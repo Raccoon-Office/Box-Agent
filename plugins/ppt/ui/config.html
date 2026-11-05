@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PPT</title>
+  <style>
+    :root { color-scheme: light; --bg: #fff; --fg: #20242b; --muted: #606975; --border: #d8dde5; --accent: #285cc4; --surface: #f5f7fa; --error: #b42318; }
+    :root[data-theme="dark"] { color-scheme: dark; --bg: #181a1f; --fg: #eef1f5; --muted: #aab2bf; --border: #414754; --accent: #8aafff; --surface: #242832; --error: #ffafa8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; background: var(--bg); color: var(--fg); font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 620px; margin: 0 auto; }
+    h1 { font-size: 18px; line-height: 1.4; margin: 0 0 8px; }
+    p { margin: 0 0 16px; }
+    .muted { color: var(--muted); }
+    form { display: grid; gap: 18px; }
+    label { display: block; margin-bottom: 6px; font-weight: 600; }
+    select, button { font: inherit; }
+    select { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--fg); }
+    .help { font-size: 13px; color: var(--muted); margin-top: 6px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    button { padding: 8px 15px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; background: var(--bg); color: var(--fg); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    :root[data-theme="dark"] button.primary { color: #10182b; }
+    button:disabled { opacity: .5; cursor: default; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .status { min-height: 24px; margin-top: 16px; overflow-wrap: anywhere; }
+    .error { color: var(--error); }
+    .versions { margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .notice { margin-top: 20px; padding: 12px; background: var(--surface); border-radius: 7px; color: var(--muted); }
+    @media (max-width: 380px) { body { padding: 14px; } .actions button { flex: 1 1 auto; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1 data-text="title">PPT</h1>
+  <p class="muted" data-text="intro"></p>
+  <form id="config-form">
+    <div>
+      <label for="language" data-text="language"></label>
+      <select id="language" name="language" disabled>
+        <option value="auto" data-text="languageAuto"></option>
+        <option value="zh-CN" data-text="languageChinese"></option>
+        <option value="en-US" data-text="languageEnglish"></option>
+      </select>
+      <div class="help" id="language-help" data-text="languageHelp"></div>
+    </div>
+    <div>
+      <label for="preferred-mode" data-text="mode"></label>
+      <select id="preferred-mode" name="preferred_mode" disabled>
+        <option value="ask" data-text="modeAsk"></option>
+        <option value="fast" data-text="modeFast"></option>
+        <option value="design" data-text="modeDesign"></option>
+      </select>
+      <div class="help" id="mode-help" data-text="modeHelp"></div>
+    </div>
+    <div class="actions">
+      <button id="save" class="primary" type="button" disabled data-text="save"></button>
+      <button id="reload" type="button" disabled data-text="reload"></button>
+    </div>
+  </form>
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+  <div id="versions" class="versions"></div>
+  <p class="notice" data-text="notice"></p>
+</main>
+<script>
+(() => {
+  'use strict';
+  const texts = {
+    zh: {
+      title: 'PPT 默认设置', intro: '设置新任务的默认偏好，用户在任务中的明确要求始终优先。',
+      language: '默认演示语言', languageAuto: '跟随任务语言', languageChinese: '简体中文', languageEnglish: '英语',
+      languageHelp: '仅在用户未指定语言时使用。已有演示的语言不会被这些设置自动修改。',
+      mode: '制作模式偏好', modeAsk: '根据任务推荐', modeFast: '优先推荐快速模式', modeDesign: '优先推荐设计模式',
+      modeHelp: '偏好用于推荐，不会跳过制作前的模式确认。已有任务继续使用已确认的模式。',
+      save: '保存配置', reload: '重新读取（放弃草稿）', connecting: '正在连接配置服务…', ready: '配置已读取。',
+      saving: '正在校验并保存…', saved: '已保存，等待在插件管理中应用并重启。', active: '配置已生效。',
+      conflict: '配置已被其他窗口修改。当前草稿已保留；请重新读取最新配置后再保存。',
+      changedPackage: '插件包已更新。请关闭此页面并重新打开，再编辑新版本配置。',
+      disconnected: '尚未确认保存结果。可重试当前提交，或在插件管理中重新打开此页面核对已保存配置。',
+      failed: '操作未完成。请检查连接或插件管理中的错误信息后重试。',
+      invalid: '配置校验未通过。', versions: '已保存版本：{saved} · 已生效版本：{active}',
+      unknown: '尚未生效', notice: '保存不会改变正在进行的任务。启用、停用及重启由外层插件管理控制。此页面不会执行 PPT 生成，也不收集模型密钥。'
+    },
+    en: {
+      title: 'PPT defaults', intro: 'Set defaults for new tasks. Explicit instructions in a task always take priority.',
+      language: 'Default presentation language', languageAuto: 'Follow the task language', languageChinese: 'Simplified Chinese', languageEnglish: 'English',
+      languageHelp: 'Used only when the user has not selected a language. Existing presentations are not changed automatically.',
+      mode: 'Creation mode preference', modeAsk: 'Recommend based on the task', modeFast: 'Prefer recommending Fast mode', modeDesign: 'Prefer recommending Design mode',
+      modeHelp: 'This guides the recommendation and does not skip mode confirmation. Existing tasks retain their confirmed mode.',
+      save: 'Save configuration', reload: 'Reload (discard draft)', connecting: 'Connecting to the configuration service…', ready: 'Configuration loaded.',
+      saving: 'Validating and saving…', saved: 'Saved. Apply and restart from plugin management to activate it.', active: 'Configuration is active.',
+      conflict: 'Another window changed this configuration. Your draft is preserved. Reload the latest values before saving again.',
+      changedPackage: 'The plugin package has changed. Close and reopen this page to edit its new configuration.',
+      disconnected: 'The save result is not confirmed. Retry this submission, or reopen this page from plugin management to check the saved configuration.',
+      failed: 'The operation did not complete. Check the connection or the error in plugin management before retrying.',
+      invalid: 'Configuration validation failed.', versions: 'Saved revision: {saved} · Active revision: {active}',
+      unknown: 'Not active yet', notice: 'Saving does not change a running task. Plugin management controls enabling, disabling, and restarting. This page does not generate PPT files or collect model credentials.'
+    },
+    ja: {
+      title: 'PPT の既定設定', intro: '新しいタスクの既定値を設定します。タスク内での明示的な指示が常に優先されます。',
+      language: 'プレゼンテーションの既定言語', languageAuto: 'タスクの言語に合わせる', languageChinese: '簡体字中国語', languageEnglish: '英語',
+      languageHelp: 'ユーザーが言語を指定していない場合にのみ使用します。既存の資料の言語は自動変更されません。',
+      mode: '作成モードの優先設定', modeAsk: 'タスクに応じて提案', modeFast: '高速モードを優先して提案', modeDesign: 'デザインモードを優先して提案',
+      modeHelp: '提案の参考にする設定であり、モード確認は省略しません。既存タスクは確認済みのモードを使用します。',
+      save: '設定を保存', reload: '再読み込み（下書きを破棄）', connecting: '設定サービスに接続しています…', ready: '設定を読み込みました。',
+      saving: '検証して保存しています…', saved: '保存しました。プラグイン管理から適用して再起動すると有効になります。', active: '設定は有効です。',
+      conflict: '別のウィンドウで設定が変更されました。入力内容は保持されています。最新の設定を読み直してから保存してください。',
+      changedPackage: 'プラグインが更新されました。このページを閉じて開き直し、新しい設定を編集してください。',
+      disconnected: '保存結果を確認できません。同じ送信を再試行するか、プラグイン管理からページを開き直して保存済みの設定を確認してください。',
+      failed: '操作が完了しませんでした。接続状態またはプラグイン管理のエラーを確認してから再試行してください。',
+      invalid: '設定の検証に失敗しました。', versions: '保存済みリビジョン：{saved} · 有効なリビジョン：{active}',
+      unknown: 'まだ有効ではありません', notice: '保存しても実行中のタスクは変更されません。有効化・無効化・再起動はプラグイン管理で行います。このページは PPT を生成せず、モデルの認証情報も収集しません。'
+    }
+  };
+  let locale = 'zh';
+  let port = null;
+  let initialized = false;
+  let snapshot = null;
+  let busy = false;
+  let counter = 0;
+  let saveIdentity = null;
+  let statusState = ['connecting', false, ''];
+  const pending = new Map();
+  const fieldLanguage = document.getElementById('language');
+  const fieldMode = document.getElementById('preferred-mode');
+  const saveButton = document.getElementById('save');
+  const reloadButton = document.getElementById('reload');
+  const status = document.getElementById('status');
+  const versions = document.getElementById('versions');
+  fieldLanguage.setAttribute('aria-describedby', 'language-help');
+  fieldMode.setAttribute('aria-describedby', 'mode-help');
+
+  function translate() {
+    document.documentElement.lang = {zh: 'zh-CN', en: 'en-US', ja: 'ja'}[locale];
+    document.title = texts[locale].title;
+    for (const element of document.querySelectorAll('[data-text]')) {
+      element.textContent = texts[locale][element.dataset.text] || '';
+    }
+  }
+  function show(key, error = false, detail = '') {
+    statusState = [key, error, detail];
+    status.textContent = texts[locale][key] + (detail ? ' ' + detail : '');
+    status.classList.toggle('error', error);
+  }
+  function controls() {
+    const disabled = !port || !snapshot || busy;
+    fieldLanguage.disabled = disabled;
+    fieldMode.disabled = disabled;
+    saveButton.disabled = disabled;
+    reloadButton.disabled = !port || busy;
+  }
+  function request(method, params = {}) {
+    if (!port) return Promise.reject({code: 'DISCONNECTED'});
+    const id = 'ppt-' + (++counter);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject({code: 'REQUEST_TIMEOUT'});
+      }, 15000);
+      pending.set(id, {resolve, reject, timer});
+      port.postMessage({type: 'request', id, method, params});
+    });
+  }
+  function report(error) {
+    const code = String(error && error.code || '').toUpperCase();
+    if (/CONFLICT|REVISION/.test(code)) show('conflict', true);
+    else if (/PACKAGE|SCHEMA_CHANGED|STALE_UI/.test(code)) show('changedPackage', true);
+    else if (/DISCONNECTED|TIMEOUT/.test(code)) show('disconnected', true);
+    else show('failed', true);
+  }
+  function displaySnapshot(result, replaceDraft) {
+    if (!result || typeof result !== 'object' || !result.config ||
+        !Number.isSafeInteger(result.saved_revision)) throw {code: 'INVALID_RESPONSE'};
+    snapshot = result;
+    if (replaceDraft) {
+      fieldLanguage.value = result.config.language;
+      fieldMode.value = result.config.preferred_mode;
+      saveIdentity = null;
+    }
+    versions.textContent = texts[locale].versions
+      .replace('{saved}', String(result.saved_revision))
+      .replace('{active}', result.active_revision == null ? texts[locale].unknown : String(result.active_revision));
+  }
+  async function load() {
+    busy = true; controls(); show('connecting');
+    try { displaySnapshot(await request('config.get'), true); show('ready'); }
+    catch (error) { report(error); }
+    finally { busy = false; controls(); }
+  }
+  async function save() {
+    if (busy || !snapshot || !port) return;
+    busy = true; controls(); show('saving');
+    const config = {language: fieldLanguage.value, preferred_mode: fieldMode.value};
+    const key = JSON.stringify([snapshot.saved_revision, config]);
+    // A timed-out submission retains its operation ID. A retry must recover
+    // its original receipt, not create a second write with a new identity.
+    if (!saveIdentity || saveIdentity.key !== key) {
+      const random = new Uint32Array(4);
+      crypto.getRandomValues(random);
+      saveIdentity = {key, id: Array.from(random, n => n.toString(16).padStart(8, '0')).join('')};
+    }
+    try {
+      const checked = await request('config.validate', {config});
+      if (!checked || checked.valid !== true) {
+        const fields = Array.isArray(checked && checked.errors)
+          ? checked.errors.map(item => String(item.path || '')).filter(Boolean).join(', ') : '';
+        show('invalid', true, fields);
+        return;
+      }
+      const result = await request('config.save', {
+        config, expected_revision: snapshot.saved_revision, request_id: saveIdentity.id
+      });
+      displaySnapshot(result, true);
+      show(result.active_enabled === true && result.active_revision === result.saved_revision ? 'active' : 'saved');
+    } catch (error) { report(error); }
+    finally { busy = false; controls(); }
+  }
+  // The host sandbox forbids native form submission; save through the bridge.
+  saveButton.addEventListener('click', save);
+  document.getElementById('config-form').addEventListener('submit', event => event.preventDefault());
+  reloadButton.addEventListener('click', load);
+  window.addEventListener('message', event => {
+    const init = event.data;
+    if (initialized || event.source !== parent || !init || init.type !== 'box-plugin-config:init' ||
+        init.bridge_version !== 1 || typeof init.nonce !== 'string' || init.nonce.length < 16 ||
+        !event.ports || event.ports.length !== 1) return;
+    initialized = true;
+    locale = Object.prototype.hasOwnProperty.call(texts, init.locale) ? init.locale : 'en';
+    document.documentElement.dataset.theme = init.theme === 'dark' ? 'dark' : 'light';
+    translate();
+    port = event.ports[0];
+    port.onmessage = event => {
+      const reply = event.data;
+      if (reply && reply.type === 'context.changed') {
+        locale = Object.prototype.hasOwnProperty.call(texts, reply.locale) ? reply.locale : locale;
+        document.documentElement.dataset.theme = reply.theme === 'dark' ? 'dark' : 'light';
+        translate();
+        if (snapshot) displaySnapshot(snapshot, false);
+        show(...statusState);
+        return;
+      }
+      if (!reply || reply.type !== 'response' || typeof reply.id !== 'string') return;
+      const operation = pending.get(reply.id);
+      if (!operation) return;
+      pending.delete(reply.id); clearTimeout(operation.timer);
+      if (reply.ok === true) operation.resolve(reply.result);
+      else operation.reject(reply.error || {code: 'INVALID_RESPONSE'});
+    };
+    port.onmessageerror = () => { port.close(); port = null; controls(); show('disconnected', true); };
+    port.start();
+    port.postMessage({type: 'box-plugin-config:ready', nonce: init.nonce, bridge_version: 1});
+    load();
+  });
+  window.addEventListener('pagehide', () => {
+    if (port) port.close();
+    port = null;
+    for (const operation of pending.values()) {
+      clearTimeout(operation.timer); operation.reject({code: 'DISCONNECTED'});
+    }
+    pending.clear();
+  });
+  translate(); show('connecting'); controls();
+})();
+</script>
+</body>
+</html>

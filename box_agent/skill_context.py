@@ -390,8 +390,9 @@ class SkillReferenceContext:
         # delete caller-supplied system text, and durable messages stay intact.
         projected = project_legacy_system(messages, verified_system_suffixes(self.runtime))
         facts = self.runtime.read_facts
-        read_names = {record.name for record in facts}
-        diagnostics = [notice for name, notice in self.runtime.restore_diagnostics.items() if name in read_names]
+        # Missing restored sources deliberately have no active read fact. Keep
+        # their status visible without reactivating or rewriting old methods.
+        diagnostics = list(self.runtime.restore_diagnostics.values())
         references: list[dict[str, Any]] = []
         required_notice = ""
         required_reference_tokens = 0

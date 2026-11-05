@@ -43,6 +43,7 @@ class SkillRuntime:
         self._deferred_restore_records: list[dict[str, Any]] = []
         self._reference_validation: SkillValidation | None = None
         self.validation_timeout_seconds = SKILL_VALIDATION_TIMEOUT_SECONDS
+        self.available_tools_provider: Callable[[], Any] | None = None
 
     def begin_turn(self) -> None:
         self.turn_deliveries.clear()
@@ -168,7 +169,8 @@ class SkillRuntime:
     def deactivate_reference(self, name: str) -> bool:
         """Withdraw an active or pending host reference without editing history."""
         removed = name in (*self.state.reads, *self.state.selected,
-                           *self._restore_pending, *self._restoring)
+                           *self._restore_pending, *self._restoring,
+                           *self._restore_diagnostics)
         removed = removed or any(row.get("name") == name for row in self._deferred_restore_records)
         self.state.reads.pop(name, None)
         self.select([item for item in self.state.selected if item != name])
@@ -222,8 +224,25 @@ class SkillRuntime:
                                    to_prompt=lambda: record.prompt)
         if self.loader is None:
             raise SkillDependencyError("SKILL_PROVIDER_UNAVAILABLE", "No Skill source is configured.")
-        resolve_required_skills(self.loader, [name])
+        dependencies = resolve_required_skills(self.loader, [name])
+        self.check_host_tools(dependencies)
         return self.loader.get_skill(name)
+
+    def check_host_tools(self, skills) -> None:
+        """Declarations can require an existing tool, never register or grant one."""
+        if self.available_tools_provider is None:
+            return
+        from .tools.base import build_tool_name_index
+        tools = self.available_tools_provider()
+        index = build_tool_name_index(tools.values() if hasattr(tools, "values") else tools)
+        for skill in skills:
+            if getattr(skill, "source", None) != "plugin":
+                continue
+            required = (getattr(skill, "metadata", None) or {}).get("requires_host_tools", [])
+            missing = sorted(set(required) - index.keys())
+            if missing:
+                raise SkillDependencyError("PLUGIN_TOOL_UNAVAILABLE",
+                                           f"Skill '{skill.name}' requires unavailable host tools: {', '.join(missing)}")
 
     def register_reference(self, name: str, prompt: str, *, expected_hash: str | None = None,
                            order: int | None = None, persist: bool = True) -> None:
@@ -254,6 +273,7 @@ class SkillRuntime:
         not a reason to prevent the session from continuing.
         """
         recovered = False
+        unavailable_diagnostics: dict[str, str] = {}
         validation = self._reference_validation
         if not self._allow_partial_restore:
             validate_restore_records(records)
@@ -275,13 +295,40 @@ class SkillRuntime:
                 available = [row for row in available
                              if not isinstance(validation.references.get(row["name"]), SkillDependencyError)
                              and row["name"] in validation.references]
+            available_names = {row["name"] for row in available}
+            for record in records:
+                # A dropped reference is not an active method, but its absence
+                # matters when the historical body is still in this task.
+                # Diagnose only valid historical facts and a current source
+                # failure; malformed optional metadata stays optional debris.
+                try:
+                    validate_restore_records([record])
+                except SkillDependencyError:
+                    continue
+                name = record["name"]
+                if name in available_names:
+                    continue
+                try:
+                    if validation is not None:
+                        validation.resolve(name)
+                    elif self.loader is not None:
+                        resolve_required_skills(self.loader, [name])
+                    else:
+                        raise SkillDependencyError("SKILL_PROVIDER_UNAVAILABLE", "No Skill source is configured.")
+                except SkillDependencyError as error:
+                    unavailable_diagnostics[name] = (
+                        f"Skill '{name}' is currently unavailable at session restoration "
+                        f"({error.code}): {error.message} Historical text is not an active method. "
+                        "Tell the user that affected task choices need reconfirmation; choose an available Skill "
+                        "or restore this one before using it. Do not automatically replay earlier operations."
+                    )
             recovered = available != records
             records = available
         validate_restore_records(records)
         if self.loader is not None and validation is None:
             self.loader.maybe_reload()
         restored: dict[str, SkillRead] = {}
-        diagnostics: dict[str, str] = {}
+        diagnostics: dict[str, str] = unavailable_diagnostics
         historical_bodies_verified = not recovered
         for record in sorted(records, key=lambda row: row["loadOrder"]):
             name = record["name"]
@@ -374,11 +421,14 @@ class SkillRuntime:
                 f"historical sha256={historical['sha256']}; current sha256={revision}. "
                 f"Historical source={historical.get('source', 'unspecified')} path={historical.get('path', 'unspecified')}; "
                 f"current source={source} path={path}. Historical logs remain unchanged; "
-                "the restored reference does not prove the historical source or version.")
+                "the restored reference does not prove the historical source or version. "
+                "Read the current reference and reconfirm affected task choices before continuing; "
+                "do not automatically replay earlier operations.")
 
 
     def _remember(self, skill: Any, prompt: str, reason: str, metadata: dict[str, Any]) -> None:
         self._deferred_restore_records = [row for row in self._deferred_restore_records if row.get("name") != skill.name]
+        self._restore_diagnostics.pop(skill.name, None)
         revision = sha256(prompt.encode()).hexdigest()
         old = self.state.reads.get(skill.name)
         ranges = set(old.delivered_ranges) if (old is not None and old.revision == revision
@@ -428,7 +478,11 @@ class SkillRuntime:
         import json
 
         if self._reference_validation is not None:
-            return self._reference_validation.resolve(name)
+            snapshot = self._reference_validation.resolve(name)
+            if self.loader is not None and snapshot.source != "caller":
+                catalog = self._reference_validation.catalog or self.loader
+                self.check_host_tools(resolve_required_skills(catalog, [name]))
+            return snapshot
         if self.loader is not None:
             self.loader.maybe_reload()
         skill = self._resolve(name.strip())
@@ -544,6 +598,9 @@ class SkillRuntime:
                 "required_skills": list(skill.required_skills or []),
                 "related_skills": list(skill.related_skills or []), "reason": reason,
                 "guidance": "Method reference only; required_skills must be read before their steps. This does not grant tools or permission."}
+        plugin = (getattr(skill, "metadata", None) or {}).get("plugin")
+        if plugin:
+            metadata["plugin"] = dict(plugin)
         dependencies = []
         for name in dict.fromkeys([*metadata["required_skills"], *metadata["related_skills"]]):
             related = self.loader.get_skill(name) if self.loader is not None else None

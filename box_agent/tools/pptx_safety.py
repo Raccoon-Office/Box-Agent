@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -242,6 +242,7 @@ def detect_pptx_image_status_command_bypass(
     runtime_env: Mapping[str, str] | None,
     shell_style: Literal["posix", "powershell"] = "posix",
     expert_sync_script: Path | None = None,
+    bound_sync_scripts: Collection[Path] = (),
 ) -> str | None:
     """Fail closed for shell calls to the image-status manifest synchronizer.
 
@@ -351,6 +352,7 @@ def detect_pptx_image_status_command_bypass(
     allowed_scripts = {_SYNC_IMAGE_STATUS_SCRIPT.resolve(strict=False)}
     if expert_sync_script is not None:
         allowed_scripts.add(expert_sync_script)
+    allowed_scripts.update(bound_sync_scripts)
     script_path = Path(script_token.replace("\\", "/")).expanduser()
     if (
         not script_path.is_absolute()

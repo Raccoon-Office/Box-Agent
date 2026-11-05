@@ -1,0 +1,59 @@
+name: pptx
+runtime: openai-codex
+summary: "Independent design-plan authoring, seed-free editable HTML, preserved user layout editing, and optional PPTX export."
+entrypoint: SKILL.md
+dependency_policy:
+  install_without_user_approval: managed office-raccoon node/python environment only
+  default_new_deck_generator: controlled deck.json to editable index.html; bundled dom-to-pptx is optional export
+  allow_silent_fallback_to_python_pptx: false
+visual_quality_policy:
+  preview_generation_is_not_qa: true
+  default_visual_inspection: optional; follow SKILL.md section 4.2 triggers
+  require_image_content_inspection: only when generated or source images are visually reviewed
+  require_contact_sheet: only when rendered visual inspection is triggered
+  compare_source_previews_to_pptx_render: only for PPTX export or an explicit comparison request
+  if_no_image_viewer_report: skip optional visual inspection and report the limitation; do not block otherwise valid HTML
+controlled_deck_policy:
+  outline_first: every new controlled deck must write outline.json and pass validate_outline.js --report qa/outline_check.json before theme/layout selection; a complete user page list becomes a lightweight direct mapping
+  scaffold_after_outline: "Prepare a compact designer_brief, delegate read-only visual choices, import the completed child Session Log with design_plan.js accept, then scaffold --design-plan. Programs bind metadata/content paths; main does not write the plan."
+  degraded_terminal_state: "When design_plan.js accept returns status=degraded, stop PPT authoring: do not call inspect_deck_contract, apply_deck_patch, finalize_controlled_deck, edit deck.json, delete slides, or start another design call. Deliver primary_artifact and qa/design_delivery.json."
+  presentation_directory: use the absolute directory selected in conversation; pass it as workspaceDir when supported, otherwise cd to it explicitly, and never infer it from a legacy output-root setting
+  source_facts: use --fact only for verbatim user/source text; use --research-fact only after actual external research; strict source requests reject research facts, paraphrases, and deductions; never infer dates, team sizes, repeat rates, awards, or results
+  public_research: an ordinary factual-deck request authorizes bounded public authoritative research; do not ask again for permission after research succeeds; ask only for strict/private source boundaries, unavailable required evidence, or material source conflicts
+  research_budget: short prompts that require external market, industry, competitive, policy, current-data, citation, or quantitative evidence route through the preloaded research-synthesis workflow before outline authoring; solution/design briefs for proposed architecture, integration, or data-flow decks stay source_mode=user_provided and do not load research-synthesis by default; for research-routed decks follow the coarse-to-fine route budget, preserve at least three distinct dimensions in a reduced sequential run, then consume the workflow-normalized presentation_handoff delivery_mode, verified_facts, gaps, and quality_summary; partial or framework handoffs continue delivery without repeating identical queries, and PPT authoring does not interpret the upstream validator name or internal QA status
+  required_fields: use exact field ids from the chosen contract; recovery aliases normalize common chart/cards/table guesses, but author canonical ids; never swap a requested KPI page to generic cards to evade a rejected check
+  batch_patch: prefer one deck.patch.json plus apply_deck_patch.js; after strict facts are scaffolded omit truth_contract from the patch; copy exact slide ids and prop shapes from the report/contract and never reinterpret slide ids as array indexes; never use execute_code or Python to rewrite deck.json
+  image_manifest: scaffolded beside deck.json under assets/generated/manifest.json; acquire_via distinguishes user, web, ai, and none while decision remains generate, use_existing, or skip for execution compatibility; ordinary real, documentary, named-subject, and photographic image jobs call the hosted web_search tool with SearchType=image first, localize one selected result with source and unverified-rights provenance, and fall back to labelled AI concept generation only after image search is exhausted or unavailable; invented, stylized, illustrative, metaphorical, abstract, product-interface, and technical-concept visuals use ai directly; the isolated designer selects narrative media layouts before scaffold; do not silently promote or replace a plan-owned layout; use image-full-bleed-v1 for explicit entire-slide generation with a scaffolded text-safe/focus-region contract; --image-asset binds a supplied fixed asset through use_existing; reserve creative_image_mode for explicit image-rich briefs; pass each manifest output_path verbatim to generate_image; after acquisition sync status deterministically, deferring optional missing assets while preserving an explicit incomplete finding for required assets
+  chart_design: "The isolated design role owns registered chart visual enums; content patches preserve them. Human HTML editing remains free to adjust chart types, data and local options."
+  overwrite_policy: patch the scaffolded deck; never replace the full file after validation failure
+  truth_policy: strict source-only decks must also source-bind narrative copy, process steps, project positioning/captions, and future plans; for public-research decks omit nonessential gaps instead of exposing 待补充, reserving it for genuinely unavailable required user/private fields; generated case-study images require origin generated plus an explicit AI concept/placeholder label
+  media_failure_policy: never manufacture or duplicate a placeholder and claim it was generated
+  format_qa_policy: HTML delivery may complete with advisory chart/export findings; when native PPTX is requested, pass --require-pptx to finalize_controlled_deck.js so chart recoverability and dom-to-pptx incompatibilities are blocking checks while retaining the HTML diagnostic artifact
+recommended_tools:
+  - shell
+  - filesystem
+  - image_viewer
+  - web_search
+optional_dependencies:
+  python:
+    - python-pptx
+    - pillow
+    - lxml
+    - defusedxml optional for advanced OOXML helper scripts
+  node:
+    - pptxgenjs required by dom-to-pptx/PptxGenJS export paths
+    - bundled scripts/dom-to-pptx.bundle.js required for new HTML-first decks
+    - pngjs for source-vs-render slide image comparison
+    - playwright optional browser host for CLI HTML editable export
+  system:
+    - LibreOffice soffice or libreoffice on macOS/Linux/Windows
+    - Poppler pdftoppm on macOS/Linux/Windows
+    - macOS qlmanage as lightweight render fallback
+    - Microsoft PowerPoint export automation only with explicit user approval
+api_wrapping:
+  suggested_tools:
+    - inspect_pptx
+    - render_pptx
+    - validate_pptx
+    - create_pptx_from_spec
+    - edit_pptx_from_plan

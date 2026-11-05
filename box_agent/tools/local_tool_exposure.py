@@ -24,7 +24,6 @@ SKILL_TOOL_HINTS: Mapping[str, frozenset[str]] = {
     "browser-use": frozenset({"mcp_config"}),
     "mcp-config": frozenset({"mcp_config"}),
     "memory-guide": frozenset({"memory_read", "memory_search", "memory_write", "memory_edit", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction"}),
-    "ppt-fast": frozenset({"append_file", "query_jsonl", "report_execution_result"}),
     "docx": frozenset({"append_file", "report_execution_result"}),
     "pdf": frozenset({"append_file", "report_execution_result"}),
     "xlsx": frozenset({"query_jsonl", "report_execution_result"}),
@@ -42,10 +41,12 @@ class LocalToolExposurePolicy:
         *,
         goal_provider: Callable[[], Any],
         active_skills_provider: Callable[[], Iterable[str]],
+        skill_tools_provider: Callable[[str], Iterable[str]] | None = None,
     ) -> None:
         self._tools_provider = tools_provider
         self._goal_provider = goal_provider
         self._active_skills_provider = active_skills_provider
+        self._skill_tools_provider = skill_tools_provider
         self._required_names: set[str] = set()
 
     def require_tools(self, names: Iterable[str]) -> None:
@@ -85,6 +86,8 @@ class LocalToolExposurePolicy:
             direct.update(("goal_read", "goal_write"))
         for skill_name in self._active_skills_provider():
             direct.update(SKILL_TOOL_HINTS.get(skill_name, ()))
+            if self._skill_tools_provider is not None:
+                direct.update(self._skill_tools_provider(skill_name))
         self._required_names.update(direct & tools.keys())
         return frozenset(
             tool.name for tool in self.candidate_tools()

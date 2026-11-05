@@ -42,6 +42,18 @@ class AgentService:
 
         return skill_loader_from_catalog({tool.name: tool for tool in tools})
 
+    @staticmethod
+    def confirm_plugin_startup(config: Any, loader: Any, *, base_tools: list[Any] | None = None,
+                               llm: Any = None, available_tools: Any = None,
+                               runtime_env: dict[str, str] | None = None) -> Any:
+        """Verify process capabilities before publishing a plugin generation."""
+        from .plugins.skill_sources import confirm_acp_plugin_startup, confirm_plugin_startup
+
+        if base_tools is not None:
+            return confirm_acp_plugin_startup(config, loader, base_tools, llm)
+        return confirm_plugin_startup(config, loader, available_tools=available_tools,
+                                      runtime_env=runtime_env)
+
     async def start(
         self,
         request: RunRequest,

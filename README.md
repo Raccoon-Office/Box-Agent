@@ -244,6 +244,8 @@ Read these files first:
 - `docs/REVIEW_GUIDE.md` — maintainer review order, blockers, and proof requirements.
 - `docs/DEVELOPMENT_GUIDE.md` — deeper architecture and development notes.
 - `docs/INTEGRATION.md` — ACP/runtime integration details for host apps.
+- [Skill plugin development](docs/RESOURCE_PLUGIN_DEVELOPMENT_CN.md) — author a resource plugin, run isolated checks, and verify it in a real host.
+- [Independent plugin authoring task](docs/PLUGIN_AUTHORING_SESSION_TASK_CN.md) — clone the paired development branches and validate a new plugin in an isolated environment.
 
 Project map:
 

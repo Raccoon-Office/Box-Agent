@@ -1,0 +1,44 @@
+{
+  "id": "people-handbook",
+  "name": "People Handbook",
+  "description": "A warm, tactile employee handbook system with pinned paper, badge-like labels, human annotations, and an unmistakable people-operations voice.",
+  "source_reference": "beautiful-html-templates/pin-and-paper",
+  "selection": {
+    "visual_dna_ids": ["people-handbook"],
+    "mood_keywords": ["human", "welcoming", "tactile", "handbook", "warm", "员工友好", "入职", "手册感", "有温度"],
+    "industry_fit": ["human resources", "people operations", "employee onboarding", "talent development", "employer branding", "人力资源", "员工入职", "企业文化", "人才发展"],
+    "density": "medium",
+    "scheme": "light",
+    "formality": "medium",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F6F0DE",
+    "surface": "#FFFDF5",
+    "surface_strong": "#EFE56A",
+    "primary": "#1F3A8A",
+    "primary_soft": "#DCE5F7",
+    "text": "#20232B",
+    "muted": "#67675F",
+    "border": "#BDB69F",
+    "inverse": "#FFFDF5",
+    "alt_background": "#1F3A8A",
+    "alt_surface": "#29489B",
+    "alt_text": "#FFFDF5",
+    "alt_muted": "#DDE4F2",
+    "alt_border": "#6F84BC",
+    "alt_primary": "#EFE56A",
+    "chart": ["#1F3A8A", "#C4513A", "#D7C936", "#4F745D"]
+  },
+  "typography": {
+    "display": "Space Grotesk, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "DM Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 4, "radius_medium": 10, "radius_large": 16, "border_width": 2},
+  "style": {"canvas": "paper", "surface": "note", "shadow": "hard", "heading": "condensed", "label": "tape", "accent": "dot", "alternation": "section"},
+  "composition": {
+    "default_family": "editorial-spread",
+    "allowed_families": ["editorial-spread", "institutional-grid", "playful-collage", "literary-minimal"]
+  }
+}

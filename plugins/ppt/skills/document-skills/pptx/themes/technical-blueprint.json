@@ -1,0 +1,86 @@
+{
+  "id": "technical-blueprint",
+  "name": "Technical Blueprint",
+  "description": "A professional technical blueprint system with coordinate grids, specification rails, compact annotations, and precise architecture framing.",
+  "source_reference": "beautiful-html-templates/cobalt-grid",
+  "selection": {
+    "visual_dna_ids": [
+      "technical-blueprint"
+    ],
+    "mood_keywords": [
+      "technical",
+      "precise",
+      "systematic",
+      "structured",
+      "engineering",
+      "blueprint",
+      "技术",
+      "精密",
+      "系统化",
+      "严谨",
+      "蓝图"
+    ],
+    "industry_fit": [
+      "system architecture",
+      "cloud infrastructure",
+      "platform engineering",
+      "system integration",
+      "enterprise technology",
+      "developer tools",
+      "系统架构",
+      "云基础设施",
+      "平台工程",
+      "系统集成"
+    ],
+    "density": "high",
+    "scheme": "cool-light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F3F6FA",
+    "surface": "#FFFFFF",
+    "surface_strong": "#E5EDF6",
+    "primary": "#145CC5",
+    "primary_soft": "#DCE9FA",
+    "text": "#10253F",
+    "muted": "#4F6278",
+    "border": "#9CB0C6",
+    "inverse": "#FFFFFF",
+    "chart": [
+      "#145CC5",
+      "#0B8793",
+      "#4F6278",
+      "#8B5CF6"
+    ]
+  },
+  "typography": {
+    "display": "IBM Plex Sans, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, IBM Plex Sans, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {
+    "radius_small": 2,
+    "radius_medium": 4,
+    "radius_large": 6,
+    "border_width": 1
+  },
+  "style": {
+    "canvas": "grid",
+    "surface": "outline",
+    "shadow": "none",
+    "heading": "condensed",
+    "label": "mono",
+    "accent": "bracket",
+    "alternation": "none"
+  },
+  "composition": {
+    "default_family": "technical-schematic",
+    "allowed_families": [
+      "technical-schematic",
+      "institutional-grid",
+      "analytical-exhibit",
+      "product-showcase"
+    ]
+  }
+}

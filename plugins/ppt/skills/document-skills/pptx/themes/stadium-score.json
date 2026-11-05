@@ -1,0 +1,85 @@
+{
+  "id": "stadium-score",
+  "name": "Stadium Score · 体育赛事",
+  "description": "A stadium scorecard with night-blue panels, ice-blue timing bars, tabular scores and strong condensed headline hierarchy.",
+  "source_reference": "builtin",
+  "selection": {
+    "visual_dna_ids": [
+      "stadium-score"
+    ],
+    "mood_keywords": [
+      "competitive",
+      "energetic",
+      "scoreboard",
+      "竞技",
+      "战报",
+      "运动"
+    ],
+    "industry_fit": [
+      "sports performance",
+      "match review",
+      "athlete profile",
+      "tournament proposal",
+      "赛事复盘",
+      "运动员介绍",
+      "训练总结",
+      "体育赛事招商"
+    ],
+    "density": "medium",
+    "scheme": "dark",
+    "formality": "medium",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#101C2B",
+    "surface": "#172A3C",
+    "surface_strong": "#213C51",
+    "primary": "#9BDDFF",
+    "primary_soft": "#26485E",
+    "text": "#F5F9FF",
+    "muted": "#B6C9D9",
+    "border": "#456277",
+    "inverse": "#101C2B",
+    "alt_background": "#EAF5FC",
+    "alt_surface": "#FFFFFF",
+    "alt_text": "#101C2B",
+    "alt_muted": "#496176",
+    "alt_border": "#ABC5D6",
+    "alt_primary": "#225C79",
+    "chart": [
+      "#9BDDFF",
+      "#F4BA5A",
+      "#EC8D83",
+      "#9FCF9E"
+    ]
+  },
+  "typography": {
+    "display": "Barlow Condensed, Impact, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Barlow, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {
+    "radius_small": 0,
+    "radius_medium": 0,
+    "radius_large": 0,
+    "border_width": 2
+  },
+  "style": {
+    "canvas": "solid",
+    "surface": "hard",
+    "shadow": "none",
+    "heading": "condensed",
+    "label": "boxed",
+    "accent": "block",
+    "alternation": "none"
+  },
+  "composition": {
+    "default_family": "poster-asymmetric",
+    "allowed_families": [
+      "poster-asymmetric",
+      "analytical-exhibit",
+      "cinematic-canvas",
+      "institutional-grid"
+    ]
+  }
+}

@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from box_agent.acp.env_context import EnvContext
-from box_agent.tools.jupyter_tool import SandboxEnvironment
+from box_agent.tools.jupyter_tool import RUNTIME_PACKAGES_DIR, SANDBOX_BASE_DIR, SandboxEnvironment
 from box_agent.tools.runtime import (
     DEFAULT_NODE_VERSION,
     NodeRuntimeInstallError,
@@ -32,7 +32,14 @@ from box_agent.tools.skill_preload import (
 )
 
 
-_IMPORTED_HOME = Path.home()
+# Runtime defaults are captured during collection, before the per-test fixture
+# clears BOX_AGENT_HOME. Preserve the runner's explicit profile when asserting
+# those imported constants; the OS home is only the legacy default.
+_IMPORTED_PROFILE = os.environ.get("BOX_AGENT_HOME")
+_IMPORTED_STATE_ROOT = (
+    Path(_IMPORTED_PROFILE.strip()).resolve()
+    if _IMPORTED_PROFILE is not None else Path.home() / ".box-agent"
+)
 
 
 def _make_executable(path: Path) -> None:
@@ -369,9 +376,9 @@ def test_node_runtime_defaults_missing(tmp_path: Path) -> None:
 
 
 def test_default_node_runtime_root_is_separate_from_python_dirs() -> None:
-    assert DEFAULT_NODE_RUNTIME_ROOT == _IMPORTED_HOME / ".box-agent" / "runtimes" / "node"
-    assert DEFAULT_NODE_RUNTIME_ROOT != _IMPORTED_HOME / ".box-agent" / "sandbox"
-    assert DEFAULT_NODE_RUNTIME_ROOT != _IMPORTED_HOME / ".box-agent" / "runtime-packages"
+    assert DEFAULT_NODE_RUNTIME_ROOT == _IMPORTED_STATE_ROOT / "runtimes" / "node"
+    assert DEFAULT_NODE_RUNTIME_ROOT != SANDBOX_BASE_DIR
+    assert DEFAULT_NODE_RUNTIME_ROOT != RUNTIME_PACKAGES_DIR
 
 
 def test_self_managed_node_runtime_from_manifest(tmp_path: Path) -> None:

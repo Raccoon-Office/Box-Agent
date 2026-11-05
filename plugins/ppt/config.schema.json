@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "language",
+    "preferred_mode"
+  ],
+  "properties": {
+    "language": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "zh-CN",
+        "en-US"
+      ],
+      "default": "auto",
+      "title": "默认语言"
+    },
+    "preferred_mode": {
+      "type": "string",
+      "enum": [
+        "ask",
+        "fast",
+        "design"
+      ],
+      "default": "ask",
+      "title": "制作模式偏好"
+    }
+  }
+}

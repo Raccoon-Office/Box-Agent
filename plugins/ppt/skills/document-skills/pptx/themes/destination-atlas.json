@@ -1,0 +1,85 @@
+{
+  "id": "destination-atlas",
+  "name": "Destination Atlas · 文旅路线",
+  "description": "A destination atlas with sea-blue labels, postcard frames, dashed route annotations and spacious photo-led itineraries.",
+  "source_reference": "builtin",
+  "selection": {
+    "visual_dna_ids": [
+      "destination-atlas"
+    ],
+    "mood_keywords": [
+      "exploratory",
+      "airy",
+      "postcard",
+      "旅行",
+      "路线",
+      "目的地"
+    ],
+    "industry_fit": [
+      "tourism",
+      "destination marketing",
+      "travel itinerary",
+      "cultural tourism",
+      "文旅推介",
+      "旅行路线",
+      "目的地介绍",
+      "城市漫游"
+    ],
+    "density": "medium",
+    "scheme": "light",
+    "formality": "medium",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F2F8FC",
+    "surface": "#FFFFFF",
+    "surface_strong": "#DFEDF6",
+    "primary": "#13647A",
+    "primary_soft": "#D8EBF2",
+    "text": "#183C53",
+    "muted": "#506B7B",
+    "border": "#B7CCD8",
+    "inverse": "#FFFFFF",
+    "alt_background": "#183C53",
+    "alt_surface": "#244E66",
+    "alt_text": "#F2F8FC",
+    "alt_muted": "#CADFEA",
+    "alt_border": "#62859A",
+    "alt_primary": "#AEDAE9",
+    "chart": [
+      "#13647A",
+      "#BD542E",
+      "#6A7D42",
+      "#876197"
+    ]
+  },
+  "typography": {
+    "display": "DM Sans, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {
+    "radius_small": 0,
+    "radius_medium": 4,
+    "radius_large": 8,
+    "border_width": 1
+  },
+  "style": {
+    "canvas": "solid",
+    "surface": "paper",
+    "shadow": "soft",
+    "heading": "editorial",
+    "label": "boxed",
+    "accent": "bracket",
+    "alternation": "none"
+  },
+  "composition": {
+    "default_family": "editorial-spread",
+    "allowed_families": [
+      "editorial-spread",
+      "cinematic-canvas",
+      "institutional-grid",
+      "literary-minimal"
+    ]
+  }
+}

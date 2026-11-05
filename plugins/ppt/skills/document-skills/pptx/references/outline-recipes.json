@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "recipes": [
+    {
+      "id": "project-review",
+      "name": "项目复盘",
+      "signals": ["项目复盘", "项目总结", "交付复盘", "project review", "project retrospective"],
+      "summary": "从目标与结果进入偏差诊断，再落到决策和责任行动。",
+      "beats": [
+        { "id": "scope", "title": "目标与范围", "goal": "重申项目目标、范围与关键约束。", "preferred_layout_roles": ["statement", "overview"] },
+        { "id": "results", "title": "结果与关键指标", "goal": "先给出结果、证据与关键指标。", "preferred_layout_roles": ["kpi", "results", "chart"] },
+        { "id": "variance", "title": "计划与实际偏差", "goal": "对比原计划、实际结果与主要偏差。", "preferred_layout_roles": ["comparison", "table"] },
+        { "id": "causes", "title": "根因分析", "goal": "区分症状、直接原因与可验证根因。", "preferred_layout_roles": ["root-cause", "cause-analysis"] },
+        { "id": "decisions", "title": "经验与决策", "goal": "沉淀继续保持、停止与调整的关键决策。", "preferred_layout_roles": ["decision", "capabilities"] },
+        { "id": "actions", "title": "行动项与责任人", "goal": "明确行动、责任、时间和验证方式。", "preferred_layout_roles": ["table", "next-steps"] }
+      ]
+    },
+    {
+      "id": "sales-proposal",
+      "name": "销售提案",
+      "signals": ["销售提案", "客户提案", "解决方案提案", "商务提案", "sales proposal", "client proposal"],
+      "summary": "围绕客户情境和决策障碍建立方案价值，再用证据和实施路径降低风险。",
+      "beats": [
+        { "id": "context", "title": "客户情境与目标", "goal": "用客户语言重述目标、约束与成功标准。", "preferred_layout_roles": ["statement", "overview"] },
+        { "id": "challenge", "title": "关键挑战", "goal": "解释当前路径的业务影响和决策紧迫性。", "preferred_layout_roles": ["comparison", "root-cause"] },
+        { "id": "solution", "title": "方案主张", "goal": "给出一句核心方案主张及其边界。", "preferred_layout_roles": ["statement", "solution"] },
+        { "id": "journey", "title": "使用与服务旅程", "goal": "展示用户、客户或实施角色如何经历方案。", "preferred_layout_roles": ["customer-journey", "swimlane"] },
+        { "id": "capabilities", "title": "能力与差异化", "goal": "把能力映射到客户目标，而不是罗列功能。", "preferred_layout_roles": ["capabilities", "comparison"] },
+        { "id": "proof", "title": "证据与案例", "goal": "用可验证结果、案例或假设标识支撑价值。", "preferred_layout_roles": ["case-study", "kpi", "chart"] },
+        { "id": "delivery", "title": "实施路径与下一步", "goal": "明确阶段、责任、风险控制和下一次决策。", "preferred_layout_roles": ["swimlane", "timeline", "next-steps"] }
+      ]
+    },
+    {
+      "id": "operating-analysis",
+      "name": "经营分析",
+      "signals": ["经营分析", "经营复盘", "月度经营", "季度经营", "业绩分析", "operating analysis", "business performance review"],
+      "summary": "先给经营结论和指标，再解释驱动因素、根因、决策与行动闭环。",
+      "beats": [
+        { "id": "headline", "title": "经营结论", "goal": "用一句话说明本周期最重要的经营判断。", "preferred_layout_roles": ["statement", "results"] },
+        { "id": "scorecard", "title": "核心指标", "goal": "呈现真实指标、目标差距和同比环比。", "preferred_layout_roles": ["kpi", "dashboard"] },
+        { "id": "trend", "title": "趋势与结构", "goal": "展示趋势、结构变化和异常区间。", "preferred_layout_roles": ["chart", "heatmap"] },
+        { "id": "drivers", "title": "业务驱动因素", "goal": "把结果拆解到渠道、产品、区域或客户结构。", "preferred_layout_roles": ["chart", "table", "comparison"] },
+        { "id": "diagnosis", "title": "问题与根因", "goal": "定位关键偏差背后的可验证原因。", "preferred_layout_roles": ["root-cause", "cause-analysis"] },
+        { "id": "decisions", "title": "经营决策", "goal": "说明资源、优先级和策略需要如何调整。", "preferred_layout_roles": ["quadrant", "decision"] },
+        { "id": "actions", "title": "行动与验证", "goal": "绑定行动、责任人、期限和下一周期指标。", "preferred_layout_roles": ["table", "next-steps"] }
+      ]
+    }
+  ]
+}

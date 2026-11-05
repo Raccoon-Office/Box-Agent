@@ -1,0 +1,404 @@
+---
+name: sn-ppt-standard
+description: 仅在 `sn-ppt-entry` 与 `sn-ppt-story` 已准备绝对 `DECK_DIR` 和 `outline.md` 后使用；生成每页独立 HTML（默认 1600×900；用户指定尺寸优先）、渲染 PNG、逐页讲稿、`present.html`，并按 `static_postprocess` 选择生成由 Standard 自有 exporter 转换的 PPTX。**`present.html` 始终是必交付产物，缺失即技术故障，不得交付；`static_postprocess` 含 `pptx` 时 PPTX 同为必交付产物（缺一即技术故障），且只能由 Standard 自有 exporter 生成；仅当用户明确要求只要 HTML（`static_postprocess` 为 `[]`）时，PPTX 才可不交付。**
+metadata:
+  allow_override: false
+  user_visible: false
+---
+
+# sn-ppt-standard
+
+## Presentation content language
+
+Read `values.language` from the host-provided plugin instance settings. It controls
+presentation content: slide text, added notes, captions, and rewritten content.
+It does not set the chat response language or the configuration page language.
+
+1. An explicit request for the presentation's output language takes priority.
+   Otherwise keep the output language explicitly confirmed for this same task.
+   The language used to write a prompt is not, by itself, an explicit output-language
+   choice. Neither an English prompt nor existing English slides override `zh-CN`.
+2. When no output language was explicitly requested or confirmed, use the instance
+   default for all newly authored or rewritten content, including a new note added
+   to an existing deck: `zh-CN` means Simplified Chinese; `en-US` means English.
+   With `auto` or no injected setting, follow the existing deck's language when
+   editing, or the task's language for a new presentation.
+3. Preserve existing text that is outside the requested edit and text the user
+   explicitly asks to keep or quote verbatim, in its original language. Applying
+   the default to a new note does not authorize translating the rest of a deck.
+   An English source deck with a Chinese addition is valid under this rule.
+4. Keep response language separate from presentation content language. UI locale,
+   chat reply instructions, and the prompt's language do not change this priority.
+   Pass the resolved content language and verbatim-preservation constraints to
+   downstream Skills and delegated agents; where a task pack or handoff records
+   `deliverable_language`, use this resolved value rather than guessing it again.
+   Before delivery, check newly added or rewritten text against that value while
+   checking preserved text separately; report any unmet requirement accurately.
+
+把本文件当作**路线图**，不要当作需要一次背完的规范全集。只读取已准备任务的 Entry/Story 交接、该路径要求的 reference 和职责卡。
+
+## Chromium 准备
+
+执行依赖 Chromium 的渲染前，若宿主支持，优先调用 `local_environment(capability="chromium", action="ensure")`；就绪后用新的子进程继续原任务。宿主不支持或未提供该工具时沿用原渲染流程。准备失败或超时时，由 Agent 根据错误和任务需要自主判断继续、修复或采用其他可用方式，不因准备接口失败直接停止整个任务。
+
+安装可能仍在后台进行，先确认状态、避免并发安装或修改正在安装的环境；尊重用户取消。如实报告渲染结果并保留原有验收要求，不混淆独立 Chromium 与 Electron/MCP 的就绪状态。用户明确要求只检查、不安装时，不调用 `ensure`。
+
+## 整册 HTML 完成条件
+
+`<DECK_DIR>/present.html` 是静态整册的必交付入口，包括全生图、只要 PPTX、只要 HTML
+和续改任务。逐页 HTML/PNG、子代理完成或 PPTX 导出成功，都不等于整册完成。
+父级必须执行下方包含 build/audit 的 `deck.py review-prep`，确认播放器覆盖全部页且可打开；
+再完成最终像素检查及所需 PPTX 导出。只缺播放器时复用已有页面补齐收尾，不重新制作整册。
+最终回复必须给出真实 `present.html` 的可点击链接，并保留其依赖的 slides、样式与资源；
+未生成或核验失败则保存现有产物、登记 `partial` 和错误，不得声称完成或伪造链接。
+
+## Box-Agent 兼容入口
+
+当当前 harness 暴露 `sub_agent`、`inspect_images`、`generate_image`、`bash` 等 Box-Agent 原生工具时，父级开始制作前完整读取 `references/box-agent-tool-contract.md`；只负责写页的 Slide 子任务按该文件的阅读路由读取相关章节，不要求通读父级的素材、渲染和导出操作。该契约只覆盖工具名称、参数、脚本路径、委派方式和权限边界；本文件及各职责卡的事实、设计、质量和交付标准仍然有效。委派时按该契约交接原文：子任务须完整掌握自己的 `subagents/<role>.md` 与所需工具契约章节，task 或有效分片已完整提供的内容不重复读取；未提供时给出绝对路径并要求读完整。
+
+## Entry / Story 输入契约（最高优先级）
+本 Skill 不接收裸 query，不自行创建任务目录。只接受绝对 `DECK_DIR`，且必须存在 `task_pack.json`、`info_pack.json` 和 `outline.md`。
+`choices.output` 必须为 `static_html`，且 `ppt_mode` 必须为 `standard`。开始和恢复时重新读取磁盘上的 `outline.md`；不得自行 Research、重复解析材料、改写 outline、增删页面、重排页序或新增事实。输入不满足时返回 Entry。
+
+执行路线：复用 task pack → 阶段 3 完成计划与 `prepare` → 阶段 4 素材验收、页面制作与逐页纠错 → 阶段 5 正式 Review 与交付。制作后的看图方法以 `subagents/slide.md` 为准，正式 Review 以 `subagents/review.md` 为准；脚本回执的 `next_instructions` 给出当前方法的绝对路径，已完整掌握且未变化时直接复用。Box-Agent 工具参数和分工只查工具契约，不另按本路线启动一轮验收。
+
+## 1. 所有模式共享的合同
+
+### 1.1 Orchestrator 的职责与边界
+
+非 Box-Agent 环境及已有 PPT 编辑任务中，Orchestrator 只负责：**读取 Entry/Story 交接、规划、委派、合并、验收和确定性收尾**。Box-Agent 静态新建使用下方执行方式。
+
+- 可写：`plan/`、`base.css`、知识汇总和构建产物。
+- 上述委派分工中不直接写 `slides/slide_NN.html`；页面由 Slide 或 Review 修改。Box-Agent 静态新建允许主 Agent 制作和修页。
+- 不伪装工具能力，不把计划动作写成已完成动作。
+- 每个 subagent 必须有显式 label；失败、超时或未自然收尾的结果不得当成完成品。
+- `sub_agent(title, task, skills, required_tools, files, write_scope, budget)` 负责委派；其返回的结构化 contract、artifact paths 与 `handoff_path` 是父级交接真相，Orchestrator 不读取子 Agent 的 `messages.json`、`tool_log.json` 或 system/tool 快照来轮询进度。父级负责通过 `inspect_images` 完成视觉检查，以及通过 bash、render、build 和 export 完成确定性收尾。
+
+### Box-Agent 静态新建的执行方式
+
+本节只改变 Box-Agent 从零生成静态 PPT 的执行组织，不改变既有编辑路径、其他环境或下文的质量与交付要求。
+
+- **主 Agent 默认连续制作**：按阶段 4 的制作方法，在当前上下文完成页面。**设计分组不等于执行分组**：保留 `production_group`、跨页呼应和节奏，但主 Agent 可以连续制作多个组，不为每个组自动新建子任务。
+- 只有多个输入已就绪、工作量足够大且互不依赖的制作组确实适合并行，或独立长段确需隔离上下文时，才用现有 `sub_agent` 委派；后者是容量取舍，不宣称并行加速。一次委派仍负责一个现有组、使用精确 `write_scope`，不新增执行组格式或固定页数阈值。不要让主 Agent 空等一个仅为分组形式启动的小任务；当前工具不支持父子暂停/续跑流水线。
+- 规划确定事实、逐字文案、设计语言、主焦点、媒介、空间意图、素材与像素验收目标；制作负责实际 CSS/图表尺寸与文字排布。沿用已经确定的决定，不重复生成设计预演报告。同一上下文已完整掌握且未变化的原文可复用，截断、修改或压缩丢失时恢复必要原文。小批页面允许成组读取并连续写出，不要求每页插入一次工具往返。
+- 制作前照常完成 `deck.py prepare`、素材验收、catalog 的 ready 状态及实际路径和裁切合同回填；`prepare` 成功不是素材验收。主 Agent 按本文和 Slide 的要求渲染、逐页看图；**所有写页子任务返回后**，由主 Agent 对有证据的问题集中修复、重渲、复看，不默认重新委派原组。修复前读当前 HTML 和必要 CSS；子任务运行时不改其页面或共享 CSS。
+- Review 是必须完成的验收工作，不是必须新增一个子任务。制作期逐页纠错结束后，按阶段 5 先 `review-prep`，再由主 Agent 对该正式版本完成全册诊断、事实核验、最终像素覆盖与合同；不在待审前另做一轮完整 Review。必要修复先完成构建再复验，修复次数上限、播放器核验和 Standard exporter 均保留。`html_ready` 只用于实际子任务交接，不是主任务可以提前结束的状态。
+
+### 1.2 角色
+
+| 角色 | 数量与时机 | 唯一职责 |
+| --- | --- | --- |
+| Image | 按素材量并行 | 获取或生成位图素材，返回实际路径 |
+| Slide | Box-Agent 静态新建按上文执行方式；其他新建或复杂编辑按设计亲缘页组委派 | 制作/重做页面；实际子任务只写所属页组，Box-Agent 由父级完成逐页像素闭环，其他环境由具备能力的 Slide 完成 |
+| Review | 首次验收 1 次，修复后最多复验 2 次；Box-Agent 静态新建不要求新建子任务 | 先诊断、后集中修复、批量重渲和最终讲稿收口；简单编辑时也是执行者 |
+
+所有角色开工前完整读取自己的 `subagents/<role>.md`（页组分片中的完整原文等价；Box-Agent task 已提供的完整原文也等价）。任何选中的文件或章节出现截断提示时，续读到结束；**未被路由命中的 reference 不读**。
+
+### 1.3 语言与能力
+
+开始前锁定：
+
+- `response_language`：过程与最终回复语言；
+- `deliverable_language`：屏显、规划和讲稿语言；
+- attachments、web、真实图片获取、图片生成、渲染、vision、写文件等能力状态。
+
+`response_language` 按宿主回复语言要求确定，否则采用用户 query 的主要语言。
+`deliverable_language` 按上方 Presentation content language 的优先级确定，继承 Entry/Story 已解析的正文语言与逐字保留约束；不能用 query 语言覆盖实例默认语言。只能规划实际可用的能力。
+看图任务按制作或 Review 方法区分首次检查与修复复验，Box-Agent 参数见工具契约。视觉判断、问题账本和看图后的回复使用 `response_language`，不得因模型默认语言切换，屏显原文与专有名词可保留原语言。
+
+### 1.4 工作区真相源
+
+```text
+task_pack.json
+info_pack.json
+outline.md
+plan/design-brief.md
+plan/deck.md
+plan/slide_NN.md
+base.css
+assets/
+slides/slide_NN.html
+renders/slide_NN.png
+speech.md
+present.html   ← 必交付产物：由 `deck.py build` 生成，缺失即技术故障
+`<DECK_DIR>/<DECK_ID>.pptx`   ← 必交付产物（`static_postprocess` 含 `pptx` 时）：只能由 `scripts/export_pptx/html_to_pptx.mjs` 生成
+```
+
+`outline.md` 是页面事实、页数、页序、标题、结论和内容关系的真相源；事实证据沿用 Entry/Story 已交接的 Research 或原始材料。`plan/grounded-knowledge.md` 按 Grounding gate 按需补充，不新增研究或事实，也不得覆盖 `outline.md`。
+`design-brief.md` 是视觉真相源；
+`slide_NN.md` 是页面内容合同；
+`base.css` 是全局设计系统；
+最终判断必须基于最新 PNG，而不是只看 HTML。
+
+### 1.5 Reference 路由
+
+| 场景 | 读取 |
+| --- | --- |
+| 场景定调 | `design-rules.md` §T1–T3、§1–3 + 命中的主题节；`design-styles.md` 目录 + 一个风格家族 |
+| 全局与逐页规划 | `planning-contract.md`；每页只读 `layout-patterns.md` 对应页型 |
+| 编辑现有 deck | `editing-contract.md` |
+| 页面制作 / 修页（新建阶段 4 或已有编辑），不论主 Agent 或子任务执行 | `subagents/slide.md`；当前制作页的逐页计划、`base.css`、`quality-checklist.md`“一、单页检查”与本页命中章节 |
+| Review 验收（新建阶段 5 或已有编辑），不论主 Agent 或子任务执行 | `subagents/review.md`；完整读取 `quality-checklist.md`：先用“一、单页检查”核对视觉语义，再做“二、整套检查”和“三、可机核 lint 项” |
+
+字体只在默认角色不足或场合敏感时读 `fonts.md`。不要在开工前扫描所有 design、style、layout、font 文档。
+
+无论是否读取 `fonts.md`，中文眉签、部门名、页脚、来源和元数据都不得使用等宽字体或拉丁 ALL CAPS 的疏字距：使用 `--font-sans` / `--font-serif`，字距保持 `0–0.03em`。`--font-mono`、`--tracking-caps`、`.is-latin-label` 只用于纯拉丁技术标识、代码、坐标和真实编号。
+
+同一句中文标题、结论或标签必须使用同一字体家族；强调词只通过颜色、字重、字号或下划线建立层级，禁止把其中几个字换成卡通、手写或另一套展示字体。**全册字体家族总数 ≤ 3 且必须全册统一**：同一角色在每页都用同一家族，不因页面题材临时换字体；严谨型收敛到 1–2 族。字体选择服从场景与 Style Lock——中文正文/表格/页脚/眉签一律 `--font-sans`（严谨衬线可 `--font-serif`），**中文绝不放进 `--font-mono`**（IBM Plex Mono 无中文字形，会回退成卡通体）；`--font-mono` 只服务纯拉丁代码、坐标、ID。`playful`、圆趣、手写和书法字体只有在主题与受众真正支持时启用（至多占那 3 族里的 1 个点缀位），并在对应元素加 `.is-expressive-type` 或 `data-type-intent="expressive"`，让渲染检查确认这是有意选择。
+
+### 1.6 视觉媒介优先级
+
+按内容选择媒介：
+
+1. 真实人物、地点、产品、事件：真实照片；
+2. 氛围、隐喻、故事场景、视觉主画面：生成图或高质量位图；
+3. 数据：ECharts；
+4. 大型流程、架构、机制、关系示意：**Canvas 绘制几何 + HTML 文字层**，或“无文字图片 + HTML 标注”；
+5. SVG：仅用于 icon、logo、箭头、标记和小型装饰。
+
+普通内容页只要存在人物、地点、产品、作品、活动、体验、自然/城市环境、故事场景或情绪画面等可见主体，优先让一张有分量的真实/生成位图成为主视觉，而不是用彩色块、图标或抽象线框替代。配图数量服从叙事，不机械凑数；但能够增加识别、证据、临场感或情绪价值的位图机会不得静默放弃。
+
+**默认禁止把手写 SVG 当作 hero、半屏/全屏主视觉或大型示意图。**SVG 只承担小型辅助图形；复杂的非位图主视觉若确需程序化表达，优先使用 Canvas 几何 + HTML 文字层。只有用户明确要求矢量交付，或必须复用用户提供的准确矢量资产时才例外。详细实现见 `design-rules.md` §5 和 `layout-patterns.md` 的 Canvas diagram 章节。
+
+## 2. 新建 PPT
+
+### 阶段 0：解析任务
+
+1. 读取 `task_pack.json`、`info_pack.json` 和当前磁盘 `outline.md`；页数、页序、标题、结论、事实与内容关系全部以 `outline.md` 为准，场景、受众、材料与 Research 路径以 task/info pack 为准。
+2. 锁定语言、能力、附件清单和交付范围，不向用户追问非阻塞偏好，并在规划中显式记录合理假设。
+3. `static_html` 新建流程不启动 Research 或 Material，只读取 Entry/Story 已生成的产物；若 required Research 报告缺失则返回 Entry，事实不足时不编造数字、不改写 Story；事实复用与补充记录按下面的 Grounding gate 执行。
+
+### 阶段 1：按需接地
+
+#### Grounding gate
+
+Entry/Story 产物交接后，Orchestrator 先校验 `info_pack.json`、Entry/Story 的 Research 报告和当前磁盘 `outline.md`；缺少必需报告时返回 Entry，不能在 Standard 内重新 Research、解析材料或改写事实。
+
+**Box-Agent 静态新建：**直接复用已交接的事实与证据，不强制创建 `plan/grounded-knowledge.md`。只有尚未在上游原文中说明的跨来源冲突、口径、假设或未确认项需要补充时，才在该文件简记相关 claim、准确数值/单位/时间、事实或示意属性、出处定位及处理结论，不重抄其余事实，也不逐条重建已有来源索引。没有补充项即可进入设计规划，不写“无问题”占位文件。需要改变已确认事实或叙事的冲突先交回 Entry/Story 处理，补充记录不能代替上游修正。已有汇总保留并按需核对，不为新规则删除或迁移。
+
+**其他环境：**保留原有生产汇总流程，校验通过后写唯一 `plan/grounded-knowledge.md`，整理已交接的用户事实、外部核验、编排器假设、示意、冲突和未确认项，确认完整提交后再进入设计规划。所有路径均不添加无来源的新事实；Box-Agent 文件提交确认仍按工具契约，不固定追加一次 `read_file`。
+
+附件提供的是**事实与可复用素材边界，不是默认设计上限**。合并时同时整理材料里的可复用页图、内嵌图片、图表结构和品牌线索；随后在 `design-brief.md` 明确 `material_visual_mode`：`facts-only`、`visual-reuse`、`style-reference` 或用户明确要求的 `faithful-restyle`。对每张图片附件另写 `attachment_visual_map`，决定 must-show / reuse / reference-only / omit、上屏页与处理方式；论文整页视觉与页内命名 Figure 必须区分为 `page-facsimile` 和 `figure-crop`。这项判断独立于外部搜图/生图的 `image_opportunity`。除 `faithful-restyle` 外，不继承附件的小字号、密集表格、普通文档排版或低质量视觉；仍按听众、场合和叙事重新定调。
+
+### 阶段 2：场景定调与 Style Lock
+
+1. 按 Reference 路由读取视觉规则，不扫描全库。
+2. 先锁定 `scene_register`（庄重汇报 / 编辑叙事 / 产品发布 / 教学解释 / 文化体验等）和一个明确的主风格；风格必须能解释“为什么适合这个受众、场合与内容”，不能只写抽象形容词，也不要把多个风格编号拼成折中套餐。允许借一种辅助 craft，但整册要能用一句视觉主张说清。
+3. 写 `plan/design-brief.md#Style Lock`：
+   - scene / scene_register 与选择理由；
+   - primary_style；
+   - supporting_craft（最多一种）；
+   - visual_thesis / signature_visual；
+   - palette / typography / numeric_voice；
+   - image_language / image_opportunity_map / composition_grammar；
+   - background_system：先根据场景说明背景应偏“克制秩序”还是“氛围表达”，再定义一个贯穿内容页的 `base_canvas_family` 与 `visual_state_range`（明度、色场、环境光、肌理、图片占比、信息密度、构图方向和章节状态）；每种状态写清叙事用途、适用页面及 `enter_from / exit_to`。学术、组会、合规、严肃评审等场景可以更安静，但仍需有排版和证据视觉；其他场景不要把整册同一纯色底当作安全默认。统一不等于全册同底色；变化也不能脱离同一画布家族；
+   - motif_role：说明主题母题在哪些页作为主视觉、在哪些页只作次要线索、哪些页主动缺席。同一装饰母题不得承担封面、章节页和大多数内容页的主要视觉；一致性主要来自字体、颜色语义、图片处理和构图语法。技术注、坐标、场记、档案编号等只有在传递真实且有用的信息时才可成为母题，不能编造伪元数据营造“高级感”；
+   - special_pages；
+   - avoid；
+   - spatial_rhythm：内容页如何铺开、呼吸页如何聚焦、峰值页在哪里；
+   - special_page_system：封面、章节页、结尾页共享什么设计 DNA，各自用什么构图动作。
+   - material_visual_mode（有附件时）：哪些只作为事实，哪些图片/图表可直接复用，哪些风格线索值得保留。
+   - attachment_visual_map（有图片附件时）：原路径、must-show / reuse / reference-only / omit、`material_asset_type`、正式 asset 路径、上屏页、裁切/整图/抠图/调色与理由。论文 `Figure N` 必须记录 figure-crop 的 `figure_id / source_page / crop_box`，不能直接复用整页 PDF PNG。
+4. 用户未指定风格时，按主题 × 受众 × 场合主动判断。没有 Style Lock 不进入规划；没有可见的 `signature_visual` 兑现页，也不把通用配色和字体清单当作完成定调。
+
+`image_language` 先说明哪些颜色本身承担识别、证据或教学信息，再决定统一处理。人物、动物、植物、作品、产品、场地、实验输出等真实主体默认保留有意义的原始色彩；统一感优先来自选图、裁切、色温、局部色罩、边框与背景。只有用户明确要求黑白/双色调，或本册视觉主张确实依赖该处理且不会损害辨认与证据价值时，才使用整图灰阶或 duotone；“学术感”“高级感”“为了统一”本身不构成把整册真实图片去色的理由。对承担识别、证据或主视觉职责的图片，同时定义轻量 `crop_contract`：焦点、必须保留的主体部位/图内信息、允许裁掉的背景与推荐 fit；不能只写宽高比后让 Slide 猜裁切。
+
+Style Lock 锁定的是**视觉语言与判断边界**，不是一套固定 HTML 模板，也不锁死每页几何。必须明确区分：
+
+- 稳定语言：字体角色、颜色语义、间距节奏、背景语法、图片裁切/调色、图形语法与特殊页亲缘关系；
+- 受控变化：每页主焦点、构图方向、媒介比例、信息密度、留白位置和章节状态；
+- 禁止项：临时引入新字体、新配色、无主题装饰或复制上一页几何只换文案。
+
+它应当像可执行的 Art Direction：足够具体，使不同 Slide 能做出同一世界里的页面；又保留足够空间，让每页按内容选择最佳构图。无需另建模板文件或共享装饰素材。
+
+`image_opportunity_map` 必须先做一次与实现方式无关的“可见主体扫描”：这页有没有值得被看见的人物、场地、产品、作品、活动、体验场景、虚构角色或情绪主画面；先说明图片能增加的证据、识别、临场感或情绪价值，再选择真图、生成图或代码视觉。不得先偏爱 CSS/Canvas，再倒推“没有图片机会”。
+
+当页面的核心内容是一组**具名真实人物、主创、嘉宾或团队成员**时，默认把“人物可识别”视为真实图片机会，并交给 Image 批量检索人物肖像、官方简介照、活动照或团队合影。“不应生成假真人”只意味着不能用生成肖像冒充本人，不能据此把该页改判为 `image_opportunity: none`。若只能可靠取得部分人物照片，优先采用一张可信团队/机构场景图配少量关键人物肖像，或降低人物数量并重组叙事；不得用身份不明的相似面孔补齐。只有经过真实检索仍无可辨认、可下载且适合上屏的素材，且图片不会增加识别价值时，才使用纯排印，并在计划中记录缺口与降级理由。
+
+同样审视具名作品、软件/产品、制作流程与案例：可检索的官方画面、界面、幕后制作图、过程拆解、实物或现场照片通常比小图标和空卡片更能建立识别与可信度。每张普通内容页都应有一个与内容相称的主要视觉载体——真实/生成图片、图表、解释性 Canvas，或真正能独立成立的排印主视觉。边框、空面板、微型图标和装饰线不算主要视觉载体；纯排印只有在文字本身被有意放大、组织并形成明确焦点时才成立。增加配图不等于增加散点：优先一张有分量的主图或一组视觉口径一致的素材，让其他元素安静地服务它。
+
+有附件时同样执行完整扫描：优先复用其中真正有信息价值且清晰的图片；附件没有实景、人物或品牌图，只说明“没有附件真图”，不等于“生成图会虚构所以禁止配图”。用于气氛、愿景、概念体验或非特定场景的生成图可以作为表达层使用，准确事实、数字和关系仍留在 HTML / 图表层。把事实保真与视觉想象分开，不把材料摘要机械搬成卡片墙。
+
+图片附件不能只被“读懂后重画”而默认消失。用户明确要求根据某张图制作，或该图本身是唯一产品、人物、场地、作品、证据、前后对比或流程总图时，将其标为 `must-show`，至少在一页以可辨认的整图或忠实裁切出现；复杂流程图可以先用原图建立全貌，再用 Canvas/HTML 分步重绘。只有重复、无关、不可读或用户明确不希望展示时才 omit。`image_opportunity: none` 只表示不新增外部/生成位图，不能覆盖 `attachment_visual_map`。
+
+真实对象的识别与证据、场景的临场感、人物与产品的可信度、故事与情绪的锚点，都属于有效配图机会。虚构人物、概念场景、未建成空间和风格化主视觉正是生成图的适用对象，不应因其不是真实对象而改用彩色方块、抽象符号或纯 CSS 占位。“CSS 更可控”“没有用户实拍”“担心 AI 生成错误”“为了风格统一”都不能单独成为 `none` 的理由；这些问题应通过真图/生成图分流、提示词约束、统一裁切与调色解决。只有当位图确实不增加听众价值，或会比图表、Canvas 或排印更含糊时，才选择 `none`。如果一册存在多个明显可见主体，却被整体判成无位图或仅封面一张图，在冻结计划前必须重做这次扫描。这里不设图片数量配额，也不为装饰而配图。
+
+当搜图或生图能力可用时，**整册全部 `none` 或只有封面一张图属于需要证明的异常，不是默认安全路线**。数据、商业、技术、学术或代码题材也不能因此整册退回卡片墙：事实页可以用图表/Canvas，但封面、章节转场、案例、场景、愿景或结论中至少应选择两个真正能从图像获益的节点，给出可执行的搜索/生成 brief；短册则至少保证一个内容节点，而不只是封面。只有用户明确要求纯排印/纯图表，或逐页证明位图都会降低准确性与可读性时，才允许整册无位图，并在 `plan/deck.md` 写明逐页例外理由。这是防止误判的最低覆盖线，不是为了凑数；事实型真图与非证据性的氛围生成图必须明确分流。卡片、极简、学术、商务等风格描述不等于禁止位图，也不能作为免配图理由。只有用户原文明确要求“纯文字”“不要图片”或语义完全等价的限制时，才能把 `explicit_user_request` 作为图片豁免依据；不得根据风格标签自行推断用户拒绝图片。
+
+可见主体扫描必须同步落盘为 `plan/image-strategy.json`，供生成流程在 Slide 委派前确定性验收。存在配图机会时写入 `status: images_required`、`visible_subject_scan_complete: true` 和完整的 `image_opportunity_pages`；整册无位图时必须写入 `status: bitmap_exception`、`visible_subject_scan_complete: true`、覆盖全部计划页的 `reviewed_pages`、不少于 20 字的 `exception_reason`，以及 `explicit_user_request | pure_typography | pure_chart | wireframe | accuracy_critical` 之一的 `exception_basis`。不能用自然语言总结替代该文件。
+
+背景不等于一块纯色，也不等于每页随机换皮。学术、组会、合规、严肃评审等场景可用安静画布承托事实；产品、品牌、招商、文旅、文化、故事、课程导入、活动与大众传播等表达型场景，应主动考虑一层与主题相容的环境设计，而不是整册退回纯色：可以是有方向的柔和光场、局部光晕、低对比颗粒/网点/纸纹/地形等主题肌理、图片背景，或由 Image 统一生成的背景。光晕只有在能解释光源、主题和视觉焦点，且形状、位置与构图相关时才成立；标题后反射式复制的圆形模糊光斑仍属于无主题 glow。先确定贯穿普通内容页的基础画布家族，再选择少量相容手法形成背景语法。章节差异优先通过局部大色场、图片调色、条带或母题状态表达；只有章节页、hero、结尾或叙事确需整体换场时才更换整页画布，并在前一张或后一张保留颜色、肌理、图片处理或构图方向的承接。图片或生成背景必须进入 `image_opportunity_map` 与素材 brief，不能由 Slide 临时发明路径。避免出现数页突然像另一套 Deck、随后又无过渡切回，也避免把深藏青、霓虹蓝紫渐变或通用科技 glow 当作默认“高级感”。
+
+后续沿阶段 3–5 执行，不另建平行的收尾路线。Box-Agent 静态新建由主 Agent 连续制作、按需委派；其他环境保留 Image 分片、输入分片与 Slide 页组并行，详见阶段 4。前一节点的真相源未冻结，不启动依赖它的下游；已选择委派且互不依赖的同层任务一次并行派出。`review-prep` 集中执行讲稿、字体、全册渲染、build 和 audit；制作期看图不能作为最终版本验收。
+
+### 阶段 3：全局规划与字体前置
+
+完整读取 `references/planning-contract.md`，然后按顺序：
+
+若存在 `materials/font-config.json`，先读取一次并把其中 title/body/number/annotation 角色作为 Style Lock 的字体输入；用户上传字体优先于自动选型，未覆盖字符由交付字体包自动回退，禁止凭字体名改用未上传的本机字体。
+
+1. 补全 `design-brief.md`；
+2. 写 `plan/deck.md`；
+3. 运行下方 `init`，仅在缺失时从本 Skill 复制 `base.css`，随后只编辑 Style Lock 对应的设计 token；不由模型重新输出整份骨架。已有 CSS 原样保留并按本次范围编辑。命令返回绝对路径，不生成计划、字体或验收结果，也不替代第 10 步 `prepare`；安全骨架不固定各页的几何、媒介或构图：
+
+```bash
+python "$SKILL_ROOT/scripts/deck.py" init "$DECK_DIR"
+```
+
+4. 一次写完全部 `plan/slide_NN.md`，每页同时定稿屏显文案、视觉实现、来源、`## 口语讲稿` 和 Reference route，不先留空讲稿再新建补稿任务；
+5. 在 `plan/deck.md` 定义 Production groups：全部过渡页为 `dividers`，封面与结尾为 `bookends`；内容页首先按**制作方式与构图亲缘性**分组，再考虑叙事连续，最后才考虑章节归属。一个组应共享同一种制作问题，而不是把 cards、复杂 Canvas、数据图表、真实照片等不同媒介仅因属于同一章就塞给一个 Agent；章名相同不构成分组理由。每组同时写 `boundary_handoff`，说明进入本组前与离开本组后的画布、明度、色场和母题状态；分组完成后按逐页表复核一次，确保每页恰好归属一个组，章节页与互动页等页型没有错号。
+6. 参考文献与结尾页分开承担职责：需要上屏的来源使用独立 references 页或前置内容页；closing 只负责收束命题、行动或提问，不与长参考文献、详细回顾或多栏总结合并。
+7. 在启动 Image 或 Slide 前写一段简短的 `## Repetition & rhythm preflight`：逐页比较画布状态、标题锚点、构图方向、媒介、图片占比、信息密度与母题角色；同时纵向比较各章的页面脚本，不能把同一套“痛点—案例前—案例后—步骤—工具”机械复制到不同章节。共享节奏可以形成亲缘性，但每章仍应有自己的问题视角、证据任务与阅读动作；某页没有独立职责且需要合并或改变叙事时，返回 Story 更新同一 `outline.md`。在已确认页数、页序和内容关系不变的范围内，调整视觉页面地图、Style Lock 或 Production groups，再冻结计划。
+8. 做一次**内容充分性与屏显语义去重**：每个普通内容页先写清不可替代的听众所得，再用最适合该页的证据、机制、对比、案例、行动或边界继续解释；不设固定条数，但只有主题句、同义副题和状态角标的页面不算内容成立。若没有新的支撑层，返回 Story 决定是否合并页面或改变叙事职责；Standard 不自行增删页或改写大纲，不用大片无职责空白或重复标签把薄内容拉成一页。逐页确认主要视觉载体与 `spatial_budget` 相符；不能靠大边框、等高卡或空面板在几何上“占满”，却把短文字钉在边缘、留下大块未参与阅读的内部空白。逐页比较标题、kicker / subtitle、图片角标、badge、callout、图例和页脚；同一短语通常只选择一个最强载体，其他区域补充对象、原因、变化或结果。只有导航或同屏比较确有必要时才重复，且每次出现必须承担不同作用。`dense` 不是一句标签：若主内容只压在半张画布或一条窄带里、其余空间没有焦点或方向，必须重做空间计划。
+9. 做一次 `screen-copy firewall`：逐页区分“观众必须看到”与“只供生产使用”。Speaker/Audience/Occasion/Objective、页面职责、production group、视觉验收、素材路线、证据编号、假设、文件名和 Research/Material 来源都留在计划或讲稿中，不得自动进入 `## 最终屏显文案`。只有当页面主题本身确实讨论目标受众、项目目标或研究方法时，才把相关内容重新写成观众可理解的叙事，而不是显示 `受众：…`、`主体：…`、`页面角色：…` 等内部标签。屏显文案和 HTML 不使用 emoji / Unicode 图标（如 `👀 ✋ 💡 ✨ ★ ✦`）；需要图标时使用与 Style Lock 一致的本地小 SVG、CSS 形状或直接用文字表达。星芒、爱心、礼花等通用装饰不能作为“全册点缀”散布到多数页面，只在确有构图职责的页面出现。
+10. 用一个确定性命令同步讲稿并从计划前置字体包：
+
+```bash
+python "$SKILL_ROOT/scripts/deck.py" prepare "$DECK_DIR" --expected <总页数>
+```
+
+Box-Agent 静态新建若 `prepare` 报规划缺项，由当前规划者按已列出的全部错误一次补齐原计划，再运行回执的 `retry_after_fix`；不为补漏另派讲稿或计划子任务。失败回执的 `plan_dir` 与 `planning_reference` 给出绝对定位；按原始错误处理，已掌握的合同不重读，也不因回执列了规划路径就把字体或依赖故障误当规划问题。缺少上游事实仍返回 Entry/Story，不由脚本或补稿任务编造。成功回执不要求重跑。
+
+规划冻结条件：事实、页序、屏显文案、视觉媒介、逐页配图机会、素材 brief、背景处理、来源、讲稿、页型和字体全部确定，`plan/image-strategy.json` 已写入，并已通过内容充分性、屏显语义去重与 screen-copy firewall。本阶段以 `deck.py prepare` 成功为结束，不以“计划已写完”结束；依据它更新后的 `base.css` 与 `assets/fonts/manifest.json` 中的实际字体，以及已准备依赖制作首张 HTML，不能到收尾时才准备字体。冻结前专门反证所有 `image_opportunity: none`：若页面已经有可视化的主体或场景，不能只用“代码更可控”将它排除。屏显文案或字体 token 变化时，先同步计划再重跑 `deck.py prepare`；仅 Box-Agent 静态新建的正式 Review 集中修复按 Review §4B 直接执行同次 `review-prep`，由它在全册渲染前完成讲稿与字体准备，不另跑 prepare。首张制作前、其他环境及已有编辑保留原 prepare 要求。
+
+逐页计划写清主视觉与文字各占哪块、主信息如何使用安全区、剩余空间为什么存在，以及观众从最终像素应读出哪些对象、方向、领域证据和结论。`deck.md` 与逐页计划的媒介不能互相矛盾。普通内容页若只能把主体挤在中间、靠小字塞下或用通用几何代替领域证据，先改空间意图和内容层级。章节过渡页明确“主信息团 + 视觉对重 + 留白职责”，不能只在局部放一小团文字。Box-Agent 静态新建不在规划和制作两阶段重复书写空间/可读性预演：规划保留这些设计约束，实际像素级布局由制作时求解；其他环境保留原有规划预演。
+
+### 阶段 4：素材与页面制作
+
+**Box-Agent 的输入准备：**完成下列素材验收和路径回填后，进入页面制作时先完整读取 `subagents/slide.md`，并按阶段 4 的 Reference 路由读取质量要求与当前页命中参考；这取决于当前工作，不取决于是否委派。按“Box-Agent 静态新建的执行方式”消费既有原计划与 `base.css`，不以生成页组输入分片为前置。主 Agent 复用当前上下文已完整掌握且未变化的输入；实际委派时可把已掌握的短原文直接交给 Slide，其余给出精确路径。Slide 对已完整提供的内容不重复读取，未提供或已失效时补读。允许小批成组读取并连续制作，不强制一次全读全册。不得为缩短输入改写事实、屏显文案或设计决策，也不把全册或长 CSS 复制到每个 task。已有有效原文分片可复用，不为分片重排计划或另建真相源；路径、`files/write_scope` 规则见工具契约。
+
+**其他环境的输入准备：**保留素材回填后调用 `python "$SKILL_ROOT/scripts/group_input.py" "$DECK_DIR" --expected N` 一次准备全部组的流程；该脚本只收集完整原文，不代替设计判断。旧计划格式不适用时按原读取要求继续，不强制迁移或重新规划。
+
+1. 汇总所有被判定为真实图或生成图的图片 brief，再启动 Image subagent；每个 goal 显式带上稳定 `group_id`、`response_language` 与 `deliverable_language`。**第一次 Image 委派前**，每个 `plan/slide_NN.md` 的唯一 `## 视觉实现` 都必须已有一条完整单行机器字段 `- image_opportunity: <枚举>`；有位图页另用同级独立行写 `- presentation: <四枚举之一>`，不得写成空的 `image_opportunity:` 父块，不得把 `full-bleed` / `framed-scene` 填进 `image_opportunity`，也不得把 `split-media` 等 layout 值填进 `presentation`。缺字段时直接修计划并重试，不搜索或修改运行时代码。只要计划中存在有效配图机会，就不能静默跳过 Image 阶段；若计划需要图片但当前没有 Image Worker，必须重新规划为真正成立的非位图表达，或补派 Image Agent，不能直接进入完成状态。同一视觉配方且能在一张联系表中共同审清的素材归入同一分片，多张生成图在同一工具回合并行提交。Image 与 Slide 不得在同一次 `sub_agent` 中派出：先完成并验收素材，再启动页面制作。
+2. 先把 `attachment_visual_map` 中 must-show / reuse 的图片复制并登记来源，再交给对应 Image 分组；论文命名 Figure 先使用 `deck.py material-figure` 从页图生成独立、可追溯的 Figure 裁图，整页 PNG 只作为定位上下文。每个 Image 分组将候选路径绑定到稳定 `asset_id`，由 `deck.py asset-contact` 生成一张带 ID 的素材联系表，默认只做一次整组 Vision；只有被标红、要求抠图、比例可疑或主体完整性无法从缩略图判断的素材才打开单图复核。用 `asset-review` 写回最终状态后，Orchestrator 只按 `ready` 的 `asset_id → actual path + origin + crop_contract` 回填逐页计划；候选、被替换与废弃图片不算正式素材。Box-Agent 的确定性脚本由父级执行：接收 `pending_parent_verification` 的 Image 候选、原始 prompt / 来源与待办后，直接接续登记、裁图/抠图、联系表和验收，不为这些操作重新委派，也不要求 Image 再返回一份 ready 合同；其他环境仍由 Image 完成原分工并返回 ready。`assets/catalog.json` 是唯一素材真相源，必须保留下载 URL、生成模型、用户附件路径和派生关系；Image 的自然语言总结不能代替 catalog。逐页图片先锁定 `presentation: subject-only | framed-scene | full-bleed | evidence-crop`（这是位图的展示/背景处理合同，**只允许这四个枚举**；`split-media`/`right-half`/`cards`/分屏等是版式不是 presentation，放到 `layout`；**无位图页完全省略 presentation**，不写 `无`/`none` 占位）：任何要悬浮、跨色场叠放或作为独立角色/物件的图都属于 `subject-only`，必须按上述分工完成透明检查、主体抠图、最终 Alpha 检查与必要的单图 Vision，再回填可用的 `*-cutout.png`；普通 RGB 图不得作为透明资产返回 `ready`。带背景图片只能作为有意的画框场景、满幅裁切或证据裁图，不能把其白底/奶油底矩形偶然贴到另一种画布上。Slide 不临时去背，也不用 CSS mask/multiply 冒充。映射确有问题时交回同一个 Image 复核。失败素材先换可行的真实图或生成图路线，确实不可得时才改为 Canvas 或排版降级，并写清原因，不留占位。Slide 启动前，父级必须确认素材验收完成，catalog 中所有计划 `asset_id` 都必须为 `ready`、实际文件存在，且路径与裁切合同已经回填逐页计划。
+3. Box-Agent 静态新建不按 Production group 自动委派；主 Agent 可以连续制作多个设计组。实际选择委派时，仍一个 Production group 委派一个 Slide，可并行执行；goal 的首行必须精确写成 `Slide Group <group_id> [NN,NN]:`，例如 `Slide Group bookends [01,20]:`。页码所有权以已冻结的 `production_group` 为准；不用“负责封面和结尾”、“第一组页面”等叙述取代组 ID 与标准页码头。显式带上 `response_language`、`deliverable_language` 和该组计划引用；`boundary_handoff` 使用 `plan/deck.md` 所属组的完整原文，可随任务提供，不改写。不得为了提高并发把已冻结多页组拆成一页一任务。组内设计与制作负荷仍应相容；复杂媒介可以有独立设计组，但独立设计组本身不构成启动新 Agent 的理由。其他环境保留原有一组一个 Slide 的委派方式。
+4. **Box-Agent 静态新建：**主 Agent 可连续完成一批 HTML 后批量渲染；实际委派的 Slide 在一次任务内写完所属组全部首稿，一次返回全部待渲染页码，不等待父级逐页批准。主 Agent 逐页用 `inspect_images(strategy=\"native\")` 查看新鲜 PNG，所有写页子任务返回后集中修复有证据的问题，再重渲复看。已有编辑保留原组修复方式。**其他具备子内渲染和看图能力的环境：**Slide 保留“当前页完整首稿 → 渲染 → 看图 → 必要修复与复验 → 下一页”的子内逐页闭环。所有路径都必须覆盖封面、每张章节页、结尾及全部内容页，并用设计组全部最终 PNG 检查亲缘性与明显回归；已有新鲜渲染可直接用于组内总览，不为总览重复渲染或开启审美循环。首次看图后的“合并修改 → 重渲 → 复看”记为一轮 refine，每页最多 1 轮；仍有真实硬伤时改用更稳定的结构或返回 blocked。最后一次修改后没有重新渲染和看图，不得返回 ready。
+   同一主 Agent 已完成全册逐页检查及必要修复复验、立即进入阶段 5 时，可按 Slide §3 步骤 7 将尚未执行的组末关系检查并入正式 Review；仍用正式最终 PNG 检查各组亲缘、节奏、重复与漂移。未全册就绪、未立即进入 Review、其他环境及已有编辑保留原组末检查；不省略单页初检、特殊页、正式全册检查或修后复验。
+5. 全部页面完成制作期检查（仅上述组末关系检查可并入阶段 5）后进入阶段 5；Box-Agent 静态新建先准备正式待审版本，再由主 Agent 执行首次 Review，不在这里先做全册 Review，也不因此新增子任务。新建或复杂编辑过程中不得额外委派 `simple_edit` 或 `review-fix` 角色；不得追逐 `cjkTypography`、`crowded`、bbox/contrast 候选、轻微换行/标点等 advisory，也不得在 Review 前开启审美清门循环。有新鲜像素/DOM 证据的硬伤，Box-Agent 静态新建由主 Agent 在所有子写者返回后集中修复；其他环境与已有复杂编辑仍交回原所属 Slide Group。每组最多返修 2 次，退化时恢复最后一次已验证版并重渲复看；实际修复后才可进行下一次 Review，Review 总计最多 3 次。
+
+### 阶段 5：全册 Review 与交付
+
+Box-Agent 静态新建把正式 Review 与最终验收合为同一次工作，先准备正式版本：
+
+```bash
+python "$SKILL_ROOT/scripts/deck.py" review-prep "$DECK_DIR" --expected <总页数>
+```
+
+成功回执为 `prepared / qa: not-run`，只表示待审产物就绪。先完整读取 `subagents/review.md`（回执 `next_instructions`）及本阶段路由的质量清单；当前上下文已有完整且未变化的原文时复用。由主 Agent 按 Review §4 完成首次全册诊断、内容保真、讲稿与最终像素检查；有修复则按 §4B 先构建后复验，再按 §5 更新回执 `review_ledger` 指向的唯一账本和最终合同。制作期记录沿用，不另做待审前的全册 Review，也不在这里重复 Review 方法。全册最终像素覆盖、事实与设计要求、refine 上限不减少。
+
+其他环境及已有编辑继续按 `subagents/review.md` 的原 Review 分工执行，实际委派使用下列语言与模式合同；主 Agent 自行执行时沿用已锁定语言与 `mode=final_review`，不为切换职责另建任务：
+
+```text
+Review:
+Response language: <response_language>
+Deliverable language: <deliverable_language>
+mode=final_review
+```
+
+委派时不得省略语言或让 Review 自行猜测。Review 中间返回不等于验收完成；父级仍负责该路径的最终待审、像素检查及下列交付门。
+
+1. **产物核验（硬门）**：Review 返回 `ready` 后，父级确认 `outline.md`、全部 HTML/PNG、讲稿、`present.html` 与播放器均存在，并确认 `DECK_DIR/present.html` 可打开。`present.html` 由待审命令内的 build 生成，不追加 contact/build；缺失即技术故障。`present.html` 是必交付产物：不得省略构建、不得拿其他文件代替它交付。父级验收通过后登记绝对路径到 `state.artifacts.present_html`，最终回复提供真实链接；命令失败保持非零状态，不用后续命令掩盖退出码。Entry 仍核对交付和实际链接；脚本没有验收权。
+2. **PPTX 导出（必做步骤，不是可选项）**：当 `static_postprocess` 含 `pptx` 时，**必须**执行以下唯一导出命令，不得跳过、不得改用任何其他工具：
+
+    ```bash
+    node "$SKILL_ROOT/scripts/export_pptx/html_to_pptx.mjs" --deck-dir "$DECK_DIR" --pages-dir "$DECK_DIR/slides" --output "$DECK_DIR/<DECK_ID>.pptx"
+    ```
+
+    - **这是 PPTX 的唯一合法产出路径**：禁止用 python-pptx、自写 python 脚本、宿主 Agent 原生演示工具或手工重建 PPTX 替代；导出失败时也不得用这些方式"补产出"，只能按下方失败分支处理。
+    - Linux 下若该命令报 chromium 启动失败 / `Target page, context or browser has been closed` / 缺动态库（如 libnspr4.so），先执行 `export LD_LIBRARY_PATH="$HOME/.box-agent/runtime/linux-libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"` 再重跑同一条命令，最多重试一次；仍失败进入失败分支。
+    - 成功且 `DECK_DIR/<DECK_ID>.pptx` 确实存在后，登记 `state.artifacts.pptx`；失败则写入 `state.last_error`（保留原始错误原文）、将 `state.status` 设为 `partial`、保留全部 HTML 产物并如实向用户报告，**不得伪造 PPTX 路径**。
+
+   Review 停滞收口时允许补齐或更新的正式产物只有 `_trace/review-issues.md` 与 `_trace/content-fidelity.md`；运行时不得禁止写入最终验收合同明确要求的这两份文件，也不得在收口阶段允许继续修改页面。`inspect_images` 超时按工具契约只重试一次降采样批次；再次失败立即记为 `visual_unverified`，按实际已有产物执行确定性检查，以 `partial` 保留可用 HTML、未验页与错误；没有 ready 和最终像素通过合同不得启动新的 PPTX 导出，不继续消耗整轮任务预算。
+
+Review 超时、返回 `blocked`、缺少最终像素复验或没有自然返回合同时，先进入有限恢复流程，而不是立即把整项任务判失败。达到 3 次 Review 或每个受影响页组 2 次返修预算后停止继续改页，保留 `_trace/review-issues.md`。若需恢复已有验证版，恢复后同样执行 `review-prep` 并检查最终全册像素，不把恢复前的截图当作最终证据，也不为此重启审美返修。全部 slide、非空最终渲染、`speech.md` 与可打开的 `present.html` 存在且最终像素已覆盖时，可按实际问题以 `needs_improvement` 交付 HTML 并携带 warnings；尚未完成像素检查则保留待验收状态与产物，如实说明，不能称为最终完成。缺页、渲染缺失/空白、播放器无法构建/打开或**缺少 `present.html`** 等属于不可用技术故障。`static_postprocess` 含 `pptx` 时，没有 ready 最终合同或导出失败按第 2 步登记 `partial` 并如实提供现有 HTML 及其验收状态，**不得以 python-pptx 等替代工具另产 PPTX 冒充完成**。
+
+正式验收、事实核验、最终合同的唯一方法见 `subagents/review.md`，使用原 `_trace/review-issues.md` 的唯一 `## Final review contract` 段；不另造根目录 PASS，不用 `--force` 绕过导出检查。最终看图后只更新 Review 账本与内容保真记录，不再改视觉源或 build；源变化后按同一 Review 方法重新待审与验收。
+
+只有 Review ready 且用户要求的全部产物验证通过时，交付状态才为 `ready`；必需 PPTX 缺失时保持 `partial`。Review 最终仍有硬伤但全部页面、渲染、讲稿与 `present.html` 可用时，以 `needs_improvement` 交付并展示问题账本；不得因为 advisory、子 Agent 文本收尾或 Review 合同不完美丢弃可用成稿。
+
+## 3. 编辑 PPT
+
+先完整读取 `references/editing-contract.md`，只读检查现有 plan、HTML、素材、讲稿和渲染图，建立受影响文件/页面清单，再选择编辑路径。
+
+### 3.1 简单与复杂的判定
+
+**简单编辑**同时满足：
+
+- 不改变核心论点、页序、页面职责或跨页叙事；
+- 不需要新 Research、Material 或 Image；
+- 不改变全局 Style Lock、字体系统或多个 arch；
+- 可在少量页面内安全完成，且影响边界明确。
+
+任一条件不满足即按复杂编辑处理。页数只是信号，不是唯一判据。
+
+### 3.2 Review 快修
+
+本轮修改涉及 `outline.md` 中的标题、结论或事实时，先返回 Entry/Story 仅更新受影响项，再进入简单编辑；纯版式修改不重做 Story。
+
+简单编辑只委派一个 Review，goal 标明 `mode=simple_edit`、用户原始修改要求、目标页和不可改变项。
+
+Review：
+
+1. 看现有 overview 与目标页最终 PNG；
+2. 一次列完本次修改项；
+3. 读取目标页计划与 HTML，集中修改；
+4. 更新受影响的计划/讲稿；
+5. 用 `render.py --batch --pages` 一次重渲并看 focus，确认修改不退化；
+6. 由父级执行 `deck.py review-prep`，查看它准备的最终全册像素并返回 ready/blocked；最终看图后不再修改或 build。
+
+不派 Slide、Image、Research 或第二个 Review。
+
+### 3.3 Orchestrator 改造
+
+复杂编辑由 Orchestrator：
+
+1. 写影响图：事实、叙事、页序、Style Lock、base.css、素材、页面、讲稿分别受什么影响；
+2. 只复用仍有效的既有成果，不从头覆盖无关页面；
+3. 只在已存在的 `outline.md`、`info_pack.json`、`raw_documents.json` 和既有研究边界内，委派受影响的 Image/Slide 页组；Standard 阶段不得委派 Research 或 Material，也不得自行修改`outline.md`。若发现新事实、新附件、论文 Figure 页图缺失，立即返回 Entry/Story，待Entry 更新材料/研究、Story 覆盖同一 `outline.md` 后再重新进入 Standard；互不依赖的 Image/Slide任务仍可并行；
+4. 更新受影响计划并运行 `deck.py prepare`；
+5. 只重做受影响页面；全局 token 变化时 batch 重渲全册；
+6. 最后委派唯一 Review，以 `mode=final_review` 做全册一致性与讲稿收口。
+
+复杂编辑不允许让 Review 独自重写叙事或凭空补素材，也不允许 Orchestrator 直接改页面 HTML。当编辑改变事实、页序、页面职责或核心结论时，必须先回到 Entry → Story；Standard 只负责表达、渲染、Review、build 和 Standard exporter 收尾。
+
+### 3.4 编辑交付门
+
+- 用户要求逐项可追踪到修改结果；
+- 未受影响页面和素材保持不变；
+- 新旧页面风格、页码、讲稿和播放器一致；
+- 所有变更页面已看最终像素；
+- 字体包、render freshness、`speech.md`、`present.html` 重新通过。
+
+## 4. 硬红线
+
+- 图表必须用 ECharts，不用生成图伪造数据图表。
+- AI 生成图不承载需要准确呈现的文字；文字放 HTML 层。
+- SVG 只做小元素，不做大型结构图或主视觉。
+- `slides/` 只保留正式 `slide_NN.html`，不放备份或临时页。
+- 页面固定骨架、页脚安全区、最小字号、对比度与无溢出是硬门。听众阅读的正文不得低于 20px，注释、来源和辅助说明不得低于 18px；若字体 token 规定了更大值，以更大值为准。内容放不下时减少卡片数量、删减重复屏显文字、调整信息层级；确需拆页时返回 Story 更新大纲，不得自行拆页或继续缩字。
+- 内部规划标签、来源、文件路径、制作状态和无听众价值的伪元数据不得出现在屏显内容中。
+- 最终判断看 PNG；修改后未重渲、未看新像素，不得声称完成。
+- Review 最多 3 次受控验收；只有页面实际修改并重渲后才允许复验。Box-Agent 静态新建不以新建子任务计次，切换执行者也不重置次数。达到预算后停止返工并带 warnings 交付可用成稿。
+
+## 5. 确定性脚本
+
+| 脚本 | 用途 |
+| --- | --- |
+| `stage_materials.py` | 不参与 Entry → Story → Standard 新链路；材料解析由 Entry 完成，Standard 只读取 Entry/Story 已交接的产物 |
+| `font_bundle.py` | 保留：OFL 白名单、官方来源、许可证随包、字符裁剪、交付校验和 render freshness 属于独立高风险能力 |
+| `render.py` | 保留：单页诊断；`--batch` 复用同一 Chromium 渲染整册或指定页 |
+| `group_input.py` | 保留既有工具与有效原文分片的兼容性；Box-Agent 新任务不以前置打包约束计划标题，其他环境保留阶段 4 的输入准备流程 |
+| `image_cutout.py` | 保留：检查 Alpha、清除烘焙棋盘格/纯色背景，并在需要时用 GrabCut 生成独立主体 PNG；不覆盖来源原图 |
+| `deck.py` | `init` 只复制缺失的基础 CSS；`review-prep` 一次完成正式待审前的机械步骤，固定全册渲染，不替模型验收；保留 `prepare` 计划讲稿与字体前置、资产管理、`contact`、独立 `build` 与只改讲稿的 `sync` |
+| `install.sh` | 保留：跨环境依赖、字体和 Chromium 安装无法由运行脚本可靠替代；依赖清单已内联 |
+
+首次部署依赖解析 venv、PyMuPDF、可分发字体、FontTools/Brotli 和 Playwright Chromium；用 `scripts/install.sh` 安装。运行脚本时若 skill 挂载路径不同，使用实际 skill root。
+
+
+## Canvas dimensions / 画布尺寸执行约定
+
+- 用户指定像素尺寸优先；1600×900 仅为未指定时的默认值。1920×1080 是精确 CSS 画布要求，不能用“同比例”代替。
+- 在已有的绝对任务目录中执行一次 `python "<SKILL_ROOT>/scripts/deck.py" init "$DECK_DIR" --width 1920 --height 1080`（数值替换为用户要求）。不指定尺寸则省略两个参数。已有 CSS 不被 init 改写；变更尺寸须明确编辑工作区 `base.css`。
+- `base.css` 中的 `--canvas-w` / `--canvas-h` 是本任务唯一尺寸来源；每页 `.slide` 使用它们，统一全册。`prepare`、`review-prep`、批量 `render.py --batch "$DECK_DIR"` 自动沿用尺寸，不需要反复查脚本源码，也不要覆盖 Skill 安装文件。
+- 播放器沿用 CSS 画布并等比适配窗口；Standard PPTX exporter 从实际 HTML 画布映射到相同纵横比的英寸页面。CSS 像素、截图像素和 PPTX 英寸是不同单位：PNG 为 2 倍设备像素（1920×1080 画布截图为 3840×2160），PPTX 无固定像素分辨率。
+- 先按此约定 init、规划并写页面，成功后进入既有渲染与验收流程；只有工具返回具体失败才读对应诊断，不为尺寸猜测反复搜索实现。

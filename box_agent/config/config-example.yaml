@@ -256,3 +256,19 @@ image_generation:
 #       openclaw_import: true  # allow one-time import from ~/.openclaw/
 #   paths:
 #     session_workspace_root: ""  # absolute path; defaults to workspace_dir if empty
+
+# External resource plugins. Instance settings are owned by the management store;
+# use `box-agent plugins` JSON requests to import/save/apply them, then restart.
+# HTML pages may only edit their own non-sensitive instance settings.
+plugin_platform:
+  enabled: true
+  target_id: local
+  profile_id: default
+  # state_dir defaults to BOX_AGENT_HOME/plugins; custom paths stay in that profile.
+  # These deployment profiles describe dependencies, never install them at startup.
+  runtime_profiles:
+    ppt-host-v1:
+      python_modules: [PIL, fontTools, brotli, playwright, pypdf, docx, psutil]
+      node_modules: [pptxgenjs, jszip]
+      playwright_chromium: true
+      timeout_seconds: 20

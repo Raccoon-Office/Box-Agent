@@ -1,8 +1,11 @@
+import json
+
 import pytest
 
 from box_agent.tools.skill_loader import SkillLoader
 from scripts.generate_skills_manifest import (
     BUILTIN_SKILL_NAMES,
+    PLUGIN_COMPATIBILITY_SKILL_NAMES,
     SKILLS_DIR,
     _collect_skills,
 )
@@ -19,14 +22,14 @@ EXPECTED_BUILTIN_SKILLS = {
     "mcp-config": "mcp-config/SKILL.md",
     "memory-guide": "memory-guide/SKILL.md",
     "pdf": "document-skills/pdf/SKILL.md",
-    "pptx": "pptx/SKILL.md",
-    "ppt-fast": "document-skills/pptx/SKILL.md",
-    **{f"sn-ppt-{module}": f"presentation-suite/skills/sn-ppt-{module}/SKILL.md"
-       for module in ("entry", "tools", "story", "standard", "dazzle", "doctor")},
     "research-synthesis": "research-synthesis/SKILL.md",
     "roadmap": "roadmap/SKILL.md",
     "scheduled-task": "scheduled-task/SKILL.md",
     "xlsx": "document-skills/xlsx/SKILL.md",
+    "pptx": "pptx/SKILL.md",
+    "ppt-fast": "document-skills/pptx/SKILL.md",
+    **{f"sn-ppt-{name}": f"presentation-suite/skills/sn-ppt-{name}/SKILL.md"
+       for name in ("entry", "tools", "story", "standard", "dazzle", "doctor")},
 }
 
 
@@ -84,3 +87,27 @@ def test_roadmap_is_a_top_level_builtin_skill():
     entries = dict(_collect_skills())
 
     assert entries["roadmap"] == "roadmap/SKILL.md"
+
+
+@pytest.mark.parametrize(("name", "relative_path"), [
+    ("pptx", "pptx/SKILL.md"),
+    ("ppt-fast", "document-skills/pptx/SKILL.md"),
+    *[(f"sn-ppt-{name}", f"presentation-suite/skills/sn-ppt-{name}/SKILL.md")
+      for name in ("entry", "tools", "story", "standard", "dazzle", "doctor")],
+])
+def test_core_upgrade_keeps_legacy_ppt_entry_points_available(name, relative_path):
+    assert (SKILLS_DIR / relative_path).is_file()
+    assert dict(_collect_skills())[name] == relative_path
+    loader = SkillLoader(SKILLS_DIR)
+    loader.discover_skills()
+    assert loader.get_skill(name).source == "builtin"
+
+
+def test_packaged_manifest_identifies_compatibility_names_for_unreadable_plugin_state():
+    manifest = json.loads((SKILLS_DIR / "_manifest.json").read_text())
+    names = set(manifest["plugin_compatibility_names"])
+    assert names == PLUGIN_COMPATIBILITY_SKILL_NAMES
+    assert names == {"pptx", "ppt-fast", *(
+        f"sn-ppt-{name}" for name in ("entry", "tools", "story", "standard", "dazzle", "doctor")
+    )}
+    assert names <= {entry["name"] for entry in manifest["skills"]}

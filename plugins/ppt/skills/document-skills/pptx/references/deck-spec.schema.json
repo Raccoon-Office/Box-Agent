@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://box-agent.local/schemas/deck-spec.schema.json",
+  "title": "Box Agent controlled HTML deck",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "title", "theme_id", "truth_contract", "slides"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "theme_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "design": {
+      "type": "object",
+      "description": "Persisted composition choice. The scaffold creates it once so rerenders and editor saves keep the same geometry.",
+      "additionalProperties": false,
+      "required": ["version", "seed", "family", "variant"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "seed": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        },
+        "family": {
+          "enum": [
+            "institutional-grid",
+            "editorial-spread",
+            "poster-asymmetric",
+            "playful-collage",
+            "brutalist-frame",
+            "retro-interface",
+            "literary-minimal"
+          ]
+        },
+        "variant": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "design_contract": {
+      "type": "object",
+      "description": "Original hard/soft visual requirements persisted before scaffold resolution.",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {
+        "version": { "const": 1 },
+        "palette": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": { "enum": ["explicit", "inferred"] },
+            "requested": { "type": "array", "items": { "type": "string" } },
+            "background": { "$ref": "#/$defs/colorContract" },
+            "surface": { "$ref": "#/$defs/colorContract" },
+            "text": { "$ref": "#/$defs/colorContract" },
+            "primary": { "$ref": "#/$defs/colorContract" },
+            "accent": { "$ref": "#/$defs/colorContract" },
+            "secondary": { "$ref": "#/$defs/colorContract" },
+            "accent_usage": { "enum": ["sparse", "balanced", "dominant"] }
+          }
+        },
+        "style_overrides": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "card_columns": { "enum": ["2", "3"] },
+            "collage": { "const": "off" },
+            "decorations": { "const": "off" },
+            "stagger": { "const": "off" },
+            "irregular_grid": { "const": "off" },
+            "shadow": { "const": "off" },
+            "texture": { "const": "off" },
+            "gradient": { "const": "off" },
+            "radius": { "enum": ["square", "rounded"] }
+          }
+        },
+        "slides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["visual_kind", "source"],
+            "properties": {
+              "visual_kind": { "type": "string", "minLength": 1 },
+              "source": { "enum": ["explicit", "recommended", "inferred"] },
+              "item_count": { "type": "integer", "minimum": 1, "maximum": 40 },
+              "item_dimension": { "type": "string", "minLength": 1 },
+              "direction": { "type": "string" },
+              "relationship": { "type": "string" },
+              "hierarchy_depth": { "type": "integer", "minimum": 1, "maximum": 8 }
+            }
+          }
+        }
+      }
+    },
+    "truth_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "source_facts", "assumptions"],
+      "properties": {
+        "mode": {
+          "enum": ["source_bound", "illustrative"]
+        },
+        "source_facts": {
+          "type": "array",
+          "maxItems": 80,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          }
+        },
+        "research_facts": {
+          "type": "array",
+          "description": "Externally researched factual statements captured before scaffolding. Forbidden when the user requests strict source-only output.",
+          "maxItems": 80,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          }
+        },
+        "assumptions": {
+          "type": "array",
+          "description": "User-authorized illustrative claims. Every affected slide must visibly disclose that the data is assumed or illustrative.",
+          "maxItems": 40,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          }
+        }
+      }
+    },
+    "slides": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "layout_id", "props"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+          },
+          "layout_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "props": {
+            "type": "object"
+          },
+          "source_outline_page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "source_outline_item_range": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start", "end", "total", "part", "parts"],
+            "properties": {
+              "start": { "type": "integer", "minimum": 1 },
+              "end": { "type": "integer", "minimum": 1 },
+              "total": { "type": "integer", "minimum": 1 },
+              "part": { "type": "integer", "minimum": 1 },
+              "parts": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "outline_intent": {
+            "type": "object",
+            "description": "Immutable semantic intent copied from the bound outline page so layout fit remains verifiable after authoring and editor saves.",
+            "additionalProperties": false,
+            "required": ["title", "message", "layout", "visual"],
+            "properties": {
+              "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+              "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "layout": { "type": "string", "minLength": 1, "maxLength": 120 },
+              "visual": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "visual_item_contract": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["dimension", "count"],
+                "properties": {
+                  "dimension": { "type": "string", "minLength": 1 },
+                  "count": { "type": "integer", "minimum": 0, "maximum": 40 }
+                }
+              }
+            }
+          },
+          "layout_drafts": {
+            "type": "object",
+            "description": "Inactive layout props retained by the HTML editor so switching layouts never destroys content.",
+            "maxProperties": 20,
+            "additionalProperties": {
+              "type": "object"
+            }
+          },
+          "background": {
+            "type": "object",
+            "description": "Optional materialized full-slide image chosen by the AI media decision. Generated assets must already exist before render.",
+            "additionalProperties": false,
+            "required": ["src"],
+            "properties": {
+              "src": { "type": "string", "minLength": 1 },
+              "alt": { "type": "string", "maxLength": 160 },
+              "origin": { "enum": ["generated", "asset", "uploaded"] },
+              "fit": { "enum": ["cover", "contain"] },
+              "position": { "enum": ["center", "left", "right", "top", "bottom"] },
+              "treatment": { "enum": ["wash-light", "wash-dark", "none"] }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "colorContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "requested", "source"],
+      "properties": {
+        "value": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "requested": { "type": "string" },
+        "source": { "enum": ["explicit", "recommended", "inferred"] }
+      }
+    }
+  }
+}

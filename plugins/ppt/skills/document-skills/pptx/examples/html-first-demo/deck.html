@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Q1 Performance Snapshot — No Padding Version</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap"
+      rel="stylesheet"
+      crossorigin="anonymous"
+    />
+    <style>
+      html, body { margin: 0; padding: 0; background: #222; font-family: 'Inter', Arial, sans-serif; }
+      .slide-stage { display: flex; flex-direction: column; align-items: center; padding: 40px 0; }
+      
+      /* 移除所有默认 margin/padding 以防干扰 */
+      h1, h2, h3, p, ul, li { margin: 0; padding: 0; list-style: none; }
+      
+      .slide {
+        width: 1920px;
+        height: 1080px;
+        position: relative;
+        overflow: hidden;
+        background: linear-gradient(135deg, #1e3a5f 0%, #2d4a6f 100%);
+      }
+
+      /* 通用卡片容器，使用 flex 代替 padding */
+      .card-base {
+        display: flex;
+        flex-direction: column;
+        justify-content: center; /* 垂直居中 */
+        align-items: flex-start; /* 水平靠左 */
+        box-sizing: border-box;
+      }
+      
+      /* 辅助定位内部内容的容器，模拟 padding 效果 */
+      .content-inset {
+        width: 85%; /* 留出左右边距 */
+        height: 80%; /* 留出上下边距 */
+        margin: auto; /* 在父级 flex 容器中居中 */
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="slide-stage">
+      <div class="slide">
+        <!-- 装饰背景 -->
+        <div style="position: absolute; right: 0; top: 0; width: 400px; height: 400px; border-radius: 50%; background: #0066cc; opacity: 0.18;"></div>
+
+        <!-- Header -->
+        <div style="position: absolute; left: 120px; top: 100px; width: 1680px; height: 200px; display: flex; flex-direction: column; justify-content: space-between;">
+          <div style="display: flex; align-items: center; gap: 16px;">
+            <div style="width: 12px; height: 12px; border-radius: 50%; background: #00d18f; box-shadow: 0 0 0 4px rgba(0, 209, 143, 0.2);"></div>
+            <p style="font-size: 18px; color: #a8c5e2; font-weight: 600; letter-spacing: 4px; text-transform: uppercase;">Live · Q1 2026 · Engineering</p>
+          </div>
+          <h1 style="font-size: 88px; font-weight: 800; color: #ffffff; line-height: 1;">Quarterly Performance</h1>
+          <p style="font-size: 28px; color: #c5d9e8; max-width: 1200px;">
+            A snapshot of how the platform held up under <strong style="color: #ffffff">10× peak traffic</strong> and what we <em style="color: #00d18f">shipped</em>.
+          </p>
+        </div>
+
+        <!-- KPI Cards Row -->
+        <div style="position: absolute; left: 120px; top: 400px; width: 1680px; height: 260px; display: flex; gap: 24px;">
+          
+          <!-- Card 1 -->
+          <div style="flex: 1; background: #ffffff; border-radius: 20px; border-top: 6px solid #0066cc; display: flex; align-items: center; justify-content: center;">
+             <div style="width: 80%; height: 75%; display: flex; flex-direction: column; justify-content: space-between;">
+                <p style="font-size: 14px; color: #6b8ba4; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;">Uptime</p>
+                <p style="font-size: 72px; font-weight: 800; color: #1e3a5f;">99.97<span style="font-size: 36px; color: #6b8ba4">%</span></p>
+                <p style="font-size: 18px; color: #00a878; font-weight: 600;">▲ 0.12% vs Q4</p>
+             </div>
+          </div>
+
+          <!-- Card 2 -->
+          <div style="flex: 1; background: linear-gradient(135deg, #0066cc 0%, #003e7a 100%); border-radius: 20px; display: flex; align-items: center; justify-content: center;">
+             <div style="width: 80%; height: 75%; display: flex; flex-direction: column; justify-content: space-between;">
+                <p style="font-size: 14px; color: #a8c5e2; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;">API p95 Latency</p>
+                <p style="font-size: 72px; font-weight: 800; color: #ffffff;">112<span style="font-size: 36px; color: #c5d9e8">ms</span></p>
+                <div style="width: 100%; height: 8px; background: rgba(255, 255, 255, 0.2); border-radius: 4px; position: relative;">
+                    <div style="position: absolute; left:0; top:0; width: 65%; height: 100%; background: #00d18f; border-radius: 4px;"></div>
+                </div>
+                <p style="font-size: 18px; color: #c5d9e8; font-weight: 600;">35% faster than target</p>
+             </div>
+          </div>
+
+          <!-- Card 3 -->
+          <div style="flex: 1; background: #ffffff; border-radius: 20px; border-top: 6px solid #00d18f; display: flex; align-items: center; justify-content: center;">
+            <div style="width: 80%; height: 75%; display: flex; flex-direction: column; justify-content: space-between;">
+               <p style="font-size: 14px; color: #6b8ba4; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;">Releases</p>
+               <p style="font-size: 72px; font-weight: 800; color: #1e3a5f;">48</p>
+               <p style="font-size: 18px; color: #6b8ba4">across 12 services · zero rollbacks</p>
+            </div>
+          </div>
+
+          <!-- Card 4 -->
+          <div style="flex: 1; background: #0f1f33; border-radius: 20px; border-top: 6px solid #ff8a3d; display: flex; align-items: center; justify-content: center;">
+            <div style="width: 80%; height: 75%; display: flex; flex-direction: column; justify-content: space-between;">
+               <p style="font-size: 14px; color: #ff8a3d; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;">Cost / Request</p>
+               <p style="font-size: 72px; font-weight: 800; color: #ffffff;">$0.0042</p>
+               <p style="font-size: 18px; color: #00d18f; font-weight: 600;">▼ 18% after caching layer</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom Split Section -->
+        <div style="position: absolute; left: 120px; top: 730px; width: 1680px; height: 260px; display: flex; gap: 32px;">
+          
+          <!-- Highlights (Left) -->
+          <div style="flex: 1.4; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; display: flex; align-items: center; justify-content: center;">
+             <div style="width: 90%; height: 80%; display: flex; flex-direction: column; justify-content: flex-start; gap: 20px;">
+                <h3 style="font-size: 24px; color: #ffffff; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;">Quarter Highlights</h3>
+                <div style="display: flex; flex-direction: column; gap: 15px;">
+                    <div style="display: flex; gap: 15px; font-size: 22px; color: #c5d9e8;">
+                        <span style="color: #00d18f;">•</span>
+                        <span><strong style="color: #ffffff">Auth v2.0</strong> shipped — login failures down <strong style="color: #00d18f">62%</strong>.</span>
+                    </div>
+                    <div style="display: flex; gap: 15px; font-size: 22px; color: #c5d9e8;">
+                        <span style="color: #00d18f;">•</span>
+                        <span><strong style="color: #ffffff">Real-time analytics</strong> processing <strong style="color: #00d18f">2M+ events/day</strong>.</span>
+                    </div>
+                    <div style="display: flex; gap: 15px; font-size: 22px; color: #c5d9e8;">
+                        <span style="color: #00d18f;">•</span>
+                        <span><strong style="color: #ffffff">SOC 2 Type II</strong> audit closed with <em style="color: #ff8a3d">zero findings</em>.</span>
+                    </div>
+                </div>
+             </div>
+          </div>
+
+          <!-- Team (Right) -->
+          <div style="flex: 1; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; display: flex; align-items: center; justify-content: center;">
+             <div style="width: 85%; height: 80%; display: flex; flex-direction: column; justify-content: space-between;">
+                <h3 style="font-size: 24px; color: #ffffff; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;">Top Contributors</h3>
+                <div style="display: flex; align-items: center; height: 80px;">
+                    <!-- Avatars -->
+                    <div style="width: 72px; height: 72px; border-radius: 50%; border: 3px solid #ffffff; background: linear-gradient(135deg, #7dd3fc, #2563eb); display: flex; align-items: center; justify-content: center; color: #ffffff; font-weight: 800; position: relative;">SC</div>
+                    <div style="width: 72px; height: 72px; border-radius: 50%; border: 3px solid #ffffff; background: linear-gradient(135deg, #34d399, #047857); display: flex; align-items: center; justify-content: center; color: #ffffff; font-weight: 800; margin-left: -16px;">ML</div>
+                    <div style="width: 72px; height: 72px; border-radius: 50%; border: 3px solid #ffffff; background: linear-gradient(135deg, #f59e0b, #c2410c); display: flex; align-items: center; justify-content: center; color: #ffffff; font-weight: 800; margin-left: -16px;">AJ</div>
+                    <div style="width: 72px; height: 72px; border-radius: 50%; border: 3px solid #ffffff; background: #0066cc; display: flex; align-items: center; justify-content: center; color: #ffffff; font-weight: 700; margin-left: -16px;">+21</div>
+                </div>
+                <p style="font-size: 20px; color: #c5d9e8; line-height: 1.4;">
+                  <strong style="color: #ffffff">24 engineers</strong> · 1,287 PRs merged · <strong style="color: #00d18f">96%</strong> review coverage.
+                </p>
+             </div>
+          </div>
+        </div>
+
+        <!-- Page Number Badge -->
+        <div style="position: absolute; right: 60px; bottom: 24px; height: 40px; width: 120px; display: flex; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 20px;">
+           <span style="color: #00d18f">02</span>
+           <span style="color: #6b8ba4; margin: 0 8px;">/</span>
+           <span style="color: #a8c5e2">10</span>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

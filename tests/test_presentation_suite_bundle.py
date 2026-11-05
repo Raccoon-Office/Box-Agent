@@ -13,7 +13,7 @@ import yaml
 
 
 REPO = Path(__file__).resolve().parents[1]
-SUITE = REPO / "box_agent/skills/presentation-suite"
+SUITE = REPO / "plugins/ppt/skills/presentation-suite"
 MODULES = {"entry", "story", "tools", "standard", "dazzle", "doctor"}
 NAMES = {f"sn-ppt-{name}" for name in MODULES}
 
@@ -36,9 +36,9 @@ def test_entry_routes_static_and_dynamic_without_missing_methods():
     assert task_example["choices"]["output"] == "static_html"
     assert task_example["ppt_mode"] == "standard"
     assert task_example["choices"]["static_postprocess"] == ["pptx"]
-    assert "`dynamic_html` -> `sn-ppt-dazzle`" in entry
-    assert "`static_html` -> `sn-ppt-standard`" in entry
-    assert "ppt-fast" in entry
+    assert "`dynamic_html` -> `{{skill:sn_ppt_dazzle}}`" in entry
+    assert "`static_html` -> `{{skill:sn_ppt_standard}}`" in entry
+    assert "{{skill:ppt_fast}}" in entry
     assert "不承诺" in entry and "动画" in entry
     assert "pwd -P" in entry and "outline.md" in entry
     for path in (SUITE / "skills").rglob("*.md"):

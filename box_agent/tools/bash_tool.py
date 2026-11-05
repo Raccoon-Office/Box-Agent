@@ -20,8 +20,9 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, model_validator
@@ -977,7 +978,7 @@ class BashTool(Tool):
             _DEFAULT_TOOLS_CONFIG.bash_default_timeout_seconds
         ),
         max_timeout_seconds: int = _DEFAULT_TOOLS_CONFIG.bash_max_timeout_seconds,
-        pptx_sync_script_provider: Callable[[], Path | None] | None = None,
+        pptx_sync_script_provider: Callable[[], Path | tuple[Path, ...] | None] | None = None,
     ):
         """Initialize BashTool with OS-specific shell detection.
 
@@ -1060,6 +1061,16 @@ class BashTool(Tool):
             self._subprocess_env = os.environ.copy()
         if self._subprocess_env is not None:
             self._subprocess_env.pop("BOX_AGENT_OUTPUT_DIR", None)
+
+    @property
+    def runtime_env(self) -> Mapping[str, str]:
+        """Read-only snapshot of the environment inherited by future commands.
+
+        This includes managed-runtime overrides and removals. Command-specific
+        guards and shell startup scripts may add their own environment later.
+        """
+        values = os.environ if self._subprocess_env is None else self._subprocess_env
+        return MappingProxyType(dict(values))
 
     def _refresh_windows_shell(self, runtime_env: dict[str, str] | None = None) -> None:
         """Resolve the shell again after the host finishes preparing a runtime."""
@@ -1685,16 +1696,18 @@ Examples:
                     exit_code=1,
                 )
             # 仅目标同步命令查询当前会话的技能资源，不缓存可能已失效的路径。
-            expert_sync_script = (
+            bound_sync_scripts = (
                 self._pptx_sync_script_provider()
                 if self._pptx_sync_script_provider is not None
                 and "sync_image_manifest_status.js" in command else None
             )
+            if isinstance(bound_sync_scripts, Path):
+                bound_sync_scripts = (bound_sync_scripts,)
             image_status_error = detect_pptx_image_status_command_bypass(
                 command,
                 workspace_dir=self.workspace_dir,
                 runtime_env=self._subprocess_env,
-                expert_sync_script=expert_sync_script,
+                bound_sync_scripts=bound_sync_scripts or (),
                 shell_style=(
                     "powershell"
                     if self.is_windows and self._bundled_win_bash is None

@@ -1,0 +1,20 @@
+schema_version: 1
+id: org.example.resource-skill
+version: 0.1.1
+display_name: Brief example
+description: Minimal external Skill resource plugin with a reusable configuration page.
+requires:
+  box_agent: ">=1.0.0 <2.0.0"
+  plugin_api: 1
+runtime:
+  kind: resources
+config_schema: config.schema.json
+ui:
+  config:
+    entry: ui/config.html
+    bridge_version: 1
+contributes:
+  skills:
+    - id: brief
+      path: skills/brief
+      config_keys: []

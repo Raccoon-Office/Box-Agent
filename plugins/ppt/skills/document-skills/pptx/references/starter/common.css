@@ -1,0 +1,41 @@
+/* ============================================================================
+ * CANONICAL SLIDE FRAME — copy this file to `drafts/common.css` verbatim.
+ *
+ * The `.slide` block below is a HARD CONTRACT. Do NOT change width/height,
+ * position, or overflow. Every slide must render at exactly 1920x1080 (16:9);
+ * the PPTX exports at LAYOUT_WIDE (13.333x7.5in, 16:9) and any other size is
+ * rejected by html_self_check.js / html_to_editable_pptx.js (hard failure, not
+ * a fixable warning). Authoring at 1280x720, 1400x840, 1600x900, viewport units,
+ * or scaled wrappers is the #1 cause of export failures — never re-derive these
+ * numbers from memory; copy them.
+ *
+ * For a deliberately non-standard deck (rare), the user must opt in by passing
+ * `--canvas WxH` to BOTH scripts AND setting the same WxH here.
+ * ==========================================================================*/
+
+html, body { margin: 0; padding: 0; }
+h1, h2, h3, h4, p, ul, ol, li { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+* { box-sizing: border-box; }
+
+/* --- HARD CONTRACT: do not edit these four properties --------------------- */
+.slide {
+  width: 1920px;       /* contract — do not change */
+  height: 1080px;      /* contract — do not change */
+  position: relative;  /* contract — dom-to-pptx requires relative/absolute */
+  overflow: hidden;    /* contract — dom-to-pptx requires overflow:hidden */
+}
+
+/* --- Everything below is yours to replace with the deck's Visual DNA ------ */
+/* Define palette variables, typography, and reusable component classes here  */
+/* ONCE, and reference them from each slide — do not repeat styles inline on   */
+/* every slide. Example scaffold: */
+
+/*
+:root {
+  --bg: #FFFDF5;
+  --ink: #1E1E1E;
+  --accent: #FF2D7E;
+}
+.slide { background: var(--bg); color: var(--ink); font-family: 'Inter', Arial, sans-serif; }
+*/

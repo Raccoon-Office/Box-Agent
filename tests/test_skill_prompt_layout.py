@@ -11,9 +11,9 @@ import pytest
 
 from box_agent.tools.skill_loader import (
     SKILL_SLOT_SENTINEL,
-    SkillLoader,
     move_skill_slot_to_end,
 )
+from tests.pptx_test_support import PPT_PLUGIN_ROOT, ppt_plugin_loader
 
 
 def test_default_system_prompt_keeps_skill_metadata_slot_at_tail() -> None:
@@ -43,14 +43,7 @@ def test_move_skill_slot_to_end_preserves_prefix_and_single_slot() -> None:
 
 
 def test_pptx_skill_makes_scaffold_and_framework_fallback_executable() -> None:
-    skill_path = (
-        Path(__file__).resolve().parents[1]
-        / "box_agent"
-        / "skills"
-        / "document-skills"
-        / "pptx"
-        / "SKILL.md"
-    )
+    skill_path = PPT_PLUGIN_ROOT / "skills/document-skills/pptx/SKILL.md"
     skill = skill_path.read_text(encoding="utf-8")
 
     assert (
@@ -77,11 +70,7 @@ def test_loaded_pptx_sync_example_preserves_literal_task_and_script_paths(
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("Bash is required to execute the documented POSIX example")
-    skill_dir = (
-        Path(__file__).resolve().parents[1]
-        / "box_agent/skills/document-skills/pptx"
-    )
-    skill = SkillLoader(skill_dir).load_skill(skill_dir / "SKILL.md")
+    skill = ppt_plugin_loader(tmp_path / "settings.json").get_skill("ppt-fast")
     assert skill is not None and not skill.broken
     prompt = skill.to_prompt()
     command = re.search(

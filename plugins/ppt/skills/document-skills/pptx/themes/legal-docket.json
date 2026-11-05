@@ -1,0 +1,38 @@
+{
+  "id": "legal-docket",
+  "name": "Legal Docket",
+  "description": "A disciplined legal dossier with ivory paper, oxblood evidence marks, docket numbers, exhibit tabs, clause rhythm, and restrained case authority.",
+  "source_reference": "beautiful-html-templates/monochrome",
+  "selection": {
+    "visual_dna_ids": ["legal-docket"],
+    "mood_keywords": ["legal", "authoritative", "archival", "evidence", "formal", "法律", "合规", "证据", "严肃", "权威"],
+    "industry_fit": ["legal services", "litigation", "compliance", "regulatory", "corporate counsel", "法律服务", "诉讼", "合规管理", "监管", "公司法务"],
+    "density": "high",
+    "scheme": "warm-light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F3EFE5",
+    "surface": "#FFFCF5",
+    "surface_strong": "#E8E0D2",
+    "primary": "#7A2432",
+    "primary_soft": "#E8D7D8",
+    "text": "#171717",
+    "muted": "#625D56",
+    "border": "#91887C",
+    "inverse": "#FFFDF8",
+    "chart": ["#7A2432", "#171717", "#9B7B45", "#6D7580"]
+  },
+  "typography": {
+    "display": "Source Serif 4, Noto Serif SC, Songti SC, serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 0, "radius_medium": 0, "radius_large": 0, "border_width": 1},
+  "style": {"canvas": "paper", "surface": "paper", "shadow": "none", "heading": "editorial", "label": "mono", "accent": "underline", "alternation": "section"},
+  "composition": {
+    "default_family": "institutional-grid",
+    "allowed_families": ["institutional-grid", "literary-minimal", "analytical-exhibit", "editorial-spread"]
+  }
+}

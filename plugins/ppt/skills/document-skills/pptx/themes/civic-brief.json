@@ -1,0 +1,44 @@
+{
+  "id": "civic-brief",
+  "name": "Civic Brief",
+  "description": "An institutional policy docket with deep navy, official rules, numbered clauses, and a restrained seal-like civic signature.",
+  "source_reference": "beautiful-html-templates/signal",
+  "selection": {
+    "visual_dna_ids": ["civic-brief"],
+    "mood_keywords": ["institutional", "authoritative", "public", "policy", "docket", "政务", "政策", "庄重", "公共治理"],
+    "industry_fit": ["government", "public policy", "municipal services", "regulation", "public administration", "政务汇报", "公共政策", "城市治理", "监管", "民生服务"],
+    "density": "medium-high",
+    "scheme": "dark",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#17233A",
+    "surface": "#202F4B",
+    "surface_strong": "#293B5D",
+    "primary": "#D2B36F",
+    "primary_soft": "#4A463F",
+    "text": "#F4F0E7",
+    "muted": "#B8C0CD",
+    "border": "#53617A",
+    "inverse": "#17233A",
+    "alt_background": "#F3EEE3",
+    "alt_surface": "#FFFDF7",
+    "alt_text": "#17233A",
+    "alt_muted": "#657083",
+    "alt_border": "#BBB5AA",
+    "alt_primary": "#9D2F2D",
+    "chart": ["#D2B36F", "#9D2F2D", "#6883A8", "#7D8F71"]
+  },
+  "typography": {
+    "display": "Source Serif 4, Noto Serif SC, Songti SC, serif",
+    "body": "DM Sans, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 0, "radius_medium": 0, "radius_large": 0, "border_width": 1},
+  "style": {"canvas": "solid", "surface": "outline", "shadow": "none", "heading": "editorial", "label": "mono", "accent": "underline", "alternation": "section"},
+  "composition": {
+    "default_family": "institutional-grid",
+    "allowed_families": ["institutional-grid", "analytical-exhibit", "editorial-spread"]
+  }
+}

@@ -28,6 +28,12 @@ BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"
 def builtin_skill_write_error(path: Path, skills_root: Path | None = None) -> str | None:
     """Bundled skills are executable runtime resources, never task output."""
     root = skills_root or BUILTIN_SKILLS_ROOT
+    from ..plugins.locations import plugin_package_roots
+    if any(path.resolve().is_relative_to(plugin_root) for plugin_root in plugin_package_roots()):
+        return (
+            "PLUGIN_RESOURCE_READ_ONLY: installed plugin resources are immutable. "
+            "Write task artifacts in the workspace; change plugin settings through the configuration service."
+        )
     if path.resolve().is_relative_to(root.resolve()):
         return (
             "BUILTIN_SKILL_READ_ONLY: bundled Skill files cannot be changed by task tools. "

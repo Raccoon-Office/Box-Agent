@@ -1,0 +1,488 @@
+{
+  "schema_version": 1,
+  "themes": [
+    {
+      "id": "biennale-yellow",
+      "name": "Biennale Yellow",
+      "description": "Warm parchment, deep indigo serif, and a solar-yellow cultural-poster atmosphere.",
+      "source_reference": "beautiful-html-templates/biennale-yellow",
+      "selection": {
+        "visual_dna_ids": ["biennale-yellow"],
+        "mood_keywords": ["editorial", "atmospheric", "warm", "cultural", "poster", "双年展", "策展", "暖黄"],
+        "industry_fit": ["arts institution", "exhibition", "museum", "design conference", "literary publication", "studio report"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#E9E5DB",
+        "surface": "#F3EFE4",
+        "surface_strong": "#F1EE2E",
+        "primary": "#1B2566",
+        "primary_soft": "#F1EE2E",
+        "text": "#1B2566",
+        "muted": "#676A86",
+        "border": "#B7B09E",
+        "inverse": "#F3EFE4",
+        "alt_background": "#F1EE2E",
+        "alt_surface": "#F0DA7C",
+        "alt_text": "#1B2566",
+        "alt_muted": "#50577E",
+        "alt_border": "#1B2566",
+        "alt_primary": "#1B2566",
+        "chart": ["#1B2566", "#F1EE2E", "#E26B4A", "#F0DA7C"]
+      },
+      "typography": {
+        "display": "Instrument Serif, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Archivo, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "JetBrains Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "gradient",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "editorial",
+        "label": "mono",
+        "accent": "underline",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "bold-poster",
+      "name": "Bold Poster",
+      "description": "White paper, deep warm ink, and saturated red with groovy poster typography.",
+      "source_reference": "beautiful-html-templates/bold-poster",
+      "selection": {
+        "visual_dna_ids": ["bold-poster"],
+        "mood_keywords": ["bold", "poster", "groovy", "graphic", "red", "海报", "大胆", "复古"],
+        "industry_fit": ["campaign", "event", "music", "creative launch", "brand manifesto", "culture"],
+        "density": "low",
+        "scheme": "light",
+        "formality": "low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#FFFFFF",
+        "surface": "#F5F2EF",
+        "surface_strong": "#FBE2E4",
+        "primary": "#D8000F",
+        "primary_soft": "#FBE2E4",
+        "text": "#1C1410",
+        "muted": "#6C5C55",
+        "border": "#1C1410",
+        "inverse": "#FFFFFF",
+        "alt_background": "#D8000F",
+        "alt_surface": "#B9000C",
+        "alt_text": "#FFFFFF",
+        "alt_muted": "#FFD9DC",
+        "alt_border": "#FFFFFF",
+        "alt_primary": "#FFFFFF",
+        "chart": ["#D8000F", "#1C1410", "#8E5A4C", "#F1A8AE"]
+      },
+      "typography": {
+        "display": "Shrikhand, Arial Black, Noto Sans SC, PingFang SC, sans-serif",
+        "body": "Space Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "Libre Baskerville, Noto Serif SC, Songti SC, Georgia, serif"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 4,
+        "radius_large": 8,
+        "border_width": 3
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "hard",
+        "shadow": "hard",
+        "heading": "poster",
+        "label": "boxed",
+        "accent": "block",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "capsule",
+      "name": "Capsule",
+      "description": "Warm bone, ink-black structure, and a full pastel-pop system built from rounded capsules.",
+      "source_reference": "beautiful-html-templates/capsule",
+      "selection": {
+        "visual_dna_ids": ["capsule"],
+        "mood_keywords": ["pastel", "playful", "fashion", "friendly", "rounded", "胶囊", "柔和", "活泼"],
+        "industry_fit": ["consumer product", "fashion", "beauty", "creative portfolio", "lifestyle", "community"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "medium-low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#F5F5F0",
+        "surface": "#FFFFFF",
+        "surface_strong": "#C5B5E0",
+        "primary": "#E85D4E",
+        "primary_text": "#B7372A",
+        "primary_soft": "#F5B895",
+        "text": "#1A1A1A",
+        "muted": "#666660",
+        "border": "#1A1A1A",
+        "inverse": "#1A1A1A",
+        "chart": ["#E85D4E", "#C4D94E", "#8BB4F7", "#A06CE8"]
+      },
+      "typography": {
+        "display": "Bodoni Moda, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Space Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "Space Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif"
+      },
+      "shape": {
+        "radius_small": 24,
+        "radius_medium": 48,
+        "radius_large": 80,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "dots",
+        "surface": "pill",
+        "shadow": "soft",
+        "heading": "editorial",
+        "label": "pill",
+        "accent": "dot",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "cartesian",
+      "name": "Cartesian",
+      "description": "Warm bone and stone neutrals organized by quiet axes, lines, and newspaper typography.",
+      "source_reference": "beautiful-html-templates/cartesian",
+      "selection": {
+        "visual_dna_ids": ["cartesian"],
+        "mood_keywords": ["minimal", "neutral", "analytical", "newspaper", "quiet", "坐标", "极简", "理性"],
+        "industry_fit": ["research", "architecture", "strategy", "editorial", "academic", "consulting"],
+        "density": "low",
+        "scheme": "light",
+        "formality": "high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#EDE8E0",
+        "surface": "#E2DBD1",
+        "surface_strong": "#F4F1EC",
+        "primary": "#6F6861",
+        "primary_soft": "#D8D1C8",
+        "text": "#1A1A1A",
+        "muted": "#5A5A5A",
+        "border": "#B8B0A4",
+        "inverse": "#FFFFFF",
+        "chart": ["#1A1A1A", "#6F6861", "#A69D92", "#5A5A5A"]
+      },
+      "typography": {
+        "display": "Playfair Display, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Inter, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "Inter, Noto Sans SC, PingFang SC, Arial, sans-serif"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "grid",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "editorial",
+        "label": "plain",
+        "accent": "line",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "cobalt-grid",
+      "name": "Cobalt Grid",
+      "description": "Warm ivory paper with one strict cobalt ink and a precise editorial grid.",
+      "source_reference": "beautiful-html-templates/cobalt-grid",
+      "selection": {
+        "visual_dna_ids": ["cobalt-grid"],
+        "mood_keywords": ["cobalt", "grid", "editorial", "precise", "bichromatic", "钴蓝", "网格", "严谨"],
+        "industry_fit": ["research", "technology", "design", "data story", "consulting", "publication"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#F0EBDE",
+        "surface": "#F7F2E7",
+        "surface_strong": "#E1E3FF",
+        "primary": "#1F2BE0",
+        "primary_soft": "#E1E3FF",
+        "text": "#1F2BE0",
+        "muted": "#5560B0",
+        "border": "#A9AFE6",
+        "inverse": "#FFFFFF",
+        "chart": ["#1F2BE0", "#5560E5", "#8991ED", "#B8BDF4"]
+      },
+      "typography": {
+        "display": "Newsreader, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Hanken Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "DM Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "grid",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "italic",
+        "label": "mono",
+        "accent": "bracket",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "creative-mode",
+      "name": "Creative Mode",
+      "description": "Cream paper, ink-black structure, and saturated green, pink, orange, and yellow poster blocks.",
+      "source_reference": "beautiful-html-templates/creative-mode",
+      "selection": {
+        "visual_dna_ids": ["creative-mode"],
+        "mood_keywords": ["creative", "poster", "bold", "multicolor", "graphic", "创意", "海报", "高饱和"],
+        "industry_fit": ["creative agency", "brand", "campaign", "product launch", "portfolio", "workshop"],
+        "density": "medium-high",
+        "scheme": "light",
+        "formality": "medium-low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#EFE9D9",
+        "surface": "#E4DCC4",
+        "surface_strong": "#F5C518",
+        "primary": "#187B43",
+        "primary_soft": "#CBE7D5",
+        "text": "#0F0F0F",
+        "muted": "#5B554B",
+        "border": "#0F0F0F",
+        "inverse": "#FFFFFF",
+        "chart": ["#1F8A4C", "#F06CA8", "#E85A1F", "#F5C518"]
+      },
+      "typography": {
+        "display": "Archivo Black, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Space Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "JetBrains Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 4,
+        "radius_large": 8,
+        "border_width": 3
+      },
+      "style": {
+        "canvas": "dots",
+        "surface": "hard",
+        "shadow": "hard",
+        "heading": "poster",
+        "label": "boxed",
+        "accent": "block",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "daisy-days",
+      "name": "Daisy Days",
+      "description": "Cream paper, rounded friendly type, and a cheerful pastel rainbow with chunky outlines.",
+      "source_reference": "beautiful-html-templates/daisy-days",
+      "selection": {
+        "visual_dna_ids": ["daisy-days"],
+        "mood_keywords": ["friendly", "pastel", "cheerful", "rounded", "playful", "雏菊", "可爱", "粉彩"],
+        "industry_fit": ["education", "community", "family", "wellness", "consumer product", "children"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#F5F0E6",
+        "surface": "#F7C8D4",
+        "surface_strong": "#FDE68A",
+        "primary": "#397D73",
+        "primary_soft": "#A8E6CF",
+        "text": "#2D2D2D",
+        "muted": "#625F5A",
+        "border": "#2D2D2D",
+        "inverse": "#FFFFFF",
+        "chart": ["#7ECDC0", "#D4A5E8", "#F8635F", "#A8D8F0"]
+      },
+      "typography": {
+        "display": "Fredoka One, Arial Rounded MT Bold, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Quicksand, PingFang SC, Microsoft YaHei, Arial, sans-serif",
+        "label": "Quicksand, PingFang SC, Microsoft YaHei, Arial, sans-serif"
+      },
+      "shape": {
+        "radius_small": 18,
+        "radius_medium": 30,
+        "radius_large": 44,
+        "border_width": 3
+      },
+      "style": {
+        "canvas": "dots",
+        "surface": "note",
+        "shadow": "hard",
+        "heading": "handwritten",
+        "label": "pill",
+        "accent": "dot",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "long-table",
+      "name": "Long Table",
+      "description": "Buttery cream and strict terracotta ink with pill borders and modern editorial type.",
+      "source_reference": "beautiful-html-templates/long-table",
+      "selection": {
+        "visual_dna_ids": ["long-table"],
+        "mood_keywords": ["editorial", "social", "terracotta", "bichromatic", "friendly", "长桌", "赤陶", "现代"],
+        "industry_fit": ["social media", "food", "hospitality", "community", "editorial", "lifestyle"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "medium",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#FAF1E2",
+        "surface": "#FFF8EE",
+        "surface_strong": "#F4DFD4",
+        "primary": "#B53D2A",
+        "primary_soft": "#F1D5CC",
+        "text": "#8E2D1F",
+        "muted": "#825B52",
+        "border": "#B53D2A",
+        "inverse": "#FFFFFF",
+        "chart": ["#B53D2A", "#D16B56", "#8E2D1F", "#E6A393"]
+      },
+      "typography": {
+        "display": "Bricolage Grotesque, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Fraunces, Noto Serif SC, Songti SC, Georgia, serif",
+        "label": "Fraunces, Noto Serif SC, Songti SC, Georgia, serif"
+      },
+      "shape": {
+        "radius_small": 16,
+        "radius_medium": 24,
+        "radius_large": 48,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "pill",
+        "shadow": "none",
+        "heading": "poster",
+        "label": "pill",
+        "accent": "underline",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "monochrome",
+      "name": "Monochrome",
+      "description": "Ivory paper and ink-black type only, organized like a carefully typeset ledger.",
+      "source_reference": "beautiful-html-templates/monochrome",
+      "selection": {
+        "visual_dna_ids": ["monochrome"],
+        "mood_keywords": ["monochrome", "literary", "ledger", "quiet", "high density", "黑白", "账本", "克制"],
+        "industry_fit": ["annual report", "research", "finance", "academic", "publishing", "consulting"],
+        "density": "high",
+        "scheme": "light",
+        "formality": "high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#FAFADF",
+        "surface": "#F2F2D2",
+        "surface_strong": "#F5F0E4",
+        "primary": "#1A1A16",
+        "primary_soft": "#E5E5C9",
+        "text": "#1A1A16",
+        "muted": "#5E5E54",
+        "border": "#A9A994",
+        "inverse": "#FFFFFF",
+        "chart": ["#1A1A16", "#5E5E54", "#8D8D80", "#B4B4A1"]
+      },
+      "typography": {
+        "display": "Lora, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Jost, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "JetBrains Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "paper",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "editorial",
+        "label": "mono",
+        "accent": "line",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "neo-grid-bold",
+      "name": "Neo Grid Bold",
+      "description": "Off-white paper, ink-black structure, and a sparing neon-yellow grid accent.",
+      "source_reference": "beautiful-html-templates/neo-grid-bold",
+      "selection": {
+        "visual_dna_ids": ["neo-grid-bold"],
+        "mood_keywords": ["neo grid", "bold", "technical", "neon yellow", "structured", "新网格", "黑黄", "强结构"],
+        "industry_fit": ["technology", "architecture", "design system", "product launch", "consulting", "portfolio"],
+        "density": "high",
+        "scheme": "light",
+        "formality": "medium-high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#ECECE8",
+        "surface": "#F5F4EF",
+        "surface_strong": "#E6FF3D",
+        "primary": "#0A0A0A",
+        "primary_soft": "#E6FF3D",
+        "text": "#0A0A0A",
+        "muted": "#6F6F6A",
+        "border": "#0A0A0A",
+        "inverse": "#FFFFFF",
+        "chart": ["#0A0A0A", "#E6FF3D", "#8A8A85", "#C5D830"]
+      },
+      "typography": {
+        "display": "Space Grotesk, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Space Grotesk, PingFang SC, Microsoft YaHei, Arial, sans-serif",
+        "label": "JetBrains Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 3
+      },
+      "style": {
+        "canvas": "grid",
+        "surface": "hard",
+        "shadow": "hard",
+        "heading": "poster",
+        "label": "boxed",
+        "accent": "block",
+        "alternation": "none"
+      }
+    }
+  ]
+}

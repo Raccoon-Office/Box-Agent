@@ -1685,6 +1685,24 @@ def test_runtime_env_can_be_updated_for_future_subprocesses():
     assert "BOX_AGENT_SOURCE_TEXT_B64" not in tool._subprocess_env
 
 
+def test_runtime_environment_snapshot_is_readonly_and_preserves_overrides_and_removals(monkeypatch):
+    monkeypatch.setenv("NODE_PATH", "/parent/modules")
+    monkeypatch.setenv("FIXTURE_REMOVED_PATH", "/parent-only")
+    inherited = BashTool()
+    assert inherited.runtime_env["NODE_PATH"] == "/parent/modules"
+    tool = BashTool(runtime_env={"NODE_PATH": "/tool/modules"})
+    tool.update_runtime_env({"FIXTURE_REMOVED_PATH": None})
+    snapshot = tool.runtime_env
+    assert snapshot["NODE_PATH"] == "/tool/modules"
+    assert "FIXTURE_REMOVED_PATH" not in snapshot
+    with pytest.raises(TypeError):
+        snapshot["NODE_PATH"] = "/unexpected/mutation"
+    tool.update_runtime_env({"NODE_PATH": "/new-tool/modules"})
+    assert snapshot["NODE_PATH"] == "/tool/modules"
+    assert tool.runtime_env["NODE_PATH"] == "/new-tool/modules"
+    assert os.environ["NODE_PATH"] == "/parent/modules"
+
+
 def test_no_sandbox_uses_login_shell():
     """Without sandbox_venv_path, login shell flag should be enabled."""
     import platform

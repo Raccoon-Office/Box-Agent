@@ -1,0 +1,57 @@
+{
+  "id": "block-frame",
+  "name": "Block Frame",
+  "description": "Neo-brutalist warm paper, pure black structure, saturated color blocks, hard offset shadows, and zero-radius geometry.",
+  "source_reference": "beautiful-html-templates/block-frame",
+  "composition": {
+    "default_family": "brutalist-frame",
+    "allowed_families": [
+      "brutalist-frame",
+      "product-showcase",
+      "analytical-exhibit",
+      "technical-schematic",
+      "poster-asymmetric"
+    ]
+  },
+  "selection": {
+    "visual_dna_ids": ["block-frame"],
+    "mood_keywords": ["neo-brutalism", "bold", "playful", "graphic", "portfolio", "大胆", "新锐", "粗黑描边", "高饱和", "作品集"],
+    "industry_fit": ["creative studio", "brand", "design portfolio", "independent SaaS", "startup"],
+    "density": "high",
+    "scheme": "warm-light",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#FFFDF5",
+    "surface": "#C0F7FE",
+    "surface_strong": "#99E885",
+    "primary": "#FE90E8",
+    "primary_text": "#000000",
+    "primary_soft": "#FFDC8B",
+    "text": "#000000",
+    "muted": "#292929",
+    "border": "#000000",
+    "inverse": "#000000",
+    "chart": ["#FE90E8", "#C0F7FE", "#99E885", "#F7CB46"]
+  },
+  "typography": {
+    "display": "Space Grotesk, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "Space Grotesk, Arial Black, PingFang SC, Microsoft YaHei, sans-serif"
+  },
+  "shape": {
+    "radius_small": 0,
+    "radius_medium": 0,
+    "radius_large": 0,
+    "border_width": 5
+  },
+  "style": {
+    "canvas": "dots",
+    "surface": "hard",
+    "shadow": "hard",
+    "heading": "poster",
+    "label": "boxed",
+    "accent": "block",
+    "alternation": "none"
+  }
+}

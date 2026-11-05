@@ -184,6 +184,23 @@ async def test_session_prompt_has_no_unrendered_placeholders(name, tmp_path, pin
     assert not re.findall(r"\{[A-Z_]{3,}\}|\{\{\.[A-Za-z]+\}\}", prompt)
 
 
+@pytest.mark.parametrize("name", sorted(CASES))
+async def test_assembled_prompt_preserves_scoped_output_language_precedence(name, tmp_path, pinned_environment):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prompt = await _assemble(name, workspace)
+    assert prompt.count("<language_principles>") == 1
+    language = prompt.split("<language_principles>", 1)[1].split("</language_principles>", 1)[0]
+    assert (
+        "用户本轮明确指定的交付语种 > 用户在本任务中先前明确确认的交付语种 > "
+        "宿主为当前已加载 Skill 注入的、已生效且经 Schema 校验的对应能力默认输出语种 > 用户提问语种"
+    ) in language
+    assert "没有上述明确选择且默认值未设置或为 auto 时，才按提问语种兜底" in language
+    assert "只用于该 Skill 定义的对应产物" in language
+    assert "对话回复和进度说明遵从宿主指定的界面语种；宿主未指定时跟随用户提问" in language
+    assert "只有用户明确指定交付语种时才按指定语种" not in prompt
+
+
 # Every tool name a session could have. A backticked mention of one of these is
 # an instruction to use it, unless prohibited or conditional on availability.
 KNOWN_TOOL_NAMES = FULL_TOOLS | {"install_skillhub_skill", "search_skillhub", "web_extract", "web_search"}

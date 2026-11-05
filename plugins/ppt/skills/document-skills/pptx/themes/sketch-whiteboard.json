@@ -1,0 +1,87 @@
+{
+  "id": "sketch-whiteboard",
+  "name": "Sketch Whiteboard · 手绘白板",
+  "description": "A hand-drawn whiteboard with deterministic double-stroke frames, sketch arrows, circled labels and highlighter marks. Text stays editable; charts and technical diagram contents retain their exact geometry.",
+  "source_reference": "builtin",
+  "selection": {
+    "visual_dna_ids": [
+      "sketch-whiteboard"
+    ],
+    "mood_keywords": [
+      "hand-drawn",
+      "whiteboard",
+      "sketch",
+      "doodle",
+      "手绘线条",
+      "白板草图",
+      "双笔触",
+      "圈注"
+    ],
+    "industry_fit": [
+      "brainstorming",
+      "workshop",
+      "concept explanation",
+      "product ideation",
+      "头脑风暴",
+      "工作坊",
+      "概念讲解",
+      "产品构思"
+    ],
+    "density": "medium",
+    "scheme": "light",
+    "formality": "low",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#FCFCF8",
+    "surface": "#FFFFFF",
+    "surface_strong": "#F7EBAC",
+    "primary": "#365BA6",
+    "primary_soft": "#F7EBAC",
+    "text": "#27333A",
+    "muted": "#59646A",
+    "border": "#59646A",
+    "inverse": "#FFFFFF",
+    "alt_background": "#27333A",
+    "alt_surface": "#34454F",
+    "alt_text": "#FCFCF8",
+    "alt_muted": "#DBE3E6",
+    "alt_border": "#8EA2AA",
+    "alt_primary": "#B7CEF8",
+    "chart": [
+      "#365BA6",
+      "#568060",
+      "#AF634D",
+      "#806199"
+    ]
+  },
+  "typography": {
+    "display": "Caveat, Kaiti SC, STKaiti, KaiTi, cursive",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "Caveat, Kaiti SC, STKaiti, KaiTi, cursive"
+  },
+  "shape": {
+    "radius_small": 4,
+    "radius_medium": 8,
+    "radius_large": 10,
+    "border_width": 2
+  },
+  "style": {
+    "canvas": "solid",
+    "surface": "outline",
+    "shadow": "none",
+    "heading": "handwritten",
+    "label": "plain",
+    "accent": "underline",
+    "alternation": "none"
+  },
+  "composition": {
+    "default_family": "institutional-grid",
+    "allowed_families": [
+      "institutional-grid",
+      "editorial-spread",
+      "analytical-exhibit",
+      "technical-schematic"
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "id": "block-frame-mono-blue",
+  "name": "Block Frame · Mono Blue",
+  "description": "Neo-brutalist black-and-white structure with a restrained electric-blue accent, hard offset shadows, and zero-radius geometry.",
+  "source_reference": "beautiful-html-templates/block-frame",
+  "composition": {
+    "default_family": "brutalist-frame",
+    "allowed_families": [
+      "brutalist-frame",
+      "product-showcase",
+      "analytical-exhibit",
+      "technical-schematic",
+      "poster-asymmetric"
+    ]
+  },
+  "selection": {
+    "visual_dna_ids": ["block-frame"],
+    "mood_keywords": ["neo-brutalism", "black and white", "electric blue", "limited palette", "editorial", "粗黑结构线", "高对比黑白", "少量蓝色强调", "作品集"],
+    "industry_fit": ["creative studio", "brand", "design portfolio", "digital product", "independent SaaS"],
+    "density": "high",
+    "scheme": "mono-light",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#FFFDF7",
+    "surface": "#FFFFFF",
+    "surface_strong": "#EEF1FF",
+    "primary": "#1E2BFA",
+    "primary_soft": "#E3E6FF",
+    "text": "#000000",
+    "muted": "#292929",
+    "border": "#000000",
+    "inverse": "#FFFFFF",
+    "chart": ["#1E2BFA", "#6470FF", "#000000", "#8B91C9"]
+  },
+  "typography": {
+    "display": "Space Grotesk, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "Space Grotesk, Arial Black, PingFang SC, Microsoft YaHei, sans-serif"
+  },
+  "shape": {
+    "radius_small": 0,
+    "radius_medium": 0,
+    "radius_large": 0,
+    "border_width": 5
+  },
+  "style": {
+    "canvas": "dots",
+    "surface": "hard",
+    "shadow": "hard",
+    "heading": "poster",
+    "label": "boxed",
+    "accent": "block",
+    "alternation": "none"
+  }
+}

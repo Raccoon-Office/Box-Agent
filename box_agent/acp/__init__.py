@@ -1677,7 +1677,7 @@ class BoxACPAgent:
             # inside the task; retrying on every turn would just repeat them.
             self._skills_loaded = True
 
-    def _skills_meta(self) -> list[dict] | None:
+    def _skills_meta(self, *, include_disabled: bool = False) -> list[dict] | None:
         """Return current skills metadata for ACP _meta payload, reloading if changed.
 
         Returns ``None`` (rather than an empty list) while background
@@ -1691,7 +1691,10 @@ class BoxACPAgent:
         if not self._skills_loaded:
             return None
         try:
-            return self._skill_loader.list_skills_metadata(include_connector=False)
+            self._skill_loader.maybe_reload()
+            return self._skill_loader.list_skills_metadata(
+                include_connector=False, include_disabled=include_disabled,
+            )
         except Exception as exc:
             log.warn("skills/meta_error", message=f"Failed to build skills metadata: {exc}")
             return None
@@ -1733,6 +1736,11 @@ class BoxACPAgent:
 
     async def initialize(self, params: InitializeRequest) -> InitializeResponse:
         log.info("initialize", message="ACP initialize request received")
+        plugin_plan = getattr(self._config, "_plugin_skill_plan", None)
+        if plugin_plan is not None and (plugin_plan.skills or plugin_plan.generation):
+            await self._ensure_skills_loaded()
+            plugin_plan = await asyncio.to_thread(AgentService.confirm_plugin_startup, self._config,
+                                                  self._skill_loader, base_tools=self._base_tools, llm=self._llm)
         meta = getattr(params, "field_meta", None) or {}
         if isinstance(meta, dict):
             self._client_info = ClientInfo.from_meta(meta.get("client_info"))
@@ -1749,6 +1757,12 @@ class BoxACPAgent:
         if skills is not None:
             # Pydantic alias: _meta ↔ field_meta
             kwargs["field_meta"] = {"skills": skills}
+        if plugin_plan is not None and plugin_plan.generation:
+            kwargs.setdefault("field_meta", {})["plugin_runtime"] = {
+                "generation": plugin_plan.generation,
+                "healthy": not bool(plugin_plan.errors),
+                "errors": list(plugin_plan.errors),
+            }
         resp = InitializeResponse(**kwargs)
         log.info("initialize", message=f"Initialized box-agent v{__version__}, skills={len(skills) if skills else 0}")
         return resp
@@ -3820,7 +3834,8 @@ class BoxACPAgent:
             )
             return {"ok": removed}
         if method == "list_skills":
-            skills = self._skills_meta()
+            await self._ensure_skills_loaded()
+            skills = self._skills_meta(include_disabled=params.get("includeDisabled") is True)
             if skills is None:
                 return {"skills": []}
             log.info("skills/list", count=len(skills))
@@ -6335,6 +6350,9 @@ async def run_acp_server(config: Config | None = None) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--plugin-management"]:
+        from ..plugin_management import main as manage_plugins
+        raise SystemExit(manage_plugins())
     asyncio.run(run_acp_server())
 
 

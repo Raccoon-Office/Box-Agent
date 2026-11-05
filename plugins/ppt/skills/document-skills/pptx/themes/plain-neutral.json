@@ -1,0 +1,64 @@
+{
+  "id": "plain-neutral",
+  "name": "Plain Neutral",
+  "description": "Plain fallback: solid canvas, neutral sans-serif typography, no texture or shadow. All colors come from the fixed palette contract.",
+  "composition": {
+    "default_family": "institutional-grid",
+    "allowed_families": [
+      "institutional-grid",
+      "analytical-exhibit",
+      "product-showcase",
+      "technical-schematic",
+      "literary-minimal"
+    ]
+  },
+  "selection": {
+    "mood_keywords": [
+      "neutral",
+      "plain",
+      "minimal"
+    ],
+    "industry_fit": [],
+    "density": "medium",
+    "scheme": "light",
+    "fallback": true,
+    "visual_dna_ids": []
+  },
+  "palette": {
+    "background": "#FFFFFF",
+    "surface": "#F5F5F7",
+    "surface_strong": "#E8E8ED",
+    "primary": "#1D1D1F",
+    "primary_soft": "#F5F5F7",
+    "text": "#1D1D1F",
+    "muted": "#6E6E73",
+    "border": "#D2D2D7",
+    "inverse": "#FFFFFF",
+    "chart": [
+      "#1D1D1F",
+      "#6E6E73",
+      "#86868B",
+      "#D2D2D7"
+    ]
+  },
+  "typography": {
+    "display": "Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "Arial, PingFang SC, Microsoft YaHei, sans-serif"
+  },
+  "shape": {
+    "radius_small": 12,
+    "radius_medium": 22,
+    "radius_large": 36,
+    "border_width": 2
+  },
+  "style": {
+    "canvas": "solid",
+    "surface": "soft",
+    "shadow": "none",
+    "heading": "standard",
+    "label": "plain",
+    "accent": "line",
+    "alternation": "none"
+  }
+}

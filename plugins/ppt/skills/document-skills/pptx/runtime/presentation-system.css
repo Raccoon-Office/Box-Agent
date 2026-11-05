@@ -1,0 +1,209 @@
+/* One presentation scale for every theme. Dense layouts keep their proven
+   capacity geometry; sparse content earns more space and stronger hierarchy. */
+body[data-deck-presentation="1"] {
+  --presentation-heading-weight: 700;
+  --presentation-rule: 2px;
+  --presentation-label-tracking: .04em;
+}
+body[data-deck-voice="bold"], body[data-deck-voice="digital"] {
+  --presentation-heading-weight: 800;
+  --presentation-rule: 5px;
+  --presentation-label-tracking: .08em;
+}
+body[data-deck-voice="editorial"] { --presentation-heading-weight: 600; --presentation-rule: 1px; }
+body[data-deck-voice="sketch"] { --presentation-heading-weight: 600; --presentation-label-tracking: 0; }
+
+body[data-deck-presentation="1"] .expressive-slide[data-presentation-density="sparse"] {
+  --presentation-heading: 88px;
+  --presentation-item-heading: 64px;
+  --presentation-body: 36px;
+  --presentation-label: 26px;
+  --presentation-caption: 24px;
+  --presentation-data-heading: 40px;
+  --presentation-data-body: 28px;
+}
+body[data-deck-presentation="1"] .expressive-slide[data-presentation-density="regular"] {
+  --presentation-heading: 68px;
+  --presentation-item-heading: 42px;
+  --presentation-body: 28px;
+  --presentation-label: 22px;
+  --presentation-caption: 22px;
+  --presentation-data-heading: 32px;
+  --presentation-data-body: 24px;
+}
+body[data-deck-presentation="1"] .expressive-slide:not([data-presentation-density="dense"]) :is(.open-title,.slide-header h2) {
+  font-size: var(--presentation-heading);
+  line-height: 1.18;
+  font-weight: var(--presentation-heading-weight);
+}
+body[data-deck-presentation="1"] .expressive-slide:not([data-presentation-density="dense"]) :is(.open-intro,.slide-header .lead,.slide-header .header-note) {
+  font-size: var(--presentation-body);
+  line-height: 1.45;
+}
+body[data-deck-presentation="1"] .expressive-slide:not([data-presentation-density="dense"]) :is(.open-label,.slide-header .eyebrow) {
+  font-size: var(--presentation-label);
+  line-height: 1.35;
+  letter-spacing: var(--presentation-label-tracking);
+}
+body[data-deck-presentation="1"] .expressive-slide:not([data-presentation-density="dense"]) .open-header [data-prop-kind="text"] { padding-bottom: 16px; }
+body[data-deck-presentation="1"]:not(.deck-editing) .expressive-slide [data-presentation-redundant="true"] { display: none; }
+body[data-deck-presentation="1"] .expressive-slide :is(.open-title,.open-point-title,.open-side-title,.open-action-title,.open-route-title) { font-weight: var(--presentation-heading-weight); }
+
+/* Identity is applied to actual labels and separators, never an unrelated
+   motif repeated in a blank corner. Colors come from the contrast-safe roles. */
+body[data-deck-presentation="1"][data-deck-accent="block"] .expressive-slide :is(.open-header,.slide-header) > .eyebrow,
+body[data-deck-presentation="1"][data-deck-accent="block"] .expressive-slide .open-header > .open-label {
+  width: fit-content;
+  max-width: 100%;
+  padding: 8px 20px;
+  margin-bottom: 12px;
+  background: var(--deck-primary);
+  color: var(--deck-primary-fill-text);
+}
+body[data-deck-presentation="1"][data-deck-accent="bracket"] .expressive-slide :is(.open-header,.slide-header) {
+  border-left: 5px solid var(--deck-primary);
+  padding-left: 32px;
+}
+body[data-deck-presentation="1"][data-deck-accent="dot"] .expressive-slide :is(.open-header,.slide-header) > :is(.open-label,.eyebrow) {
+  border-left: 10px solid var(--deck-primary);
+  padding-left: 20px;
+}
+body[data-deck-presentation="1"][data-deck-voice="editorial"] .expressive-slide :is(.open-title,.open-side-title) { font-family: var(--deck-display); }
+body[data-deck-presentation="1"][data-deck-voice="bold"] .expressive-slide :is(.open-title,.open-point-title,.open-closing-title) { color: var(--deck-base-emphasis); }
+body[data-deck-presentation="1"] .expressive-slide :is(.open-point,.open-side,.open-action) { border-top-width: var(--presentation-rule); }
+body[data-deck-presentation="1"] .open-comparison-contrast .open-side-right,
+body[data-deck-presentation="1"] .open-points-featured .open-point:first-child { border-top-width: 8px; }
+
+/* Sparse parallel concepts are a reading spread, not three tiny paragraphs
+   stacked inside a full-height column. Longer items keep the stacked geometry. */
+body[data-deck-presentation="1"] .open-cards[data-presentation-density="sparse"] .open-point-title { font-size: var(--presentation-item-heading); line-height: 1.25; }
+body[data-deck-presentation="1"] .open-cards[data-presentation-density="sparse"] .open-point-body { font-size: var(--presentation-body); line-height: 1.45; }
+body[data-deck-presentation="1"] .open-cards.open-count-3[data-presentation-density="sparse"] .open-title { font-size: 104px; }
+body[data-deck-presentation="1"] .open-cards.open-count-3[data-presentation-density="sparse"]:is([data-presentation-items="short"],[data-presentation-items="brief"]) .open-point-copy {
+  display: grid;
+  grid-template-columns: minmax(0,.7fr) minmax(0,1.3fr);
+  column-gap: 40px;
+  align-content: center;
+}
+body[data-deck-presentation="1"] .open-cards.open-count-3[data-presentation-density="sparse"]:is([data-presentation-items="short"],[data-presentation-items="brief"]) .open-point-copy > .open-label { grid-column: 1; }
+body[data-deck-presentation="1"] .open-cards.open-count-3[data-presentation-density="sparse"]:is([data-presentation-items="short"],[data-presentation-items="brief"]) .open-point-title { grid-column: 1; }
+body[data-deck-presentation="1"] .open-cards.open-count-3[data-presentation-density="sparse"]:is([data-presentation-items="short"],[data-presentation-items="brief"]) .open-point-body { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+body[data-deck-presentation="1"] .open-cards:is(.open-count-5,.open-count-6)[data-presentation-density="sparse"] .open-point-title { font-size: 44px; }
+body[data-deck-presentation="1"] .open-cards:is(.open-count-5,.open-count-6)[data-presentation-density="sparse"] .open-point-body { font-size: 28px; }
+body[data-deck-presentation="1"][data-deck-style-card-columns] .open-cards.open-count-3 .open-point-copy { display: block; }
+body[data-deck-presentation="1"][data-deck-style-card-columns="3"] .open-cards[data-presentation-density="sparse"] .open-point-title { font-size: 48px; }
+
+body[data-deck-presentation="1"] .open-comparison[data-presentation-density="sparse"] .open-sides { align-items: center; gap: 96px; }
+body[data-deck-presentation="1"] .open-comparison[data-presentation-density="sparse"] .open-side { gap: 32px; }
+body[data-deck-presentation="1"] .open-comparison[data-presentation-density="sparse"] .open-side-title { font-size: 88px; line-height: 1.2; }
+body[data-deck-presentation="1"] .open-comparison[data-presentation-density="sparse"] .open-side-items { gap: 24px; }
+body[data-deck-presentation="1"] .open-comparison[data-presentation-density="sparse"] .open-side-items [data-prop-kind="text"] { font-size: 38px; line-height: 1.45; }
+body[data-deck-presentation="1"] .open-comparison[data-presentation-density="sparse"] .open-side-footer { margin-top: 8px; font-size: var(--presentation-caption); }
+body[data-deck-presentation="1"] .open-comparison-stacked[data-presentation-density="sparse"] .open-side-title { font-size: 52px; }
+body[data-deck-presentation="1"] .open-comparison-stacked[data-presentation-density="sparse"] .open-side-items [data-prop-kind="text"] { font-size: 30px; }
+
+body[data-deck-presentation="1"] .open-timeline[data-presentation-density="sparse"] .open-route-title { font-size: 52px; }
+body[data-deck-presentation="1"] .open-timeline[data-presentation-density="sparse"] .open-route-body { font-size: 28px; }
+body[data-deck-presentation="1"] .open-timeline[data-presentation-density="sparse"] .open-route-dot { width: 32px; height: 32px; top: calc(50% - 15px); }
+body[data-deck-presentation="1"] .open-timeline[data-presentation-density="sparse"] .open-route-rail { left: 16px; height: 3px; }
+body[data-deck-presentation="1"] .open-route-dense[data-presentation-density="sparse"] .open-route-dot { top: 7px; }
+body[data-deck-presentation="1"] .open-route-dense[data-presentation-density="sparse"] .open-route-rail { top: 22px; }
+body[data-deck-presentation="1"] .open-timeline[data-presentation-density="sparse"] .open-route-copy > .open-label { font-size: 26px; }
+
+body[data-deck-presentation="1"] .open-statement[data-presentation-density="sparse"] .open-statement-title { font-size: 132px; line-height: 1.2; }
+body[data-deck-presentation="1"] .open-statement[data-presentation-density="sparse"] .open-statement-support { font-size: 36px; }
+body[data-deck-presentation="1"] .open-statement[data-presentation-density="sparse"] .open-proof-value { font-size: 52px; }
+body[data-deck-presentation="1"] .open-statement[data-presentation-density="sparse"] .open-proof-label { font-size: 30px; }
+body[data-deck-presentation="1"] .open-closing[data-presentation-density="sparse"] .open-closing-title { font-size: 140px; line-height: 1.2; }
+body[data-deck-presentation="1"] .open-closing[data-presentation-density="sparse"] .open-closing-hero:has(.open-closing-subtitle:empty) { grid-template-columns: 1fr; }
+body[data-deck-presentation="1"] .open-closing[data-presentation-density="sparse"] .open-action-title { font-size: 48px; }
+body[data-deck-presentation="1"] .open-closing[data-presentation-density="sparse"] .open-action-detail { font-size: 28px; }
+body[data-deck-presentation="1"] .open-text[data-presentation-density="sparse"] .open-text-title { font-size: 52px; }
+body[data-deck-presentation="1"] .open-text[data-presentation-density="sparse"] :is(.open-text-body,.open-text-bullets [data-prop-kind="text"]) { font-size: 34px; }
+
+/* Semantic layouts use the same field roles. New structured layouts inherit
+   the role scale; their own grids continue to encode rows, nodes and measures. */
+body[data-deck-presentation="1"] .open-structured:not([data-presentation-density="dense"]) [data-deck-text-role="heading"]:not(h2) { font-size: var(--presentation-data-heading); line-height: 1.25; }
+body[data-deck-presentation="1"] .open-structured:not([data-presentation-density="dense"]) [data-deck-text-role="body"] { font-size: var(--presentation-data-body); line-height: 1.4; }
+body[data-deck-presentation="1"] .open-structured:not([data-presentation-density="dense"]) :is([data-deck-text-role="caption"],[data-deck-text-role="source"]) { font-size: 20px; line-height: 1.4; }
+body[data-deck-presentation="1"] .open-structured[data-presentation-density="sparse"] [data-deck-text-role="metric"] { font-size: 64px; line-height: 1.15; }
+body[data-deck-presentation="1"] .open-structured[data-presentation-density="sparse"] :is(.data-table-cell-text,.heatmap-cell-value) { font-size: 30px; line-height: 1.4; }
+body[data-deck-presentation="1"] .open-structured[data-presentation-density="sparse"] .data-table :is(td,th) { padding-top: 24px; padding-bottom: 24px; }
+body[data-deck-presentation="1"] .open-structured .slide-header { align-content: start; }
+body[data-deck-presentation="1"] .open-structured :is(.kpi-card,.dashboard-domain) { background: transparent; border: 0; border-top: var(--presentation-rule) solid var(--deck-border); border-radius: 0; box-shadow: none; color: var(--deck-base-text); }
+body[data-deck-presentation="1"] .open-structured .kpi-card { display: flex; flex-direction: column; justify-content: center; gap: 20px; padding: 24px; }
+body[data-deck-presentation="1"] .open-structured .kpi-card [data-prop-kind="text"] { margin: 0; color: var(--deck-base-text); }
+body[data-deck-presentation="1"] .expressive-slide [data-deck-text-fit="metric"] { min-width: 0; }
+body[data-deck-presentation="1"] .open-structured[data-presentation-density="sparse"] .kpi-value { font-size: 104px; }
+body[data-deck-presentation="1"] .open-structured[data-presentation-density="sparse"] .kpi-label { font-size: 28px; }
+body[data-deck-presentation="1"] .open-structured .cause-tree-stage { grid-template-columns: 360px 64px minmax(0,1fr); padding: 0; }
+body[data-deck-presentation="1"] .open-structured .cause-branches { gap: 24px; }
+body[data-deck-presentation="1"] .open-structured .cause-branch { border: 0; border-left: 3px solid var(--deck-primary); border-radius: 0; background: transparent; padding: 12px 24px; }
+body[data-deck-presentation="1"] .open-structured .cause-branch [data-prop-kind="text"] { margin-top: 8px; }
+body[data-deck-presentation="1"] .open-structured .cause-factors { margin-top: 8px; }
+body[data-deck-presentation="1"] .open-structured .cause-factors [data-prop-kind="text"] { font-size: 22px; line-height: 1.4; margin-top: 4px; padding-bottom: 4px; }
+body[data-deck-presentation="1"] .open-structured .cause-branch > .cause-category { margin-top: 0; padding-bottom: 8px; }
+body[data-deck-presentation="1"] .open-structured .property-factsheet-grid { min-height: 0; padding-top: 16px; }
+body[data-deck-presentation="1"] .open-structured .property-metrics { min-height: 0; }
+body[data-deck-presentation="1"] .open-structured .property-metric { min-height: 0; padding: 16px 20px; }
+body[data-deck-presentation="1"] .open-structured .property-metric-value { min-width: 0; }
+body[data-deck-presentation="1"] .open-structured .commerce-stage-values { min-width: 0; }
+body[data-deck-presentation="1"] .open-structured .legal-section-label { color: var(--deck-primary-text); }
+
+/* Filled semantic surfaces own both fill and foreground. A new theme never
+   needs to compensate for a component's old hard-coded foreground color. */
+body[data-deck-presentation="1"] .expressive-slide [data-presentation-surface="base"] { --presentation-fill: var(--deck-base-bg); --presentation-ink: var(--deck-base-text); }
+body[data-deck-presentation="1"] .expressive-slide [data-presentation-surface="surface"] { --presentation-fill: var(--deck-surface); --presentation-ink: var(--deck-surface-text); }
+body[data-deck-presentation="1"] .expressive-slide [data-presentation-surface="tint"] { --presentation-fill: var(--deck-primary-soft); --presentation-ink: var(--deck-primary-soft-text); }
+body[data-deck-presentation="1"] .expressive-slide [data-presentation-surface="accent"] { --presentation-fill: var(--deck-primary); --presentation-ink: var(--deck-primary-fill-text); }
+body[data-deck-presentation="1"] .expressive-slide [data-presentation-surface] { background: var(--presentation-fill); color: var(--presentation-ink); }
+body[data-deck-presentation="1"] .expressive-slide [data-presentation-surface] [data-prop-kind="text"] { color: var(--presentation-ink); }
+body[data-deck-presentation="1"] .open-structured .factory-process-track { align-items: center; }
+body[data-deck-presentation="1"] .open-structured .factory-station { min-height: 300px; border: 0; border-top: var(--presentation-rule) solid var(--deck-primary); border-radius: 0; box-shadow: none; }
+body[data-deck-presentation="1"] .open-structured .commerce-stage { border: 0; border-top: var(--presentation-rule) solid var(--deck-primary); border-radius: 0; box-shadow: none; }
+body[data-deck-presentation="1"] .open-structured .supply-node { border: 0; border-top: var(--presentation-rule) solid var(--deck-primary); border-radius: 0; box-shadow: none; }
+body[data-deck-presentation="1"] .open-structured:not([data-presentation-density="dense"]) .legal-logic-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 24px 48px; padding: 24px 0; }
+body[data-deck-presentation="1"] .open-structured:not([data-presentation-density="dense"]) .legal-logic-section { display: grid; grid-template-columns: minmax(0,.8fr) minmax(0,1.2fr); gap: 12px 36px; border: 0; border-top: var(--presentation-rule) solid var(--deck-border); padding: 24px 0; }
+body[data-deck-presentation="1"] .open-structured:not([data-presentation-density="dense"]) .legal-logic-section > .legal-section-index { grid-column: 1; }
+body[data-deck-presentation="1"] .open-structured:not([data-presentation-density="dense"]) .legal-logic-section > h3 { grid-column: 1; margin: 0; }
+body[data-deck-presentation="1"] .open-structured:not([data-presentation-density="dense"]) .legal-section-body { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin: 0; }
+
+/* The same semantic content can have a different reading rhythm without
+   changing item priority or inventing a relationship between parallel points. */
+body[data-deck-presentation="1"][data-deck-rhythm="editorial"]:not([data-deck-style-card-columns]) .open-cards.open-count-3[data-presentation-density="sparse"] .expressive-content { grid-template: auto minmax(0,1fr) / 1fr; gap: 64px; }
+body[data-deck-presentation="1"][data-deck-rhythm="editorial"]:not([data-deck-style-card-columns]) .open-cards.open-count-3[data-presentation-density="sparse"] .open-header { align-self: start; }
+body[data-deck-presentation="1"][data-deck-rhythm="editorial"]:not([data-deck-style-card-columns]) .open-cards.open-count-3[data-presentation-density="sparse"] .open-points-items { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 56px; align-items: center; }
+body[data-deck-presentation="1"][data-deck-rhythm="editorial"]:not([data-deck-style-card-columns]) .open-cards.open-count-3[data-presentation-density="sparse"] .open-point { border-top: 0; border-left: 1px solid var(--deck-border); padding: 0 0 0 28px; }
+body[data-deck-presentation="1"][data-deck-rhythm="editorial"]:not([data-deck-style-card-columns]) .open-cards.open-count-3[data-presentation-density="sparse"] .open-point-copy { display: block; }
+body[data-deck-presentation="1"][data-deck-rhythm="editorial"] .open-text.open-count-2[data-presentation-density="sparse"] .open-text-sections { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 80px; }
+body[data-deck-presentation="1"][data-deck-rhythm="editorial"] .open-text.open-count-2[data-presentation-density="sparse"] .open-text-section { grid-template-columns: 1fr; align-content: center; row-gap: 28px; }
+
+body[data-deck-presentation="1"][data-deck-voice="sketch"] .slide > .sketch-overlay { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 2; }
+body[data-deck-presentation="1"]:is([data-deck-label="boxed"],[data-deck-label="pill"]) .expressive-slide :is(.slide-header,.open-header) > :is(.eyebrow,.open-label) { width: fit-content; max-width: 100%; padding: 8px 20px; background: var(--deck-primary); color: var(--deck-primary-fill-text); }
+body[data-deck-presentation="1"][data-deck-label="tape"] .expressive-slide :is(.slide-header,.open-header) > :is(.eyebrow,.open-label) { width: fit-content; max-width: 100%; padding: 8px 20px; background: var(--deck-primary-soft); color: var(--deck-primary-soft-text); }
+body[data-deck-presentation="1"] .open-cards[data-presentation-density="dense"] .expressive-content { gap: 24px; }
+body[data-deck-presentation="1"] .expressive-slide.background-wash-dark .image-full-bleed-copy > .eyebrow { color: var(--deck-text); background: transparent; }
+body[data-deck-presentation="1"] .expressive-slide [data-deck-text-fit="copy"] { text-wrap: balance; }
+body[data-deck-presentation="1"] .open-route-rail::after { content: ""; position: absolute; right: 20px; top: -4px; width: 8px; height: 8px; border-top: 2px solid var(--deck-base-muted); border-right: 2px solid var(--deck-base-muted); transform: rotate(45deg); }
+body[data-deck-presentation="1"] .open-cards.open-count-3[data-presentation-density="sparse"][data-presentation-items="brief"] .open-point-title { font-size: 96px; }
+body[data-deck-presentation="1"][data-deck-rhythm="editorial"] .open-cards.open-count-3[data-presentation-density="sparse"][data-presentation-items="brief"] .open-point-title { font-size: 128px; }
+body[data-deck-presentation="1"] .open-closing.open-count-3[data-presentation-density="sparse"][data-presentation-items="brief"] .open-action-title { font-size: 64px; }
+/* Image treatments are deterministic contrast fallbacks, independent of vision.
+   Keep these after theme/cover styles so a light wash never retains white poster ink. */
+body[data-deck-theme] .slide.has-background.background-wash-light {
+  --deck-poster-bg: var(--deck-base-bg);
+  --deck-poster-text: var(--deck-base-text);
+  color: var(--deck-base-text);
+}
+body[data-deck-theme] .slide.background-wash-light .slide-background::after {
+  background: var(--deck-base-bg);
+  opacity: 0.72;
+}
+body[data-deck-theme] .slide.has-background.background-wash-dark {
+  --deck-poster-text: #FFFFFF;
+  color: #FFFFFF;
+}
+body[data-deck-theme] .slide.background-wash-dark .slide-background::after {
+  background: #000000;
+  opacity: 0.82;
+}

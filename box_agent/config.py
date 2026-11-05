@@ -3,6 +3,7 @@
 Provides unified configuration loading and management functionality
 """
 
+import os
 import re
 import shutil
 import sys
@@ -456,6 +457,40 @@ class HooksConfig(BaseModel):
     hooks: list[str] = Field(default_factory=list)
 
 
+class PluginRuntimeProfile(BaseModel):
+    """Administrator-owned environment checks; no plugin code is executed."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    python_modules: list[str] = Field(default_factory=list, max_length=64)
+    node_modules: list[str] = Field(default_factory=list, max_length=64)
+    playwright_chromium: StrictBool = False
+    timeout_seconds: float = Field(default=20, ge=1, le=60)
+
+
+class PluginPlatformConfig(BaseModel):
+    """Host-owned resource plugin store; business values live in versioned snapshots."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    enabled: StrictBool = True
+    state_dir: str | None = None
+    target_id: str = "local"
+    profile_id: str = "default"
+    runtime_profiles: dict[str, PluginRuntimeProfile] = Field(default_factory=dict)
+
+    @classmethod
+    def from_host_mapping(cls, raw: Any) -> "PluginPlatformConfig":
+        if os.environ.get("BOX_AGENT_DISABLE_PLUGINS") == "1":
+            return cls(enabled=False)
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError("plugin_platform must be a mapping")
+        # Deployment inputs are consumed only by explicit profile.import. They
+        # may live alongside host settings but never overwrite saved state.
+        deployment_keys = {"lock_file", "instances", "bindings"}
+        return cls(**{k: v for k, v in raw.items() if k not in deployment_keys})
+
+
 class Config(BaseModel):
     """Main configuration class"""
 
@@ -472,6 +507,8 @@ class Config(BaseModel):
     # Plugin-owned configuration is kept opaque to the core model. Each
     # plugin validates its own namespace after activation.
     plugins: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    plugin_platform: PluginPlatformConfig = Field(default_factory=PluginPlatformConfig)
+    _plugin_skill_plan: Any = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _resolve_profile_paths(self) -> "Config":
@@ -763,6 +800,7 @@ class Config(BaseModel):
             officev3=officev3_config,
             hooks=hooks_config,
             plugins=plugin_configs,
+            plugin_platform=PluginPlatformConfig.from_host_mapping(data.get("plugin_platform")),
         )
 
     @staticmethod

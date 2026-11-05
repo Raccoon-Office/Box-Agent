@@ -39,7 +39,7 @@ import yaml
 from box_agent.execution_profile import is_skill_blocked
 from box_agent.user_paths import state_path
 
-SkillSource = Literal["builtin", "connector", "user", "expert"]
+SkillSource = Literal["builtin", "connector", "user", "expert", "plugin"]
 
 SKILL_USAGE_GUIDANCE = (
     "When the user names a Skill or the task clearly matches an available Skill, read its "
@@ -164,22 +164,44 @@ def move_skill_slot_to_end(system_prompt_text: str) -> str:
     return f"{without_slot}\n\n{SKILL_SLOT_SENTINEL}"
 
 
-def _read_disabled_skill_names(settings_path: Optional[Path]) -> Set[str]:
+def _read_skill_settings(settings_path: Optional[Path]) -> dict:
+    """Read the desktop-owned preference document without changing it."""
+    if settings_path is None:
+        return {}
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _disabled_plugin_skills(settings: dict) -> set[tuple[str, str, str]]:
+    """Plugin usage preferences use stable identities, never public aliases."""
+    from ..plugins.manifest import IDENTIFIER, PACKAGE_ID
+
+    result = set()
+    rows = settings.get("disabledPluginSkills", [])
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"plugin_id", "instance_id", "contribution_id"}:
+            continue
+        values = tuple(row[key] for key in ("plugin_id", "instance_id", "contribution_id"))
+        if all(isinstance(value, str) and len(value) <= 128 and re.fullmatch(pattern, value)
+               for value, pattern in zip(values, (PACKAGE_ID, IDENTIFIER, IDENTIFIER))):
+            result.add(values)
+    return result
+
+
+def _read_disabled_skill_names(settings_path: Optional[Path], *, settings: dict | None = None) -> Set[str]:
     """Read officev3 skill enable/disable state.
 
     The file is optional and owned by the desktop app. Missing or malformed
     settings should never break agent startup; they simply mean all skills are
     enabled.
     """
-    if settings_path is None:
-        return set()
-
-    try:
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-
-    raw_names = data.get("disabledSkillNames") if isinstance(data, dict) else None
+    data = _read_skill_settings(settings_path) if settings is None else settings
+    raw_names = data.get("disabledSkillNames")
     if not isinstance(raw_names, list):
         return set()
 
@@ -223,6 +245,15 @@ class Skill:
     broken: bool = False
     broken_reason: Optional[str] = None
     instruction_digest: Optional[str] = None
+    # Host-owned installation identity, never parsed from Skill frontmatter.
+    plugin_package_root: Optional[Path] = None
+    # Host-bound availability links, resolved from manifest contribution IDs.
+    plugin_enabled_by: tuple[str, ...] = ()
+    user_enabled: bool = True
+    unavailable_reason: Optional[str] = None
+    unavailable_code: Optional[str] = None
+    # Author-facing label; namespace/alias changes must not change this value.
+    display_name: Optional[str] = None
 
     @property
     def user_visible(self) -> bool:
@@ -275,6 +306,7 @@ All files and references in this skill are relative to this directory.
         """Structured metadata for officev3 / ACP _meta payloads."""
         return {
             "name": self.name,
+            "displayName": self.display_name or self.name,
             "description": self.description,
             "source": self.source,
             "ownerId": self.owner_id,
@@ -288,6 +320,10 @@ All files and references in this skill are relative to this directory.
             "capabilities": self.capabilities or [],
             "broken": self.broken,
             "broken_reason": self.broken_reason,
+            **({"plugin": self.metadata["plugin"]} if self.metadata and "plugin" in self.metadata else {}),
+            **({"user_enabled": self.user_enabled,
+                "unavailable_reason": self.unavailable_reason,
+                "unavailable_code": self.unavailable_code} if self.source == "plugin" else {}),
         }
 
 
@@ -357,6 +393,8 @@ class SkillLoader:
         sources: Optional[List[Tuple[str | Path, SkillSource]] | str | Path] = None,
         skills_dir: Optional[str] = None,
         skill_settings_path: Optional[str | Path] = None,
+        plugin_skills: Collection[Skill] = (),
+        replaced_skill_names: Collection[str] = (),
     ):
         """
         Initialize Skill Loader.
@@ -376,6 +414,8 @@ class SkillLoader:
             sources = [(legacy, "builtin")]
 
         self._catalog = _SkillCatalog({}, {}, [], [])
+        self._plugin_skills = tuple(copy.deepcopy(tuple(plugin_skills)))
+        self._replaced_skill_names = frozenset(replaced_skill_names)
         self._reload_lock = threading.RLock()
         self._validation_local = threading.local()
         self._validation_task: asyncio.Task[SkillValidation] | None = None
@@ -464,6 +504,12 @@ class SkillLoader:
                     raise SkillDependencyError("SKILL_SOURCE_CHANGED", "Skill source changed during reading. Refresh and retry from offset=0.")
             except OSError as exc:
                 raise SkillDependencyError("SKILL_SOURCE_UNAVAILABLE", f"Skill source became unreadable: {exc}") from exc
+
+    def disable_plugin_skills(self) -> None:
+        """Recover the ordinary catalog while keeping disabled aliases hidden."""
+        with self._reload_lock:
+            self._plugin_skills = ()
+            self.discover_skills()
 
     def _instruction_digest(self, raw: bytes) -> str:
         started = perf_counter()
@@ -618,6 +664,96 @@ class SkillLoader:
                 continue
         return None
 
+    def get_bound_skill_resource(
+        self, name: str, relative_path: str, *,
+        plugin_anchor_id: str | None = None,
+        plugin_resource_id: str | None = None,
+    ) -> Optional[Path]:
+        """Resolve a resource from this loader's current, explicitly bound owner.
+
+        Expert bindings retain their existing session scope. Plugin resources
+        come only from frozen contributions of the same instance/package and
+        are revalidated against the installed package digest at use time.
+        Cross-contribution lookup requires the caller's expected anchor ID, so
+        an unrelated Skill using the same public alias cannot supply a script.
+        """
+        if (not isinstance(relative_path, str) or not relative_path
+                or "\\" in relative_path or Path(relative_path).is_absolute()
+                or any(part in {"", ".", ".."} for part in relative_path.split("/"))):
+            return None
+        with self.source_transaction():
+            skill = self.get_skill(name)
+            if skill is None or skill.broken:
+                return None
+            if skill.source == "expert":
+                return self.get_bound_expert_resource(name, relative_path)
+            if skill.source != "plugin":
+                return None
+            anchor = next((item for item in self._plugin_skills if item.name == name), None)
+            if anchor is None or skill != anchor:
+                return None
+            identity = (anchor.metadata or {}).get("plugin", {})
+            if plugin_anchor_id is not None and identity.get("contribution_id") != plugin_anchor_id:
+                return None
+            resource_skill = anchor
+            if plugin_resource_id is not None:
+                if plugin_anchor_id is None:
+                    return None
+                owner_keys = ("plugin_id", "instance_id", "package_version", "package_digest",
+                              "config_revision", "generation")
+                matches = [item for item in self._plugin_skills
+                           if item.owner_id == anchor.owner_id
+                           and item.plugin_package_root == anchor.plugin_package_root
+                           and (item.metadata or {}).get("plugin", {}).get("contribution_id") == plugin_resource_id
+                           and all((item.metadata or {}).get("plugin", {}).get(key) == identity.get(key)
+                                   for key in owner_keys)]
+                if len(matches) != 1:
+                    return None
+                resource_skill = matches[0]
+            if (resource_skill.disabled or resource_skill.broken
+                    or self.get_skill(resource_skill.name) != resource_skill
+                    or resource_skill.skill_path is None or anchor.plugin_package_root is None):
+                return None
+            from ..plugins.manifest import PluginError
+            from ..plugins.package_store import package_digest
+
+            try:
+                package_root = anchor.plugin_package_root
+                digest = identity.get("package_digest")
+                if (package_root.resolve(strict=True) != package_root
+                        or package_root.is_symlink() or package_root.name != digest
+                        or package_digest(package_root) != digest):
+                    return None
+                root = resource_skill.skill_path.parent.resolve(strict=True)
+                resource = (root / relative_path).resolve(strict=True)
+                if (root.is_relative_to(package_root) and resource.is_relative_to(root)
+                        and resource.is_file()):
+                    return resource
+            except (OSError, RuntimeError, PluginError):
+                return None
+        return None
+
+    def get_bound_skill_resources(
+        self, relative_path: str, *, plugin_anchor_id: str,
+        plugin_resource_id: str, expert_name: str | None = None,
+    ) -> tuple[Path, ...]:
+        """Return exact resources for every exposed owner, regardless of aliases."""
+        with self.source_transaction():
+            names = [skill.name for skill in self._plugin_skills
+                     if (skill.metadata or {}).get("plugin", {}).get("contribution_id") == plugin_anchor_id]
+            if expert_name is not None:
+                skill = self.get_skill(expert_name)
+                if skill is not None and skill.source == "expert":
+                    names.append(expert_name)
+            resources = []
+            for name in dict.fromkeys(names):
+                resource = self.get_bound_skill_resource(
+                    name, relative_path, plugin_anchor_id=plugin_anchor_id,
+                    plugin_resource_id=plugin_resource_id)
+                if resource is not None and resource not in resources:
+                    resources.append(resource)
+            return tuple(resources)
+
     def with_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
@@ -692,6 +828,8 @@ class SkillLoader:
                 *extra_sources,
             ],
             skill_settings_path=self._skill_settings_path,
+            plugin_skills=self._plugin_skills,
+            replaced_skill_names=self._replaced_skill_names,
         )
         for entry in loader._sources[:len(package_directories)]:
             entry.containment_root = entry.directory
@@ -812,6 +950,13 @@ class SkillLoader:
             skill_dir = skill_path.parent
             processed_content = self._process_skill_paths(skill_content, skill_dir)
 
+            display_name = frontmatter.get("displayName")
+            if (not isinstance(display_name, str) or not display_name.strip()
+                    or len(display_name.strip()) > 256
+                    or any(ord(char) < 32 or ord(char) == 127 or char in "\x85\u2028\u2029"
+                           for char in display_name)):
+                display_name = frontmatter["name"]
+
             raw_keywords = frontmatter.get("keywords")
             if isinstance(raw_keywords, str):
                 keywords_list = [k.strip() for k in re.split(r"[,，\s]+", raw_keywords) if k.strip()]
@@ -858,6 +1003,7 @@ class SkillLoader:
 
             return Skill(
                 name=frontmatter["name"],
+                display_name=display_name.strip(),
                 description=frontmatter["description"],
                 content=processed_content,
                 instruction_digest=self._instruction_digest(raw_content),
@@ -945,7 +1091,9 @@ class SkillLoader:
         reserved_override_count = 0
         discovered: List[Skill] = []
         settings_signature = self._file_signature(self._skill_settings_path)
-        disabled_skill_names = _read_disabled_skill_names(self._skill_settings_path)
+        settings = _read_skill_settings(self._skill_settings_path)
+        disabled_skill_names = _read_disabled_skill_names(self._skill_settings_path, settings=settings)
+        disabled_plugin_skills = _disabled_plugin_skills(settings)
         scanned = getattr(self._validation_local, "signatures", {})
 
         # Reverse order: load lower-priority sources first, then higher-priority
@@ -983,6 +1131,8 @@ class SkillLoader:
                 else:
                     skill = self.load_skill(skill_file, source=entry.source)
                 if skill is None:
+                    continue
+                if skill.name in self._replaced_skill_names:
                     continue
 
                 if (
@@ -1039,6 +1189,47 @@ class SkillLoader:
             # backward compatibility with older tests/debug code that may read it.
             entry.signature = signature
             entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
+
+        # Plugin bodies/configuration are frozen for this loader's generation.
+        # Never refresh them from mutable directories or a newer saved config.
+        plugin_copies = {}
+        for frozen in self._plugin_skills:
+            skill = copy.deepcopy(frozen)
+            if skill.name in all_skills:
+                # The real-host startup smoke rejects the candidate; keep the
+                # ordinary catalog available when recovering an active profile.
+                continue
+            all_skills[skill.name] = skill
+            identity = (skill.metadata or {}).get("plugin", {})
+            key = tuple(identity.get(field) for field in ("plugin_id", "instance_id", "contribution_id"))
+            skill.user_enabled = key not in disabled_plugin_skills
+            plugin_copies[key] = skill
+
+        resolved: dict[tuple, bool] = {}
+
+        def plugin_available(key: tuple, visiting: frozenset[tuple] = frozenset()) -> bool:
+            if key in resolved:
+                return resolved[key]
+            skill = plugin_copies.get(key)
+            if skill is None or key in visiting:
+                return False
+            available = not skill.disabled and not skill.broken and skill.user_enabled
+            if not skill.user_enabled:
+                skill.unavailable_code = "SKILL_USER_DISABLED"
+                skill.unavailable_reason = "Skill is disabled by the user's usage preference."
+            elif available and skill.plugin_enabled_by:
+                available = any(plugin_available((*key[:2], entry), visiting | {key})
+                                for entry in skill.plugin_enabled_by)
+                if not available:
+                    skill.unavailable_code = "SKILL_ENTRY_DISABLED"
+                    skill.unavailable_reason = "All public entries enabling this internal Skill are unavailable."
+            skill.disabled = not available
+            resolved[key] = available
+            return available
+
+        for key, skill in plugin_copies.items():
+            if plugin_available(key):
+                loaded[skill.name] = skill
 
         self._catalog = _SkillCatalog(loaded, all_skills, sources, self.parse_errors,
                                      settings_signature)

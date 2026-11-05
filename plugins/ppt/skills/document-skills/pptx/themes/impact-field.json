@@ -1,0 +1,85 @@
+{
+  "id": "impact-field",
+  "name": "Impact Field · 可持续发展",
+  "description": "A sustainability field report with forest ink, evidence bands, resource-cycle colors and clear baseline-to-target comparisons.",
+  "source_reference": "builtin",
+  "selection": {
+    "visual_dna_ids": [
+      "impact-field"
+    ],
+    "mood_keywords": [
+      "sustainability",
+      "evidence-led",
+      "natural",
+      "可持续",
+      "低碳",
+      "环境影响"
+    ],
+    "industry_fit": [
+      "ESG report",
+      "carbon accounting",
+      "climate action",
+      "environmental education",
+      "可持续发展报告",
+      "碳排放盘查",
+      "节能减排",
+      "生态保护"
+    ],
+    "density": "high",
+    "scheme": "light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F3F8F4",
+    "surface": "#FFFFFF",
+    "surface_strong": "#E1EDE2",
+    "primary": "#206442",
+    "primary_soft": "#DCEEDC",
+    "text": "#183D2A",
+    "muted": "#51695A",
+    "border": "#B6CDBB",
+    "inverse": "#FFFFFF",
+    "alt_background": "#183D2A",
+    "alt_surface": "#244C35",
+    "alt_text": "#F3F8F4",
+    "alt_muted": "#D1E1D4",
+    "alt_border": "#587664",
+    "alt_primary": "#CDE590",
+    "chart": [
+      "#206442",
+      "#3E7280",
+      "#9B6922",
+      "#775EA2"
+    ]
+  },
+  "typography": {
+    "display": "Barlow, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "DM Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {
+    "radius_small": 2,
+    "radius_medium": 6,
+    "radius_large": 10,
+    "border_width": 1
+  },
+  "style": {
+    "canvas": "solid",
+    "surface": "outline",
+    "shadow": "none",
+    "heading": "standard",
+    "label": "mono",
+    "accent": "line",
+    "alternation": "none"
+  },
+  "composition": {
+    "default_family": "analytical-exhibit",
+    "allowed_families": [
+      "analytical-exhibit",
+      "institutional-grid",
+      "editorial-spread",
+      "technical-schematic"
+    ]
+  }
+}

@@ -1,24 +1,19 @@
 """The public entry loads without choosing or enabling its internal backends."""
 
 import json
-from pathlib import Path
 import re
 
 import pytest
 
-from box_agent.tools.local_tool_exposure import SKILL_TOOL_HINTS
 from box_agent.tools.skill_catalog_tool import ListSkillsTool
-from box_agent.tools.skill_loader import SkillLoader
+from tests.pptx_test_support import PPT_PLUGIN_ROOT, ppt_plugin_loader
 from box_agent.tools.skill_tool import GetSkillTool
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 
 
 @pytest.fixture
 def loader(tmp_path):
-    source = Path(__file__).parents[1] / "box_agent" / "skills"
-    loader = SkillLoader(sources=[(source, "builtin")], skill_settings_path=tmp_path / "settings.json")
-    loader.discover_skills()
-    return loader
+    return ppt_plugin_loader(tmp_path / "settings.json")
 
 
 @pytest.mark.asyncio
@@ -115,18 +110,22 @@ async def test_one_public_presentation_entry_and_exact_hidden_backend_reads(load
 
 
 @pytest.mark.asyncio
-async def test_disabled_fast_backend_does_not_disable_the_entry_or_other_mode(loader, tmp_path):
+async def test_legacy_skill_toggle_does_not_mutate_the_active_plugin_snapshot(loader, tmp_path):
     (tmp_path / "settings.json").write_text('{"disabledSkillNames":["ppt-fast"]}')
     loader.discover_skills()
     assert (await GetSkillTool(loader).invoke({"skill_name": "pptx"})).success
     assert (await GetSkillTool(loader).invoke({"skill_name": "sn-ppt-entry"})).success
-    denied = await GetSkillTool(loader).invoke({"skill_name": "ppt-fast"})
-    assert not denied.success
-    assert "disabled" in denied.error
+    fast = await GetSkillTool(loader).invoke({"skill_name": "ppt-fast"})
+    assert fast.success
+    assert loader.get_skill("ppt-fast").source == "plugin"
 
 
-def test_fast_name_keeps_the_original_tool_exposure_and_trusted_resource_path(loader):
+def test_fast_plugin_declares_tool_requirements_and_owns_its_resource_path(loader):
     fast = loader.get_skill("ppt-fast")
+    assert fast.source == "plugin"
+    assert fast.skill_path.is_relative_to(PPT_PLUGIN_ROOT)
     assert fast.skill_path.parent.name == "pptx"  # Preserve exporter safety/path bindings.
     assert (fast.skill_path.parent / "scripts" / "html_to_editable_pptx.js").is_file()
-    assert SKILL_TOOL_HINTS["ppt-fast"] == {"append_file", "query_jsonl", "report_execution_result"}
+    assert set(fast.metadata["requires_host_tools"]) == {
+        "bash", "append_file", "query_jsonl", "report_execution_result",
+    }

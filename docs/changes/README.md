@@ -6,6 +6,33 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-11-05 — Resource Skill packages and PPT upgrade compatibility
+
+- External resource packages add immutable installation, per-instance Schema
+  configuration, explicit public aliases, and host-confirmed activation/rollback.
+  Saved edits and prepared candidates do not replace the active snapshot.
+  See [resource plugin contracts](../RESOURCE_PLUGINS.md) and the
+  [author guide](../RESOURCE_PLUGIN_DEVELOPMENT_CN.md).
+- PPT is also available as a separate package, but upgrading the core does not
+  install or activate it. Keep all eight legacy builtin entries and resources
+  until supported deployments reliably deliver and activate the replacement.
+  Full migration binds all eight names; partial bindings retain coexistence.
+  Removing discovery entries before delivery was a compatibility regression,
+  not an acceptable manual-migration requirement.
+- Confirmed aliases suppress old copies, including after instance disable or
+  package failure. Unreadable state suppresses host-declared compatibility
+  names; an invalid host compatibility catalog fails explicitly. Safe mode is
+  an explicit builtin recovery path and does not rewrite external state.
+- Failed candidates preserve the previous active snapshot. Explicit rollback
+  after the first plugin activation can restore builtin PPT while retaining
+  saved plugin configuration. Compatibility resources remain maintained by the
+  platform until their removal conditions are met.
+- Source proof covers the upgrade state matrix and actual Skill reads in
+  `tests/test_ppt_upgrade_compatibility.py`. Release acceptance also requires
+  installed wheel/runtime/client cold-start evidence and separate real business
+  validation; source tests and an installable plugin do not establish those
+  boundaries. Use the [acceptance template](../RESOURCE_PLUGIN_ACCEPTANCE_TEMPLATE.md).
+
 ## 2026-11-02 — Incomplete file delivery and bounded recovery
 
 - Omitting `chunk_index` during an active `write_file` transaction now reports

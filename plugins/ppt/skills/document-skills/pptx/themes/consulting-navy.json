@@ -1,0 +1,85 @@
+{
+  "id": "consulting-navy",
+  "name": "Consulting Navy",
+  "description": "Cool white, deep navy, and steel gray with restrained grids for procurement reviews, enterprise solutions, and consulting delivery decks.",
+  "source_reference": "builtin/consulting-navy",
+  "composition": {
+    "default_family": "institutional-grid",
+    "allowed_families": [
+      "institutional-grid",
+      "analytical-exhibit",
+      "technical-schematic",
+      "product-showcase",
+      "literary-minimal"
+    ]
+  },
+  "selection": {
+    "visual_dna_ids": ["blue-professional"],
+    "mood_keywords": [
+      "professional",
+      "consulting",
+      "restrained",
+      "credible",
+      "structured",
+      "cool",
+      "navy",
+      "steel gray",
+      "稳健",
+      "专业",
+      "可信",
+      "可落地",
+      "冷色",
+      "深蓝",
+      "钢灰",
+      "浅灰",
+      "咨询交付",
+      "评标"
+    ],
+    "industry_fit": [
+      "consulting",
+      "enterprise",
+      "procurement",
+      "technology",
+      "B2B",
+      "IT",
+      "solution proposal",
+      "bid evaluation"
+    ],
+    "density": "high",
+    "scheme": "cool-light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F4F7FA",
+    "surface": "#FFFFFF",
+    "surface_strong": "#E7EDF3",
+    "primary": "#173B63",
+    "primary_soft": "#DCE7F1",
+    "text": "#14212D",
+    "muted": "#5D6B78",
+    "border": "#B8C3CE",
+    "inverse": "#FFFFFF",
+    "chart": ["#173B63", "#4F6F8F", "#7E8D9C", "#AAB5C0"]
+  },
+  "typography": {
+    "display": "Inter, Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "Inter, Arial, PingFang SC, Microsoft YaHei, sans-serif"
+  },
+  "shape": {
+    "radius_small": 2,
+    "radius_medium": 4,
+    "radius_large": 8,
+    "border_width": 1
+  },
+  "style": {
+    "canvas": "solid",
+    "surface": "outline",
+    "shadow": "none",
+    "heading": "standard",
+    "label": "mono",
+    "accent": "line",
+    "alternation": "none"
+  }
+}

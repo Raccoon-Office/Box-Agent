@@ -1,0 +1,38 @@
+{
+  "id": "property-atlas",
+  "name": "Property Atlas",
+  "description": "An architectural property atlas with cadastral grids, plot lines, north marks, address plaques, area annotations, and development facts.",
+  "source_reference": "beautiful-html-templates/cobalt-grid",
+  "selection": {
+    "visual_dna_ids": ["property-atlas"],
+    "mood_keywords": ["architectural", "spatial", "precise", "premium", "planned", "建筑", "空间", "规划", "资产", "开发"],
+    "industry_fit": ["real estate", "property development", "asset management", "urban renewal", "commercial property", "房地产", "地产开发", "资产管理", "城市更新", "商业地产"],
+    "density": "medium-high",
+    "scheme": "architectural-light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F4F1E8",
+    "surface": "#FFFDF7",
+    "surface_strong": "#E4E8E2",
+    "primary": "#1E5A67",
+    "primary_soft": "#D8E6E5",
+    "text": "#202B2D",
+    "muted": "#657071",
+    "border": "#93A5A4",
+    "inverse": "#FFFFFF",
+    "chart": ["#1E5A67", "#C96B45", "#537F9C", "#9B8A5F"]
+  },
+  "typography": {
+    "display": "Source Serif 4, Noto Serif SC, Songti SC, serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 0, "radius_medium": 2, "radius_large": 4, "border_width": 1},
+  "style": {"canvas": "grid", "surface": "outline", "shadow": "none", "heading": "editorial", "label": "mono", "accent": "line", "alternation": "section"},
+  "composition": {
+    "default_family": "institutional-grid",
+    "allowed_families": ["institutional-grid", "technical-schematic", "analytical-exhibit", "editorial-spread"]
+  }
+}

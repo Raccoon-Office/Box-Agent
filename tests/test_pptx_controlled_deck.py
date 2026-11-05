@@ -14,8 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from box_agent.tools.skill_loader import SkillLoader
-from tests.pptx_test_support import skip_unavailable_pptx_runtime
+from tests.pptx_test_support import PPT_PLUGIN_ROOT, ppt_plugin_loader, skip_unavailable_pptx_runtime
 
 
 SKILL_DIR = (
@@ -10313,13 +10312,11 @@ def test_pptx_theme_selection_has_no_hard_html_templates_dependency() -> None:
     assert "verified_facts[].canonical" in text
 
 
-def test_pptx_skill_exposes_platform_specific_standalone_image_sync() -> None:
-    skill = SkillLoader(sources=[(SKILL_DIR, "builtin")]).load_skill(
-        SKILL_DIR / "SKILL.md"
-    )
+def test_pptx_skill_exposes_platform_specific_standalone_image_sync(tmp_path) -> None:
+    skill = ppt_plugin_loader(tmp_path / "settings.json").get_skill("ppt-fast")
 
     assert skill is not None
-    sync_script = str(SCRIPTS_DIR / "sync_image_manifest_status.js")
+    sync_script = str(PPT_PLUGIN_ROOT / "skills/document-skills/pptx/scripts/sync_image_manifest_status.js")
     assert sync_script in skill.content
     assert '"$BOX_AGENT_NODE" \'<LOADER_EXPANDED_SYNC_SCRIPT>\'' in skill.content
     assert '& "$env:BOX_AGENT_NODE" \'<LOADER_EXPANDED_SYNC_SCRIPT>\'' in skill.content

@@ -1,0 +1,87 @@
+{
+  "id": "product-console",
+  "name": "Product Console",
+  "description": "A polished B2B product console with browser chrome, app-shell panels, status chips, feature stages, and UI-first storytelling.",
+  "source_reference": "beautiful-html-templates/blue-professional",
+  "selection": {
+    "visual_dna_ids": [
+      "product-console"
+    ],
+    "mood_keywords": [
+      "modern",
+      "clean",
+      "product-led",
+      "polished",
+      "professional",
+      "modular",
+      "现代",
+      "清爽",
+      "产品化",
+      "专业",
+      "模块化"
+    ],
+    "industry_fit": [
+      "SaaS",
+      "software product",
+      "AI product",
+      "product management",
+      "developer platform",
+      "B2B software",
+      "软件产品",
+      "AI 产品",
+      "产品发布",
+      "开发者平台"
+    ],
+    "density": "medium-high",
+    "scheme": "cool-light",
+    "formality": "medium-high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F5F7FC",
+    "surface": "#FFFFFF",
+    "surface_strong": "#E9EDFA",
+    "primary": "#3448D8",
+    "primary_soft": "#E6EAFE",
+    "text": "#101828",
+    "muted": "#475467",
+    "border": "#B8C1D6",
+    "inverse": "#FFFFFF",
+    "chart": [
+      "#3448D8",
+      "#6D5CE7",
+      "#0E9384",
+      "#D05D42"
+    ]
+  },
+  "typography": {
+    "display": "Space Grotesk, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {
+    "radius_small": 8,
+    "radius_medium": 14,
+    "radius_large": 22,
+    "border_width": 1
+  },
+  "style": {
+    "canvas": "solid",
+    "surface": "soft",
+    "shadow": "soft",
+    "heading": "standard",
+    "label": "pill",
+    "accent": "line",
+    "alternation": "none"
+  },
+  "composition": {
+    "default_family": "product-showcase",
+    "allowed_families": [
+      "product-showcase",
+      "institutional-grid",
+      "technical-schematic",
+      "analytical-exhibit",
+      "cinematic-canvas"
+    ]
+  }
+}

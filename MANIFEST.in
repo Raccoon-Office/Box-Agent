@@ -1,4 +1,10 @@
 recursive-include box_agent/skills *
+recursive-include examples/resource-skill-plugin *
+include docs/RESOURCE_PLUGINS.md
+include docs/RESOURCE_PLUGIN_DEVELOPMENT_CN.md
+include docs/RESOURCE_PLUGIN_ACCEPTANCE_TEMPLATE.md
+include docs/PLUGIN_AUTHORING_SESSION_TASK_CN.md
+include scripts/check_resource_plugin.py
 global-exclude *.pyc *.pyo
 global-exclude .DS_Store
 include box_agent/skills/README.md

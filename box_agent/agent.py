@@ -503,6 +503,10 @@ class Agent:
             lambda: self.tools,
             goal_provider=lambda: getattr(self, "goal", None),
             active_skills_provider=lambda: self.skill_runtime.current_active_names,
+            skill_tools_provider=lambda name: (
+                (getattr(self.skill_runtime.loader.get_skill(name), "metadata", None) or {}).get("requires_host_tools", [])
+                if self.skill_runtime.loader is not None else ()
+            ),
         )
         self.mcp_tool_exposure: MCPToolExposureManager | None = None
         if enable_builtin_tools:
@@ -607,6 +611,7 @@ class Agent:
             loader, session_log=session_log
         )
         _bind_skill_store(self.skill_runtime, session_log)
+        self.skill_runtime.available_tools_provider = lambda: self.tools
         for tool in self.tools.values():
             if hasattr(tool, "set_parent_system_prompt"):
                 tool.set_parent_system_prompt(system_prompt)
