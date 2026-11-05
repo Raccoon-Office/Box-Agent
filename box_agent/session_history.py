@@ -11,9 +11,12 @@ if TYPE_CHECKING:
     from .agent import Agent
 
 
-def prompt_fingerprint(prompt: Any) -> str:
+def prompt_fingerprint(prompt: Any, context: dict[str, Any] | None = None) -> str:
     value = [block if isinstance(block, dict) else block.model_dump(mode="json")
              for block in prompt]
+    # Keep the exact old hash for old/no-context requests and persisted revisions.
+    if context:
+        value = {"prompt": value, "input_context_v1": context}
     return sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 

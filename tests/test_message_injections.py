@@ -101,6 +101,9 @@ def test_pending_and_injected_receipts_follow_actual_history_insertion():
     assert event.injection_id == "user-1"
     assert event.content == "use Chinese"
     assert history[0].content.endswith("use Chinese")
+    with pytest.raises(ValueError, match="INJECTION_IDEMPOTENCY_CONFLICT"):
+        manager.submit(item)
+    item["content"] = "use Chinese"
     assert not manager.submit(item)
     assert not manager.cancel("user-1")
     assert not manager.submit(item)

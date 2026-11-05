@@ -18,6 +18,24 @@ SDK 包版本与 ACP 线协议版本是两回事：`initialize.protocolVersion` 
   当界面与 Agent 不在同一机器时，本地 `file://` 不会自动成为云电脑可读文件；
   下一阶段须先准备 Agent 可读资源，再发送引用。
 
+## 2A：输入事实与 Agent 职责
+
+Lab 的普通发送、历史编辑重发和 `_inject` 使用同一组 `_meta` 字段。宿主不再追加通用回答规则、选区编辑流程、截图分析指导或数据库指导语；文件附件仍沿用既有正文包装，结构化文件输入留给 2B。
+
+| 字段 | 数据合同 | 消费边界 |
+| --- | --- | --- |
+| `input_context` | `schemaVersion: 1`、`userRequest`；可选 `appshot: {text}`、`referencedConversations: {text, sources: [{sessionId, title}]}`、`teamTask: {text}` | 原始请求决定本轮意图；截图辅助文本、主动引用对话及团队任务保留独立来源。纯 Appshot 延续分析当前窗口的默认请求。 |
+| `selection_context` | 既有 v1 `document_selection` 合同：相对源文件路径、预览策略、PDF 页码及选中文本 | 文档能力规定问答/不落盘请求不写文件；明确局部编辑保存原文件，保留其余内容；定位不唯一或写入校验失败时不得覆盖。 |
+| `database_context` | `schemaVersion: 1`、`connections: [{connection, allowedTables}]`、`truncated` | 只携带本轮显式引用的连接及选表事实；不授予权限，数据库凭据和工具仍执行实际访问控制。 |
+
+共享 `input_context.py` 在接受轮次、回退历史或入补充队列前校验以上字段，并统一投影到模型消息。未知字段、非整数版本、非法选区路径/页码等返回 `INVALID_INPUT_CONTEXT:<field>`。每项辅助文本最多 200,000 字符，引用来源最多 3 个，选区文本最多 4,000 字符；数据库最多 8 个连接、每连接 16 张表。Lab 另外保留自己的采集/展示大小限制。
+
+投影保留用户原文中的标签和代码；资料以有来源的 JSON 呈现，不作为行为指令或工具授权。投影后的用户消息沿用 Session Log 持久化与恢复，`input/context` 是可忽略的诊断事件；不批量重写已有历史。Lab 的消息配置另存本轮输入事实，用于重试、历史编辑及界面恢复。
+
+幂等指纹纳入规范化后的语义上下文，忽略 trace ID、时间戳等传输元数据。相同 ID/相同输入保留既有去重行为；同一轮次或补充 ID 携带不同语义输入分别返回 `TURN_IDEMPOTENCY_CONFLICT` 或 `INJECTION_IDEMPOTENCY_CONFLICT`。没有新上下文的旧请求沿用原指纹。
+
+直接回归见 `tests/test_input_context.py`、`tests/test_message_injections.py` 和历史编辑测试。配套 Lab 的 `boxAgentSdk.spec.ts` 使用真实 SDK 子进程及受控模型，记录普通发送与运行中补充实际交给模型的消息；它证明合同贯通，不代替真实模型和原生界面验收。
+
 ## 长驻进程约束
 
 `stdio_compat.StdioTransport` 实现 SDK 的消息级 transport，SDK 负责 JSON-RPC 路由和回包关联。
