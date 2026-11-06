@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from hashlib import sha256
 from pathlib import Path
 import re
 from typing import Any
@@ -58,15 +59,29 @@ def normalize_file_inputs(
                 )
                 if not decision.allowed:
                     raise ValueError("permission_denied")
-            # Test actual readability without loading file bodies into the prompt.
+            # Stream the version without loading file bodies into the prompt.
             with path.open("rb") as stream:
-                stream.read(1)
+                before = os.fstat(stream.fileno())
+                if (before.st_dev, before.st_ino, before.st_nlink) != (info.st_dev, info.st_ino, 1):
+                    raise ValueError("file_changed_during_preparation")
+                digest = sha256()
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                after = os.fstat(stream.fileno())
+                current = path.stat()
+                if (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino):
+                    raise ValueError("file_changed_during_preparation")
+                if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+                ):
+                    raise ValueError("file_changed_during_preparation")
         except (OSError, ValueError, RuntimeError) as exc:
             raise ValueError(f"INVALID_INPUT_RESOURCE:{exc}") from exc
         if path in seen:
             continue
         seen.add(path)
         item = {"name": name, "path": str(path), "uri": path.as_uri(), "size": info.st_size}
+        item["version"] = {"algorithm": "sha256", "digest": digest.hexdigest()}
         title = block.get("title")
         if title is not None:
             if not isinstance(title, str) or len(title) > 1024:
@@ -79,3 +94,14 @@ def normalize_file_inputs(
             item["mimeType"] = mime_type
         files.append(item)
     return files
+
+
+def verify_input_versions(files: list[dict[str, Any]], workspace_dir: str | Path, permission_engine=None) -> None:
+    """Check a not-yet-adopted input without changing its accepted identity."""
+    links = [{"type": "resource_link", **item} for item in files]
+    try:
+        current = normalize_file_inputs(links, workspace_dir, permission_engine)
+    except ValueError as exc:
+        raise ValueError("INPUT_RESOURCE_VERSION_UNAVAILABLE") from exc
+    if len(current) != len(files) or any(a.get("version") != b.get("version") for a, b in zip(current, files)):
+        raise ValueError("INPUT_RESOURCE_VERSION_CHANGED")

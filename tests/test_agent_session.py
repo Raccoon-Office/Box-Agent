@@ -381,7 +381,7 @@ async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(t
         assert retry.field_meta["ok"] is True
         _, _, model, contents = next(call for call in calls if not call[1])
         assert model == "model-main"
-        assert any(str(content).startswith("Keep this pending message.") for content in contents)
+        assert any("Keep this pending message." in str(content) for content in contents)
         assert any(isinstance(content, list) and any(block.get("type") == "input_image" for block in content)
                    for content in contents)
     else:
@@ -505,7 +505,7 @@ async def test_acp_closes_session_stream_before_returning_prompt(tmp_path):
     assert state.turn_active is False
     assert await adapter.ext_method("inject", {
         "sessionId": response.sessionId, "text": "too late", "injectionId": "late",
-    }) == {"error": "no_active_turn"}
+    }) == {"error": "no_active_turn", "injectionId": "late"}
     second = await adapter.prompt(**acp_params(SimpleNamespace(
         sessionId=response.sessionId, prompt=[{"text": "second"}],
         field_meta={"llm_binding": {"source": "builtin", "model": "next-model"}},

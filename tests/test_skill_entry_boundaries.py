@@ -104,10 +104,14 @@ async def test_agent_without_current_source_blocks_before_provider_and_log_write
         agent = Agent(llm_client=provider, system_prompt="BASE", tools=[], session_log=log,
                       workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, max_steps=1)
         agent.add_user_message("continue")
+        # Acceptance is durable before a model run; preparation failure must not
+        # mutate that accepted input or append runtime/provider history.
+        accepted = path.read_bytes()
+        assert accepted != before
         with pytest.raises(SkillDependencyError, match="No Skill source"):
             _ = [event async for event in agent.run_events()]
         assert provider.requests == []
-        assert path.read_bytes() == before
+        assert path.read_bytes() == accepted
     finally:
         log.close()
 

@@ -89,7 +89,7 @@ async def probe():
     restored = await second.new_session(**acp_params(request))
     state = second._sessions[restored.sessionId]
     assert [message.content for message in state.agent.messages][-2:] == [
-        "fixture\\n\\n<connector-status>\\nnone: selected\\n</connector-status>", "done",
+        "fixture", "done",
     ]
     state.agent.session_log.close()
 asyncio.run(probe())

@@ -25,7 +25,7 @@ def test_injection_type_selects_framing_source_and_visibility(kind):
     assert "source" not in message.model_dump()
     assert asdict(event) == {
         "content": content, "injection_id": "receipt-1", "kind": kind.value,
-        "user_visible": kind is InjectionKind.USER_SUPPLEMENT,
+        "user_visible": kind is InjectionKind.USER_SUPPLEMENT, "status": "injected",
     }
     if kind is InjectionKind.USER_SUPPLEMENT:
         assert message.source == "user"
@@ -110,7 +110,7 @@ def test_pending_and_injected_receipts_follow_actual_history_insertion():
 
 
 @pytest.mark.asyncio
-async def test_cancel_preserves_fifo_and_allows_only_cancelled_id_to_be_reused():
+async def test_cancel_preserves_fifo_and_requires_a_new_id_for_changed_input():
     manager = InjectionManager()
     await manager.put({"id": "one", "content": "first"})
     manager.put_nowait({"id": "two", "content": "cancel me"})
@@ -120,22 +120,25 @@ async def test_cancel_preserves_fifo_and_allows_only_cancelled_id_to_be_reused()
     assert manager.cancel("two")
     assert manager.status("two") is InjectionStatus.CANCELLED
     assert not manager.cancel("two")
-    assert manager.submit({"id": "two", "content": "replacement"})
+    with pytest.raises(ValueError, match="INJECTION_IDEMPOTENCY_CONFLICT"):
+        manager.submit({"id": "two", "content": "replacement"})
+    assert manager.submit({"id": "four", "content": "replacement"})
     history = []
     events = [manager.apply_next(history)[1] for _ in range(3)]
-    assert [event.injection_id for event in events] == ["one", "three", "two"]
+    assert [event.injection_id for event in events] == ["one", "three", "four"]
     assert [message.source for message in history] == ["user", "runtime", "user"]
     assert [event.user_visible for event in events] == [True, False, True]
     await manager.join()
 
 
-def test_taken_message_cannot_be_cancelled_or_queued_twice():
+def test_taken_message_can_be_cancelled_without_requeueing_the_same_id():
     manager = InjectionManager()
     item = {"id": "one", "content": "first"}
     manager.submit(item)
     assert manager.get_nowait() == item
     assert manager.status("one") is InjectionStatus.TAKEN
-    assert not manager.cancel("one")
+    assert manager.cancel("one")
+    assert manager.status("one") is InjectionStatus.CANCELLED
     assert not manager.submit(item)
 
 

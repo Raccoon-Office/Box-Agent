@@ -106,12 +106,16 @@ class ImageContext:
                 ref["toolName"] = message.name
             if failed:
                 ref["evictionReason"] = "persistence_failed"
+                if message.input_facts is not None:
+                    raise ValueError("INPUT_IMAGE_PERSISTENCE_FAILED")
                 notice = self._notice(ref, "persistence_failed")
                 message.content = f"{message.content or ''}\n{notice}"
             refs.append(ref)
         if refs:
             queue = getattr(self.session_log, "queue_message_images", None)
             if self.session_log is not None and not callable(queue):
+                if message.input_facts is not None:
+                    raise ValueError("INPUT_IMAGE_METADATA_UNSUPPORTED")
                 # A custom Store without metadata support cannot satisfy the
                 # durability contract. Keep its ordinary text history usable.
                 for ref in refs:
@@ -206,10 +210,14 @@ class ImageContext:
             evict(ref, "encoded_byte_budget")
 
         def overlay() -> Message | None:
+            linked = {block["imageId"] for message in messages if isinstance(message.content, list)
+                      for block in message.content if block.get("type") == "input_image_reference"}
             blocks = []
             if self._notices:
                 blocks.append({"type": "text", "text": "\n".join(self._notices.values())})
             for ref, block in hydrated:
+                if ref["imageId"] in linked:
+                    continue
                 label = (f"Image {ref['imageId']} | source={ref.get('source', 'unknown')} | "
                          f"toolCallId={ref.get('toolCallId', '-')} | "
                          f"index={ref.get('imageIndex', '?')} | "
@@ -225,7 +233,26 @@ class ImageContext:
         blocked = None
         while True:
             image_message = overlay()
-            provider_messages = [*messages, image_message] if image_message else list(messages)
+            available_images = {ref["imageId"]: block for ref, block in hydrated}
+            rendered_images = set()
+            provider_messages = []
+            for message in messages:
+                if isinstance(message.content, list):
+                    blocks = []
+                    for block in message.content:
+                        if block.get("type") == "input_image_reference":
+                            image = available_images.get(block["imageId"])
+                            if block["imageId"] in rendered_images:
+                                blocks.append({"type": "text", "text": f"[Image {block['imageId']} already attached above]"})
+                            else:
+                                blocks.append(image or {"type": "text", "text": f"[Image {block['imageId']} unavailable for this request]"})
+                                rendered_images.add(block["imageId"])
+                        else:
+                            blocks.append(block)
+                    message = message.model_copy(update={"content": blocks, "trace_redact_content": True})
+                provider_messages.append(message)
+            if image_message is not None:
+                provider_messages.append(image_message)
             if not callable(preflight) or inspect.iscoroutinefunction(preflight):
                 break
             metrics = preflight(provider_messages, tools, thinking_enabled=thinking_enabled)
@@ -264,8 +291,11 @@ class ImageContext:
         if purpose == "main":
             self._selected = [item["imageId"] for item in selected]
             self._notice_ids = list(self._notices)
-        return ImageProjection(provider_messages, manifest,
-                               _fallback_context_estimate([image_message], {}) if image_message else 0,
+        accounting_blocks = [*(image_message.content if image_message is not None else []),
+                             *(block for ref, block in hydrated if ref["imageId"] in rendered_images)]
+        image_tokens = (_fallback_context_estimate([Message(role="user", content=accounting_blocks)], {})
+                        if accounting_blocks else 0)
+        return ImageProjection(provider_messages, manifest, image_tokens,
                                blocked, tuple(self._notices.values()))
 
     def mark_response(self, message: Message) -> None:

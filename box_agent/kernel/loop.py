@@ -1283,13 +1283,19 @@ async def _run_agent_loop_impl(
         if inject_queue:
             while not inject_queue.empty():
                 if isinstance(inject_queue, InjectionManager):
-                    injection, injected_event = inject_queue.apply_next(messages)
+                    def commit_injection():
+                        if session_log is not None:
+                            session_log.append_unlogged_messages(session_log_messages(messages), turn=session_turn, step=step)
+                            session_log.flush()
+                    injection, injected_event = await inject_queue.aapply_next(
+                        messages, commit=commit_injection, cancelled=cancelled,
+                    )
                 else:
                     injection = parse_queued_injection(inject_queue.get_nowait())
                     if injection is None:
                         continue
                     injected_event = injection.apply(messages)
-                if injection.kind is InjectionKind.USER_SUPPLEMENT:
+                if injection.kind is InjectionKind.USER_SUPPLEMENT and injected_event.status == "injected":
                     continuation_user_request = injection.content
                     await completion_checks.include_inputs(
                         tools, CompletionContext(tuple(messages), cancelled, session_log, turn_id),
@@ -1664,6 +1670,9 @@ async def _run_agent_loop_impl(
                 request_context["skillReferences"] = list(skill_references)
             if image_manifest is not None:
                 request_context["imageContext"] = image_manifest
+            input_manifest = getattr(projection, "input_context", None) if context_engine is not None else None
+            if input_manifest is not None:
+                request_context["inputContext"] = input_manifest
             session_log.append("request/context", request_context)
             session_log.flush()
 

@@ -71,14 +71,14 @@ def restore_connector_status(messages: list[Message]) -> list[Message]:
             runs[-1].append((index, message))
             previous_key = key
         projected = messages
-        for run in runs:
+        for run_index, run in enumerate(runs):
             if any(_contains_snapshot(message) for _, message in run):
                 continue
             anchor, message = run[0]
-            content = (_append_snapshot(message.content, message.host_connector_status)
+            content = (_append_snapshot(message.content, message.host_connector_status, update=run_index > 0)
                        if isinstance(message.content, str) else [
                            *message.content,
-                           {"type": "text", "text": _append_snapshot("", message.host_connector_status)},
+                           {"type": "text", "text": _append_snapshot("", message.host_connector_status, update=run_index > 0)},
                        ])
             if projected is messages:
                 projected = list(messages)

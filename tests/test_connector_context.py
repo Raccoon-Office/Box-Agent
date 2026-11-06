@@ -47,7 +47,8 @@ def test_first_and_changed_snapshots_are_appended_without_breaking_prefix(agent,
         before = [message.model_dump() for message in agent.messages]
         agent.add_user_message(f"你好{index}", host_connector_status=status)
         assert [message.model_dump() for message in agent.messages[:-1]] == before
-        current = agent.messages[-1]
+        assert agent.messages[-1].content == f"你好{index}"
+        current = restore_connector_status(agent.messages)[-1]
         if status is not None and status != previous_status:
             assert current.content.endswith(status)
             if previous_status is not None:
@@ -84,7 +85,7 @@ def test_user_xml_legacy_history_and_surrounding_context_are_never_deleted(agent
     assert request(agent.messages)[:len(before)] == before
     assert "literal:" + example in agent.messages[-2].content
     assert "Attachment: file.png" in agent.messages[-2].content
-    assert restore_connector_status(agent.messages) is agent.messages
+    assert restore_connector_status(agent.messages) == restore_connector_status(restore_connector_status(agent.messages))
 
 
 def test_sessions_have_independent_change_detection(tmp_path):

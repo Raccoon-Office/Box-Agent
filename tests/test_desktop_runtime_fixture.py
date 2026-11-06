@@ -219,7 +219,7 @@ async def test_request_cleanup_preserves_interleaved_sessions_and_host_permissio
                 handles[product] = await probe.session_new(cwd=cwd, meta={
                     "session_id": product, "fixture_payload": "x" * (256 * 1024),
                 })
-                assert handles[product] != old
+                assert handles[product] == old
                 response = await probe.session_prompt(handles[product], f"fixture:normal resumed-{product}")
                 assert response["stopReason"] == "end_turn"
 

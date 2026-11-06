@@ -68,14 +68,15 @@ class AgentService:
             raise RuntimeError("agent session is closed")
         current_handle = getattr(session, "_run_handle", None)
         if (getattr(current_handle, "is_active", False)
-                or getattr(session, "_active_run_task", None) is not None):
+                or getattr(session, "_active_run_task", None) is not None
+                or getattr(session, "_preparing_input", False)):
             raise RuntimeError("session already has an active run")
         control = RunControl()
         if options is None:
             options = session.build_run_options(
                 session_id=request.session_id,
                 turn_id=request.run_id,
-                current_turn_text=request.user_message,
+                current_turn_text=request.user_text,
             )
         if hasattr(options, "run_control"):
             options = replace(options, run_control=control)
@@ -113,18 +114,24 @@ class AgentService:
             permission_broker.set_event_sink(handle.publish)
         # No await between the ownership check and runner reservation: another
         # start cannot append history or replace this handle in that interval.
-        if request.user_message is not None:
-            from .turn_hints import with_turn_hints
+        if request.user_input is not None or request.user_message is not None:
+            from .api.input import UserInput
+            from .input_preparation import prepare_user_input
 
-            skip_hint = (getattr(session, "utility_session", False)
-                         or request.metadata.get("synthetic_continuation") is True)
-            message = (request.user_message if skip_hint
-                       else with_turn_hints(request.user_message))
-            if validation is not None:
+            value = request.user_input or UserInput.text(request.user_message, input_id=request.run_id)
+            record, images = prepare_user_input(value, session.agent.workspace_dir,
+                                                getattr(session, "permission_engine", None))
+            record["policy"]["turn_hints"] = not (
+                getattr(session, "utility_session", False)
+                or request.metadata.get("synthetic_continuation") is True
+            )
+            if request.user_input is not None:
+                await session.add_user_input(value, input_facts=record, image_content=images)
+            elif validation is not None:
                 with runtime.reference_scope(validation):
-                    session.agent.add_user_message(message)
+                    session.agent.add_user_message(value, input_facts=record)
             else:
-                session.agent.add_user_message(message)
+                session.agent.add_user_message(value, input_facts=record)
             grant_store = getattr(session, "grant_store", None)
             if grant_store is not None:
                 grant_store.clear_prompt_grants()

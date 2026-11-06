@@ -319,13 +319,22 @@ class AgentRunHandle:
             self._control.request_resume()
             return
         if command.kind is ControlCommandKind.INJECT_MESSAGE:
-            content = command.payload.get("content")
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("inject_message command requires message content")
-            item: Any = content
-            if command.request_id is not None:
-                item = {"id": command.request_id, "content": content}
-            self._state.inject_queue.put_nowait(item)
+            from .api.input import UserInput
+            from .injections import submit_user_input
+            if "input" in command.payload:
+                raw = command.payload["input"]
+                value = UserInput(tuple(raw["blocks"]), raw.get("context", {}),
+                                  command.request_id or raw.get("input_id"))
+            else:
+                content = command.payload.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("inject_message command requires message content")
+                if not hasattr(self._state.inject_queue, "receipt"):
+                    item = {"id": command.request_id, "content": content} if command.request_id else content
+                    self._state.inject_queue.put_nowait(item)
+                    return
+                value = UserInput.text(content, input_id=command.request_id)
+            submit_user_input(value, agent=self._state.agent, queue=self._state.inject_queue)
             return
         raise NotImplementedError(
             f"control command {command.kind.value!r} is not supported yet"

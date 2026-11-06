@@ -130,7 +130,7 @@ def original_request(text: str, context: dict[str, Any]) -> str:
 
 
 def project_input_context(text: str, context: dict[str, Any]) -> str:
-    """Produce one durable model message while retaining factual provenance."""
+    """Derive model text from saved facts; never use this as the user original."""
     facts = {key: value for key, value in context.items() if key != "input_context"}
     source = context.get("input_context", {})
     facts.update({key: source[key] for key in ("appshot", "referencedConversations", "teamTask") if key in source})
@@ -163,3 +163,83 @@ def project_input_context(text: str, context: dict[str, Any]) -> str:
         )
     parts.append(json.dumps(facts, ensure_ascii=False, sort_keys=True))
     return "\n\n".join(parts)
+
+
+def requires_input_contract(record: dict[str, Any]) -> bool:
+    return bool(record.get("context") or record.get("policy") or record.get("kind")
+                or any(block["type"] != "text" for block in record.get("blocks", [])))
+
+
+def project_user_message(message):
+    """Project a new-format input without mutating its durable representation."""
+    record = message.input_facts
+    if not record:
+        return message
+    from .turn_hints import turn_hints
+    from .loop_guards import format_injected_message
+
+    original = "\n".join(block["text"] for block in record["blocks"] if block["type"] == "text")
+    marker = "\x00input:" + record["id"] + "\x00"
+    text = marker
+    policy = record.get("policy", {})
+    decision = policy.get("user_decision_response")
+    if decision:
+        text = "[HOST_USER_DECISION_RESPONSE]\n" + json.dumps(decision, ensure_ascii=False) + "\n[/HOST_USER_DECISION_RESPONSE]\n\n" + text
+        if decision.get("decision_kind") == "presentation_mode" and decision.get("selected_option_id") in {"fast", "design"}:
+            text = (
+                "[Host presentation progress guidance: The choice card already displays the "
+                "selected mode. Continue the existing task with the next concrete action; "
+                "do not announce or reconfirm the mode in progress text before or after loading "
+                "a Skill. Report new work, results, blockers or required decisions, rather than "
+                "rephrasing the previous update. Keep meaningful long-running progress updates. "
+                "Explain the choice if the user asks; a timeout must not be described as a user click.]\n\n"
+                + text
+            )
+    language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}.get(policy.get("ui_language"))
+    if language:
+        text = (f"[Host UI language: {language}. Use this language for user-visible intermediate summaries, "
+                "progress updates, and the final response unless the user explicitly requests another language.]\n\n" + text)
+    if policy.get("turn_hints"):
+        text = "\n\n".join([text, *turn_hints(original_request(original, record["context"]))])
+    context = record["context"]
+    if not original:
+        context = {**context, "input_context": {**context.get("input_context", {}), "userRequest": ""}}
+    text = project_input_context(text, context)
+    if record.get("image_result"):
+        text += "\n\n" + record["image_result"]
+    if record.get("kind") == "user_supplement":
+        text = format_injected_message(text)
+    if policy.get("goal_objective"):
+        text = (
+            "## Active Goal\n"
+            f"Objective: {policy['goal_objective']}\n\n"
+            "Work toward this durable goal across turns. Treat completion as evidence-based: "
+            "verify the objective against concrete files, tests, logs, command output, or artifacts "
+            "before saying it is done. Keep changes scoped to the goal and the user's latest message. "
+            "If the goal is satisfied, call `goal_write` with action `complete` and non-empty "
+            "`evidence` before your final answer, then state the evidence that proves completion. "
+            "Use `goal_write` action `progress` for verified partial progress and action `block` "
+            "with `blocked_reason` when external input is required. Do not ask the user to run "
+            "a slash command for this.\n\n"
+            "## Latest User Message\n"
+            f"{text}"
+        )
+    ordered = record.get("blocks", [])
+    if not any(block["type"] != "text" for block in ordered):
+        return message.model_copy(update={"content": text.replace(marker, original)})
+    prefix, suffix = text.split(marker, 1)
+    content = [{"type": "text", "text": prefix}] if prefix else []
+    refs = record.get("images", [])
+    for block in ordered:
+        if block["type"] == "text":
+            content.append({"type": "text", "text": block["text"]})
+        elif block["type"] == "resource_link":
+            content.append({"type": "text", "text": "[File reference] " + json.dumps(block, ensure_ascii=False)})
+        image_index = block.get("imageIndex", -1)
+        if block["type"] == "resource_link":
+            image_index = record.get("resourceImages", {}).get(block["uri"], -1)
+        if 0 <= image_index < len(refs):
+            content.append({"type": "input_image_reference", "imageId": refs[image_index]["imageId"]})
+    if suffix:
+        content.append({"type": "text", "text": suffix})
+    return message.model_copy(update={"content": content})

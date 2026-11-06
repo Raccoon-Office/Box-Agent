@@ -59,7 +59,7 @@ async def test_conversations_continue_after_host_transition(tmp_path, transition
         if transition == "rebind":
             previous_id = first
             first = await bind(adapter, "first")
-            assert first != previous_id and previous_id not in adapter._sessions
+            assert first == previous_id and adapter._sessions[first] is not old_state
             assert old_state._closed
         elif transition == "restart_adapter":
             await adapter.aclose()

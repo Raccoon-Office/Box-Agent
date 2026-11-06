@@ -3707,7 +3707,7 @@ async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
 
 async def memory_run_events(session: Any, request: Any, options: Any) -> AsyncIterator[AgentEvent]:
     """共享服务运行包装器，普通运行和 CLI/ACP 外层轮次使用同一策略。"""
-    user_text = request.user_message if request.user_message is not None else (getattr(options, "current_turn_text", None) or "")
+    user_text = request.user_text if request.user_text is not None else (getattr(options, "current_turn_text", None) or "")
     async with memory_user_turn(session, user_text=user_text, session_id=request.session_id,
                                 turn_id=getattr(options, "turn_id", "") or request.run_id) as turn:
         if turn is not None:

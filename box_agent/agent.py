@@ -537,6 +537,7 @@ class Agent:
         self.workspace_dir = Path(workspace_dir)
         self.cancel_event: Optional[asyncio.Event] = None
         self.inject_queue: asyncio.Queue[Any] = InjectionManager()
+        self.inject_queue.prepare_input = self.prepare_injected_input
         self._permission_negotiator = None  # set by CLI/ACP when permission engine is active
         self._proposal_negotiator = None  # set by CLI/ACP to handle MemoryProposalEvent
         self._hooks = hooks
@@ -879,37 +880,103 @@ class Agent:
                     "the previous compact commit could not be replayed; refusing to continue"
                 ) from exc
 
-    async def aadd_user_message(self, content: str, *, image_content: list[dict[str, Any]] | None = None,
+    async def aadd_user_input(self, value, **kwargs) -> None:
+        """Shared ordered-input entry point for adapters and direct callers."""
+        await self.aadd_user_message(value, **kwargs)
+
+    def add_user_input(self, value, **kwargs) -> None:
+        self.add_user_message(value, **kwargs)
+
+    async def aadd_user_message(self, content, *, image_content: list[dict[str, Any]] | None = None,
                                 image_source: str = "user_upload", image_context_eligible: bool = True,
-                                host_connector_status: str | None = None) -> None:
+                                host_connector_status: str | None = None,
+                                input_facts: dict[str, Any] | None = None) -> None:
+        from .api.input import UserInput
+        from .input_preparation import prepare_user_input
+        value = UserInput.text(content) if isinstance(content, str) else content
+        if input_facts is None:
+            input_facts, images = prepare_user_input(value, self.workspace_dir,
+                                                    getattr(self, "_input_permission_engine", None))
+            image_content = [*images, *(image_content or [])]
+        image_content, eligible = await self._prepare_input_attachments(input_facts, image_content or [])
+        image_context_eligible = image_context_eligible and eligible
         validation = await self.skill_runtime.avalidate_references(self.skill_runtime.selected_names)
         with self.skill_runtime.reference_scope(validation):
             self.add_user_message(content, image_content=image_content, image_source=image_source,
                                   image_context_eligible=image_context_eligible,
-                                  host_connector_status=host_connector_status)
+                                  host_connector_status=host_connector_status, input_facts=input_facts)
 
-    def add_user_message(self, content: str, *, image_content: list[dict[str, Any]] | None = None,
+    async def _prepare_input_attachments(self, record, images):
+        from .input_preparation import resource_image_paths
+        from .input_images import prepare_image_attachments
+        from .input_resources import verify_input_versions
+        verify_input_versions(record["context"].get("files", []), self.workspace_dir,
+                              getattr(self, "_input_permission_engine", None))
+        paths = resource_image_paths(record)
+        if not paths or "image_result" in record:
+            return images, True
+        text = "\n".join(block["text"] for block in record["blocks"] if block["type"] == "text")
+        prepare = getattr(self, "_input_image_preparer", None)
+        result = (await prepare(paths, text) if prepare is not None else
+                  await prepare_image_attachments(self, paths, text,
+                      permission_engine=getattr(self, "_input_permission_engine", None),
+                      allow_full_access=getattr(self, "_input_allow_full_access", False),
+                      permission_negotiator=getattr(self, "_permission_negotiator", None)))
+        record["image_result"] = result.text
+        if result.tool_result is not None:
+            record["image_tool"] = deepcopy(result.tool_result)
+        return [*images, *(result.image_content or [])], result.image_context_eligible
+
+    async def prepare_injected_input(self, message, injection):
+        if message.input_facts is None:
+            return
+        images, eligible = await self._prepare_input_attachments(message.input_facts, list(injection.input_images))
+        if images:
+            refs = self.image_context.register(message, images, source="user_upload", eligible=eligible)
+            message.input_facts["images"] = refs
+
+    def add_user_message(self, content, *, image_content: list[dict[str, Any]] | None = None,
                          image_source: str = "user_upload", image_context_eligible: bool = True,
-                         host_connector_status: str | None = None) -> None:
+                         host_connector_status: str | None = None,
+                         input_facts: dict[str, Any] | None = None) -> None:
         """Add a user message and materialize selected Skills beside it."""
         self._restore_session_surface_after_replay_failure()
+        from .api.input import UserInput
+        from .input_preparation import prepare_user_input
+        value = UserInput.text(content) if isinstance(content, str) else content
+        if input_facts is None:
+            input_facts, inline_images = prepare_user_input(value, self.workspace_dir,
+                                                           getattr(self, "_input_permission_engine", None))
+            image_content = [*inline_images, *(image_content or [])]
+        from .input_preparation import resource_image_paths
+        if resource_image_paths(input_facts) and "image_result" not in input_facts:
+            raise ValueError("resource images require aadd_user_input")
+        input_facts = deepcopy(input_facts)
+        content = "\n".join(block["text"] for block in input_facts["blocks"] if block["type"] == "text")
         if self.goal is not None and self.goal.status == "active":
-            content = self._apply_goal_context(content)
+            input_facts["policy"]["goal_objective"] = self.goal.objective
         # Explicit slash/host selection is resolved at the message boundary.
         # The resulting runtime message becomes ordinary durable history, so
         # ContextEngine does not need to rediscover Skill bodies per request.
         materialize = getattr(self.skill_runtime, "materialize_selected_messages", None)
         materialized = materialize(self.messages) if callable(materialize) else ()
-        from .connector_context import append_connector_status
-        content = append_connector_status(self.messages, content, host_connector_status)
-        user_message = Message(role="user", content=content, host_connector_status=host_connector_status)
+        user_message = Message(role="user", content=content, host_connector_status=host_connector_status,
+                               input_facts=input_facts)
         if image_content:
-            self.image_context.register(user_message, image_content, source=image_source,
-                                        eligible=image_context_eligible)
+            refs = self.image_context.register(user_message, image_content, source=image_source,
+                                               eligible=image_context_eligible)
+            input_facts["images"] = refs
+            user_message.input_facts = deepcopy(input_facts)
+        original_messages = list(self.messages)
         self.messages.append(user_message)
-        if image_content and self.session_log is not None:
-            self._persist_unlogged_messages(turn=self._next_session_turn(), step=None)
-            self.session_log.flush()
+        if self.session_log is not None:
+            try:
+                self._persist_unlogged_messages(turn=self._next_session_turn(), step=None)
+                self.session_log.flush()
+            except BaseException:
+                self.messages[:] = original_messages
+                self._session_surface_replay_failed = True
+                raise
         if materialized:
             skill_messages = []
             for _name, skill_content in materialized:
@@ -1096,13 +1163,14 @@ class Agent:
             f"{user_content}"
         )
 
-    def inject(self, content: str) -> None:
+    def inject(self, content):
         """Inject a user message into the running agent loop.
 
         The message is queued and will be appended to the conversation
         at the next step boundary. Call on the agent's owning event loop.
         """
-        self.inject_queue.put_nowait(content)
+        from .injections import submit_user_input
+        return submit_user_input(content, agent=self, queue=self.inject_queue)
 
     def set_permission_negotiator(self, negotiator: Any | None) -> None:
         """Configure the session-level permission negotiation adapter."""
