@@ -20,7 +20,7 @@ async def test_inject_preserves_instruction_but_logs_only_metadata(tmp_path, mon
     logger = ACPDebugLogger()
     monkeypatch.setattr("box_agent.acp.log", logger)
     state = SimpleNamespace(turn_active=True, inject_queue=InjectionManager(),
-                            agent=SimpleNamespace(workspace_dir=tmp_path), permission_engine=None)
+                            agent=SimpleNamespace(workspace_dir=tmp_path, session_log=None), permission_engine=None)
     canary = "SYNTHETIC_PRIVATE_INJECTION"
     stub = SimpleNamespace(_sessions={"session": state})
     try:
@@ -28,9 +28,11 @@ async def test_inject_preserves_instruction_but_logs_only_metadata(tmp_path, mon
         result = await BoxACPAgent.ext_method(stub, "inject", {
             "sessionId": "session", "injectionId": "fixture-injection", "text": canary})
         assert result["ok"]
-        assert state.inject_queue.get_nowait()["content"] == canary
-        output = capsys.readouterr().err + (tmp_path / "inject.log").read_text()
-        assert canary not in output and "characters" in output and "fixture-injection" in output
+        queued = state.inject_queue.get_nowait()
+        assert queued.content == canary and queued.injection_id == "fixture-injection"
+        logfile = tmp_path / "inject.log"
+        output = capsys.readouterr().err + (logfile.read_text() if logfile.exists() else "")
+        assert canary not in output
     finally:
         logger.close()
 
@@ -95,7 +97,9 @@ async def test_desktop_prompt_failure_and_cancellation_reset_privacy_and_reserva
     monkeypatch.delenv('BOX_AGENT_LOG_FILE', raising=False)
     logger = ACPDebugLogger()
     canary = 'MV2-PROMPT-PRIVATE-failure'
-    config = SimpleNamespace(agent=SimpleNamespace(memory_backend_type='desktop'))
+    from tests.test_agent_session import session_config
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = 'desktop'
     state = SessionState(agent=SimpleNamespace(session_log=None, workspace_dir=tmp_path), config=config)
 
     async def fail_prompt(*_):

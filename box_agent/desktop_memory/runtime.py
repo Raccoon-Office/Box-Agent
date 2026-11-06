@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 from collections import OrderedDict
+from copy import deepcopy
 from typing import Any
 
 from ..memory import MemoryRuntime, _MemoryTurn
@@ -124,6 +125,19 @@ class DesktopMemoryRuntime(MemoryRuntime):
             if getattr(goal, "status", None) == "active" and callable(wrapper):
                 wrapped = wrapper(wrapped)
             current_message = turn.user_message
+            input_facts = getattr(current_message, "input_facts", None)
+            if input_facts is not None:
+                from ..input_context import original_request
+
+                # New input records persist originals; hints, Goal and connector
+                # state exist only in the request projection, never in evidence.
+                original = "\n".join(block["text"] for block in input_facts["blocks"]
+                                     if block["type"] == "text")
+                if current_message.content != original:
+                    raise ValueError("current input does not match its persisted facts")
+                turn.input_context = deepcopy(input_facts["context"])
+                turn.user = original_request(original, turn.input_context)
+                wrapped = original
             user_seq = (log.surface_message_sequence(session.agent.messages[1:], current_message)
                         if log is not None and current_message is not None else None)
             self._evidence_cursor = EvidenceCursor.begin(log, turn.user, wrapped_user=wrapped, user_seq=user_seq)

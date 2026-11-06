@@ -761,8 +761,7 @@ async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_
             for view in views:
                 assert view["source_ref"]["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
         assert any(event["type"] == "tool/result" and event["data"]["result"]["content"] == sample for event in log.events)
-        from box_agent.turn_hints import with_turn_hints
-        assert any(event["type"] == "user/message" and event["data"]["content"] == with_turn_hints(user) for event in log.events)
+        assert any(event["type"] == "user/message" and event["data"]["content"] == user for event in log.events)
         assert "SYNTHETIC" not in caplog.text and "AKIAABCDEFGHIJKLMNOP" not in caplog.text
     finally:
         await session.aclose()
@@ -915,7 +914,7 @@ async def test_real_managed_agent_run_hands_off_actual_session_log_with_control_
 @pytest.mark.parametrize("active_goal", [False, True])
 @pytest.mark.parametrize("prelogged", [False, True])
 @pytest.mark.parametrize("wrong_host_text", [False, True])
-async def test_acp_wrapped_user_event_is_exactly_verified_but_only_original_words_are_handed_off(
+async def test_legacy_acp_wrapped_user_event_is_exactly_verified_but_only_original_words_are_handed_off(
         tmp_path, host, active_goal, prelogged, wrong_host_text):
     from box_agent.acp import _connector_status_context
     from box_agent.agent_service import AgentService
@@ -935,7 +934,9 @@ async def test_acp_wrapped_user_event_is_exactly_verified_but_only_original_word
     try:
         if active_goal:
             session.agent.set_goal("Synthetic goal")
-        await session.agent.aadd_user_message(logged)
+        # Reproduce an old record, without the new input_facts contract.
+        session.agent.messages.append(Message(role="user", content=(
+            session.agent._apply_goal_context(logged) if active_goal else logged)))
         if prelogged:
             session.agent._persist_unlogged_messages(turn=1, step=None)
             log.flush()
@@ -1013,21 +1014,19 @@ async def test_real_acp_connector_transitions_keep_current_turn_evidence(
             evidence = sent[-1]["evidence"]
             assert evidence["status"] == "captured", evidence
             view = next(v for v in evidence["views"] if v["source_ref"]["event_type"] == "user/message")
-            # ACP normalizes the explicit QA text before memory_user_turn.
-            assert json.loads(view["text"]) == {"content": user.strip()}
+            assert json.loads(view["text"]) == {"content": user}
             seq = view["source_ref"]["event_seqs"][0]
             assert seq >= before
             recorded = log.events[seq]["data"]
             assert recorded["host_connector_status"]
-            assert ("Host connector status update:" in recorded["content"]) == (index >= 2)
-            if index != 1:
-                assert recorded["content"].endswith(recorded["host_connector_status"])
-                assert view["source_ref"]["coverage"] == "excerpt"
-                assert view["source_ref"]["view_spec"]["excerpt_limit"] == 4096
+            assert recorded["content"] == user
+            assert view["source_ref"]["coverage"] == "full"
+            assert view["source_ref"]["view_spec"]["excerpt_limit"] is None
+            assert recorded["input_facts"]["blocks"][0] == {"type": "text", "text": user}
             if with_image:
                 assert log.replay().images
             assert image_data not in json.dumps(evidence)
-            assert sent[-1]["user"] == user.strip()
+            assert sent[-1]["user"] == user
     finally:
         await adapter.aclose()
         await process.aclose()

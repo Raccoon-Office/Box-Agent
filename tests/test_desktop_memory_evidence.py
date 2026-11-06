@@ -118,6 +118,23 @@ def test_cursor_end_cannot_consume_later_turns_or_internal_messages(log):
     assert all(v["source_ref"]["event_seqs"][0] < end for v in bundle["views"])
 
 
+@pytest.mark.parametrize("mismatch", ["content", "original", "source"])
+def test_canonical_input_facts_cannot_qualify_a_different_user_event(log, mismatch):
+    data = {"role": "user", "source": "user", "content": "question", "input_facts": {
+        "blocks": [{"type": "text", "text": "question"}],
+        "context": {"input_context": {"schemaVersion": 1, "userRequest": "question"}}}}
+    if mismatch == "content":
+        data["content"] = "a different question"
+    elif mismatch == "original":
+        data["input_facts"]["context"]["input_context"]["userRequest"] = "a different question"
+    else:
+        data["source"] = "internal"
+    seq = log.event_count
+    log.append("user/message", data)
+    with pytest.raises(ValueError, match="current user event does not match"):
+        EvidenceCursor.begin(log, "question", user_seq=seq)
+
+
 @pytest.mark.parametrize("kind", ["internal", "missing_user", "missing_answer", "missing_end"])
 def test_incomplete_or_internal_only_events_never_become_completed_evidence(log, kind):
     cursor = EvidenceCursor.begin(log)

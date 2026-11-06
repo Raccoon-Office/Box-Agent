@@ -106,7 +106,8 @@ async def test_sdk_keeps_complete_original_words_separate_from_model_projection(
 
 
 @pytest.mark.parametrize("mode", ["completed", "disabled", "offline", "legacy", "unavailable", "failed", "cancelled", "no_evidence"])
-async def test_sdk_file_only_turn_hands_off_empty_raw_request_only_when_qualified(tmp_path, host, monkeypatch, mode):
+@pytest.mark.parametrize("active_goal", [False, True])
+async def test_sdk_file_only_turn_hands_off_empty_raw_request_only_when_qualified(tmp_path, host, monkeypatch, mode, active_goal):
     path = tmp_path / "input.csv"
     path.write_text("id,value\n1,37\n")
     host.automatic = mode != "disabled"
@@ -130,6 +131,8 @@ async def test_sdk_file_only_turn_hands_off_empty_raw_request_only_when_qualifie
         monkeypatch.setattr(EvidenceCursor, "capture", lambda self, **kwargs: no_evidence(
             kwargs["session_id"], kwargs["turn_id"], kwargs["event_id"], "log_unavailable"))
     async with wire_session(tmp_path, host, OutcomeLLM()) as (request, state, session_id):
+        if active_goal:
+            state.agent.set_goal("Synthetic attachment analysis")
         pending = asyncio.create_task(request("session/prompt", {"sessionId": session_id, "prompt": [{
             "type": "resource_link", "uri": path.as_uri(), "name": path.name, "mimeType": "text/csv"}],
             "_meta": {"turn_id": "file-turn", "input_context": {"schemaVersion": 1, "userRequest": ""}}}))
@@ -157,6 +160,50 @@ async def test_sdk_file_only_turn_hands_off_empty_raw_request_only_when_qualifie
             assert qa["evidence"]["status"] == "captured"
         context = next(body for operation, body in host.calls if operation == "context")
         assert context["query"] == ""
+
+
+async def test_direct_api_file_turns_use_their_own_original_input_and_evidence(tmp_path, host):
+    from box_agent.agent_service import AgentService
+    from box_agent.agent_session import AgentSession
+    from box_agent.session_context import HostBindings, SessionOptions
+    from box_agent.api import RunRequest, UserInput
+    from box_agent.session_log import SessionLog
+
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    process = backend(host)
+    log = SessionLog.create(tmp_path / "canonical", session_id="file-api", cwd=tmp_path)
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=DoneLLM(), memory_manager=process, tools=[], system_prompt="BASE", session_log=log),
+        options=SessionOptions(profile="acp", workspace_dir=tmp_path))
+    try:
+        session.agent.set_goal("Synthetic attachment analysis")
+        for index in range(2):
+            path = tmp_path / f"file-{index}.csv"
+            path.write_text("id,value\n1,37\n")
+            start = log.event_count
+            handle = await AgentService().start(RunRequest(
+                run_id=f"file-{index}", session_id="file-api", user_input=UserInput(({
+                    "type": "resource_link", "uri": path.as_uri(), "name": path.name,
+                    "mimeType": "text/csv"},))), session=session)
+            assert (await handle.result()).status.value == "completed"
+            await asyncio.gather(*tuple(session.memory_runtime.tasks))
+            sent = [body for operation, body in host.calls if operation == "qa/evidence"]
+            assert len(sent) == index + 1
+            qa = sent[-1]
+            assert qa["user"] == ""
+            assert qa["input_facts"]["files"] == [{"name": path.name, "size": path.stat().st_size,
+                                                    "mimeType": "text/csv"}]
+            assert qa["evidence"]["status"] == "captured"
+            view = next(v for v in qa["evidence"]["views"] if v["source_ref"]["event_type"] == "user/message")
+            assert json.loads(view["text"]) == {"content": ""}
+            assert view["source_ref"]["coverage"] == "full"
+            assert view["source_ref"]["event_seqs"][0] >= start
+            assert str(tmp_path) not in json.dumps(qa)
+    finally:
+        await session.aclose()
+        await process.aclose()
+        log.close()
 
 
 async def test_host_clipped_preload_stays_an_explicit_fragment_with_an_agent_recall_plan(host):

@@ -81,6 +81,13 @@ def _is_turn_user(event: dict[str, Any], variants: tuple[str, ...]) -> bool:
         return False
     data = event["data"]
     content = data.get("content")
+    facts = data.get("input_facts")
+    if isinstance(facts, dict):
+        from ..input_context import original_request
+
+        original = "\n".join(block["text"] for block in facts["blocks"] if block["type"] == "text")
+        return (data.get("source") == "user" and content == original
+                and original_request(original, facts["context"]) in variants)
     return data.get("source") == "user" and (
         content in variants
         or matches_connector_snapshot(content, variants, data.get("host_connector_status"))
