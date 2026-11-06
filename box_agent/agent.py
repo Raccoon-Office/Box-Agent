@@ -116,6 +116,8 @@ class AgentRunOptions:
     run_control: Any | None = None
     plugins: tuple[Any, ...] = ()
     initial_context_transition: InitialContextTransition | None = None
+    # Non-task turns leave capability gates and pending checkpoints untouched.
+    completion_checks_enabled: bool = True
 
 
 @dataclass
@@ -1391,6 +1393,7 @@ class Agent:
             tool_result_storage=self.tool_result_storage,
             session_log=self.session_log,
             session_turn=session_turn,
+            completion_checks_enabled=effective_options.completion_checks_enabled,
         )
         if effective_options.kernel_services is not None:
             run_arguments["kernel_services"] = effective_options.kernel_services

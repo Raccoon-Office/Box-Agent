@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -15,6 +16,7 @@ from box_agent.schema import FunctionCall, StreamEvent, ToolCall
 from tests.test_acp import DoneLLM, DummyConn
 from tests.acp_helpers import acp_params
 from tests.test_core import CountingEchoTool, PlanWriteStubTool
+from tests.test_validate_table_tool import FIELDS, setup_gate
 
 
 class HandoffLLM(DoneLLM):
@@ -354,6 +356,124 @@ async def test_handoff_cannot_rewrite_the_pending_plan(handoff_session, monkeypa
     execute.assert_not_awaited()
     assert state.pending_plan_approval == pending
     assert response.field_meta["cloudHandoff"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause_tool", ["plan_write", "request_user_input"])
+@pytest.mark.parametrize("outcome", ["success", "invalid_json", "cancelled", "error"])
+@pytest.mark.parametrize("resume", ["memory", "reload", "validate"])
+async def test_handoff_preserves_paused_table_checks_for_local_resume(
+    tmp_path, monkeypatch, pause_tool, outcome, resume,
+):
+    from box_agent.tools.request_user_input_tool import RequestUserInputTool
+    from box_agent.turn_continuation import TurnContinuationController
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", AsyncMock(return_value=None))
+    validation, _, path = await setup_gate(tmp_path)
+    llm = HandoffLLM(json.dumps({"instruction": "Continue the table task", "dependency_paths": [str(path)]}))
+    phase = "pause"
+    started = asyncio.Event()
+
+    async def generate(messages, tools=None, **kwargs):
+        nonlocal phase
+        if phase == "pause":
+            arguments = (
+                {"action": "set", "title": "Original table task"} if pause_tool == "plan_write"
+                else {"question": "Continue?", "missing_fields": ["decision"]}
+            )
+            yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
+                ToolCall(id="pause-original", type="function", function=FunctionCall(
+                    name=pause_tool, arguments=arguments,
+                )),
+            ])
+        elif phase == "cancelled":
+            started.set()
+            yield StreamEvent(type="text", delta=llm.output)
+            await asyncio.Event().wait()
+        elif phase == "error":
+            raise RuntimeError("handoff provider failed")
+        elif phase == "validate":
+            phase = "resume"
+            yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
+                ToolCall(id="validate-original", type="function", function=FunctionCall(
+                    name="validate_table", arguments={"path": str(path), "fields": FIELDS},
+                )),
+            ])
+        else:
+            yield StreamEvent(type="text", delta=llm.output)
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    monkeypatch.setattr(llm, "generate_stream", generate)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=4, workspace_dir=str(tmp_path), enable_memory=False,
+            enable_memory_extraction=False, goal_autopilot_enabled=False,
+        ),
+        tools=ToolsConfig(
+            enable_file_tools=False, enable_bash=False, enable_mcp=False,
+            enable_sub_agent=False, enable_skills=False,
+        ),
+    )
+    adapter = BoxACPAgent(
+        DummyConn(), config, llm, [validation, PlanWriteStubTool(), RequestUserInputTool()], "system",
+    )
+    try:
+        session_id = (await adapter.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
+        await adapter.prompt(session_id=session_id, prompt=[text_block(f"Process {path} completely")])
+        state = adapter._sessions[session_id]
+        paused_events = deepcopy([
+            event for event in state.agent.session_log.events if event["type"].startswith("completion.")
+        ])
+        assert paused_events[-1]["type"] == "completion.paused"
+        assert "validate_table" in paused_events[-1]["data"]["checks"]
+        validation = state.agent.tools["validate_table"]
+        pending_checks = deepcopy(validation._pending_completion_states[id(state.agent.messages)][1])
+        pending_plan = deepcopy(state.pending_plan_approval)
+
+        phase = outcome
+        if outcome == "invalid_json":
+            llm.output = "Not JSON"
+        if outcome == "cancelled":
+            task = asyncio.create_task(send(adapter, session_id))
+            await asyncio.wait_for(started.wait(), 10)
+            await adapter.cancel(session_id=session_id)
+            response = await asyncio.wait_for(task, 10)
+            assert response.stop_reason == "cancelled"
+        else:
+            response = await send(adapter, session_id, text=f"Summarize the task using {path}")
+        assert [
+            event for event in state.agent.session_log.events if event["type"].startswith("completion.")
+        ] == paused_events
+        assert validation._pending_completion_states[id(state.agent.messages)][1] == pending_checks
+        assert state.pending_plan_approval == pending_plan
+        assert response.field_meta["cloudHandoff"] is (outcome == "success")
+        if outcome == "invalid_json":
+            assert response.field_meta["errorCode"] == "invalid_cloud_handoff"
+
+        if resume != "memory":
+            await adapter.load_session(cwd=str(tmp_path), session_id=session_id, mcp_servers=[])
+        phase = "validate" if resume == "validate" else "resume"
+        llm.output = "Done"
+        response = await adapter.prompt(
+            session_id=session_id, prompt=[text_block("Continue the original task")], autoApprovePlan=True,
+        )
+        resumed_checks = [
+            event["data"] for event in adapter._sessions[session_id].agent.session_log.events
+            if event["type"] == "completion.check"
+        ]
+        if resume == "validate":
+            assert response.field_meta["ok"] is True
+            assert resumed_checks[-1]["passed"] is True
+        else:
+            assert response.field_meta["ok"] is False
+            assert response.field_meta["errorCode"] == "COMPLETION_GATE_UNSATISFIED"
+            assert any(
+                issue["code"] == "TABLE_VALIDATION_MISSING" and str(path) in issue["message"]
+                for check in resumed_checks for issue in check["issues"]
+            )
+    finally:
+        await adapter.aclose()
 
 
 @pytest.mark.asyncio

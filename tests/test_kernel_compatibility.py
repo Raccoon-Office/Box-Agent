@@ -187,6 +187,7 @@ LOOP_SIGNATURE = (
     ("session_turn", inspect.Parameter.KEYWORD_ONLY, None),
     ("kernel_services", inspect.Parameter.KEYWORD_ONLY, None),
     ("run_control", inspect.Parameter.KEYWORD_ONLY, None),
+    ("completion_checks_enabled", inspect.Parameter.KEYWORD_ONLY, True),
 )
 
 INVOKE_TOOL_SIGNATURE = (
@@ -331,6 +332,7 @@ def test_kernel_exports_agent_loop_implementation_entrypoints() -> None:
         "session_turn",
             "kernel_services",
             "run_control",
+            "completion_checks_enabled",
         )
     kernel_services = inspect.signature(kernel.run_agent_loop).parameters["_services"]
     assert kernel_services.kind is inspect.Parameter.KEYWORD_ONLY

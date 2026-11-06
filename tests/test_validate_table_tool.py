@@ -340,6 +340,83 @@ async def test_session_log_separates_completed_validation_data_quality_and_compl
         log.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("storage", ["memory", "log", "reopen"])
+async def test_inactive_completion_checks_preserve_receipts_and_ignore_new_inputs(tmp_path, monkeypatch, storage):
+    from unittest.mock import AsyncMock
+    from box_agent.session_log import SessionLog
+
+    tool, _, path = await setup_gate(tmp_path)
+    log = SessionLog.create(tmp_path / "logs", session_id="inactive", cwd=tmp_path) if storage != "memory" else None
+    messages = [Message(role="user", content=f"Process {path}")]
+    context = CompletionContext(tuple(messages), lambda: False, log, "original", messages)
+    try:
+        checks = await CompletionChecks.create({tool.name: tool}, context)
+        gate = checks.gates[tool.name]
+        assert (await tool.invoke(
+            {"path": str(path), "fields": FIELDS}, context=ToolInvocationContext(completion_gate=gate),
+        )).success
+        checks.repairs = 1
+        checks.suspend()
+        checkpoint = gate.snapshot()
+        if storage == "reopen":
+            log.close()
+            log = SessionLog.open(tmp_path / "logs", session_id="inactive", cwd=tmp_path)
+            tool = ValidateTableTool(str(tmp_path))
+        original_events = copy.deepcopy(log.events) if log is not None else None
+        other = tmp_path / "new.csv"
+        write_table(other, [row(3)])
+        messages.append(Message(role="user", content=f"Summarize {other}"))
+        context = CompletionContext(tuple(messages), lambda: False, log, "summary", messages)
+        factory = AsyncMock(wraps=tool.create_completion_gate)
+        restore = AsyncMock(wraps=tool.restore_completion_gate)
+        monkeypatch.setattr(tool, "create_completion_gate", factory)
+        monkeypatch.setattr(tool, "restore_completion_gate", restore)
+        inactive = await CompletionChecks.create({tool.name: tool}, context, enabled=False)
+        await inactive.include_inputs({tool.name: tool}, context)
+        assert await inactive.check() == []
+        inactive.suspend()
+        inactive.close()
+        factory.assert_not_awaited()
+        restore.assert_not_awaited()
+        if log is not None:
+            assert log.events == original_events
+
+        # Resuming the actual task retains its receipts and repair budget.
+        messages.append(Message(role="user", content="Continue the original task"))
+        resumed = await CompletionChecks.create({tool.name: tool}, CompletionContext(
+            tuple(messages), lambda: False, log, "resume", messages,
+        ))
+        assert resumed.repairs == 1
+        assert resumed.gates[tool.name].snapshot() == checkpoint
+        assert await resumed.check() == []
+    finally:
+        if log is not None:
+            log.close()
+
+
+@pytest.mark.asyncio
+async def test_zero_tool_allowance_keeps_completion_checks_enabled(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from box_agent.agent import Agent
+    from box_agent.turn_continuation import TurnContinuationController
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", AsyncMock(return_value=None))
+    tool, _, path = await setup_gate(tmp_path)
+    agent = Agent(
+        llm_client=ScriptedLLM([LLMResponse(content="Done", finish_reason="stop")] * 3),
+        system_prompt="system", tools=[tool], workspace_dir=str(tmp_path),
+        deferred_mcp_loading_enabled=False, max_steps=3,
+    )
+    agent.add_user_message(f"Process {path}")
+    events = [event async for event in agent.run_events(
+        options=replace(agent.default_run_options(), max_tool_calls=0),
+    )]
+    assert next(e for e in events if isinstance(e, DoneEvent)).stop_reason == StopReason.ERROR
+    assert any(isinstance(e, ErrorEvent) and "TABLE_VALIDATION_MISSING" in e.message for e in events)
+
+
 class ScriptedLLM:
     model = "test-model"
     max_output_tokens = 1024

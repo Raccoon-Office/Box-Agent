@@ -39,10 +39,11 @@ class CompletionCheck(Protocol):
 
 
 class CompletionChecks:
-    """Per-task gates; only trusted checkpoints may survive an interactive pause."""
+    """Per-task gates; inactive runs neither participate in nor close checkpoints."""
 
-    def __init__(self, context: CompletionContext):
+    def __init__(self, context: CompletionContext, *, enabled: bool = True):
         self.context = context
+        self._enabled = enabled
         self.gates: dict[str, CompletionCheck] = {}
         self._tool_gates: dict[int, CompletionCheck] = {}
         self.failures: list[CompletionIssue] = []
@@ -66,8 +67,12 @@ class CompletionChecks:
         return None
 
     @classmethod
-    async def create(cls, tools: Mapping, context: CompletionContext) -> CompletionChecks:
-        checks = cls(context)
+    async def create(
+        cls, tools: Mapping, context: CompletionContext, *, enabled: bool = True,
+    ) -> CompletionChecks:
+        checks = cls(context, enabled=enabled)
+        if not enabled:
+            return checks
         checks._tools = tools
         pending = cls._pending_state(tools, context)
         if pending is not None and pending.get("version") != 1:
@@ -115,6 +120,8 @@ class CompletionChecks:
 
     def close(self) -> None:
         """A terminal run ends the pending task, without leaking it into a new one."""
+        if not self._enabled:
+            return
         if self._pending_state(self._tools, self.context) is not None:
             self.context.record("completion.closed", {})
         for tool in self._tools.values():
@@ -125,6 +132,8 @@ class CompletionChecks:
 
     async def include_inputs(self, tools: Mapping, context: CompletionContext) -> None:
         """Extend capability gates after a user supplement, preserving receipts."""
+        if not self._enabled:
+            return
         self._tools = tools
         seen: set[int] = set()
         for registered_name, tool in tools.items():

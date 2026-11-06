@@ -3373,6 +3373,7 @@ class BoxACPAgent:
                     pending_summary_llm=pending_summary_llm,
                     initial_context_transition=initial_context_transition,
                     max_tool_calls=0 if cloud_handoff else None,
+                    completion_checks_enabled=not cloud_handoff,
                 )
                 while (
                     auto_enabled
@@ -4639,6 +4640,7 @@ class BoxACPAgent:
         pending_summary_llm: SessionBoundLLM | None = None,
         initial_context_transition: InitialContextTransition | None = None,
         max_tool_calls: int | None = None,
+        completion_checks_enabled: bool = True,
     ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
         message_display = message_display or MessageDisplay()
@@ -5135,6 +5137,7 @@ class BoxACPAgent:
                 fingerprint,
             ),
             current_turn_text=plan_start_text,
+            completion_checks_enabled=completion_checks_enabled,
         )
         if max_tool_calls is not None:
             # A summary-only request must reject model tool calls at execution,
