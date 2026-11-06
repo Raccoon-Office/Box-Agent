@@ -75,7 +75,7 @@ replace 的 start/end 是**当前 Surface 中存在的消息节点 seq，首尾�
 | `step/end` | turn:int,step:int | 步骤完成或恢复补闭；无最终正文。 |
 | `user/message` | data 本身为 Message；额外 source、images?、surfaceDerived? | 有效用户/运行时消息；surfaceOp 必须明确。input_facts 承载原始输入及附件关联，不能把 input/context 当其替代。 |
 | `input/contract` | schemaVersion:int，当前1 | 首次保存需要新输入合同的消息前写入；不可忽略，旧版本遇到未知必需类型应拒绝。 |
-| `input/adopted` | id:string,fingerprint:string,files:FileFact[] | 请求提交回调复核版本后写入，表示该输入已被请求采用；不证明模型有效响应或工具已读取。 |
+| `input/adopted` | id:string,fingerprint:string,files:FileFact[] | 请求提交回调复核版本后写入，表示该输入已被请求采用；不证明模型有效响应或工具已读取。 重启后的响应完成判定及物理事件扫描限制见4.2.1。 |
 | `assistant/chunk` | turn:int,step:int或null,kind:text/thinking,content:string | 流式审计片段，不加入 replay().messages，也不能与完整 assistant/message 再次拼接。 |
 | `assistant/message` | turn:int,step:int或null,message:Message; modelRound?,contextUsage?,surfaceDerived? | 完整助手消息/工具调用声明；参与 Surface 重建。modelRound 表示已接受模型响应轮次。 |
 | `tool/call` | turn:int,step:int,callId:string,name:string,arguments:object | 持久派发事实；串行立即 flush，批量并行先全部记录并 flush 再启动。不证明副作用完成。 |
@@ -279,7 +279,7 @@ ACP 接受轮次前预留业务身份；旧记录可无 input_fingerprint。绑�
 
 ### 3.9 input/adopted
 
-请求提交回调复核版本后写入，表示该输入已被请求采用；不证明模型有效响应或工具已读取。
+请求提交回调复核版本后写入，表示该输入已被请求采用；不证明模型有效响应或工具已读取。 重启后的响应完成判定及物理事件扫描限制见4.2.1。
 
 字段：id:string,fingerprint:string,files:FileFact[]。
 
@@ -765,12 +765,44 @@ prepare_resume 修复未闭合生命周期后写入的恢复边界；不是关�
 | content | string 或内容块 object[]；新结构化用户消息保存原文字串，有序附件另在 input_facts |
 | source | user/runtime；模型对象默认排除序列化，user/message 写入时显式补回 |
 | thinking | 可选 string，助手思考内容 |
-| tool_calls | 可选数组，每项 `{id,type:"function",function:{name,arguments}}`；arguments 为工具调用原始字符串 |
+| tool_calls | 可选数组，每项 `{id,type:"function",function:{name,arguments}}`；arguments 为已解析的参数对象（dict[str, Any]），不能传 JSON 字符串 |
 | tool_call_id / name | 可选 string，tool 回复的调用ID/工具名 |
 | usage | 可选 `{prompt_tokens,completion_tokens,total_tokens}`；内部输入/缓存字段不直接序列化 |
 | request_only_input_tokens | 非负 int，默认0；恢复后估算上下文所需的请求独有输入调整 |
 | host_connector_status | 可选 string，可信宿主状态快照，不从用户XML猜测 |
 | input_facts | 可选 object；旧消息可没有，见4.2 |
+
+带工具调用的完整消息记录如下。function.arguments 与 tool/call.data.arguments 都是对象；把它写成字符串 `"{\"path\":\"sales.csv\"}"` 会使 Message 校验失败。该助手消息声明调用，实际派发和结果仍需各自记录。
+
+```json
+{
+  "type": "assistant/message",
+  "seq": 3,
+  "time": 1793930400003,
+  "data": {
+    "turn": 1,
+    "step": 1,
+    "message": {
+      "role": "assistant",
+      "content": "先读取报表。",
+      "tool_calls": [
+        {
+          "id": "call-1",
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "arguments": {
+              "path": "sales.csv"
+            }
+          }
+        }
+      ],
+      "request_only_input_tokens": 0
+    }
+  },
+  "surfaceOp": "append"
+}
+```
 
 `trace_redact_content` 不落盘。事件级 `images`、`modelRound`、`contextUsage`、`surfaceDerived` 不属于 Message 正文字段：images 关联用户/工具图片；modelRound 与已接受助手响应同写；surfaceDerived:true 标记替换时保留的原消息副本，展示历史应排除。
 
@@ -808,9 +840,21 @@ prepare_resume 修复未闭合生命周期后写入的恢复边界；不是关�
 ```
 
 
-普通文件会流式计算摘要，不形成文件内容快照。`input/adopted` 引用这份事实；有效响应前复核版本，之后工具仍看到共享工作区的当前文件。同一文件可被不同会话修改，但附件与消息的关联仍按会话保存。
+普通文件会流式计算摘要，不形成文件内容快照。`input/adopted` 引用这份事实；正常链路在有效响应前复核版本；重启后的完成判定存在4.2.1所述物理事件扫描限制。之后工具仍看到共享工作区的当前文件。同一文件可被不同会话修改，但附件与消息的关联仍按会话保存。
 
 input/contract 的写入条件：input_facts 有非空 context/policy/kind，或包含非 text 块。仅纯文字、无附加上下文的记录可以没有该特性标记；不能仅凭 schemaVersion=1 推断所有旧运行包都能读新日志。
+
+### 4.2.1 重新配置运行时的采用状态恢复及限制
+
+`box_agent/context_input.py` 的 `DefaultContextEngine.configure_run()` 每次重置 `_input_adoptions` 和 `_input_settled`，随后按顺序扫描 `session_store.events`：
+
+1. 遇到 input/adopted，将 data.id 加入 `_input_adoptions`。
+2. 遇到非 surfaceDerived 的 assistant/message，将此前所有已采用 ID 加入 `_input_settled`。不要求它是最终回答；带 tool_calls 的有效助手消息也符合条件。该判断没有逐输入请求关联，也不在这里核对响应的 modelRound。
+3. 后续准备请求时，只有仍在输入记录中且 ID 不属于 `_input_settled` 的输入作为 pending，继续复核文件版本；已 settled 的输入跳过这项复核。采用记录后没有符合条件的助手消息时，不会仅因 adopted 就认定已经响应。
+
+**当前限制：此处扫描全部物理 events，而非 `_active_events()` 的修订后时间线。** history/revise 已撤销的 input/adopted 和 assistant/message 仍可能进入这两个集合。例如 seq 0 采用输入 i-1，seq 1 写助手响应，seq 2 的 history/revise 恢复到 -1；有效时间线已不含前两条，但 configure_run 仍将 i-1 视为 adopted 和 settled。若待处理输入使用同一 ID，版本复核可能被跳过。不能把 replay 的有效历史隔离规则推断到这里。
+
+这描述的是 9f0db474 的实际行为，不是预期合同。是否改为扫描有效事件、如何处理现有采用记录及恢复兼容性，需要另行代码修复评估；本文不声明该问题已修复。
 
 ### 4.3 图片引用与交付状态
 
@@ -911,11 +955,18 @@ selected 的每项按存在性选择 imageId/contentRef/sha256/media_type/width/
 
 ### 7.1 编辑与压缩
 
-history/revise 的 restore_through_seq 必须是当前有效时间线中的旧 seq，或 -1；小于当前修订事件 seq。revision_id/previous_revision_id/turn_id 均为非空字符串。被撤销的未来仍在文件里，但不再进入 replay 的目标、计划、待办、技能或图片状态。
+history/revise 的 restore_through_seq 必须是当前有效时间线中的旧 seq，或 -1；小于当前修订事件 seq。revision_id/previous_revision_id/turn_id 均为非空字符串。被撤销的未来仍在文件里，但不再进入 replay 的目标、计划、待办、技能或图片状态。这不涵盖 configure_run 的输入采用状态扫描，后者的当前限制见4.2.1。
 
 compaction/summary 记录摘要，随后 replace_surface 追加 replacement 消息及 surfaceOp。history_messages 忽略 summary→end 区间的消息和 surfaceDerived 副本；replay 则按 surfaceOp 重建压缩后的上下文。不要用“所有 message 行直接相加”同时实现这两种视图。
 
-### 7.2 打开、尾行与损坏
+### 7.2 打开、独占锁、尾行与损坏
+
+`SessionLog.create()`、`open()`、`open_with_projection()` 均获取会话目录 `.writer.lock` 的**非阻塞独占锁**；`open_or_create()` 也经这些入口获取锁。该基线的名称是 open_with_projection，不是 open_projected。open 即使仅用于检查，也以 r+b 打开日志，并可能截断残尾，不是旁路只读 API。
+
+锁在读取/创建日志前取得，成功后由 SessionLog 对象持有至 close()；打开失败的异常路径释放已获取的锁，进程终止后操作系统释放锁。close() 关闭日志及锁句柄，但不删除 .writer.lock；锁文件存在不代表当前有人持锁。Windows 使用 msvcrt 的非阻塞字节锁，其他系统使用 flock 的 LOCK_EX | LOCK_NB。
+
+已有持有者时抛 SessionLogInUseError。**占用不是日志损坏，recover=True 也不能据此重建或替换日志**。调试程序不能用上述 API 打开正在运行的会话作旁路读取，更不能删除锁文件强开。需要一致的恢复视图时，先由持有者 flush 并关闭后再打开；直接读取运行中文件只能作为可能滞后的诊断快照，不能据此认定尾部异常或写回修复。
+
 
 读取器验证头部身份/工作区/版本、逐条 seq 连续、非空 type、data 对象。未知类型且 ignorable 不为 true 时抛 SessionLogIncompatible；未知版本也拒绝。不会为每种 event data 执行完整 Schema 校验，消息及修订等在投影时另行校验。
 
@@ -1644,6 +1695,105 @@ def inspect_image_request(params: dict[str, Any], max_body_bytes: int | None) ->
     }
 ```
 
+
+### 输入采用恢复与锁的精确实现
+
+#### configure_run
+
+[box_agent/context_input.py:81](https://github.com/Raccoon-Office/Box-Agent/blob/9f0db4746fd9fba08adbe5580811bab946b6f069/box_agent/context_input.py#L81)
+
+```python
+def configure_run(self, *, skill_engine: Any = None, session_store: Any = None) -> None:
+    self._session_store = session_store
+    self._input_adoptions = set()
+    self._input_settled = set()
+    for event in getattr(session_store, "events", ()):
+        if event["type"] == "input/adopted":
+            self._input_adoptions.add(event["data"]["id"])
+        elif event["type"] == "assistant/message" and not event["data"].get("surfaceDerived"):
+            self._input_settled.update(self._input_adoptions)
+    if self.image_context is None:
+        from .image_context import ImageContext
+        self.image_context = ImageContext(session_store)
+    elif self.image_context.session_log is not session_store:
+        raise ValueError("Image context and final SessionStore must belong to the same session")
+    self.references = (SkillReferenceContext(skill_engine, session_store=session_store)
+                       if skill_engine is not None else None)
+    self.prepared_tools = None
+    self._history = []
+```
+
+#### _acquire_writer_lock
+
+[box_agent/session_log.py:250](https://github.com/Raccoon-Office/Box-Agent/blob/9f0db4746fd9fba08adbe5580811bab946b6f069/box_agent/session_log.py#L250)
+
+```python
+def _acquire_writer_lock(path: Path) -> BinaryIO:
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+            raise SessionLogInUseError(
+                "session already has an active writer"
+            ) from exc
+        raise
+    return handle
+```
+
+#### _release_writer_lock
+
+[box_agent/session_log.py:276](https://github.com/Raccoon-Office/Box-Agent/blob/9f0db4746fd9fba08adbe5580811bab946b6f069/box_agent/session_log.py#L276)
+
+```python
+def _release_writer_lock(handle: BinaryIO) -> None:
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+```
+
+#### close
+
+[box_agent/session_log.py:1373](https://github.com/Raccoon-Office/Box-Agent/blob/9f0db4746fd9fba08adbe5580811bab946b6f069/box_agent/session_log.py#L1373)
+
+```python
+def close(self) -> None:
+    if self._closed:
+        return
+    self._pending_message_metadata.clear()
+    try:
+        self._handle.close()
+    finally:
+        try:
+            _release_writer_lock(self._lock_handle)
+        finally:
+            self._closed = True
+```
+
 ## 10. 本文验证范围
 
-固定提交的实际 Message Schema 和 SessionLog 实现用于内存加载验证：26种事件示例逐一写入临时日志、flush、重新打开并 replay；完整顺序示例恢复两条消息；recover=False 的残尾截断、未知 ignorable 扩展接受及未知必需事件拒绝均通过。28个 JSON 示例及完整 JSONL 示例语法通过，本地文档链接存在。测试使用临时目录，不读写用户真实会话；不等同模型调用、工具副作用或客户端端到端验证。
+固定提交的实际 Message Schema 和 SessionLog 实现用于内存加载验证：26种事件示例逐一写入临时日志、flush、重新打开并 replay；完整顺序示例恢复两条消息；recover=False 的残尾截断、未知 ignorable 扩展接受及未知必需事件拒绝均通过。29个 JSON 示例及完整 JSONL 示例语法通过，本地文档链接存在。测试使用临时目录，不读写用户真实会话；不等同模型调用、工具副作用或客户端端到端验证。
+
+针对本次勘误，另用固定源码验证：带 tool_calls 的完整消息接受对象 arguments、拒绝字符串 arguments，并可写入后重新打开及回放；持锁期间 create/open/open_with_projection 均抛 SessionLogInUseError，recover=True 不改原始字节，close 后可重新打开；直接执行固定 configure_run 函数，确认仅 adopted 或 surfaceDerived 响应不 settled，普通工具调用助手消息会 settled，已被 history/revise 撤销的物理记录仍影响集合。后一项验证的是当前限制，未修改实现。
