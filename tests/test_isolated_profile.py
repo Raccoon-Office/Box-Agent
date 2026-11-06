@@ -73,6 +73,7 @@ from types import SimpleNamespace
 from box_agent.acp import BoxACPAgent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
 from tests.test_acp import DummyConn, DoneLLM
+from tests.acp_helpers import acp_params
 
 async def probe():
     config = Config(llm=LLMConfig(api_key="fixture-key"),
@@ -80,12 +81,12 @@ async def probe():
         tools=ToolsConfig(enable_mcp=False, enable_skills=False, enable_sub_agent=False))
     request = SimpleNamespace(cwd=str(root / "workspace"), field_meta={"session_id": "isolated-fixture"})
     first = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await first.newSession(request)
-    response = await first.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "fixture"}], field_meta={}))
+    session = await first.new_session(**acp_params(request))
+    response = await first.prompt(session_id=session.session_id, prompt=[{"type": "text", "text": "fixture"}])
     assert response.field_meta["ok"] is True
     first._sessions[session.sessionId].agent.session_log.close()
     second = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    restored = await second.newSession(request)
+    restored = await second.new_session(**acp_params(request))
     state = second._sessions[restored.sessionId]
     assert [message.content for message in state.agent.messages][-2:] == [
         "fixture\\n\\n<connector-status>\\nnone: selected\\n</connector-status>", "done",
@@ -125,27 +126,27 @@ async def tools(*args, **kwargs):
     calls.append("no-background-tools")
     return result
 acp.initialize_base_tools = tools
-async def streams(**kwargs): return object(), SimpleNamespace(transport=SimpleNamespace(_is_closing=False))
+initialized, shutdown = [], []
+class Writer:
+    transport = SimpleNamespace(_is_closing=False)
+    def write(self, data):
+        import json
+        response = json.loads(data)["result"]
+        initialized.append(response["protocolVersion"])
+        assert response["agentCapabilities"]["loadSession"] is False
+        shutdown[0]()
+    async def drain(self): pass
+async def streams(**kwargs):
+    reader = asyncio.StreamReader()
+    reader.feed_data(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}\\n')
+    return reader, Writer()
 acp.stdio_streams_largebuf = streams
 
 async def probe():
     loop = asyncio.get_running_loop()
     socket.socket.connect = forbidden
-    shutdown = []
     loop.add_signal_handler = lambda signal, callback: shutdown.append(callback)
     loop.remove_signal_handler = lambda signal: True
-    initialized = []
-    def connected(factory, writer, reader, *, state_store, sender_factory):
-        assert isinstance(state_store, acp.RequestStateStore)
-        assert sender_factory.__self__ is state_store
-        agent = factory(DummyConn())
-        async def handshake():
-            response = await agent.initialize(SimpleNamespace(field_meta={}))
-            initialized.append(response.protocolVersion)
-            assert response.agentCapabilities.loadSession is False
-            shutdown[0]()
-        asyncio.create_task(handshake())
-    acp.AgentSideConnection = connected
     await acp.run_acp_server(config)
     assert initialized == [1]
 asyncio.run(probe())

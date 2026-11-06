@@ -1,5 +1,7 @@
 """Session-owned configuration and state across the public execution path."""
 
+from tests.acp_helpers import acp_params
+
 import json
 import asyncio
 from pathlib import Path
@@ -231,9 +233,9 @@ async def test_acp_creates_configured_session_and_runs_through_it(tmp_path, monk
     loader = SkillLoader(method.parent.parent)
     loader.discover_skills()
     adapter = acp_module.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system", skill_loader=loader)
-    response = await adapter.newSession(SimpleNamespace(
+    response = await adapter.new_session(**acp_params(SimpleNamespace(
         cwd=None, field_meta={"session_mode": "general"},
-    ))
+    )))
     session = adapter._sessions[response.sessionId]
     # Historical compatibility views cannot select methods or raise quotas.
     session.preloaded_skill_names.append("research-synthesis")
@@ -249,10 +251,10 @@ async def test_acp_creates_configured_session_and_runs_through_it(tmp_path, monk
     # A new adapter default must not replace an existing session's config.
     adapter._config = config.model_copy(deep=True)
     adapter._config.tool_limits.web_search.deep_research_total_calls = 1
-    result = await adapter.prompt(SimpleNamespace(
+    result = await adapter.prompt(**acp_params(SimpleNamespace(
         sessionId=response.sessionId, prompt=[{"text": "hello"}],
         field_meta={"selected_skill_names": ["research-synthesis"]} if selected else {},
-    ))
+    )))
 
     assert isinstance(session, AgentSession)
     assert session.config is config
@@ -269,16 +271,16 @@ async def test_model_switch_keeps_explicit_session_budget_after_default_changes(
     config.llm.context_window = 100_000
     config.llm.max_output_tokens = 20_000
     adapter = BoxACPAgent(_DummyConn(), config, _DummyLLM("main"), [], "system")
-    response = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path)))
+    response = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path))))
     session = adapter._sessions[response.sessionId]
     adapter._config = config.model_copy(deep=True)
     adapter._config.llm.context_window = 200_000
 
-    result = await adapter.prompt(SimpleNamespace(
+    result = await adapter.prompt(**acp_params(SimpleNamespace(
         sessionId=response.sessionId, prompt=[{"text": "hello"}],
         field_meta={"llm_binding": {"source": "builtin", "model": "another-model",
                                     "contextWindow": 100_000, "maxTokens": 20_000}},
-    ))
+    )))
 
     assert result.stopReason == "end_turn"
     assert session.agent.llm.model == "another-model"
@@ -329,9 +331,9 @@ async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(t
     main.max_output_tokens = 4_000
     main.capabilities = {"image_input": True}
     adapter = BoxACPAgent(_DummyConn(), config, main, [], "system")
-    response = await adapter.newSession(SimpleNamespace(
+    response = await adapter.new_session(**acp_params(SimpleNamespace(
         cwd=str(tmp_path), field_meta={"session_id": "context-transition-test"},
-    ))
+    )))
     session = adapter._sessions[response.sessionId]
     original_limit = session.agent.token_limit
     old_output = "Old detail. " * 9_000
@@ -342,11 +344,11 @@ async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(t
     prompt = [{"type": "text", "text": "Keep this pending message."}]
     if case == "recheck_rejects":
         prompt.append({"type": "image", "mimeType": "image/png", "data": image_block()["data"]})
-    result = await adapter.prompt(SimpleNamespace(
+    result = await adapter.prompt(**acp_params(SimpleNamespace(
         sessionId=response.sessionId, prompt=prompt,
         field_meta={"llm_binding": {"source": "builtin", "model": "small",
                                     "contextWindow": 48_000, "maxTokens": 1_000}},
-    ))
+    )))
 
     assert prepared and all(model == "model-main" for model, _ in prepared)
     assert any("Keep this pending message." in str(content) for _, contents in prepared for content in contents)
@@ -373,9 +375,9 @@ async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(t
         assert any(str(msg.content).startswith("Keep this pending message.") for msg in restored.messages)
         assert len(restored.images) == 1 and restored.images[0]["active"]
         assert session.agent.image_context.images[0]["active"]
-        retry = await adapter.prompt(SimpleNamespace(
+        retry = await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=response.sessionId, prompt=[{"text": "Continue the saved request."}],
-        ))
+        )))
         assert retry.field_meta["ok"] is True
         _, _, model, contents = next(call for call in calls if not call[1])
         assert model == "model-main"
@@ -491,22 +493,22 @@ async def test_acp_closes_session_stream_before_returning_prompt(tmp_path):
     adapter = BoxACPAgent(
         _DummyConn(), session_config(tmp_path), _DummyLLM("main"), [], "system",
     )
-    response = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path)))
+    response = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path))))
     state = adapter._sessions[response.sessionId]
-    first = await adapter.prompt(SimpleNamespace(
+    first = await adapter.prompt(**acp_params(SimpleNamespace(
         sessionId=response.sessionId, prompt=[{"text": "first"}],
-    ))
+    )))
     assert first.stopReason == "end_turn"
     # Finalizers must not reactivate a prompt after ACP reports completion.
     for _ in range(3):
         await asyncio.sleep(0)
     assert state.turn_active is False
-    assert await adapter.extMethod("inject", {
+    assert await adapter.ext_method("inject", {
         "sessionId": response.sessionId, "text": "too late", "injectionId": "late",
     }) == {"error": "no_active_turn"}
-    second = await adapter.prompt(SimpleNamespace(
+    second = await adapter.prompt(**acp_params(SimpleNamespace(
         sessionId=response.sessionId, prompt=[{"text": "second"}],
         field_meta={"llm_binding": {"source": "builtin", "model": "next-model"}},
-    ))
+    )))
     assert second.stopReason == "end_turn"
     assert state.agent.llm.model == "next-model"

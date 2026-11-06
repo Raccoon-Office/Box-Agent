@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
+from hashlib import sha256
+import json
 from typing import Any
 from uuid import uuid4
 
 from .events import InjectedMessageEvent
 from .loop_guards import format_injected_message, format_runtime_context_update
 from .schema import Message
+from .input_context import project_input_context
 
 
 class InjectionKind(Enum):
@@ -56,6 +60,7 @@ class MessageInjection:
     injection_id: str | None = None
     user_visible: bool | None = None
     source: str | None = None
+    input_context: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         expected = "user" if self.kind is InjectionKind.USER_SUPPLEMENT else "runtime"
@@ -65,7 +70,7 @@ class MessageInjection:
 
     def apply(self, messages: list[Message]) -> InjectedMessageEvent:
         """Append the model message and return its matching host event."""
-        formatted = _PROMPT_FORMATTERS[self.kind](self.content)
+        formatted = _PROMPT_FORMATTERS[self.kind](project_input_context(self.content, self.input_context or {}))
         from_user = self.kind is InjectionKind.USER_SUPPLEMENT
         messages.append(Message(
             role="user", source=self.source, content=formatted,
@@ -82,10 +87,11 @@ class MessageInjection:
 def parse_queued_injection(item: object) -> MessageInjection | None:
     """Accept the existing string/dict queue interface with its original defaults."""
     if isinstance(item, MessageInjection):
-        return item if item.content else None
+        return item if item.content or (item.input_context or {}).get("files") else None
     kind = InjectionKind.USER_SUPPLEMENT
     injection_id = None
     user_visible = True
+    input_context = None
     if isinstance(item, dict):
         content = str(item.get("content") or "")
         if isinstance(item.get("id"), str):
@@ -94,11 +100,12 @@ def parse_queued_injection(item: object) -> MessageInjection | None:
             user_visible = item["user_visible"]
         if item.get("source") == "runtime":
             kind = InjectionKind.RUNTIME_STATE
+        input_context = item.get("input_context")
     else:
         content = str(item)
-    if not content:
+    if not content and not (input_context or {}).get("files"):
         return None
-    return MessageInjection(kind, content, injection_id, user_visible)
+    return MessageInjection(kind, content, injection_id, user_visible, input_context=input_context)
 
 
 class InjectionStatus(Enum):
@@ -120,6 +127,7 @@ class InjectionManager(asyncio.Queue[Any]):
         super().__init__()
         self.run_id = str(uuid4())
         self._statuses: dict[str, InjectionStatus] = {}
+        self._inputs: dict[str, str] = {}
         self._run_finished = False
 
     def status(self, injection_id: str) -> InjectionStatus | None:
@@ -135,13 +143,20 @@ class InjectionManager(asyncio.Queue[Any]):
         if self._run_finished:
             self.begin_run()
         identifier = injection.injection_id
+        fingerprint = sha256(json.dumps([
+            injection.kind.value, injection.content, injection.user_visible,
+            injection.source, injection.input_context,
+        ], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         if identifier is not None and self.status(identifier) in {
             InjectionStatus.PENDING, InjectionStatus.TAKEN, InjectionStatus.INJECTED,
         }:
+            if fingerprint != self._inputs[identifier]:
+                raise ValueError("INJECTION_IDEMPOTENCY_CONFLICT")
             return False
-        super().put_nowait(dict(item) if isinstance(item, dict) else item)
+        super().put_nowait(deepcopy(item))
         if identifier is not None:
             self._statuses[identifier] = InjectionStatus.PENDING
+            self._inputs[identifier] = fingerprint
         return True
 
     def put_nowait(self, item: Any) -> None:
@@ -193,6 +208,7 @@ class InjectionManager(asyncio.Queue[Any]):
             identifier: status for identifier, status in self._statuses.items()
             if status is InjectionStatus.PENDING
         }
+        self._inputs = {identifier: self._inputs[identifier] for identifier in self._statuses}
         self.run_id = str(uuid4())
         self._run_finished = False
         return discarded

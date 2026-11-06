@@ -1,5 +1,8 @@
 """Slow cleanup checks must not starve other sessions or ACP updates."""
 
+from tests.acp_helpers import acp_params
+from acp.schema import RequestPermissionRequest
+
 import asyncio
 import threading
 import shlex
@@ -36,7 +39,8 @@ async def test_slow_cleanup_check_keeps_other_session_execution_and_updates_resp
 
     monkeypatch.setattr(references, "retained_chat_file_in", slow_scan)
     class CleanupConn(DummyConn):
-        async def requestPermission(self, request):
+        async def request_permission(self, session_id, tool_call, options, **meta):
+            request = RequestPermissionRequest(session_id=session_id, tool_call=tool_call, options=options, field_meta=meta or None)
             return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", optionId="approve"))
 
     conn = CleanupConn()
@@ -55,22 +59,22 @@ async def test_slow_cleanup_check_keeps_other_session_execution_and_updates_resp
         agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False, enable_memory_extraction=False, memory_maintainer_enabled=False),
         tools=ToolsConfig(enable_sub_agent=False, allow_full_access=True),
     ), CleanupLLM(), [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
-    old_session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    old_session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     (tmp_path / "cache").mkdir()
     tool = BashTool(workspace_dir=str(tmp_path), bypass_dangerous_command_approval=True)
     command = {"command": command_text}
     cleanup = asyncio.create_task(
-        tool.execute(**command) if direct_bash else agent.prompt(SimpleNamespace(
+        tool.execute(**command) if direct_bash else agent.prompt(**acp_params(SimpleNamespace(
             sessionId=old_session.sessionId, prompt=[{"text": "cleanup cache"}],
-        ))
+        )))
     )
     try:
         assert await asyncio.to_thread(entered.wait, 1)
         await asyncio.wait_for(agent._send(session.sessionId, update_agent_message(text_block("still responsive"))), 0.5)
-        response = await asyncio.wait_for(agent.prompt(SimpleNamespace(
+        response = await asyncio.wait_for(agent.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "hello"}],
-        )), 1)
+        ))), 1)
         assert response.stopReason == "end_turn"
         assert not cleanup.done()
         assert any(getattr(item.update, "sessionUpdate", None) == "agent_message_chunk" for item in conn.updates)

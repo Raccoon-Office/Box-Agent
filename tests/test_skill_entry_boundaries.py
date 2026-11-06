@@ -1,5 +1,7 @@
 """Public host regressions for source binding, restoration and paging admission."""
 
+from tests.acp_helpers import acp_params
+
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -122,7 +124,7 @@ async def test_acp_without_loader_continues_without_rewriting_historical_skill_f
     monkeypatch.setattr(acp_module, "state_path", lambda name: tmp_path / name)
 
     class Conn:
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
             pass
 
     provider = CapturingProvider()
@@ -132,13 +134,13 @@ async def test_acp_without_loader_continues_without_rewriting_historical_skill_f
     adapter = BoxACPAgent(Conn(), config, provider, [], "BASE", skill_loader=None)
     try:
         for _ in range(2):
-            response = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
-                "session_id": "restore-skill", "session_mode": "general"}))
+            response = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
+                "session_id": "restore-skill", "session_mode": "general"})))
             state = adapter._sessions[response.sessionId]
             assert state.agent.skill_runtime.active_names == ()
-            await adapter.prompt(SimpleNamespace(
+            await adapter.prompt(**acp_params(SimpleNamespace(
                 sessionId=response.sessionId, prompt=[{"text": "continue"}], field_meta={},
-            ))
+            )))
             assert provider.requests
             assert "METHOD_BODY" not in str(provider.requests)
             records = [event for event in state.agent.session_log.events if event["type"] == "skill/change"]
@@ -159,7 +161,7 @@ async def test_acp_restore_borrows_real_tool_loader_when_separate_loader_is_omit
     monkeypatch.setattr(acp_module, "state_path", lambda name: tmp_path / name)
 
     class Conn:
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
             pass
 
     provider = CapturingProvider()
@@ -167,10 +169,10 @@ async def test_acp_restore_borrows_real_tool_loader_when_separate_loader_is_omit
     config = Config(llm=LLMConfig(api_key="offline"), agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
                     tools=ToolsConfig(enable_todo=False, enable_plan=False, enable_sub_agent=False, enable_mcp=False))
     adapter = BoxACPAgent(Conn(), config, provider, [GetSkillTool(loader)], "BASE", skill_loader=None)
-    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
-        "session_id": "restore-skill", "session_mode": "general"}))
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        "session_id": "restore-skill", "session_mode": "general"})))
     try:
-        await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}], field_meta={}))
+        await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}], field_meta={})))
         assert adapter._sessions[session.sessionId].agent.skill_runtime.loader is loader
         assert len(provider.requests) == 1
         assert "METHOD_BODY" in str(provider.requests[0])

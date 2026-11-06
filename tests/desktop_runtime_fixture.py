@@ -1,8 +1,12 @@
 """Opt-in deterministic ACP server for a development desktop, never a release entry."""
 
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
+
 import asyncio
 from contextvars import ContextVar
 import json
+from importlib.metadata import version
 import os
 from pathlib import Path
 import re
@@ -95,6 +99,43 @@ class FixtureLLM:
         users = "\n".join(str(message.content) for message in messages if message.role == "user")
         has_results = any(message.role == "tool" for message in messages)
         mode = scenario.get()
+        if mode == "file_inputs":
+            record_lifecycle("file_model_input", messages=[message.model_dump(mode="json") for message in messages])
+            files = {}
+            for line in users.splitlines():
+                if line.startswith('{"files":'):
+                    files.update({item["path"]: item for item in json.loads(line)["files"]})
+            completed = {message.tool_call_id for message in messages if message.role == "tool"}
+            read_paths = {
+                call.function.arguments["path"]
+                for message in messages for call in (message.tool_calls or [])
+                if call.function.name == "read_file" and call.id in completed
+            }
+            pending = [path for path in files if path not in read_paths]
+            if pending:
+                if not read_paths:
+                    yield StreamEvent(type="text", delta="FILES_READY")
+                    await asyncio.sleep(0.5)
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                    call("read_file", {"path": path}, len(read_paths) + index)
+                    for index, path in enumerate(pending)
+                ])
+                return
+            contents = "\n".join(str(message.content) for message in messages if message.role == "tool")
+            result = {"readCount": len(read_paths), "tokens": re.findall(r"TOKEN=([a-zA-Z0-9-]+)", contents),
+                      "sum": sum(int(value) for value in re.findall(r"VALUE=(\d+)", contents))}
+            record_lifecycle("file_read_result", **result)
+            yield StreamEvent(type="text", delta=json.dumps(result))
+            yield StreamEvent(type="finish", finish_reason="stop")
+            return
+        if mode == "input_context":
+            record_lifecycle("model_input", messages=[message.model_dump(mode="json") for message in messages])
+            if not has_results:
+                yield StreamEvent(type="text", delta="CONTEXT_READY")
+                await asyncio.sleep(0.5)
+                yield StreamEvent(type="finish", finish_reason="tool_use",
+                                  tool_calls=[call("fixture_count", {"n": 1}, 0)])
+                return
         if "fixture-leaf" in users and not has_results:
             name = "fixture_nested" if mode == "nested" else "fixture_count"
             leaf = int(re.search(r"fixture-leaf (\d+)", users)[1])
@@ -198,10 +239,11 @@ def install_fixture(acp, root):
         def __getattr__(self, name):
             return getattr(self.wrapped, name)
 
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             if getattr(payload.update, "sessionUpdate", "") == "agent_message_chunk":
                 await asyncio.sleep({"slow": 0.01, "timeout": 1}.get(scenario.get(), 0))
-            return await self.wrapped.sessionUpdate(payload)
+            return await self.wrapped.session_update(**acp_params(payload))
 
     original = acp.BoxACPAgent
 
@@ -214,22 +256,24 @@ def install_fixture(acp, root):
             # process never loads credentials or contacts a real provider.
             return self._llm
 
-        async def extMethod(self, method, params):
+        async def ext_method(self, method, params):
+            if method == "fixture_host_request":
+                return await self._conn.ext_method(params["method"], params["params"])
             if method == "fixture_rpc_state":
-                store = self._conn._conn._state
+                connection = self._conn._conn
                 return {
-                    "incoming_records": len(store._incoming),
-                    "outgoing_requests": len(store._outgoing),
+                    "sdk_version": version("agent-client-protocol"),
+                    "host_client_name": self._client_info.name if self._client_info else None,
+                    "outgoing_requests": len(connection._pending),
                     "sessions": {state.upstream_session_id: {
                         "handle": handle,
                         "users": [str(message.content) for message in state.agent.messages
                                   if message.role == "user"],
                     } for handle, state in self._sessions.items()},
                 }
-            return await super().extMethod(method, params)
+            return await super().ext_method(method, params)
 
-        async def newSession(self, params):
-            meta = getattr(params, "field_meta", None) or {}
+        async def new_session(self, cwd, mcp_servers=None, additional_directories=None, **meta):
             should_block = bool(binding_phase and meta.get("fixture_block_binding"))
             if should_block and binding_phase == "close":
                 state = next(s for s in self._sessions.values()
@@ -243,11 +287,22 @@ def install_fixture(acp, root):
                 state.plugin_session.aclose = close
             token = block_binding.set(should_block)
             try:
-                return await super().newSession(params)
+                return await super().new_session(cwd=cwd, mcp_servers=mcp_servers,
+                    additional_directories=additional_directories, **meta)
             finally:
                 block_binding.reset(token)
 
         async def aclose(self):
+            if os.environ.get("BOX_AGENT_DESKTOP_TEST_HOLD_SHUTDOWN") == "1":
+                # Keep the real server's signal handlers installed until the
+                # transport test has delivered its concurrent shutdown signal.
+                (root / "shutdown-waiting").touch()
+
+                async def wait_for_release():
+                    while not (root / "shutdown-release").exists():
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(wait_for_release(), 10)
             states = list(self._sessions.values())
             await super().aclose()
             record_lifecycle("adapter_closed", remaining_sessions=len(self._sessions),
@@ -260,21 +315,21 @@ def install_fixture(acp, root):
                     opening=len(self._plugin_runtime._opening),
                     plugin_sessions=len(self._plugin_runtime._sessions))
 
-        async def prompt(self, params):
+        async def prompt(self, session_id, prompt, **meta):
             text = " ".join(str(getattr(block, "text", block.get("text", "") if isinstance(block, dict) else ""))
-                            for block in params.prompt)
+                            for block in prompt)
             match = re.search(r"fixture:(\w+)", text)
             mode = match[1] if match else "normal"
             token = scenario.set(mode)
             calls_token = executions.set([])
             try:
-                return await super().prompt(params)
+                return await super().prompt(session_id=session_id, prompt=prompt, **meta)
             finally:
-                state = self._sessions.get(params.sessionId)
+                state = self._sessions.get(session_id)
                 handle = getattr(state, "_run_handle", None)
                 if handle is not None and not handle.is_active:
                     result = await handle.result()
-                    record = {"scenario": mode, "session_id": params.sessionId,
+                    record = {"scenario": mode, "session_id": session_id,
                               "status": result.status.value, "stop_reason": result.stop_reason,
                               "error": dict(result.error) if result.error else None,
                               "executions": executions.get()}
@@ -309,11 +364,13 @@ def main():
 
     install_fixture(acp, root)
     config = Config(
-        llm=LLMConfig(api_key="synthetic-test-key", model="desktop-fixture"),
+        # Protocol fixtures include complete large snapshots plus supplements.
+        # Declare a model window that fits them; production budget checks stay on.
+        llm=LLMConfig(api_key="synthetic-test-key", model="desktop-fixture", context_window=1_000_000),
         agent=AgentConfig(workspace_dir=str(root / "profile/workspaces"), max_steps=5,
                           enable_memory=False, enable_memory_extraction=False,
                           memory_maintainer_enabled=False, memory_promotion_proposal_enabled=False),
-        tools=ToolsConfig(enable_file_tools=False, enable_bash=False, enable_todo=False,
+        tools=ToolsConfig(enable_file_tools=os.environ.get("BOX_AGENT_DESKTOP_TEST_FILE_INPUTS") == "1", enable_bash=False, enable_todo=False,
                           enable_plan=False, enable_sub_agent=True, enable_skills=False, enable_mcp=False),
     )
     config.tool_limits.general.max_delegated_tool_calls = 3

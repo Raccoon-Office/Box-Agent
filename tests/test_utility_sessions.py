@@ -1,5 +1,7 @@
 """Real Agent construction and provider exposure for ACP utility sessions."""
 
+from tests.acp_helpers import acp_params
+
 from types import SimpleNamespace
 
 import pytest
@@ -36,7 +38,7 @@ class SentinelTool(Tool):
 
 
 class Connection:
-    async def sessionUpdate(self, _payload):
+    async def session_update(self, session_id, update, **meta):
         pass
 
 
@@ -78,17 +80,17 @@ async def test_utility_has_no_registered_or_provider_visible_tools_without_chang
     llm = RecordingLLM()
     adapter, workspace = configured_adapter(tmp_path, monkeypatch, llm)
     meta = {} if utility is None else {"utility": utility}
-    session = await adapter.newSession(SimpleNamespace(cwd=str(workspace), field_meta=meta))
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(workspace), field_meta=meta)))
     agent = adapter._sessions[session.sessionId].agent
     if utility:
         assert agent.tools == {}
         assert "## Discoverable tools" not in agent.system_prompt
         await adapter.prompt(
-            SimpleNamespace(
+            **acp_params(SimpleNamespace(
                 sessionId=session.sessionId,
                 prompt=[{"text": "hello utility"}],
                 field_meta={},
-            )
+            ))
         )
         assert llm.calls and all(not tools for _, tools in llm.calls)
     else:
@@ -103,21 +105,21 @@ async def test_utility_preserves_box_session_log_context_after_recreation(tmp_pa
         cwd=str(workspace),
         field_meta={"utility": True, "session_id": "utility-restart"},
     )
-    session = await first.newSession(request)
+    session = await first.new_session(**acp_params(request))
     log = first._sessions[session.sessionId].agent.session_log
     try:
         await first.prompt(
-            SimpleNamespace(
+            **acp_params(SimpleNamespace(
                 sessionId=session.sessionId,
                 prompt=[{"text": "remember utility context"}],
                 field_meta={},
-            )
+            ))
         )
     finally:
         log.close()
     llm = RecordingLLM()
     restarted, _ = configured_adapter(tmp_path, monkeypatch, llm)
-    session = await restarted.newSession(request)
+    session = await restarted.new_session(**acp_params(request))
     state = restarted._sessions[session.sessionId]
     try:
         assert state.agent.tools == {}
@@ -125,11 +127,11 @@ async def test_utility_preserves_box_session_log_context_after_recreation(tmp_pa
             (message.role, message.content) for message in state.agent.messages
         ]
         await restarted.prompt(
-            SimpleNamespace(
+            **acp_params(SimpleNamespace(
                 sessionId=session.sessionId,
                 prompt=[{"text": "continue"}],
                 field_meta={},
-            )
+            ))
         )
         assert llm.calls and all(not tools for _, tools in llm.calls)
     finally:
@@ -156,8 +158,8 @@ async def test_eager_mcp_refresh_keeps_utility_registry_and_provider_tools_empty
     monkeypatch.setattr(mcp_loader, "replace_mcp_source", AsyncMock(return_value=result))
     monkeypatch.setattr(mcp_loader, "reconcile_mcp_sources", AsyncMock(return_value=result))
     try:
-        utility = await adapter.newSession(SimpleNamespace(cwd=str(workspace), field_meta={"utility": True}))
-        normal = await adapter.newSession(SimpleNamespace(cwd=str(workspace), field_meta={}))
+        utility = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(workspace), field_meta={"utility": True})))
+        normal = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(workspace), field_meta={})))
         state = adapter._sessions[utility.sessionId]
         assert state.agent.tools == {}
         state.turn_active = True
@@ -168,7 +170,7 @@ async def test_eager_mcp_refresh_keeps_utility_registry_and_provider_tools_empty
             adapter._sync_mcp_registries([remote])
             adapter._inject_mcp_runtime_update(name="law", state="connected", tool_count=1)
         else:
-            await adapter.extMethod(refresh, {"source": "connector", "config": {"mcpServers": {}}})
+            await adapter.ext_method(refresh, {"source": "connector", "config": {"mcpServers": {}}})
         assert "connector_lookup" in adapter._sessions[normal.sessionId].agent.tools
         assert state.agent.tools == {}
         assert not state.mcp_fallback_tools
@@ -176,9 +178,9 @@ async def test_eager_mcp_refresh_keeps_utility_registry_and_provider_tools_empty
         assert not adapter._sessions[normal.sessionId].inject_queue.empty()
         state.turn_active = False
         adapter._sessions[normal.sessionId].turn_active = False
-        await adapter.prompt(SimpleNamespace(
+        await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=utility.sessionId, prompt=[{"text": "write a title"}], field_meta={},
-        ))
+        )))
         assert llm.calls and all(not tools for _, tools in llm.calls)
     finally:
         await adapter.aclose()

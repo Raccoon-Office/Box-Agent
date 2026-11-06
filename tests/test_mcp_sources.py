@@ -5,8 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from box_agent.tools import mcp_loader
+from box_agent.tools import mcp_loader, mcp_tool_catalog
 from box_agent.tools.mcp_sources import McpConfigSource, configured_mcp_sources, resolve_mcp_sources
+
+
+@pytest.fixture(autouse=True)
+def isolated_tool_catalog(monkeypatch):
+    # Discovery readiness belongs to this test's event loop, not a previous file.
+    monkeypatch.setattr(mcp_tool_catalog, "_CATALOG", mcp_tool_catalog.MCPToolCatalog())
+    # A previous session's managed CUA registration must not become a source here.
+    monkeypatch.setattr(mcp_loader, "_cua_service", None)
 
 
 def _write(path: Path, servers: dict) -> None:

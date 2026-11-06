@@ -1,5 +1,8 @@
 """Integration tests for the Box ACP adapter."""
 
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
+
 import ast
 import asyncio
 import base64
@@ -76,7 +79,8 @@ class DummyConn:
     def __init__(self):
         self.updates = []
 
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
+        payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
         self.updates.append(payload)
 
 
@@ -170,11 +174,11 @@ async def test_acp_public_path_reaches_plugin_composition_and_agent_loop_kernel(
     monkeypatch.setattr(composition_module, "AgentLoopKernel", SentinelKernel)
 
     adapter = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await adapter.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await adapter.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await adapter.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -471,7 +475,7 @@ async def test_acp_session_metadata_hides_physically_isolated_connector_skills(t
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
 
     assert [item["name"] for item in session.field_meta["skills"]] == ["ordinary-skill"]
 
@@ -489,12 +493,12 @@ async def test_acp_workspace_config_methods_share_profiles(tmp_path, monkeypatch
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
 
-    saved = await agent.extMethod(
+    saved = await agent.ext_method(
         "workspace/set",
         {"path": str(workspace), "taskType": "code"},
     )
-    loaded = await agent.extMethod("workspace/get", {"path": str(workspace)})
-    listed = await agent.extMethod("workspace/list", {})
+    loaded = await agent.ext_method("workspace/get", {"path": str(workspace)})
+    listed = await agent.ext_method("workspace/list", {})
 
     assert saved["workspace"]["task_type"] == "code"
     assert loaded["workspace"] == saved["workspace"]
@@ -518,7 +522,7 @@ async def test_acp_uses_saved_code_type_when_host_omits_session_mode(tmp_path, m
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=str(workspace), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(workspace), field_meta={})))
     state = agent._sessions[session.sessionId]
 
     assert state.session_mode == "code_agent"
@@ -534,7 +538,7 @@ async def test_acp_uses_saved_code_type_when_host_omits_session_mode(tmp_path, m
 
 
 class HangingConn:
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
         await asyncio.Event().wait()
 
 
@@ -589,15 +593,15 @@ async def test_acp_registers_skillhub_search_only_for_capable_host(tmp_path) -> 
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
 
-    plain = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
-    capable = await agent.newSession(
-        SimpleNamespace(
+    plain = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
+    capable = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={"host_capabilities": {"skillhub_search": 1}},
-        )
+        ))
     )
-    install_capable = await agent.newSession(
-        SimpleNamespace(
+    install_capable = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "host_capabilities": {
@@ -605,7 +609,7 @@ async def test_acp_registers_skillhub_search_only_for_capable_host(tmp_path) -> 
                     "skillhub_install": 1,
                 }
             },
-        )
+        ))
     )
 
     assert "search_skillhub" not in agent._sessions[plain.sessionId].agent.tools
@@ -646,10 +650,10 @@ async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tm
         tools=ToolsConfig(enable_sub_agent=False),
     )
     host = BoxACPAgent(RuntimeConn(), config, DummyLLM(), [], "system")
-    plain = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
-    capable = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+    plain = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
+    capable = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
         "host_capabilities": {"runtime_environment": 1},
-    }))
+    })))
     assert "local_environment" not in host._sessions[plain.sessionId].agent.tools
     tools = host._sessions[capable.sessionId].agent.tools
     assert "local_environment" in tools
@@ -719,12 +723,12 @@ async def test_acp_chromium_install_continues_execution_in_the_same_prompt(tmp_p
                     agent=AgentConfig(max_steps=4, workspace_dir=str(tmp_path)),
                     tools=ToolsConfig(enable_sub_agent=False))
     host = BoxACPAgent(RuntimeConn(), config, llm, [RenderProbe()], "system")
-    session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+    session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
         "host_capabilities": {"runtime_environment": 1},
-    }))
-    prompt = asyncio.create_task(host.prompt(SimpleNamespace(
+    })))
+    prompt = asyncio.create_task(host.prompt(**acp_params(SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "Prepare Chromium and render."}], field_meta={},
-    )))
+    ))))
     try:
         await asyncio.wait_for(started.wait(), 5)
         assert not prompt.done()
@@ -785,8 +789,8 @@ async def test_acp_skillhub_install_uses_host_rpc_after_confirmation(tmp_path) -
     )
     conn = SkillHubConn()
     agent = BoxACPAgent(conn, config, DummyLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "host_capabilities": {
@@ -794,7 +798,7 @@ async def test_acp_skillhub_install_uses_host_rpc_after_confirmation(tmp_path) -
                     "skillhub_install": 1,
                 }
             },
-        )
+        ))
     )
     tools = agent._sessions[session.sessionId].agent.tools
 
@@ -1075,11 +1079,12 @@ async def test_acp_event_send_failure_logs_original_error_and_continues(
     class FailOnceConn(DummyConn):
         failed = False
 
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             if payload.update.sessionUpdate == "agent_message_chunk" and not self.failed:
                 self.failed = True
                 raise OSError("fixture notification failure")
-            await super().sessionUpdate(payload)
+            await super().session_update(**acp_params(payload))
 
     class ChunkedLLM(DoneLLM):
         async def generate_stream(self, messages, tools=None, **_):
@@ -1094,12 +1099,12 @@ async def test_acp_event_send_failure_logs_original_error_and_continues(
     )
     conn = FailOnceConn()
     agent = BoxACPAgent(conn, config, ChunkedLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     capsys.readouterr()
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
     )
 
     assert conn.failed
@@ -1110,7 +1115,7 @@ async def test_acp_event_send_failure_logs_original_error_and_continues(
         for update in conn.updates
     )
     continued = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}]))
     )
     assert continued.field_meta["ok"] is True
     captured = capsys.readouterr()
@@ -1132,10 +1137,11 @@ async def test_acp_event_send_failure_logs_original_error_and_continues(
 @pytest.mark.asyncio
 async def test_acp_event_send_timeout_remains_terminal(tmp_path):
     class HangingContentConn(DummyConn):
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             if payload.update.sessionUpdate == "agent_message_chunk":
                 await asyncio.Event().wait()
-            await super().sessionUpdate(payload)
+            await super().session_update(**acp_params(payload))
 
     config = Config(
         llm=LLMConfig(api_key="test-key"),
@@ -1144,13 +1150,13 @@ async def test_acp_event_send_timeout_remains_terminal(tmp_path):
     )
     agent = BoxACPAgent(HangingContentConn(), config, DoneLLM(), [], "system")
     agent._SESSION_UPDATE_TIMEOUT_SECONDS = 0.01
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     with pytest.raises(TimeoutError, match="ACP session update timed out"):
         await agent.prompt(
-            SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+            **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
         )
     state = agent._sessions[session.sessionId]
     assert not state._prompt_in_progress
@@ -1185,8 +1191,8 @@ async def test_session_creation_uses_cached_memory_while_busy_then_refreshes(tmp
     maintenance = asyncio.create_task(asyncio.to_thread(hold_maintenance_lock))
     try:
         assert await asyncio.to_thread(entered.wait, 2)
-        session = await asyncio.wait_for(agent.newSession(
-            SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}),
+        session = await asyncio.wait_for(agent.new_session(
+            **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})),
         ), timeout=2)
         assert not release.is_set()
         prompt = agent._sessions[session.sessionId].agent.system_prompt
@@ -1201,8 +1207,8 @@ async def test_session_creation_uses_cached_memory_while_busy_then_refreshes(tmp
         await asyncio.wait_for(maintenance, 2)
 
     memory.write_core("- user prefers English")
-    session = await asyncio.wait_for(agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}),
+    session = await asyncio.wait_for(agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})),
     ), timeout=2)
     prompt = agent._sessions[session.sessionId].agent.system_prompt
     assert "user prefers English" in prompt
@@ -1228,8 +1234,8 @@ async def test_slow_skill_validation_keeps_other_acp_updates_and_control_respons
                     tools=ToolsConfig(enable_sub_agent=False))
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, DoneLLM(), tools, "system", skill_loader=loader)
-    first = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
-    second = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    first = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    second = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     # Seed an actual source-verified snapshot, without recording a delivery.
     await SkillRuntime(loader).avalidate_references(("demo",))
     loader.validation_timeout_seconds = 0.05
@@ -1255,13 +1261,13 @@ async def test_slow_skill_validation_keeps_other_acp_updates_and_control_respons
 
         monkeypatch.setattr(loader, "read_skill_bytes", slow)
 
-    prompt = asyncio.create_task(agent.prompt(SimpleNamespace(
+    prompt = asyncio.create_task(agent.prompt(**acp_params(SimpleNamespace(
         sessionId=first.sessionId, prompt=[{"text": "/demo task"}],
-    )))
+    ))))
     try:
         assert await asyncio.to_thread(entered.wait, 1)
         await asyncio.wait_for(agent._send(second.sessionId, update_agent_message(text_block("other session"))), 0.5)
-        await asyncio.wait_for(agent.cancel(SimpleNamespace(sessionId=second.sessionId)), 0.5)
+        await asyncio.wait_for(agent.cancel(**acp_params(SimpleNamespace(sessionId=second.sessionId))), 0.5)
         response = await asyncio.wait_for(prompt, 1)
         assert response.stopReason == "end_turn"
         assert response.field_meta["ok"] is True, response.field_meta
@@ -1291,10 +1297,10 @@ async def test_acp_session_creation_and_restore_do_not_scan_skills_on_event_loop
                     agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
                     tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False))
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), tools, "system", skill_loader=loader)
-    control = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    control = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     request = SimpleNamespace(cwd=None, field_meta={"session_mode": "general", "session_id": "restore-demo"})
     if resume:
-        previous = await agent.newSession(request)
+        previous = await agent.new_session(**acp_params(request))
         state = agent._sessions[previous.sessionId]
         state.agent.skill_runtime.read("demo")
         state.agent.session_log.close()
@@ -1308,12 +1314,12 @@ async def test_acp_session_creation_and_restore_do_not_scan_skills_on_event_loop
         return original(entry)
 
     monkeypatch.setattr(loader, "_source_signature", scan)
-    creation = asyncio.create_task(agent.newSession(request))
+    creation = asyncio.create_task(agent.new_session(**acp_params(request)))
     try:
         if resume:
             assert await asyncio.to_thread(entered.wait, 1)
         await asyncio.wait_for(agent._send(control.sessionId, update_agent_message(text_block("control"))), 0.5)
-        await asyncio.wait_for(agent.cancel(SimpleNamespace(sessionId=control.sessionId)), 0.5)
+        await asyncio.wait_for(agent.cancel(**acp_params(SimpleNamespace(sessionId=control.sessionId))), 0.5)
         response = await asyncio.wait_for(creation, 3)
         assert response.sessionId
     finally:
@@ -1592,7 +1598,7 @@ async def test_uploaded_image_payload_reaches_user_message_boundary(tmp_path, mo
         tools=ToolsConfig(enable_skills=False, enable_sub_agent=False),
     )
     adapter = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     agent = adapter._sessions[session.sessionId].agent
     agent.tools["inspect_images"] = AttachmentTool()
     original_add = agent.aadd_user_message
@@ -1606,10 +1612,10 @@ async def test_uploaded_image_payload_reaches_user_message_boundary(tmp_path, mo
 
     monkeypatch.setattr(agent, "aadd_user_message", capture_user_message)
     try:
-        await adapter.prompt(SimpleNamespace(
+        await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "Use this reference image."}],
             field_meta={"image_attachment_paths": [str(tmp_path / "reference.png")]},
-        ))
+        )))
         assert received == [{"image_content": blocks, "image_source": "user_upload",
                              "image_context_eligible": eligible,
                              "host_connector_status": _EMPTY_CONNECTOR_CONTEXT.strip()}]
@@ -1644,11 +1650,11 @@ async def test_standard_acp_image_is_persisted_and_sent_without_becoming_history
                     tools=ToolsConfig(enable_skills=False, enable_sub_agent=False))
     adapter = BoxACPAgent(DummyConn(), config, llm, [], "system")
     try:
-        session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "inline-images"}))
+        session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "inline-images"})))
         block = {"type": "image", "data": encoded, "mimeType": "image/png"}
-        await adapter.prompt(SimpleNamespace(sessionId=session.sessionId,
+        await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId,
                             prompt=[{"type": "text", "text": "Describe."}, SimpleNamespace(**block) if object_block else block],
-                            field_meta={}))
+                            field_meta={})))
         agent = adapter._sessions[session.sessionId].agent
         assert any(isinstance(message.content, list) and any(item.get("data") == encoded for item in message.content)
                    for message in llm.request)
@@ -1691,11 +1697,11 @@ async def test_path_upload_without_vision_tool_is_archived_with_clear_not_delive
                     tools=ToolsConfig(enable_skills=False, enable_sub_agent=False))
     host = BoxACPAgent(DummyConn(), config, llm, [], "system")
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "no-vision-upload"}))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "no-vision-upload"})))
         agent = host._sessions[session.sessionId].agent
         assert "inspect_images" not in agent.tools
-        await host.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "Describe this."}],
-                                        field_meta={"image_attachment_paths": [str(image)]}))
+        await host.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "Describe this."}],
+                                        field_meta={"image_attachment_paths": [str(image)]})))
         assert llm.calls == 1
         images = agent.session_log.replay().images
         assert len(images) == 1 and images[0]["source"] == "user_upload"
@@ -1946,8 +1952,8 @@ async def test_acp_appends_only_changed_snapshots_and_preserves_sent_prefixes(tm
         {"id": "pkulaw", "name": "北大法宝", "status": "connected"},
     ]
     disconnected = [{**row, "status": "disconnected"} for row in connected]
-    session = await host.newSession(SimpleNamespace(
-        cwd=str(tmp_path), field_meta={"connector_statuses": connected}))
+    session = await host.new_session(**acp_params(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"connector_statuses": connected})))
     turns = [
         ({}, True),
         ({"connector_statuses": list(reversed(connected))}, False),
@@ -1962,8 +1968,8 @@ async def test_acp_appends_only_changed_snapshots_and_preserves_sent_prefixes(tm
     try:
         for index, (meta, emits) in enumerate(turns):
             before = len(llm.requests)
-            await host.prompt(SimpleNamespace(
-                sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta=meta))
+            await host.prompt(**acp_params(SimpleNamespace(
+                sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta=meta)))
             assert len(llm.requests) == before + 1
             current = llm.requests[-1]
             assert current[:len(previous)] == previous
@@ -1990,7 +1996,7 @@ async def test_connector_snapshot_read_failure_and_recovery_do_not_block_turns(t
                     agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
                     tools=ToolsConfig(enable_sub_agent=False))
     host = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     render = acp_module._connector_status_context
 
     def fail(*args):
@@ -1999,18 +2005,18 @@ async def test_connector_snapshot_read_failure_and_recovery_do_not_block_turns(t
     monkeypatch.setattr(acp_module, "_connector_status_context", fail)
     try:
         for index in range(2):
-            await host.prompt(SimpleNamespace(
-                sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta={}))
+            await host.prompt(**acp_params(SimpleNamespace(
+                sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta={})))
             message = host._sessions[session.sessionId].agent.messages[-2]
             if index == 0:
                 assert "status: unavailable" in message.content
             else:
                 assert message.content == "hello 1"
         monkeypatch.setattr(acp_module, "_connector_status_context", render)
-        await host.prompt(SimpleNamespace(
+        await host.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "recovered"}],
             field_meta={"connector_statuses": [
-                {"id": "pkulaw", "name": "北大法宝", "status": "connected"}]}))
+                {"id": "pkulaw", "name": "北大法宝", "status": "connected"}]})))
         assert "pkulaw 北大法宝: connected" in host._sessions[session.sessionId].agent.messages[-2].content
     finally:
         log = host._sessions[session.sessionId].agent.session_log
@@ -2028,8 +2034,8 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "selected_connector_ids": ["pkulaw"],
@@ -2037,15 +2043,15 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
                     {"id": "pkulaw", "name": "北大法宝", "status": "connected"}
                 ],
             },
-        )
+        ))
     )
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "北大法宝还能用么"}],
             field_meta={"connector_status_unavailable": True},
-        )
+        ))
     )
 
     state = agent._sessions[session.sessionId]
@@ -2060,7 +2066,7 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
     )
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "现在呢"}],
             field_meta={
@@ -2072,7 +2078,7 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
                     }
                 ]
             },
-        )
+        ))
     )
 
     assert state.connector_statuses == (("pkulaw", "北大法宝", "disconnected"),)
@@ -2105,18 +2111,18 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
         field_meta={"session_id": "stable-restart-session"},
     )
     first_agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    first = await first_agent.newSession(request)
+    first = await first_agent.new_session(**acp_params(request))
     await first_agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=first.sessionId,
             prompt=[{"text": "remember this"}],
             field_meta={},
-        )
+        ))
     )
     first_agent._sessions[first.sessionId].agent.session_log.close()
 
     restarted_agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    restarted = await restarted_agent.newSession(request)
+    restarted = await restarted_agent.new_session(**acp_params(request))
     state = restarted_agent._sessions[restarted.sessionId]
 
     assert restarted.sessionId != first.sessionId
@@ -2127,7 +2133,7 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
     assert state.agent.session_log.events[-1]["type"] == "session/end-seed"
 
     await restarted_agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=restarted.sessionId,
             prompt=[{"text": "continue after restart"}],
             field_meta={
@@ -2141,7 +2147,7 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
                     "truncated": False,
                 }
             },
-        )
+        ))
     )
 
     assert [message.content for message in state.agent.messages].count(
@@ -2184,11 +2190,11 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
     original = BoxACPAgent(
         DummyConn(), config, DoneLLM(), [], "system", skill_loader=loader
     )
-    session = await original.newSession(request)
+    session = await original.new_session(**acp_params(request))
     original_state = original._sessions[session.sessionId]
     try:
         await original.prompt(
-            SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "remember me"}])
+            **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "remember me"}]))
         )
         for name in ("missing-skill", "available-skill"):
             original_state.agent.activate_skill_instructions(
@@ -2210,7 +2216,7 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
         restarted = BoxACPAgent(
             DummyConn(), config, llm, [], "system", skill_loader=current_loader
         )
-        session = await restarted.newSession(request)
+        session = await restarted.new_session(**acp_params(request))
         state = restarted._sessions[session.sessionId]
         try:
             expected_names = ("available-skill",) if availability == "partial" else ()
@@ -2220,7 +2226,7 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
                 message.content for message in state.agent.messages
             ]
             response = await restarted.prompt(
-                SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}])
+                **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}]))
             )
             assert response.stopReason == "end_turn"
             assert llm.calls == 1
@@ -2277,7 +2283,7 @@ async def test_acp_recovers_optional_state_and_accepts_matching_host_history(
     for attempt in range(2):
         llm = DoneLLM()
         adapter = BoxACPAgent(DummyConn(), config, llm, [], "system", skill_loader=loader)
-        session = await adapter.newSession(request)
+        session = await adapter.new_session(**acp_params(request))
         state = adapter._sessions[session.sessionId]
         try:
             assert state.continuation_applied == optional_state
@@ -2287,14 +2293,14 @@ async def test_acp_recovers_optional_state_and_accepts_matching_host_history(
             if damage == "skill-fields":
                 assert state.agent.active_skill_diagnostics()["names"] == ("available",)
             if attempt == 1:
-                result = await adapter.prompt(SimpleNamespace(
+                result = await adapter.prompt(**acp_params(SimpleNamespace(
                     sessionId=session.sessionId, prompt=[{"text": "continue"}],
                     field_meta={"session_continuation": {
                         "schema_version": "officev3-session-continuation/v1",
                         "product_session_id": "recovery",
                         "messages": [{"role": "user", "content": "trusted host history"}],
                     }},
-                ))
+                )))
                 assert result.stopReason == "end_turn"
                 assert llm.calls == 1
                 expected_history = "durable history" if optional_state else "trusted host history"
@@ -2329,7 +2335,7 @@ async def test_acp_preserves_incompatible_session_without_recovery_reset(tmp_pat
     try:
         for _ in range(2):
             with pytest.raises(SessionLogIncompatible):
-                await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "future"}))
+                await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "future"})))
             assert path.read_bytes() == original
             assert not list(path.parent.glob("session.recovery-*.jsonl"))
     finally:
@@ -2353,28 +2359,28 @@ async def test_acp_rejects_workspace_change_without_dropping_existing_session(
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    first = await agent.newSession(
-        SimpleNamespace(
+    first = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(first_workspace),
             field_meta={"session_id": "immutable-workspace-session"},
-        )
+        ))
     )
 
     with pytest.raises(SessionLogWorkspaceMismatch, match="immutable workspace"):
-        await agent.newSession(
-            SimpleNamespace(
+        await agent.new_session(
+            **acp_params(SimpleNamespace(
                 cwd=str(second_workspace),
                 field_meta={"session_id": "immutable-workspace-session"},
-            )
+            ))
         )
 
     assert first.sessionId in agent._sessions
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=first.sessionId,
             prompt=[{"text": "continue in the original workspace"}],
             field_meta={},
-        )
+        ))
     )
     assert response.stopReason == "end_turn"
     agent._sessions[first.sessionId].agent.session_log.close()
@@ -2390,8 +2396,8 @@ async def test_prompt_clears_prompt_grants_once_before_attachment_processing(
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"permission_mode": "default"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"permission_mode": "default"}))
     )
     state = agent._sessions[session.sessionId]
     assert state.grant_store is not None
@@ -2411,11 +2417,11 @@ async def test_prompt_clears_prompt_grants_once_before_attachment_processing(
     )
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "hello"}],
             field_meta={},
-        )
+        ))
     )
 
     assert clear_calls == 1
@@ -2450,10 +2456,10 @@ async def test_overlapping_request_preserves_original_task_state(
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, BlockingLLM(), [], "system")
-    session = await agent.newSession(SimpleNamespace(
+    session = await agent.new_session(**acp_params(SimpleNamespace(
         cwd=str(tmp_path),
         field_meta={"permission_mode": "default", "session_id": "busy-product"},
-    ))
+    )))
     state = agent._sessions[session.sessionId]
     original_attachment = agent._run_image_attachment_tool
 
@@ -2473,29 +2479,29 @@ async def test_overlapping_request_preserves_original_task_state(
         return await original_cleanup(**kwargs)
 
     monkeypatch.setattr(acp_module, "cleanup_turn_resources", cleanup)
-    first = asyncio.create_task(agent.prompt(SimpleNamespace(
+    first = asyncio.create_task(agent.prompt(**acp_params(SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "original task"}],
-    )))
+    ))))
     try:
         await asyncio.wait_for(started.wait(), 5)
         state.grant_store.add_grant("filesystem", "user_home", "prompt")
         state.inject_queue.submit({"id": "keep", "content": "keep supplement"})
         if cancel_requested:
-            await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
+            await agent.cancel(**acp_params(SimpleNamespace(sessionId=session.sessionId)))
         history = deepcopy(state.agent.messages)
         turn_id, turn_counter = state.current_turn_id, state.turn_counter
         handle, injection_run = state.run_handle, state.inject_queue.run_id
 
         with pytest.raises(RequestError) as raised:
             if request_kind == "rebind":
-                await asyncio.wait_for(agent.newSession(SimpleNamespace(
+                await asyncio.wait_for(agent.new_session(**acp_params(SimpleNamespace(
                     cwd=str(tmp_path), field_meta={"session_id": "busy-product"},
-                )), 5)
+                ))), 5)
             else:
-                await asyncio.wait_for(agent.prompt(SimpleNamespace(
+                await asyncio.wait_for(agent.prompt(**acp_params(SimpleNamespace(
                     sessionId=session.sessionId, prompt=[{"text": "must not enter history"}],
                     field_meta={"selected_connector_ids": ["unexpected"]},
-                )), 5)
+                ))), 5)
 
         assert raised.value.code == -32010
         assert raised.value.data == {"code": "SESSION_BUSY", "sessionId": session.sessionId}
@@ -2513,37 +2519,37 @@ async def test_overlapping_request_preserves_original_task_state(
         assert not first.done()
         if phase == "running":
             assert state.turn_active
-            result = await agent.extMethod("inject", {
+            result = await agent.ext_method("inject", {
                 "sessionId": session.sessionId, "text": "another supplement", "injectionId": "new",
             })
             assert result["ok"] is True
             # The rejected request must not clear deduplication receipts either.
-            duplicate = await agent.extMethod("inject", {
+            duplicate = await agent.ext_method("inject", {
                 "sessionId": session.sessionId, "text": "keep supplement", "injectionId": "keep",
             })
             assert duplicate["deduplicated"] is True
         # A busy session must not reserve other sessions on the same adapter.
-        peer = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
-        response = await asyncio.wait_for(agent.prompt(SimpleNamespace(
+        peer = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
+        response = await asyncio.wait_for(agent.prompt(**acp_params(SimpleNamespace(
             sessionId=peer.sessionId, prompt=[{"text": "independent task"}],
-        )), 5)
+        ))), 5)
         assert response.field_meta["ok"] is True
         release.set()
         response = await asyncio.wait_for(first, 5)
         assert response.stopReason == ("cancelled" if cancel_requested else "end_turn")
         if request_kind == "rebind":
             history = deepcopy(state.agent.messages)
-            replacement = await agent.newSession(SimpleNamespace(
+            replacement = await agent.new_session(**acp_params(SimpleNamespace(
                 cwd=str(tmp_path), field_meta={"session_id": "busy-product"},
-            ))
+            )))
             assert session.sessionId not in agent._sessions
             assert state._closed
             restored = agent._sessions[replacement.sessionId]
             assert restored.agent.messages[1:] == history[1:]
             session = replacement
-        followup = await agent.prompt(SimpleNamespace(
+        followup = await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "next task"}],
-        ))
+        )))
         assert followup.field_meta["ok"] is True
     finally:
         release.set()
@@ -2564,7 +2570,7 @@ async def test_prompt_preparation_failure_allows_next_task(
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "failed-product"})
-    session = await agent.newSession(request)
+    session = await agent.new_session(**acp_params(request))
     original = agent._run_image_attachment_tool
 
     async def fail(**kwargs):
@@ -2576,13 +2582,13 @@ async def test_prompt_preparation_failure_allows_next_task(
     params = SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "task"}])
     try:
         with pytest.raises(RuntimeError if failure == "error" else asyncio.CancelledError):
-            await agent.prompt(params)
+            await agent.prompt(**acp_params(params))
         monkeypatch.setattr(agent, "_run_image_attachment_tool", original)
         if next_request == "rebind":
-            replacement = await agent.newSession(request)
+            replacement = await agent.new_session(**acp_params(request))
             assert session.sessionId not in agent._sessions
             params.sessionId = replacement.sessionId
-        response = await agent.prompt(params)
+        response = await agent.prompt(**acp_params(params))
         assert response.field_meta["ok"] is True
     finally:
         await agent.aclose()
@@ -2598,7 +2604,7 @@ async def test_rebinding_rejects_concurrent_prompt_and_rebind(tmp_path, monkeypa
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "rebinding"})
-    session = await agent.newSession(request)
+    session = await agent.new_session(**acp_params(request))
     state = agent._sessions[session.sessionId]
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -2617,15 +2623,15 @@ async def test_rebinding_rejects_concurrent_prompt_and_rebind(tmp_path, monkeypa
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(owner, name, blocked)
-    pending = asyncio.create_task(agent.newSession(request))
+    pending = asyncio.create_task(agent.new_session(**acp_params(request)))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         sessions = dict(agent._sessions)
         for call in (
-            lambda: agent.prompt(SimpleNamespace(
+            lambda: agent.prompt(**acp_params(SimpleNamespace(
                 sessionId=session.sessionId, prompt=[{"text": "must not run"}],
-            )),
-            lambda: agent.newSession(request),
+            ))),
+            lambda: agent.new_session(**acp_params(request)),
         ):
             with pytest.raises(RequestError) as raised:
                 await asyncio.wait_for(call(), 5)
@@ -2634,19 +2640,19 @@ async def test_rebinding_rejects_concurrent_prompt_and_rebind(tmp_path, monkeypa
             assert "being created or rebound" in str(raised.value)
             assert agent._sessions == sessions
         # Reservations are per product session, not a global queue.
-        peer = await asyncio.wait_for(agent.newSession(SimpleNamespace(
+        peer = await asyncio.wait_for(agent.new_session(**acp_params(SimpleNamespace(
             cwd=str(tmp_path), field_meta={"session_id": "independent"},
-        )), 5)
-        response = await agent.prompt(SimpleNamespace(
+        ))), 5)
+        response = await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=peer.sessionId, prompt=[{"text": "independent task"}],
-        ))
+        )))
         assert response.field_meta["ok"] is True
         release.set()
         replacement = await asyncio.wait_for(pending, 5)
         assert session.sessionId not in agent._sessions
-        response = await agent.prompt(SimpleNamespace(
+        response = await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=replacement.sessionId, prompt=[{"text": "next task"}],
-        ))
+        )))
         assert response.field_meta["ok"] is True
     finally:
         release.set()
@@ -2667,7 +2673,7 @@ async def test_session_creation_failure_releases_product_reservation(
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "retry-create"})
-    old = await agent.newSession(request) if existing else None
+    old = await agent.new_session(**acp_params(request)) if existing else None
     entered, release = asyncio.Event(), asyncio.Event()
     original = agent._ensure_skills_loaded
 
@@ -2681,11 +2687,11 @@ async def test_session_creation_failure_releases_product_reservation(
         return await original()
 
     monkeypatch.setattr(agent, "_ensure_skills_loaded", fail_once)
-    pending = asyncio.create_task(agent.newSession(request))
+    pending = asyncio.create_task(agent.new_session(**acp_params(request)))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         with pytest.raises(RequestError) as raised:
-            await asyncio.wait_for(agent.newSession(request), 5)
+            await asyncio.wait_for(agent.new_session(**acp_params(request)), 5)
         assert raised.value.code == -32010
         expected = {"code": "SESSION_BUSY"}
         if old is not None:
@@ -2695,14 +2701,14 @@ async def test_session_creation_failure_releases_product_reservation(
         with pytest.raises(RuntimeError if failure == "error" else asyncio.CancelledError):
             await asyncio.wait_for(pending, 5)
         if old is not None:
-            response = await agent.prompt(SimpleNamespace(
+            response = await agent.prompt(**acp_params(SimpleNamespace(
                 sessionId=old.sessionId, prompt=[{"text": "original session still works"}],
-            ))
+            )))
             assert response.field_meta["ok"] is True
-        replacement = await agent.newSession(request)
-        response = await agent.prompt(SimpleNamespace(
+        replacement = await agent.new_session(**acp_params(request))
+        response = await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=replacement.sessionId, prompt=[{"text": "retry succeeded"}],
-        ))
+        )))
         assert response.field_meta["ok"] is True
     finally:
         release.set()
@@ -2722,7 +2728,7 @@ async def test_shutdown_cancels_rebinding_before_releasing_sessions(tmp_path, mo
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "shutdown-rebind"})
-    session = await agent.newSession(request)
+    session = await agent.new_session(**acp_params(request))
     state = agent._sessions[session.sessionId]
     entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     if phase == "close":
@@ -2744,7 +2750,7 @@ async def test_shutdown_cancels_rebinding_before_releasing_sessions(tmp_path, mo
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(owner, name, blocked)
-    pending = asyncio.create_task(agent.newSession(request))
+    pending = asyncio.create_task(agent.new_session(**acp_params(request)))
     closing = []
     try:
         await asyncio.wait_for(entered.wait(), 5)
@@ -2798,7 +2804,7 @@ async def test_shutdown_settles_initial_creation_and_rejects_new_requests(
 
     monkeypatch.setattr(assembly, "finish_session", blocked)
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": product_id})
-    pending = asyncio.create_task(agent.newSession(request))
+    pending = asyncio.create_task(agent.new_session(**acp_params(request)))
     closing = None
     try:
         await asyncio.wait_for(entered.wait(), 5)
@@ -2807,10 +2813,10 @@ async def test_shutdown_settles_initial_creation_and_rejects_new_requests(
         assert not closing.done(), "shutdown must wait for creation rollback"
         monkeypatch.setattr(assembly, "finish_session", original)
         for call in (
-            lambda: agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={})),
-            lambda: agent.prompt(SimpleNamespace(
+            lambda: agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={}))),
+            lambda: agent.prompt(**acp_params(SimpleNamespace(
                 sessionId="unknown-handle", prompt=[{"text": "must not auto-create"}],
-            )),
+            ))),
         ):
             with pytest.raises(RequestError) as raised:
                 await asyncio.wait_for(call(), 2)
@@ -2825,7 +2831,7 @@ async def test_shutdown_settles_initial_creation_and_rejects_new_requests(
         assert not agent._plugin_runtime._opening
         assert not agent._session_bindings_in_progress
         with pytest.raises(RequestError) as raised:
-            await agent.newSession(request)
+            await agent.new_session(**acp_params(request))
         assert raised.value.data == {"code": "AGENT_CLOSING"}
     finally:
         release.set()
@@ -2852,9 +2858,9 @@ async def test_shutdown_before_creation_starts_leaves_no_session_reservations(tm
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(agent, "_new_session_with_binding", creation)
-    pending = asyncio.create_task(agent.newSession(SimpleNamespace(
+    pending = asyncio.create_task(agent.new_session(**acp_params(SimpleNamespace(
         cwd=str(tmp_path), field_meta={"session_id": "cancel-before-create"},
-    )))
+    ))))
     try:
         # Let the request enter; its child creation task has not run yet.
         await asyncio.sleep(0)
@@ -3139,10 +3145,10 @@ async def test_acp_skill_selection_is_ordinary_reference_not_automatic_system_bo
         tools=ToolsConfig(enable_todo=False, enable_sub_agent=False),
     ), llm, [GetSkillTool(loader)] if with_skill_tool else [],
         f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
-    session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     original = "/pptx explain this method" if selection == "slash" else "what is pptx?"
     meta = {selection: ["pptx", "pptx", "missing"]} if selection not in (None, "slash") else {}
-    await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": original}], field_meta=meta))
+    await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": original}], field_meta=meta)))
     assert llm.calls
     for role, content in llm.calls[0]:
         if role in ("system", "developer"):
@@ -3166,7 +3172,7 @@ async def test_acp_skill_selection_is_ordinary_reference_not_automatic_system_bo
         assert usage[-1]["skillInvocations"][0]["activationSource"] == "preloaded"
         assert usage[-1]["skillInvocations"][0]["usageRole"] == "primary"
     conn.updates.clear()
-    await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
+    await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])))
     for role, content in llm.calls[-1]:
         if role in ("system", "developer"):
             assert "UNIQUE_SKILL_REFERENCE_BODY" not in str(content)
@@ -3200,9 +3206,9 @@ async def test_acp_research_budget_uses_policy_not_automatic_body(tmp_path, monk
         tools=ToolsConfig(enable_todo=False, enable_sub_agent=False),
         tool_limits=ToolLimitsConfig(web_search={"total_calls": 12, "deep_research_total_calls": 48}),
     ), DoneLLM(), [GetSkillTool(loader)], f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
-    session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general", "execution_profile": profile}))
-    await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": query}],
-        field_meta={"selected_skill_names": ["research-synthesis"]} if selected else {}))
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general", "execution_profile": profile})))
+    await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": query}],
+        field_meta={"selected_skill_names": ["research-synthesis"]} if selected else {})))
     assert captured == [expected]
     state = adapter._sessions[session.sessionId]
     assert ("research-synthesis" in state.explicitly_allowed_skill_names) is selected
@@ -3237,10 +3243,10 @@ async def test_acp_explicit_parent_and_real_dependency_reads_keep_wire_attributi
         agent=AgentConfig(max_steps=4, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False, enable_todo=False)), llm,
         [GetSkillTool(loader)], f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
-    session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     names = ["parent", "support"] if select_dependency else ["parent"]
-    await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "Proceed"}],
-        field_meta={"selected_skill_names": names}))
+    await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "Proceed"}],
+        field_meta={"selected_skill_names": names})))
     assert len(llm.calls) == 3
     for snapshot in llm.calls:
         assert all("BODY_" not in str(content) for role, content in snapshot if role in ("system", "developer"))
@@ -3270,8 +3276,8 @@ async def test_acp_explicit_missing_required_diagnostic_does_not_report_successf
         agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False, enable_todo=False)), llm,
         [GetSkillTool(loader)], f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
-    session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
-    await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "/parent proceed"}]))
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "/parent proceed"}])))
     assert llm.calls and all("NEVER_DELIVER_PARENT_BODY" not in str(c) for _, c in llm.calls[0])
     diagnostic_contents = [
         str(content)
@@ -3298,17 +3304,17 @@ async def test_acp_skill_catalog_tracks_session_profile_and_explicit_selection(t
         agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False, enable_todo=False)), DoneLLM(),
         [GetSkillTool(loader), original_list], f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
-    fast = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general", "execution_profile": "fast"}))
-    standard = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    fast = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general", "execution_profile": "fast"})))
+    standard = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     fast_tool = adapter._sessions[fast.sessionId].agent.tools["list_skills"]
     standard_tool = adapter._sessions[standard.sessionId].agent.tools["list_skills"]
     assert not (await fast_tool.execute(query="research-synthesis")).raw_output["skills"][0]["available"]
     assert (await standard_tool.execute(query="research-synthesis")).raw_output["skills"][0]["available"]
     assert fast_tool is not standard_tool and fast_tool is not original_list
-    await adapter.prompt(SimpleNamespace(sessionId=fast.sessionId, prompt=[{"text": "hello"}],
-        field_meta={"selected_skill_names": ["research-synthesis"]}))
+    await adapter.prompt(**acp_params(SimpleNamespace(sessionId=fast.sessionId, prompt=[{"text": "hello"}],
+        field_meta={"selected_skill_names": ["research-synthesis"]})))
     assert (await fast_tool.execute(query="research-synthesis")).raw_output["skills"][0]["available"]
-    await adapter.prompt(SimpleNamespace(sessionId=fast.sessionId, prompt=[{"text": "hello"}]))
+    await adapter.prompt(**acp_params(SimpleNamespace(sessionId=fast.sessionId, prompt=[{"text": "hello"}])))
     assert not (await fast_tool.execute(query="research-synthesis")).raw_output["skills"][0]["available"]
 
 
@@ -3336,16 +3342,16 @@ async def test_acp_research_prompt_catalog_and_reader_follow_current_turn_policy
         tools=ToolsConfig(enable_sub_agent=False, enable_todo=False),
     ), llm, [GetSkillTool(loader), ListSkillsTool(loader)],
         f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
-    session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={
         "session_mode": "general", "execution_profile": profile,
-    }))
+    })))
     state = adapter._sessions[session.sessionId]
     for selected in (False, True, False):
         text = "/research-synthesis research" if selected and selection == "slash" else "research"
         meta = {"selected_skill_names": ["research-synthesis"]} if selected and selection == "host" else {}
-        await adapter.prompt(SimpleNamespace(
+        await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": text}], field_meta=meta,
-        ))
+        )))
         available = profile != "fast" or selected
         system = "\n".join(str(content) for role, content in llm.calls[-1] if role == "system")
         assert ("research-synthesis" in system) is available
@@ -3381,11 +3387,11 @@ async def test_acp_expert_selection_respects_global_disabled_catalog_and_reads(t
         tools=ToolsConfig(enable_sub_agent=False, enable_todo=False)), llm,
         [GetSkillTool(loader), ListSkillsTool(loader)],
         f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
-    session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={
         "session_mode": "general",
         "expert": {"id": "expert-a", "name": "Expert", "required_skills": [
             "disabled-method", "available-method"]},
-    }))
+    })))
     state = adapter._sessions[session.sessionId]
     catalog = state.agent.tools["list_skills"]
     get_skill = state.agent.tools["get_skill"]
@@ -3397,9 +3403,9 @@ async def test_acp_expert_selection_respects_global_disabled_catalog_and_reads(t
     assert (await catalog.execute(query="available-method")).raw_output["skills"][0]["available"]
     assert (await get_skill.execute(skill_name="available-method")).success
 
-    await adapter.prompt(SimpleNamespace(sessionId=session.sessionId,
+    await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId,
         prompt=[{"text": "Use the selected expert methods"}],
-        field_meta={"selected_skill_names": ["disabled-method", "available-method"]}))
+        field_meta={"selected_skill_names": ["disabled-method", "available-method"]})))
     assert all("BODY_disabled-method" not in str(content) for _, content in llm.calls[0])
     assert any("BODY_available-method" in str(content) for role, content in llm.calls[0] if role == "user")
     assert state.explicitly_allowed_skill_names == {"available-method"}
@@ -3813,11 +3819,11 @@ async def test_mcp_reconnect_injects_hidden_deferred_state_into_active_turns_onl
         ),
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
-    active_session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={})
+    active_session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
     )
-    inactive_session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={})
+    inactive_session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
     )
     active_state = agent._sessions[active_session.sessionId]
     inactive_state = agent._sessions[inactive_session.sessionId]
@@ -3838,7 +3844,7 @@ async def test_mcp_reconnect_injects_hidden_deferred_state_into_active_turns_onl
         lambda _name: [runtime_tool],
     )
 
-    result = await agent.extMethod("mcp/reconnect", {"name": "demo"})
+    result = await agent.ext_method("mcp/reconnect", {"name": "demo"})
 
     assert result["success"] is True
     assert "echo" not in active_state.agent.tools
@@ -3872,7 +3878,7 @@ async def test_mcp_credential_set_keeps_secret_out_of_result(tmp_path, monkeypat
         set_credential,
     )
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "mcp/credential/set",
         {
             "credentialRef": "connector:pkulaw:default",
@@ -3902,7 +3908,7 @@ async def test_mcp_reconcile_delegates_source_diff_to_loader(tmp_path, monkeypat
         reconcile,
     )
 
-    result = await agent.extMethod("mcp/reconcile", {"source": "connector"})
+    result = await agent.ext_method("mcp/reconcile", {"source": "connector"})
 
     assert result == {"success": True, "source": "connector", "results": []}
 
@@ -3934,7 +3940,7 @@ async def test_mcp_source_replace_delegates_runtime_config_to_loader(tmp_path, m
     params = {"source": "connector", "config": source_config}
     if connector_ids is not None:
         params["connectorIds"] = connector_ids
-    result = await agent.extMethod("mcp/source/replace", params)
+    result = await agent.ext_method("mcp/source/replace", params)
 
     assert captured == params
     assert result == {"success": True, "source": "connector", "results": []}
@@ -3954,7 +3960,7 @@ async def test_acp_auth_refresh_reconnects_and_injects_deferred_catalog_update(
         ),
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
     state.mcp_runtime_updates_requested = True
@@ -3985,7 +3991,7 @@ async def test_acp_auth_refresh_reconnects_and_injects_deferred_catalog_update(
 @pytest.mark.asyncio
 async def test_acp_prompt_checks_for_mcp_auth_refresh(acp_agent, monkeypatch):
     agent, _ = acp_agent
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={})))
     calls = 0
 
     async def refresh():
@@ -3996,7 +4002,7 @@ async def test_acp_prompt_checks_for_mcp_auth_refresh(acp_agent, monkeypatch):
     monkeypatch.setattr(agent, "_refresh_mcp_after_auth_change", refresh)
 
     await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
     )
 
     assert calls == 1
@@ -4012,11 +4018,11 @@ async def test_acp_seeds_negotiated_session_continuation_once(
     monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
     monkeypatch.delenv("BOX_AGENT_SKILL_TOOLS_ROOT", raising=False)
     agent, _ = acp_agent
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={"session_id": "stable-product-session"},
-        )
+        ))
     )
     assert session.field_meta["capabilities"]["session_continuation_versions"] == [1]
 
@@ -4032,11 +4038,11 @@ async def test_acp_seeds_negotiated_session_continuation_once(
         ],
     }
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "修改第一页标题"}],
             field_meta={"session_continuation": continuation},
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     assert [(message.role, message.content) for message in state.agent.messages[1:4]] == [
@@ -4046,11 +4052,11 @@ async def test_acp_seeds_negotiated_session_continuation_once(
     ]
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "继续"}],
             field_meta={"session_continuation": continuation},
-        )
+        ))
     )
     assert sum(
         message.role == "user" and message.content == "制作融资 BP"
@@ -4077,7 +4083,7 @@ async def test_initial_mcp_catalog_ready_is_injected_into_active_turn(tmp_path):
         "system",
         mcp_task=mcp_task,
     )
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
     state.mcp_runtime_updates_requested = True
@@ -4108,14 +4114,14 @@ async def test_mcp_status_during_greeting_does_not_add_model_request(tmp_path, s
 
     llm = GreetingLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
     # A previous turn's MCP activity must not opt the next greeting into updates.
     state.mcp_runtime_updates_requested = True
     for _ in range(2):
-        response = await agent.prompt(SimpleNamespace(
+        response = await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "你好"}], field_meta={},
-        ))
+        )))
         assert response.stopReason == "end_turn"
     assert llm.calls == 2
     assert not any(message.source == "runtime" for message in state.agent.messages)
@@ -4173,12 +4179,12 @@ async def test_mcp_discovery_can_retry_after_readiness_update_and_call_discovere
 
     llm = DiscoveryLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
     state.agent.tools["tool_search"]._readiness_timeout = 0.001
-    response = await agent.prompt(SimpleNamespace(
+    response = await agent.prompt(**acp_params(SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "Find and use echo"}], field_meta={},
-    ))
+    )))
     assert response.stopReason == "end_turn"
     assert llm.calls == 5
     assert len(state.agent.activated_mcp_tools) == 1
@@ -4226,13 +4232,13 @@ async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_update
 
     llm = ActiveMCPLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [tool], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     # This test exercises status updates after an available tool is used.
     # Local mcp_config remains deferred even with eager remote MCP loading.
     agent._sessions[session.sessionId].agent.local_tool_exposure.require_tools([tool_name])
-    response = await agent.prompt(SimpleNamespace(
+    response = await agent.prompt(**acp_params(SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "Use MCP"}], field_meta={},
-    ))
+    )))
     assert response.stopReason == "end_turn"
     assert llm.calls == 3
 
@@ -4252,7 +4258,7 @@ async def test_mcp_disconnect_does_not_remove_stable_tools_in_deferred_mode(
     )
     stable = EchoTool()
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [stable], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
 
     async def disconnect(_name):
@@ -4267,7 +4273,7 @@ async def test_mcp_disconnect_does_not_remove_stable_tools_in_deferred_mode(
         lambda: [],
     )
 
-    result = await agent.extMethod("mcp/disconnect", {"name": "demo"})
+    result = await agent.ext_method("mcp/disconnect", {"name": "demo"})
 
     assert result["success"] is True
     assert any(tool.name == "echo" for tool in agent._base_tools)
@@ -4295,7 +4301,7 @@ async def test_mcp_disconnect_restores_stable_tool_in_eager_mode(
     remote.mcp_tool_id = "mcp:demo/echo"
     remote.server_name = "demo"
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [stable], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
     sync_mcp_tool_list(
         agent._base_tools,
@@ -4322,7 +4328,7 @@ async def test_mcp_disconnect_restores_stable_tool_in_eager_mode(
         lambda: [],
     )
 
-    result = await agent.extMethod("mcp/disconnect", {"name": "demo"})
+    result = await agent.ext_method("mcp/disconnect", {"name": "demo"})
 
     assert result["success"] is True
     assert agent._base_tools == [stable]
@@ -4340,7 +4346,7 @@ async def test_mcp_reconnect_failure_injects_non_availability_state(
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
     state.mcp_runtime_updates_requested = True
@@ -4353,7 +4359,7 @@ async def test_mcp_reconnect_failure_injects_non_availability_state(
         reconnect,
     )
 
-    result = await agent.extMethod("mcp/reconnect", {"name": "demo"})
+    result = await agent.ext_method("mcp/reconnect", {"name": "demo"})
 
     assert result["success"] is False
     update = state.inject_queue.get_nowait()
@@ -4430,15 +4436,15 @@ async def test_acp_binds_cumulative_real_user_text_to_bash_env(tmp_path):
         tools=ToolsConfig(),
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "原始事实 A"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "原始事实 A"}]))
     )
     await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "补充事实 B"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "补充事实 B"}]))
     )
 
     bash_env = agent._sessions[session.sessionId].agent.tools["bash"]._subprocess_env
@@ -4455,11 +4461,11 @@ async def test_acp_prompt_reclaims_background_bash_at_turn_end(tmp_path):
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, BackgroundBashLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "run server"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "run server"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -4491,16 +4497,16 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
         [],
         "system",
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     try:
         response = await agent.prompt(
-            SimpleNamespace(
+            **acp_params(SimpleNamespace(
                 sessionId=session.sessionId,
                 prompt=[{"text": "start server for me to inspect"}],
-            )
+            ))
         )
 
         bash_ids = BackgroundShellManager.get_available_ids(session.sessionId)
@@ -4539,11 +4545,11 @@ async def test_rebound_product_session_can_manage_original_runtime_service(
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "service"})
-    first = await agent.newSession(request)
+    first = await agent.new_session(**acp_params(request))
     original_tools = agent._sessions[first.sessionId].agent.tools
-    peer = await agent.newSession(SimpleNamespace(
+    peer = await agent.new_session(**acp_params(SimpleNamespace(
         cwd=str(tmp_path), field_meta={"session_id": "peer"},
-    ))
+    )))
     peer_tools = agent._sessions[peer.sessionId].agent.tools
     try:
         service = await original_tools["bash"].execute(
@@ -4571,23 +4577,23 @@ async def test_rebound_product_session_can_manage_original_runtime_service(
             monkeypatch.setattr(assembly, "finish_session", fail)
             error = asyncio.CancelledError if failed_rebind == "cancelled" else RuntimeError
             with pytest.raises(error):
-                await agent.newSession(request)
+                await agent.new_session(**acp_params(request))
             monkeypatch.setattr(assembly, "finish_session", original_finish)
             assert shell.process.returncode is None
             with pytest.raises(SessionLogWorkspaceMismatch):
-                await agent.newSession(SimpleNamespace(
+                await agent.new_session(**acp_params(SimpleNamespace(
                     cwd=str(tmp_path / "other"), field_meta=request.field_meta,
-                ))
+                )))
         elif failed_rebind == "workspace":
             with pytest.raises(SessionLogWorkspaceMismatch):
-                await agent.newSession(SimpleNamespace(
+                await agent.new_session(**acp_params(SimpleNamespace(
                     cwd=str(tmp_path / "other"), field_meta=request.field_meta,
-                ))
+                )))
             assert shell.process.returncode is None
 
         previous_handle = first.sessionId
         for _ in range(3):
-            rebound = await agent.newSession(request)
+            rebound = await agent.new_session(**acp_params(request))
             assert rebound.sessionId != previous_handle
             state = agent._sessions[rebound.sessionId]
             tools = state.agent.tools
@@ -4606,9 +4612,9 @@ async def test_rebound_product_session_can_manage_original_runtime_service(
         turn = await tools["bash"].execute(command="sleep 30", run_in_background=True)
         assert turn.success
         turn_shell = BackgroundShellManager.get(turn.bash_id)
-        response = await agent.prompt(SimpleNamespace(
+        response = await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=rebound.sessionId, prompt=[{"text": "continue"}],
-        ))
+        )))
         assert response.stopReason == "end_turn"
         assert BackgroundShellManager.get(turn.bash_id) is None
         assert turn_shell.process.returncode is not None
@@ -4640,7 +4646,7 @@ async def test_rebinding_does_not_expose_previous_handles_python_kernels(tmp_pat
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "python"})
     try:
-        first = await agent.newSession(request)
+        first = await agent.new_session(**acp_params(request))
         old_tool = agent._sessions[first.sessionId].agent.tools["execute_code"]
         monkeypatch.setattr(JupyterSandboxTool, "_sessions", {
             old_tool._session_key("analysis"): SimpleNamespace(
@@ -4649,7 +4655,7 @@ async def test_rebinding_does_not_expose_previous_handles_python_kernels(tmp_pat
         })
         assert old_tool.get_status()["total_sessions"] == 1
 
-        rebound = await agent.newSession(request)
+        rebound = await agent.new_session(**acp_params(request))
         new_tool = agent._sessions[rebound.sessionId].agent.tools["execute_code"]
         assert new_tool.get_status()["total_sessions"] == 0
         assert new_tool.process_owner_id == rebound.sessionId
@@ -4678,7 +4684,7 @@ async def test_background_service_remains_private_to_its_product_and_adapter(
         cwd=str(tmp_path), field_meta={} if other_session == "anonymous" else {"session_id": "a"},
     )
     try:
-        first = await agent.newSession(request)
+        first = await agent.new_session(**acp_params(request))
         owner = agent._sessions[first.sessionId].agent.tools["bash"].process_owner_id
         shell = BackgroundShell("private", "synthetic", SimpleNamespace(returncode=None),
                                 0, owner_id=owner, lifetime="runtime")
@@ -4689,10 +4695,10 @@ async def test_background_service_remains_private_to_its_product_and_adapter(
             # Close the durable log lock; runtime services intentionally outlive
             # individual AgentSessions. A new adapter must not inherit them.
             await agent.aclose()
-        second = await other.newSession(SimpleNamespace(
+        second = await other.new_session(**acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={"session_id": "b"} if other_session == "product" else request.field_meta,
-        ))
+        )))
         tools = other._sessions[second.sessionId].agent.tools
         for name in ("bash_output", "bash_kill"):
             result = await tools[name].execute(bash_id=shell.bash_id)
@@ -4713,12 +4719,12 @@ async def test_acp_prompt_discards_uncommitted_staged_writes_at_turn_end(tmp_pat
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, StagedBeginLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start write"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start write"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -4733,12 +4739,12 @@ async def test_acp_restored_session_binds_user_history_without_assistant_text(tm
         tools=ToolsConfig(),
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[
                 {
@@ -4750,7 +4756,7 @@ async def test_acp_restored_session_binds_user_history_without_assistant_text(tm
                     )
                 }
             ],
-        )
+        ))
     )
 
     bash_env = agent._sessions[session.sessionId].agent.tools["bash"]._subprocess_env
@@ -4766,11 +4772,11 @@ async def test_acp_turn_executes_tool(acp_agent):
     agent, conn = acp_agent
     # Explicit session_mode is consumed at session creation; DummyLLM's first
     # response is consumed by the main agent loop as designed.
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     prompt = SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
-    response = await agent.prompt(prompt)
+    response = await agent.prompt(**acp_params(prompt))
     assert response.stopReason == "end_turn"
     assert response.field_meta["ok"] is True
     assert "errorCode" not in response.field_meta
@@ -4823,7 +4829,7 @@ async def test_acp_turn_executes_tool(acp_agent):
         source = next(chunk for chunk in chunks if chunk.content.text == payload["content"])
         assert payload["messageDisplay"] == source.field_meta["messageDisplay"]
 
-    await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
+    await agent.cancel(**acp_params(SimpleNamespace(sessionId=session.sessionId)))
     assert agent._sessions[session.sessionId].cancelled
 
 
@@ -4835,12 +4841,12 @@ async def test_acp_prompt_exposes_structured_points_insufficient_error(tmp_path)
         tools=ToolsConfig(),
     )
     agent = BoxACPAgent(DummyConn(), config, PointsInsufficientLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -4860,8 +4866,8 @@ async def test_acp_completion_check_timeout_is_not_reported_as_success(tmp_path)
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, TimeoutJudgeLLM(), [EchoTool()], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
-    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "echo ping"}]))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "echo ping"}])))
     assert response.field_meta["ok"] is False
     assert response.field_meta["errorCode"] == "TURN_COMPLETION_CHECK_TIMEOUT"
     assert response.field_meta["errorCategory"] == "timeout"
@@ -4877,12 +4883,12 @@ async def test_acp_prompt_exposes_structured_unsupported_model_error(tmp_path):
     )
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, UnsupportedModelLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -4919,11 +4925,11 @@ async def test_acp_emits_skills_usage_raw_output(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, SkillUsageLLM(), [SkillTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "make infographic"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "make infographic"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -5017,15 +5023,15 @@ async def test_acp_emits_skill_usage_for_explicit_slash_but_not_semantic_preload
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     first = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "/eli5 explain lift"}],
-        )
+        ))
     )
     explicit_outputs = [
         update.update.rawOutput
@@ -5047,10 +5053,10 @@ async def test_acp_emits_skill_usage_for_explicit_slash_but_not_semantic_preload
 
     conn.updates.clear()
     second = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "生成一份季度汇报 PPT"}],
-        )
+        ))
     )
     semantic_outputs = [
         update.update.rawOutput
@@ -5102,8 +5108,8 @@ async def test_acp_skill_invocations_are_idempotent_and_keep_context(
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
@@ -5111,14 +5117,14 @@ async def test_acp_skill_invocations_are_idempotent_and_keep_context(
                 "expert": {"id": "expert-a", "name": "Expert A"},
                 "expert_team": {"id": "team-a", "name": "Team A"},
             },
-        )
+        ))
     )
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "use paid skill twice, then try a missing skill"}],
             field_meta={"turnId": "office-turn-skill"},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -5172,21 +5178,21 @@ async def test_acp_emits_turn_usage_for_tools_mcp_and_tokens(tmp_path, monkeypat
         "system",
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
                 "session_id": "office-session-a",
             },
-        )
+        ))
     )
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "open and echo"}],
             field_meta={"turnId": "office-turn-1"},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -5233,22 +5239,22 @@ async def test_acp_threads_session_turn_and_title_to_llm(tmp_path, monkeypatch):
     llm = CorrelationCaptureLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
                 "session_id": "office-session-a",
                 "title": "Quarterly review",
             },
-        )
+        ))
     )
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "summarize"}],
             field_meta={"turnId": "office-turn-1"},
-        )
+        ))
     )
 
     stream_calls = [call for call in llm.calls if call["mode"] == "stream"]
@@ -5257,11 +5263,11 @@ async def test_acp_threads_session_turn_and_title_to_llm(tmp_path, monkeypatch):
     assert stream_calls[0]["title"] == "Quarterly review"
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "continue"}],
             field_meta={"sessionTitle": "Updated review"},
-        )
+        ))
     )
 
     stream_calls = [call for call in llm.calls if call["mode"] == "stream"]
@@ -5284,8 +5290,8 @@ async def test_acp_goal_ext_method_injects_active_goal_into_prompt(tmp_path):
     llm = CaptureMessagesLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
-    set_result = await agent.extMethod(
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    set_result = await agent.ext_method(
         "goal",
         {
             "sessionId": session.sessionId,
@@ -5296,7 +5302,7 @@ async def test_acp_goal_ext_method_injects_active_goal_into_prompt(tmp_path):
     assert set_result["ok"] is True
     assert set_result["goal"]["status"] == "active"
 
-    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}]))
+    await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}])))
 
     latest_user = [content for role, content in llm.calls[-1] if role == "user"][-1]
     assert "## Active Goal" in latest_user
@@ -5315,19 +5321,19 @@ async def test_acp_goal_pause_stops_prompt_injection(tmp_path):
     llm = CaptureMessagesLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
                 "goal": {"objective": "Keep this goal available", "status": "active"},
             },
-        )
+        ))
     )
-    pause_result = await agent.extMethod("goal", {"sessionId": session.sessionId, "action": "pause"})
+    pause_result = await agent.ext_method("goal", {"sessionId": session.sessionId, "action": "pause"})
     assert pause_result["goal"]["status"] == "paused"
 
-    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "side question"}]))
+    await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "side question"}])))
 
     latest_user = [content for role, content in llm.calls[-1] if role == "user"][-1]
     assert latest_user == "side question" + _EMPTY_CONNECTOR_CONTEXT
@@ -5342,8 +5348,8 @@ async def test_acp_new_session_goal_meta_restores_goal_state(tmp_path):
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
@@ -5355,7 +5361,7 @@ async def test_acp_new_session_goal_meta_restores_goal_state(tmp_path):
                     "blockedReason": "Host paused for review",
                 },
             },
-        )
+        ))
     )
 
     state = agent._sessions[session.sessionId]
@@ -5380,16 +5386,16 @@ async def test_acp_goal_write_tool_completes_goal_and_emits_snapshot(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, GoalCompleteLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
                 "goal": {"objective": "Let the model complete this goal", "status": "active"},
             },
-        )
+        ))
     )
-    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "finish it"}]))
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "finish it"}])))
 
     assert response.stopReason == "end_turn"
     state = agent._sessions[session.sessionId]
@@ -5426,16 +5432,16 @@ async def test_acp_goal_autopilot_continues_active_goal_until_complete(tmp_path)
     llm = GoalAutopilotCompleteLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
                 "goal": {"objective": "Keep working until model completes", "status": "active"},
             },
-        )
+        ))
     )
-    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}])))
 
     assert response.stopReason == "end_turn"
     assert response.field_meta["goalAutopilot"]["continuations"] == 1
@@ -5468,16 +5474,16 @@ async def test_acp_goal_autopilot_stops_when_budget_exhausted(tmp_path):
     llm = GoalAutopilotNeverCompleteLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
                 "goal": {"objective": "Remain active after budget", "status": "active"},
             },
-        )
+        ))
     )
-    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}])))
 
     assert response.stopReason == "max_turn_requests"
     assert response.field_meta["goalAutopilot"]["continuations"] == 1
@@ -5505,16 +5511,16 @@ async def test_acp_goal_autopilot_stops_after_repeated_no_progress(tmp_path):
     llm = GoalAutopilotNeverCompleteLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
                 "goal": {"objective": "Remain active with no progress", "status": "active"},
             },
-        )
+        ))
     )
-    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}])))
 
     assert response.stopReason == "max_turn_requests"
     assert response.field_meta["goalAutopilot"]["continuations"] == 2
@@ -5541,16 +5547,16 @@ async def test_acp_goal_autopilot_stops_when_goal_blocks(tmp_path):
     llm = GoalAutopilotBlockLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
                 "goal": {"objective": "Validate provider integration", "status": "active"},
             },
-        )
+        ))
     )
-    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}])))
 
     assert response.stopReason == "end_turn"
     assert response.field_meta["goalAutopilot"]["continuations"] == 1
@@ -5573,8 +5579,8 @@ async def test_acp_deprecated_artifact_mode_is_ignored(tmp_path, capsys):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, DoneLLM(), [], "system {SANDBOX_INFO}")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"artifact_mode": "project"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"artifact_mode": "project"}))
     )
     state = agent._sessions[session.sessionId]
 
@@ -5617,21 +5623,21 @@ async def test_acp_turn_cleanup_preserves_running_session_scratch(
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, ConcurrentLLM(), [], "system")
-    first = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": session_mode})
+    first = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": session_mode}))
     )
-    second = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": session_mode})
+    second = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": session_mode}))
     )
     first_state = agent._sessions[first.sessionId]
     second_state = agent._sessions[second.sessionId]
     second_turn = asyncio.create_task(
         agent.prompt(
-            SimpleNamespace(
+            **acp_params(SimpleNamespace(
                 sessionId=second.sessionId,
                 prompt=[{"text": "keep running"}],
                 field_meta={},
-            )
+            ))
         )
     )
     try:
@@ -5642,9 +5648,9 @@ async def test_acp_turn_cleanup_preserves_running_session_scratch(
         second_file.write_text("keep", encoding="utf-8")
 
         await agent.prompt(
-            SimpleNamespace(
+            **acp_params(SimpleNamespace(
                 sessionId=first.sessionId, prompt=[{"text": "hello"}], field_meta={}
-            )
+            ))
         )
 
         assert not first_file.exists()
@@ -5688,16 +5694,16 @@ async def test_acp_project_artifact_mode_publishes_generated_artifact(tmp_path):
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"artifact_mode": "project"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"artifact_mode": "project"}))
     )
 
     assert not output_dir.exists()
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "生成未来三个月路线图，按团队分泳道"}],
-        )
+        ))
     )
 
     artifact_outputs = [
@@ -5724,8 +5730,8 @@ async def test_acp_project_artifact_mode_uses_generic_run_options(tmp_path):
         tools=ToolsConfig(),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"artifact_mode": "project"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"artifact_mode": "project"}))
     )
     captured: dict[str, object] = {}
 
@@ -5736,7 +5742,7 @@ async def test_acp_project_artifact_mode_uses_generic_run_options(tmp_path):
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
 
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[
                 {
@@ -5748,7 +5754,7 @@ async def test_acp_project_artifact_mode_uses_generic_run_options(tmp_path):
                     )
                 }
             ],
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -5769,8 +5775,8 @@ async def test_acp_general_mode_keeps_cwd_and_injects_directory_policy(tmp_path)
     ).read_text(encoding="utf-8")
     agent = BoxACPAgent(conn, config, DoneLLM(), [], system_prompt)
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
 
@@ -5807,8 +5813,8 @@ async def test_acp_creates_missing_host_cwd_without_allocating_output(tmp_path):
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"}))
     )
 
     assert workspace.is_dir()
@@ -5828,8 +5834,8 @@ async def test_acp_injects_standard_box_agent_image_generation_policy(tmp_path):
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"}))
     )
     prompt = agent._sessions[session.sessionId].agent.system_prompt
 
@@ -5857,15 +5863,15 @@ async def test_acp_ignores_host_artifact_root_dir(tmp_path, monkeypatch, capsys)
     agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
     artifact_root = workspace / "output" / "tasks" / "task-1"
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
                 field_meta={
                     "session_id": "office-session-a",
                     "artifact_root": str(workspace / "also-ignored"),
                     "workspace_layout": {"artifact_root_dir": str(artifact_root)},
             },
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     sandbox_tool = state.agent.tools["execute_code"]
@@ -5926,8 +5932,8 @@ async def test_acp_workspace_layout_prompt_ignores_legacy_roots(
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(task_root),
             field_meta={
                 "artifact_mode": artifact_mode,
@@ -5937,7 +5943,7 @@ async def test_acp_workspace_layout_prompt_ignores_legacy_roots(
                     layout_keys[2]: str(artifact_root),
                 },
             },
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     prompt = state.agent.system_prompt
@@ -6014,10 +6020,10 @@ async def test_acp_sends_published_artifacts_without_final_selection(tmp_path, m
         ),
         DoneLLM(), [], "system",
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"}))
     )
-    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "report"}]))
+    await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "report"}])))
 
     deliveries = [
         update.update.rawOutput
@@ -6047,11 +6053,11 @@ async def test_acp_streams_long_plain_answer_chunks(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, LongAnswerLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "介绍李白"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "介绍李白"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -6076,11 +6082,11 @@ async def test_acp_normalizes_action_hint_chunks_across_activity(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, MalformedActionHintLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "你好"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "你好"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -6133,8 +6139,8 @@ async def test_acp_marks_injected_message_at_step_boundary(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
     await state.inject_queue.put({"id": "inj-1", "content": "生成10页就可以了"})
@@ -6161,14 +6167,14 @@ async def test_acp_does_not_hide_continuation_behind_artifact_completion(tmp_pat
     llm = PrematurePptLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "做一份 15 页售前竞标方案，导出 PPTX 文件"}],
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -6190,11 +6196,11 @@ async def test_acp_plain_continue_does_not_reinterpret_historical_deliverable(tm
     llm = DoneLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[
                 {
@@ -6206,7 +6212,7 @@ async def test_acp_plain_continue_does_not_reinterpret_historical_deliverable(tm
                     )
                 }
             ],
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -6247,8 +6253,8 @@ async def test_acp_ignores_legacy_workflow_files_without_mutating_them(tmp_path)
         tools=ToolsConfig(),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     captured: dict[str, object] = {}
 
@@ -6259,7 +6265,7 @@ async def test_acp_ignores_legacy_workflow_files_without_mutating_them(tmp_path)
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
 
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[
                 {
@@ -6269,7 +6275,7 @@ async def test_acp_ignores_legacy_workflow_files_without_mutating_them(tmp_path)
                     )
                 }
             ],
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -6289,8 +6295,8 @@ async def test_acp_output_html_followup_has_no_legacy_runtime_state(tmp_path):
         tools=ToolsConfig(),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
     captured: dict[str, object] = {}
@@ -6302,10 +6308,10 @@ async def test_acp_output_html_followup_has_no_legacy_runtime_state(tmp_path):
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
 
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "输出 HTML"}],
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -6328,8 +6334,8 @@ async def test_acp_maps_waiting_for_user_to_end_turn_without_completion(tmp_path
         tools=ToolsConfig(),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     async def waiting_for_user(state_arg, session_id, **kwargs):
@@ -6338,10 +6344,10 @@ async def test_acp_maps_waiting_for_user_to_end_turn_without_completion(tmp_path
     agent._run_turn = waiting_for_user  # type: ignore[method-assign]
 
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "Ask me for the missing value."}],
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -6372,11 +6378,11 @@ async def test_acp_waiting_turn_resumes_only_from_real_user_messages(tmp_path):
         "system",
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     first = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[
                 {
@@ -6385,7 +6391,7 @@ async def test_acp_waiting_turn_resumes_only_from_real_user_messages(tmp_path):
                     )
                 }
             ],
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
 
@@ -6397,10 +6403,10 @@ async def test_acp_waiting_turn_resumes_only_from_real_user_messages(tmp_path):
     assert "deliveryStatus" not in first.field_meta
 
     second = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "TAM 120 亿元，SAM 30 亿元，SOM 3 亿元"}],
-        )
+        ))
     )
 
     assert second.stopReason == "end_turn"
@@ -6410,10 +6416,10 @@ async def test_acp_waiting_turn_resumes_only_from_real_user_messages(tmp_path):
     assert second.field_meta["runStatus"] == "completed"
 
     third = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "继续完成并交付。"}],
-        )
+        ))
     )
 
     assert third.stopReason == "end_turn"
@@ -6441,11 +6447,11 @@ async def test_presentation_resume_reports_actions_without_reconfirming_mode(tmp
                     agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)), tools=ToolsConfig())
     llm = CaptureMessagesLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = {"request_id": "choice-1", "decision_kind": kind,
                 "selected_option_id": option, "selected_option_label": "所选选项", "trigger": trigger}
-    await agent.prompt(SimpleNamespace(sessionId=session.sessionId,
-        prompt=[{"text": "请按选择继续原任务"}], field_meta={"userDecision": response, "ui_language": "zh"}))
+    await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId,
+        prompt=[{"text": "请按选择继续原任务"}], field_meta={"userDecision": response, "ui_language": "zh"})))
     assert len(llm.calls) == 1
     user_messages = [content for role, content in llm.calls[0] if role == "user"]
     assert len(user_messages) == 1
@@ -6493,16 +6499,16 @@ async def test_acp_skill_filter_ignores_host_ui_language_instruction(tmp_path):
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "孙宇晨最新的回复是什么"}],
             field_meta={"ui_language": "zh"},
-        )
+        ))
     )
 
     state = agent._sessions[session.sessionId]
@@ -6540,16 +6546,16 @@ async def test_acp_memory_match_ignores_host_ui_language_instruction(tmp_path, m
     conn = DummyConn()
     llm = CaptureMessagesLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system", memory_manager=memory)
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "用户问题：把这份对比做成ppt"}],
             field_meta={"ui_language": "zh"},
-        )
+        ))
     )
 
     assert queries == ["把这份对比做成ppt"]
@@ -6594,14 +6600,14 @@ async def test_acp_matched_pptx_does_not_deliver_automatic_fulltext(tmp_path):
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "做一份 12 页新员工入职培训 PPT，1920×1080 可编辑"}],
-        )
+        ))
     )
 
     first_system_prompt = llm.calls[0][0][1]
@@ -6646,8 +6652,8 @@ async def test_acp_disabled_skill_stays_out_of_automatic_context(tmp_path):
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
@@ -6655,10 +6661,10 @@ async def test_acp_disabled_skill_stays_out_of_automatic_context(tmp_path):
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "生成一份季度汇报 PPT"}],
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     assert state.preloaded_skill_names == []
@@ -6666,10 +6672,10 @@ async def test_acp_disabled_skill_stays_out_of_automatic_context(tmp_path):
 
     settings_path.write_text('{"disabledSkillNames": ["pptx"]}', encoding="utf-8")
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "再生成一份产品介绍 PPT"}],
-        )
+        ))
     )
 
     assert state.preloaded_skill_names == []
@@ -6706,8 +6712,8 @@ async def test_acp_host_selection_records_exact_skill_before_run(tmp_path):
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     captured: dict[str, object] = {}
 
@@ -6718,11 +6724,11 @@ async def test_acp_host_selection_records_exact_skill_before_run(tmp_path):
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "继续"}],
             field_meta={"selected_skill_names": ["pptx"]},
-        )
+        ))
     )
 
     assert "completion_gate" not in captured["kwargs"]
@@ -6760,8 +6766,8 @@ async def test_acp_explicit_external_selection_has_no_lifecycle_state(
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     captured: list[dict[str, object]] = []
 
@@ -6772,10 +6778,10 @@ async def test_acp_explicit_external_selection_has_no_lifecycle_state(
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "请使用 /ppt-master 介绍内马尔最辉煌的1个赛季"}],
-        )
+        ))
     )
     assert "completion_gate" not in captured[-1]
     state = agent._sessions[session.sessionId]
@@ -6783,10 +6789,10 @@ async def test_acp_explicit_external_selection_has_no_lifecycle_state(
     assert "# PPT MASTER RULES" not in state.agent.system_prompt
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "确认制作"}],
-        )
+        ))
     )
     assert "completion_gate" not in captured[-1]
     assert state.preloaded_skill_names == []
@@ -6836,29 +6842,29 @@ async def test_acp_does_not_read_or_rewrite_legacy_external_skill_owner(
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
-    first_session = await agent.newSession(
-        SimpleNamespace(
+    first_session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={"session_mode": "general", "session_id": "stable-session"},
-        )
+        ))
     )
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=first_session.sessionId,
             prompt=[{"text": "请使用 /ppt-master 制作内马尔演示"}],
-        )
+        ))
     )
-    second_session = await agent.newSession(
-        SimpleNamespace(
+    second_session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={"session_mode": "general", "session_id": "stable-session"},
-        )
+        ))
     )
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=second_session.sessionId,
             prompt=[{"text": "确认制作"}],
-        )
+        ))
     )
 
     assert len(captured) == 2
@@ -6893,8 +6899,8 @@ async def test_acp_explicit_user_skill_does_not_create_legacy_runtime_state(tmp_
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     captured = {}
 
@@ -6904,10 +6910,10 @@ async def test_acp_explicit_user_skill_does_not_create_legacy_runtime_state(tmp_
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "使用 /foreign-ppt 制作演示"}],
-        )
+        ))
     )
 
     assert "completion_gate" not in captured["kwargs"]
@@ -6944,8 +6950,8 @@ async def test_acp_plain_skill_mention_does_not_force_activation(tmp_path):
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     captured: dict[str, object] = {}
 
@@ -6955,10 +6961,10 @@ async def test_acp_plain_skill_mention_does_not_force_activation(tmp_path):
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "解释一下 ppt-master 这个 Skill 的名字"}],
-        )
+        ))
     )
 
     assert "completion_gate" not in captured["kwargs"]
@@ -7007,8 +7013,8 @@ async def test_acp_generic_ppt_request_does_not_preload_matched_lark_slides(tmp_
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
@@ -7017,10 +7023,10 @@ async def test_acp_generic_ppt_request_does_not_preload_matched_lark_slides(tmp_
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "制作一份哈利波特主题介绍 PPT"}],
-        )
+        ))
     )
 
     state = agent._sessions[session.sessionId]
@@ -7071,8 +7077,8 @@ async def test_acp_host_selected_skill_prefers_exact_user_skill(tmp_path):
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     captured: dict[str, object] = {}
 
@@ -7083,11 +7089,11 @@ async def test_acp_host_selected_skill_prefers_exact_user_skill(tmp_path):
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "用飞书创建幻灯片"}],
             field_meta={"selected_skill_names": ["legacy-slides"]},
-        )
+        ))
     )
 
     assert "completion_gate" not in captured["kwargs"]
@@ -7128,14 +7134,14 @@ async def test_acp_get_skill_delivers_real_tool_body_without_preload_owner(tmp_p
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "做一份 12 页新员工入职培训 PPT，1920×1080 可编辑"}],
-        )
+        ))
     )
 
     assert agent._sessions[session.sessionId].preloaded_skill_names == []
@@ -7146,8 +7152,8 @@ async def test_acp_get_skill_delivers_real_tool_body_without_preload_owner(tmp_p
     assert all("# PPTX FULL RULES" not in str(content) for snapshot in llm.calls
                for role, content in snapshot if role in ("system", "developer"))
 
-    other_session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    other_session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     first_state = agent._sessions[session.sessionId]
     other_state = agent._sessions[other_session.sessionId]
@@ -7194,8 +7200,8 @@ async def test_acp_available_hyperframes_does_not_trigger_automatic_fulltext(tmp
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
@@ -7209,13 +7215,13 @@ async def test_acp_available_hyperframes_does_not_trigger_automatic_fulltext(tmp
                     }
                 },
             },
-        )
+        ))
     )
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "把这张图做成一个 8 秒 MP4 视频动画"}],
-        )
+        ))
     )
 
     state = agent._sessions[session.sessionId]
@@ -7271,8 +7277,8 @@ async def test_acp_does_not_preload_hyperframes_skill_when_runtime_unavailable(t
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={
                 "session_mode": "general",
@@ -7286,13 +7292,13 @@ async def test_acp_does_not_preload_hyperframes_skill_when_runtime_unavailable(t
                     }
                 },
             },
-        )
+        ))
     )
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "把这张图做成一个 8 秒 MP4 视频动画"}],
-        )
+        ))
     )
 
     state = agent._sessions[session.sessionId]
@@ -7350,14 +7356,14 @@ async def test_acp_document_match_does_not_bill_root_or_dependency(tmp_path):
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "做一份 12 页新员工入职培训 PPT，1920×1080 可编辑"}],
-        )
+        ))
     )
 
     first_system_prompt = llm.calls[0][0][1]
@@ -7426,11 +7432,11 @@ async def test_acp_filtered_document_candidate_does_not_trigger_fulltext(tmp_pat
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": prompt}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": prompt}]))
     )
 
     state = agent._sessions[session.sessionId]
@@ -7462,8 +7468,8 @@ async def test_acp_hides_internal_web_search_budget_injection(tmp_path):
     web_search = CountingWebSearchTool()
     agent = BoxACPAgent(conn, config, WebBudgetLLM(), [web_search], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
 
@@ -7489,13 +7495,13 @@ async def test_acp_can_cancel_pending_injected_message(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
     state.turn_active = True
 
-    injected = await agent.extMethod(
+    injected = await agent.ext_method(
         "inject",
         {
             "sessionId": session.sessionId,
@@ -7503,7 +7509,7 @@ async def test_acp_can_cancel_pending_injected_message(tmp_path):
             "injectionId": "inj-2",
         },
     )
-    cancelled = await agent.extMethod(
+    cancelled = await agent.ext_method(
         "cancel_inject",
         {"sessionId": session.sessionId, "injectionId": "inj-2"},
     )
@@ -7511,7 +7517,7 @@ async def test_acp_can_cancel_pending_injected_message(tmp_path):
     assert injected == {"ok": True, "injectionId": "inj-2"}
     assert cancelled == {"ok": True}
     assert state.inject_queue.empty()
-    assert await agent.extMethod("inject", {
+    assert await agent.ext_method("inject", {
         "sessionId": session.sessionId, "text": "改成5页", "injectionId": "inj-2",
     }) == {"ok": True, "injectionId": "inj-2"}
     assert state.inject_queue.qsize() == 1
@@ -7528,16 +7534,16 @@ async def test_acp_inject_same_id_is_idempotent(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
     state.turn_active = True
 
     args = {"sessionId": session.sessionId, "text": "只做5页", "injectionId": "dup-1"}
 
-    first = await agent.extMethod("inject", args)
-    second = await agent.extMethod("inject", dict(args))  # retry, same id
+    first = await agent.ext_method("inject", args)
+    second = await agent.ext_method("inject", dict(args))  # retry, same id
 
     assert first == {"ok": True, "injectionId": "dup-1"}
     assert second == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
@@ -7547,17 +7553,17 @@ async def test_acp_inject_same_id_is_idempotent(tmp_path):
     # Even after the item is consumed (drained by the loop), a retry stays deduped.
     consumed = state.inject_queue.get_nowait()
     assert _inject_item_id(consumed) == "dup-1"
-    third = await agent.extMethod("inject", dict(args))
+    third = await agent.ext_method("inject", dict(args))
     assert third == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
     assert state.inject_queue.empty()
 
     # Cancelling consumed input cannot make a network retry run it twice.
-    cancelled = await agent.extMethod(
+    cancelled = await agent.ext_method(
         "cancel_inject",
         {"sessionId": session.sessionId, "injectionId": "dup-1"},
     )
     assert cancelled == {"ok": False}
-    fourth = await agent.extMethod("inject", dict(args))
+    fourth = await agent.ext_method("inject", dict(args))
     assert fourth == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
     assert state.inject_queue.empty()
 
@@ -7573,8 +7579,8 @@ async def test_acp_new_session_injects_core_memory_without_returning_it(tmp_path
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system", memory_manager=memory_mgr)
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     assert session.field_meta == {
@@ -7596,7 +7602,7 @@ async def test_acp_invalid_session(acp_agent):
     # Auto-created sessions without metadata stay on the general prompt. The
     # DummyLLM returns one normal assistant response, so we only check stopReason.
     prompt = SimpleNamespace(sessionId="missing", prompt=[{"text": "?"}])
-    response = await agent.prompt(prompt)
+    response = await agent.prompt(**acp_params(prompt))
     assert response.stopReason == "end_turn"
 
 
@@ -7624,8 +7630,8 @@ async def test_acp_prompt_lists_officev3_allowed_directories(tmp_path):
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"}))
     )
     prompt = agent._sessions[session.sessionId].agent.system_prompt
 
@@ -7672,8 +7678,8 @@ async def test_acp_default_permission_mode_replaces_global_allowed_directories(t
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={
                 "permission_mode": "default",
@@ -7683,7 +7689,7 @@ async def test_acp_default_permission_mode_replaces_global_allowed_directories(t
                     "allowed_directories": [str(session_allowed)],
                 },
             },
-        )
+        ))
     )
     bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
 
@@ -7718,11 +7724,11 @@ async def test_acp_default_permission_mode_without_filesystem_policy_fails_close
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={"permission_mode": "default"},
-        )
+        ))
     )
     bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
 
@@ -7746,8 +7752,8 @@ async def test_acp_default_mode_applies_session_directories_without_global_polic
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={
                 "permission_mode": "default",
@@ -7757,7 +7763,7 @@ async def test_acp_default_mode_applies_session_directories_without_global_polic
                     "allowed_directories": [str(allowed)],
                 },
             },
-        )
+        ))
     )
     bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
 
@@ -7777,11 +7783,11 @@ async def test_acp_non_string_permission_mode_fails_closed(tmp_path, invalid_mod
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={"permission_mode": invalid_mode},
-        )
+        ))
     )
     tools = agent._sessions[session.sessionId].agent.tools
 
@@ -7800,11 +7806,11 @@ async def test_acp_full_access_request_is_authoritative_for_session(tmp_path):
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={"permission_mode": "full_access"},
-        )
+        ))
     )
     bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
     session_tools = agent._sessions[session.sessionId].agent.tools
@@ -7826,11 +7832,11 @@ async def test_acp_unrestricted_filesystem_request_is_authoritative_for_session(
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={"permission_mode": "unrestricted_filesystem"},
-        )
+        ))
     )
     session_tools = agent._sessions[session.sessionId].agent.tools
     bash_tool = session_tools["bash"]
@@ -7854,11 +7860,11 @@ async def test_acp_unrestricted_filesystem_keeps_dangerous_command_approval(tmp_
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={"permission_mode": "unrestricted_filesystem"},
-        )
+        ))
     )
     session_tools = agent._sessions[session.sessionId].agent.tools
     bash_tool = session_tools["bash"]
@@ -7895,11 +7901,11 @@ async def test_acp_full_access_skips_dangerous_command_approval(tmp_path, monkey
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={"permission_mode": "full_access"},
-        )
+        ))
     )
     bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
     session_tools = agent._sessions[session.sessionId].agent.tools
@@ -7943,8 +7949,8 @@ async def test_acp_prompt_includes_skill_runtime_context(tmp_path, monkeypatch):
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"}))
     )
     prompt = agent._sessions[session.sessionId].agent.system_prompt
 
@@ -7995,8 +8001,8 @@ async def test_acp_prompt_and_bash_env_include_self_managed_node_runtime(tmp_pat
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
     prompt = state.agent.system_prompt
@@ -8054,8 +8060,8 @@ async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_pat
     )
     agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
 
@@ -8104,11 +8110,11 @@ async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(
         }
     }
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(workspace),
             field_meta={"session_mode": "general", "env_context": env_context},
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     bash_env = state.agent.tools["bash"]._subprocess_env
@@ -8142,9 +8148,9 @@ async def test_acp_emits_todo_snapshot_raw_output(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, TodoLLM(), [], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "更新 todo 状态"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "更新 todo 状态"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -8183,9 +8189,9 @@ async def test_acp_emits_plan_snapshot_raw_output(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, PlanLLM(), [], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "开发一个 React 个人介绍网站，先做规划"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "开发一个 React 个人介绍网站，先做规划"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -8234,18 +8240,18 @@ async def test_acp_session_meta_force_plan_start_hint_is_one_shot(tmp_path):
     llm = PlanAfterRetryLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=None,
             field_meta={"session_mode": "general", "forcePlanStart": True},
-        )
+        ))
     )
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "介绍一下太阳系"}],
             field_meta={},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8272,13 +8278,13 @@ async def test_acp_prompt_meta_force_plan_start_is_hint_only(tmp_path):
     llm = PlanAfterRetryLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "介绍一下太阳系"}],
             field_meta={"forcePlanStart": True},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8303,7 +8309,7 @@ async def test_acp_history_plan_snapshot_does_not_force_plan_for_short_reply(tmp
     llm = PlanAfterRetryLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     prompt = """以下是当前会话最近的上下文，请在此基础上继续回答：
 用户:
 text: 可以开始
@@ -8313,11 +8319,11 @@ plan: {"title": "执行计划", "steps": [{"title": "旧步骤"}]}
 
 用户问题：ok"""
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": prompt}],
             field_meta={"forcePlanStart": True, "requirePlanApproval": True},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8343,7 +8349,7 @@ async def test_acp_history_plan_snapshot_does_not_force_plan_from_host_hint(tmp_
     llm = PlanAfterRetryLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     prompt = """以下是当前会话最近的上下文，请在此基础上继续回答：
 用户:
 text: 可以开始
@@ -8351,11 +8357,11 @@ text: 可以开始
 助手:
 plan: {"title": "执行计划", "steps": [{"title": "旧步骤"}]}"""
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": prompt}],
             field_meta={"forcePlanStart": True, "requirePlanApproval": True},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8380,7 +8386,7 @@ async def test_acp_latest_user_plan_request_still_triggers_plan_with_history(tmp
     llm = PlanAfterRetryLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     prompt = """以下是当前会话最近的上下文，请在此基础上继续回答：
 用户:
 text: ok
@@ -8390,11 +8396,11 @@ plan: {"title": "旧计划", "steps": []}
 
 用户问题：先出一个计划"""
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": prompt}],
             field_meta={},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8420,13 +8426,13 @@ async def test_acp_prompt_text_plan_request_waits_for_approval_without_meta(tmp_
     llm = PlanApprovalThenEchoLLM()
     agent = BoxACPAgent(conn, config, llm, [EchoTool()], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "使用plan 生成一个内马尔图片"}],
             field_meta={},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8457,13 +8463,13 @@ async def test_acp_prompt_text_plan_request_auto_approves_with_meta(tmp_path):
     llm = PlanApprovalThenEchoLLM()
     agent = BoxACPAgent(conn, config, llm, [EchoTool()], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "使用plan 生成一个内马尔图片"}],
             field_meta={"autoApprovePlan": True, "skipPlanApproval": True},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8497,13 +8503,13 @@ async def test_acp_organic_plan_write_waits_for_approval_without_meta(tmp_path):
     llm = PlanApprovalThenEchoLLM()
     agent = BoxACPAgent(conn, config, llm, [EchoTool()], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "生成一份分析报告"}],
             field_meta={},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8534,13 +8540,13 @@ async def test_acp_organic_plan_write_auto_approves_with_meta(tmp_path):
     llm = PlanApprovalThenEchoLLM()
     agent = BoxACPAgent(conn, config, llm, [EchoTool()], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "生成一份分析报告"}],
             field_meta={"autoApprovePlan": True},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8564,13 +8570,13 @@ async def test_acp_plan_approval_text_continues_pending_plan(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, PlanApprovalThenEchoLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     first = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "先出计划"}],
             field_meta={"forcePlanStart": True, "requirePlanApproval": True},
-        )
+        ))
     )
 
     assert first.stopReason == "end_turn"
@@ -8599,7 +8605,7 @@ plan: {"title": "Approval-gated plan", "steps": []}
 
 用户问题：继续执行"""
     second = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": approval_prompt}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": approval_prompt}]))
     )
 
     assert second.stopReason == "end_turn"
@@ -8621,8 +8627,8 @@ async def test_acp_sub_agent_progress_has_stable_grouping_fields(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, SubAgentLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
-    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "delegate"}]))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "delegate"}])))
 
     assert response.stopReason == "end_turn"
     progress = [
@@ -8653,15 +8659,15 @@ async def test_acp_prompt_response_reports_turn_token_total(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, UsageLLM(per_call_total=30), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "hello"}],
             field_meta={"turn_id": "turn-response-1"},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8684,8 +8690,8 @@ async def test_acp_registry_failure_cannot_report_task_complete(tmp_path, monkey
         tools=ToolsConfig(enable_todo=False),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     def fail_finish(*args, **kwargs):
@@ -8693,7 +8699,7 @@ async def test_acp_registry_failure_cannot_report_task_complete(tmp_path, monkey
 
     monkeypatch.setattr("box_agent.acp.finish_task", fail_finish)
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
     )
 
     assert response.field_meta["completed"] is False
@@ -8720,22 +8726,22 @@ async def test_acp_turn_token_total_includes_structured_image_inspection(tmp_pat
         [EchoTool(), MeteredImageInspectionTool()],
         "system",
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     agent._sessions[session.sessionId].agent.tools["inspect_images"] = (
         MeteredImageInspectionTool()
     )
 
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "What is in this image?"}],
             field_meta={
                 "turn_id": "turn-with-image",
                 "image_attachment_paths": [str(image)],
             },
-        )
+        ))
     )
 
     assert response.field_meta["usage"]["totalTokens"] == 42
@@ -8766,14 +8772,14 @@ async def test_acp_prompt_response_marks_done_error_as_failure(tmp_path):
         "system",
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "Use echo and summarize the result"}],
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -8804,10 +8810,10 @@ async def test_acp_exhausted_stream_recovery_reports_unfinished_task(tmp_path):
     conn = DummyConn()
     llm = DroppingLLM()
     agent = BoxACPAgent(conn, config, llm, [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
-    response = await agent.prompt(SimpleNamespace(
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    response = await agent.prompt(**acp_params(SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "Create the outline."}],
-    ))
+    )))
 
     assert llm.calls == 2
     assert response.stopReason == "end_turn"  # ACP has no interrupted enum value.
@@ -8834,8 +8840,8 @@ async def test_acp_prompt_converts_unexpected_cancelled_error_to_terminal_failur
         tools=ToolsConfig(enable_todo=False),
     )
     agent = BoxACPAgent(DummyConn(), config, EmptyFinalAnswerLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     async def interrupt_turn(*_args, **_kwargs):
@@ -8844,7 +8850,7 @@ async def test_acp_prompt_converts_unexpected_cancelled_error_to_terminal_failur
     agent._run_turn = interrupt_turn  # type: ignore[method-assign]
 
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -8865,14 +8871,14 @@ async def test_acp_token_meter_resets_between_turns(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, UsageLLM(per_call_total=25), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     first = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "one"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "one"}]))
     )
     second = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "two"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "two"}]))
     )
 
     assert first.field_meta["usage"]["totalTokens"] == 25
@@ -8927,11 +8933,11 @@ async def test_acp_streams_short_model_preface_before_tool(tmp_path):
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, SpeakThenToolLLM(), [EchoTool()], "system")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "打开页面"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "打开页面"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -8971,16 +8977,16 @@ async def test_acp_prompt_binds_browser_session_key_to_session_id(tmp_path, monk
 
     monkeypatch.setattr(runtime_module, "_run_agent_loop", observing_loop)
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
 
     assert current_browser_session_key() is None
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "hello"}],
             field_meta={"browser_host_binding": binding},
-        )
+        ))
     )
 
     assert observed == [(session.sessionId, binding)]
@@ -9007,9 +9013,9 @@ async def test_acp_rebind_closes_retired_handles_browser_context(tmp_path, monke
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "office-rebind"})
 
-    first = await agent.newSession(request)
+    first = await agent.new_session(**acp_params(request))
     assert closed == []
-    second = await agent.newSession(request)
+    second = await agent.new_session(**acp_params(request))
 
     assert second.sessionId != first.sessionId
     assert closed == [first.sessionId]
@@ -9030,7 +9036,7 @@ async def test_acp_mcp_status_reports_browser_isolation_mode(tmp_path, monkeypat
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
 
-    result = await agent.extMethod("mcp/status", {})
+    result = await agent.ext_method("mcp/status", {})
 
     assert result["browser"] == snapshot
 
@@ -9102,35 +9108,35 @@ async def test_user_mcp_host_credential_binding_keeps_secret_out_of_result(tmp_p
     monkeypatch.setattr(mcp_loader, "_mcp_runtime_credential_versions", {})
     monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", {})
     target = {"owner": "user", "name": "sample", "config": {"url": "https://example.test/mcp"}}
-    result = await agent.extMethod("mcp/credential/set", {
+    result = await agent.ext_method("mcp/credential/set", {
         "credentialRef": "user-mcp:sample", "target": target,
         "headers": {"Authorization": "Bearer test-secret"},
     })
     assert result == {"success": True, "affectedServers": ["sample"], "target": {"owner": "user", "name": "sample"}}
     assert mcp_loader._mcp_runtime_credentials[("user", "user-mcp:sample")]["Authorization"] == "Bearer test-secret"
     assert "test-secret" not in str(result)
-    invalid = await agent.extMethod("mcp/credential/set", {
+    invalid = await agent.ext_method("mcp/credential/set", {
         "credentialRef": "user-mcp:sample", "target": target, "headers": {"Authorization": 1},
     })
     assert invalid["success"] is False
     assert "test-secret" not in str(invalid)
-    legacy = await agent.extMethod("mcp/credential/set", {
+    legacy = await agent.ext_method("mcp/credential/set", {
         "credentialRef": "user-mcp:sample", "headers": {"Authorization": "Bearer connector-secret"},
     })
     assert legacy["success"] is True
     assert "connector-secret" not in str(legacy)
-    rejected = await agent.extMethod("mcp/credential/clear", {
+    rejected = await agent.ext_method("mcp/credential/clear", {
         "credentialRef": "user-mcp:sample", "target": {"owner": "user", "name": "other"},
     })
     assert rejected["success"] is False
     assert mcp_loader._mcp_runtime_credentials[("user", "user-mcp:sample")]["Authorization"] == "Bearer test-secret"
-    cleared = await agent.extMethod("mcp/credential/clear", {
+    cleared = await agent.ext_method("mcp/credential/clear", {
         "credentialRef": "user-mcp:sample", "target": {"owner": "user", "name": "sample"},
     })
     # No server is resolved yet, so cleanup must not invalidate a connection.
     assert cleared == {"success": True, "affectedServers": []}
     assert mcp_loader._mcp_runtime_credentials["user-mcp:sample"]["Authorization"] == "Bearer connector-secret"
-    await agent.extMethod("mcp/credential/clear", {"credentialRef": "user-mcp:sample"})
+    await agent.ext_method("mcp/credential/clear", {"credentialRef": "user-mcp:sample"})
     assert not mcp_loader._mcp_runtime_credentials
     assert not mcp_loader._mcp_credential_targets
 

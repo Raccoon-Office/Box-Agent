@@ -6,6 +6,13 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## Structured input and selection ownership (PR #246)
+
+- Agent validates and projects `input_context`, `selection_context`, and `database_context` for normal prompts, history edits, and injections. Source facts are data, not tool authorization; selection guidance distinguishes questions from requested edits.
+- Semantic context participates in turn and injection idempotency; prompts without new context retain the old fingerprint. Existing history is not rewritten. Hosts using structured context send the corresponding input facts; file attachments retain their existing representation.
+- Contract and proof entry points: [ACP SDK 0.12 integration](../integration/acp-sdk-0.12.md#2a输入事实与-agent-职责), `tests/test_input_context.py`, `tests/test_message_injections.py`, and `tests/test_acp_history_edit.py`. These are source references, not a claim of a test run or packaged-host acceptance.
+- Reverting the change requires coordinating the Agent and paired host input behavior; installed-runtime and real-model verification remain separate from source-level evidence.
+
 ## 2026-11-02 — Incomplete file delivery and bounded recovery
 
 - Omitting `chunk_index` during an active `write_file` transaction now reports
@@ -213,6 +220,7 @@ decision, read those entries together.
 
 | Area | Affected paths or keywords | Current effective decision | Relationship | Details |
 | --- | --- | --- | --- | --- |
+| ACP structured input | `input_context.py`, `selection_context`, `database_context`, history edit, `_inject` | Agent validates and projects host facts; semantic context participates in idempotency without granting tool access. | Paired host contract; prompts without new context retain their fingerprint. | [PR #246](#structured-input-and-selection-ownership-pr-246) |
 | Session/output directories | `params.cwd`, `artifact_mode`, `artifact_root_dir`, `BOX_AGENT_OUTPUT_DIR`, artifact scan, PPT, research | Session cwd is stable; legacy path selectors warn and are ignored; General-mode task folders are model-created file organization only. | Supersedes fixed per-session output-root behavior. | [2026-09-09 cwd-owned task organization](#2026-09-09--cwd-owned-task-organization-and-legacy-output-root-deprecation) |
 | Artifact transaction inputs and truncated replies | `artifact_publication.py`, `tools/engine/artifact_results.py`, `publish_artifact_tool.py`, `.box-agent-staging`, `loop_guards.py`, `truncation_continuation_text` | Root staging inputs never become deliverables; final committed paths use normal ownership rules. Runtime user-role continuation follows the received tail; complete last-line ASCII markers/paths suppress normal-stop truncation retries. | Hardens existing publication and truncation recovery; explicit length recovery remains unchanged. | [PR #212 boundaries and proof](#2026-10-14--transaction-staging-and-truncation-continuation-pr-212) |
 | Tool name aliases | `Tool.aliases`, `build_tool_name_index`, OpenClaw, Hermes | Compatibility names are execution-only, use canonical Box-Agent argument schemas, and fail closed on conflicts. | Built-in mappings complete the generic alias mechanism in `fad2436`. | [2026-08-20 built-in aliases](#2026-08-20--built-in-tool-name-compatibility-aliases) |

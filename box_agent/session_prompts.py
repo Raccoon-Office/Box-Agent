@@ -6,6 +6,13 @@ from pathlib import Path
 
 from .tools.mcp_sources import configured_mcp_sources, resolve_mcp_sources
 
+DOCUMENT_SELECTION_PROMPT = """Document selection capability:
+- Interpret the current request semantically. Questions, explanations, summaries and editing advice are informational. A request to change the selected content means edit and save the source by default. Honor requests for suggested text only or no file changes. A selection alone never authorizes editing.
+- Edit only the selected excerpt unless this turn explicitly requests a broader scope. Preserve unselected content, ordering, tables, images and formatting; allow only necessary local layout changes. Do not add revision labels, dates, badges, headers, footers or change notes unless requested.
+- Read the current source and locate the intended occurrence before editing. The target is source.relativePath, including the original Word file behind a PDF preview; preview page numbers do not change the source format. If the location is missing or ambiguous, ask before writing.
+- For PDF edits, prefer the available generation source and re-export. When rebuilding Word or PDF is necessary, use a temporary copy and verify preservation outside the selection before replacing the original. Re-exporting does not authorize rewriting the whole document.
+- If the tools cannot reliably edit or preservation cannot be verified, do not overwrite. Explain the specific blocker and inspection/attempt, provide suggested text where possible, and state that it was not saved. Otherwise verify the saved change and report the specific edit and save result."""
+
 GENERAL_DIRECTORY_ORGANIZATION_PROMPT = """## General Task Directory Organization
 - 保持当前会话工作目录（cwd）不变。你创建的任务子目录只是文件组织行为，不是新的 workspace。
 - 在写入独立任务的产物前，先查看 cwd 的顶层结构。修改现有项目时直接在项目树中的合适位置工作，不要另建任务目录。

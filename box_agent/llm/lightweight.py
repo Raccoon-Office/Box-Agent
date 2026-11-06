@@ -6,7 +6,7 @@ to conversation history. Wraps :func:`LLMClient.generate` with a hard
 timeout, no tools, no extended thinking, and a structured result.
 
 The ACP ``llm/prompt`` extension method is a thin shell around this
-service — see :meth:`box_agent.acp.BoxACPAgent.extMethod`.
+service — see :meth:`box_agent.acp.BoxACPAgent.ext_method`.
 """
 
 from __future__ import annotations
