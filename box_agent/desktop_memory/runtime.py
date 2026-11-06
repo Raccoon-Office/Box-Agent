@@ -11,12 +11,62 @@ from typing import Any
 
 from ..memory import MemoryRuntime, _MemoryTurn
 from .backend import TurnScope
-from .evidence import EvidenceCursor, no_evidence
+from .evidence import EvidenceCursor, _redact, no_evidence
 from .experience import ExperienceRuntime
+from .transport import MemoryProxyError
 
 
 _log = logging.getLogger(__name__)
 _ATTEMPT_CACHE_LIMIT = 5000
+
+
+def _file_input_facts(context: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Project accepted file metadata without sharing paths or file bodies."""
+    files = context.get("files") if isinstance(context, dict) else None
+    if not files:
+        return None
+    if not isinstance(files, list) or len(files) > 520:
+        raise MemoryProxyError("INVALID_ARGUMENT")
+    summaries = []
+    for item in files:
+        if (not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                or not 0 < len(item["name"]) <= 1024
+                or type(item.get("size")) is not int or not 0 <= item["size"] <= 9007199254740991):
+            raise MemoryProxyError("INVALID_ARGUMENT")
+        # A display name can itself be supplied as a path; only its basename
+        # belongs to the metadata projection, never an absolute local prefix.
+        name = item["name"].replace("\\", "/").rsplit("/", 1)[-1]
+        if not name.strip() or any(ord(char) < 32 or ord(char) == 127 for char in name):
+            raise MemoryProxyError("INVALID_ARGUMENT")
+        summary = {"name": name, "size": item["size"]}
+        if "mimeType" in item:
+            mime = item["mimeType"]
+            if not isinstance(mime, str) or len(mime) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in mime):
+                raise MemoryProxyError("INVALID_ARGUMENT")
+            if mime:
+                summary["mimeType"] = mime
+        summaries.append(summary)
+    # Even omitted metadata cannot turn a credential-bearing input into a
+    # newly learned QA. The whole handoff is skipped rather than partially sent.
+    if _redact(summaries) != summaries:
+        raise MemoryProxyError("MEMORY_INPUT_REDACTED")
+    facts = {"files": summaries[:20], "omitted_files": max(0, len(summaries) - 20)}
+    if len(json.dumps(facts, ensure_ascii=False).encode("utf-8")) > 64 * 1024:
+        raise MemoryProxyError("BUDGET_EXCEEDED")
+    return facts
+
+
+def _has_original_user_view(evidence: dict[str, Any], user: str) -> bool:
+    if evidence.get("status") != "captured":
+        return False
+    for view in evidence.get("views", []):
+        if view.get("source_ref", {}).get("event_type") == "user/message":
+            try:
+                if json.loads(view["text"]) == {"content": user}:
+                    return True
+            except (ValueError, TypeError, KeyError):
+                pass
+    return False
 
 
 class DesktopMemoryRuntime(MemoryRuntime):
@@ -155,7 +205,10 @@ class DesktopMemoryRuntime(MemoryRuntime):
     async def _finish(self, turn: _MemoryTurn, scope: TurnScope,
                       cursor: EvidenceCursor | None = None, end: int = 0, llm: Any = None, token_limit: int = 0) -> None:
         try:
-            if not scope.learnable or not turn.user.strip() or turn.handle is None:
+            if not scope.learnable or turn.handle is None:
+                return
+            input_facts = _file_input_facts(turn.input_context)
+            if not turn.user.strip() and input_facts is None:
                 return
             result = await turn.handle.result(consume_events=False)
             if result.status.value != "completed" or not result.final_content.strip():
@@ -168,9 +221,11 @@ class DesktopMemoryRuntime(MemoryRuntime):
                                               assistant=result.final_content, end=end)
                 except Exception:
                     self.backend.log_failure("evidence", "log_unavailable")
+            if not turn.user.strip() and not _has_original_user_view(evidence, turn.user):
+                return
             async with self._save_slots:
                 receipt = await self.backend.handoff(scope, turn.user, result.final_content, turn.timestamp,
-                                                     evidence=evidence)
+                                                     evidence=evidence, input_facts=input_facts)
             _log.info("memory backend=desktop operation=handoff state=%s", receipt["state"])
             if receipt["state"] == "skipped_redacted":
                 return

@@ -9243,9 +9243,9 @@ async def test_desktop_memory_acp_keeps_tool_bodies_in_protocol_and_model_but_ou
     conn, llm = DummyConn(), MemoryLLM()
     agent = BoxACPAgent(conn, config, llm, [MemoryReadTool()], 'system')
     try:
-        session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
         capsys.readouterr()
-        result = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{'text': 'test memory privacy'}]))
+        result = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{'text': 'test memory privacy'}])))
         assert result.stopReason == 'end_turn'
         assert llm.saw_result
         assert any(canary in str(update.model_dump()) for update in conn.updates)

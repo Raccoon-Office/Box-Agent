@@ -26,6 +26,7 @@ from box_agent.tools.memory_tool import create_memory_tools
 from tests.test_agent_session import session_config
 from tests.test_desktop_memory_evidence import CREDENTIAL_SAMPLES
 from tests.test_session_plugins import RecordingLLM
+from tests.acp_helpers import acp_params
 
 
 @pytest.fixture
@@ -989,8 +990,8 @@ async def test_real_acp_connector_transitions_keep_current_turn_evidence(
     adapter = BoxACPAgent(DummyConn(), config, VisionLLM(), [], "system", memory_manager=process)
     image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     try:
-        opened = await adapter.newSession(SimpleNamespace(
-            cwd=str(tmp_path), field_meta={"session_id": "connector-evidence"}))
+        opened = await adapter.new_session(**acp_params(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={"session_id": "connector-evidence"})))
         state = adapter._sessions[opened.sessionId]
         if active_goal:
             state.agent.set_goal("Synthetic goal")
@@ -1005,7 +1006,7 @@ async def test_real_acp_connector_transitions_keep_current_turn_evidence(
             prompt = [{"type": "text", "text": user}]
             if with_image:
                 prompt.append({"type": "image", "data": image_data, "mimeType": "image/png"})
-            await adapter.prompt(SimpleNamespace(sessionId=opened.sessionId, prompt=prompt, field_meta=meta))
+            await adapter.prompt(**acp_params(SimpleNamespace(sessionId=opened.sessionId, prompt=prompt, field_meta=meta)))
             await asyncio.gather(*tuple(state.memory_runtime.tasks))
             sent = [payload for operation, payload in host.calls if operation == "qa/evidence"]
             assert len(sent) == index + 1
@@ -1048,7 +1049,7 @@ async def test_desktop_acp_trace_does_not_persist_private_qa(tmp_path, monkeypat
     adapter = BoxACPAgent(DummyConn(), config, DoneLLM(), [], 'system', memory_manager=process)
     canary = 'REVIEW-PRIVATE-QA-CANARY-20261030'
     try:
-        opened = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={'session_id': 'review-trace'}))
+        opened = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={'session_id': 'review-trace'})))
         state = adapter._sessions[opened.sessionId]
         request = SimpleNamespace(sessionId=opened.sessionId,
             prompt=[{'type': 'text', 'text': canary}], field_meta={'turn_id': 'trace-turn'})
@@ -1057,9 +1058,9 @@ async def test_desktop_acp_trace_does_not_persist_private_qa(tmp_path, monkeypat
                 raise RuntimeError(canary)
             monkeypatch.setattr(adapter, '_run_turn', fail_turn)
             with pytest.raises(RuntimeError, match=canary):
-                await adapter.prompt(request)
+                await adapter.prompt(**acp_params(request))
         else:
-            await adapter.prompt(request)
+            await adapter.prompt(**acp_params(request))
             assert canary in state.agent.session_log.path.read_text()
         records = [json.loads(line) for line in state.trace_writer.file_path.read_text().splitlines()]
         assert any(row['event'] == 'turn.input' for row in records)

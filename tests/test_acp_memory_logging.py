@@ -19,12 +19,13 @@ async def test_inject_preserves_instruction_but_logs_only_metadata(tmp_path, mon
     monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(tmp_path / "inject.log"))
     logger = ACPDebugLogger()
     monkeypatch.setattr("box_agent.acp.log", logger)
-    state = SimpleNamespace(turn_active=True, inject_queue=InjectionManager())
+    state = SimpleNamespace(turn_active=True, inject_queue=InjectionManager(),
+                            agent=SimpleNamespace(workspace_dir=tmp_path), permission_engine=None)
     canary = "SYNTHETIC_PRIVATE_INJECTION"
     stub = SimpleNamespace(_sessions={"session": state})
     try:
         assert not private_payloads()
-        result = await BoxACPAgent.extMethod(stub, "inject", {
+        result = await BoxACPAgent.ext_method(stub, "inject", {
             "sessionId": "session", "injectionId": "fixture-injection", "text": canary})
         assert result["ok"]
         assert state.inject_queue.get_nowait()["content"] == canary
@@ -87,7 +88,7 @@ async def test_private_acp_scope_covers_unknown_errors_and_cancellation_then_res
 
 
 @pytest.mark.parametrize('cancelled', [False, True])
-async def test_desktop_prompt_failure_and_cancellation_reset_privacy_and_reservation(monkeypatch, capsys, cancelled):
+async def test_desktop_prompt_failure_and_cancellation_reset_privacy_and_reservation(tmp_path, monkeypatch, capsys, cancelled):
     from types import SimpleNamespace
     from box_agent.acp import BoxACPAgent, SessionState
     monkeypatch.setenv('BOX_AGENT_LOG_LEVEL', 'debug')
@@ -95,7 +96,7 @@ async def test_desktop_prompt_failure_and_cancellation_reset_privacy_and_reserva
     logger = ACPDebugLogger()
     canary = 'MV2-PROMPT-PRIVATE-failure'
     config = SimpleNamespace(agent=SimpleNamespace(memory_backend_type='desktop'))
-    state = SessionState(agent=SimpleNamespace(session_log=None), config=config)
+    state = SessionState(agent=SimpleNamespace(session_log=None, workspace_dir=tmp_path), config=config)
 
     async def fail_prompt(*_):
         assert private_payloads()
@@ -110,7 +111,7 @@ async def test_desktop_prompt_failure_and_cancellation_reset_privacy_and_reserva
                            _prompt_for_session=fail_prompt)
     try:
         with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
-            await BoxACPAgent.prompt(stub, SimpleNamespace(sessionId='s-1'))
+            await BoxACPAgent.prompt(stub, session_id='s-1', prompt=[{'type': 'text', 'text': 'private request'}])
         assert not private_payloads()
         assert not state._prompt_in_progress
         assert state._prompt_finished.done()

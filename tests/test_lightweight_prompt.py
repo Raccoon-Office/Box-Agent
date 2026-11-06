@@ -371,7 +371,7 @@ async def test_desktop_title_request_omits_private_qa_from_all_diagnostics_witho
     agent = _StubAgent(llm)
     agent._config.agent.memory_backend_type = 'desktop'
     try:
-        result = await agent.extMethod('llm/prompt', {'prompt':canary, '_meta':{'purpose':'local_agent_title'}})
+        result = await agent.ext_method('llm/prompt', {'prompt':canary, '_meta':{'purpose':'local_agent_title'}})
         if failed:
             assert 'error' in result
         else:

@@ -73,7 +73,7 @@ async def test_yaml_desktop_selector_without_native_grant_is_advertised_disabled
     assert not loaded.agent.enable_memory and loaded.agent.memory_backend_type == "desktop"
     agent = BoxACPAgent(SimpleNamespace(), loaded, SimpleNamespace(), [], "base")
     agent._start_memory_bootstrap = lambda: None
-    response = await agent.initialize(SimpleNamespace(field_meta={}))
+    response = await agent.initialize(protocol_version=1)
     assert response.field_meta["desktop_memory"]["enabled"] is False
 
 
@@ -102,7 +102,7 @@ async def test_acp_initialize_advertises_adapter_without_private_launch_data(tmp
     config = Config(llm=LLMConfig(api_key="synthetic"), agent=settings, tools=ToolsConfig())
     agent = BoxACPAgent(SimpleNamespace(), config, SimpleNamespace(), [], "base")
     agent._start_memory_bootstrap = lambda: None
-    response = await agent.initialize(SimpleNamespace(field_meta={}))
+    response = await agent.initialize(protocol_version=1, host_client_info={"name": "office-desktop"})
     assert response.field_meta["desktop_memory"] == {
         "protocol_version": 2, "backend": "desktop", "enabled": True, "attempt_log_v1": True,
     }

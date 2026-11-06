@@ -19,6 +19,7 @@ import threading
 import uuid
 from contextlib import aclosing, asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -3594,6 +3595,7 @@ class _MemoryTurn:
     handle: Any = None
     logged_user_text: str | None = None
     user_message: Any = None
+    input_context: dict[str, Any] | None = None
 
 
 class MemoryRuntime:
@@ -3704,7 +3706,8 @@ class MemoryRuntime:
 @asynccontextmanager
 async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
                            turn_id: str, logged_user_text: str | None = None,
-                           user_message: Any = None) -> AsyncIterator[_MemoryTurn | None]:
+                           user_message: Any = None,
+                           input_context: dict[str, Any] | None = None) -> AsyncIterator[_MemoryTurn | None]:
     """宿主声明真实用户轮次，内部续跑复用同一边界。"""
     runtime = getattr(session, "memory_runtime", None)
     if runtime is None:
@@ -3714,7 +3717,8 @@ async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
         yield runtime.active
         return
     turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000),
-                       logged_user_text=logged_user_text, user_message=user_message)
+                       logged_user_text=logged_user_text, user_message=user_message,
+                       input_context=deepcopy(input_context))
     runtime.active = turn
     with runtime.user_turn_scope(turn):
         try:

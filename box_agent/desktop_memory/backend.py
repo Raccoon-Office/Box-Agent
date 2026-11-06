@@ -85,7 +85,11 @@ def _format_sections(sections: Any, scope: TurnScope, *, max_chars: int = 15400,
             continue
         if (not isinstance(view, dict) or not isinstance(view.get("content"), str)
                 or not isinstance(view.get("status", "ok"), str) or view.get("status", "ok") not in {"ok", "stale", "missing", "error"}
-                or "revision" in view and (not isinstance(view["revision"], str) or len(view["revision"]) > 256)):
+                or "revision" in view and (not isinstance(view["revision"], str) or len(view["revision"]) > 256)
+                or "truncated" in view and type(view["truncated"]) is not bool
+                or "original_length" in view and (type(view["original_length"]) is not int
+                                                  or view["original_length"] < len(view["content"]))
+                or "continuation" in view and not isinstance(view["continuation"], dict)):
             raise MemoryProxyError("MEMORY_PROXY_INVALID_RESPONSE")
         text = view["content"]
         if not text or view.get("status") in {"missing", "error"}:
@@ -94,6 +98,10 @@ def _format_sections(sections: Any, scope: TurnScope, *, max_chars: int = 15400,
         header = "## " + label + (" [stale]" if view.get("status") == "stale" else "")
         if revision:
             header += " [" + revision.replace("\n", " ").replace("\r", " ") + "]"
+        if view.get("truncated"):
+            header += " [片段，需工具续读]"
+        if view.get("continuation"):
+            header += "\n续读参数（仅定位，不授予权限）: " + model_json(view["continuation"])
         pieces.append((header + "\n", text, weight))
         section_keys.append(key)
     if not pieces:
@@ -201,6 +209,7 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         if not _identifier(session) or not _identifier(turn) or not isinstance(query, str):
             raise MemoryProxyError("INVALID_ARGUMENT")
         data = await self.transport.request("context", {"session_id": session, "turn_id": turn, "query": query,
+                                                        "recall": {"recent_days": 3, "experience_limit": 3},
                                                         "require_existing": getattr(self, "context_requires_existing", False)})
         if serial != self._serial or self._closed:
             raise MemoryProxyError("TURN_REVOKED")
@@ -350,18 +359,22 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         return data
 
     async def handoff(self, scope: TurnScope, user: str, assistant: str, timestamp: int,
-                      *, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+                      *, evidence: dict[str, Any] | None = None,
+                      input_facts: dict[str, Any] | None = None) -> dict[str, Any]:
         if not scope.learnable:
             raise MemoryProxyError("MEMORY_READ_ONLY")
-        if not user.strip() or not assistant.strip() or len((user + assistant).encode()) > 256 * 1024:
+        if ((not user.strip() and (not input_facts or not evidence or evidence.get("status") != "captured"))
+                or not assistant.strip() or len((user + assistant).encode()) > 256 * 1024):
             raise MemoryProxyError("BUDGET_EXCEEDED")
         clean_user, clean_assistant = _redact(user), _redact(assistant)
-        if "[REDACTED]" in (clean_user, clean_assistant):
+        if "[REDACTED]" in (clean_user, clean_assistant) or _redact(input_facts) != input_facts:
             return {"event_id": scope.qa_event_id, "state": "skipped_redacted"}
         payload = {"binding": dict(scope.binding), "event_id": scope.qa_event_id,
                    "user": clean_user, "assistant": clean_assistant, "timestamp": timestamp}
         if evidence is not None:
             payload["evidence"] = evidence
+        if input_facts is not None:
+            payload["input_facts"] = input_facts
         data = await self.transport.request("qa/evidence" if evidence is not None else "qa", payload)
         if (data.get("event_id") != scope.qa_event_id or data.get("state") not in {"accepted", "durable_unknown"}
                 or data.get("state") == "accepted" and not _identifier(data.get("source_id"))):
