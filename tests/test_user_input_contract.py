@@ -206,6 +206,88 @@ async def test_taken_cancel_and_failed_commit_never_acknowledge_effective_input(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pause_at", ["preparation", "permission"])
+@pytest.mark.parametrize("cancel", [True, False], ids=["cancelled", "committed"])
+async def test_image_supplement_cancel_while_preparing_does_not_reach_model(tmp_path, pause_at, cancel):
+    import asyncio
+    import base64
+    from box_agent.injections import InjectionStatus
+    from box_agent.tools.base import ToolResult
+    from box_agent.tools.image_inspection_tool import ImageInspectionTool
+    from tests.test_image_context import image_blocks
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    llm = CaptureLLM()
+    llm.capabilities = {"image_input": True}
+    kept, supplement = image_block("green"), image_block("red")
+    picture = tmp_path / "supplement.png"
+    picture.write_bytes(base64.b64decode(supplement["data"]))
+
+    class PausedInspection(ImageInspectionTool):
+        calls = 0
+        prepared = None
+
+        async def execute(self, image_paths, instruction, strategy=None):
+            self.calls += 1
+            if pause_at == "preparation":
+                entered.set()
+                await release.wait()
+            elif self.calls == 1:
+                return ToolResult(success=False, error="approval required", permission_request={
+                    "scope": "filesystem", "operation": "read", "path": str(picture),
+                })
+            self.prepared = await super().execute(image_paths, instruction, strategy)
+            return self.prepared
+
+    class Approver:
+        async def negotiate(self, request):
+            assert request["path"] == str(picture)
+            entered.set()
+            await release.wait()
+            return True
+
+    tool = PausedInspection(llm=None, workspace_dir=str(tmp_path), native_capability_llm=llm)
+    log = SessionLog.create(tmp_path / "sessions", session_id="image-cancel", cwd=tmp_path)
+    agent = Agent(llm_client=llm, system_prompt="system", tools=[tool],
+                  workspace_dir=str(tmp_path), session_log=log,
+                  enable_builtin_tools=False, deferred_mcp_loading_enabled=False)
+    agent.set_permission_negotiator(Approver())
+    await agent.aadd_user_input(UserInput((
+        {"type": "text", "text": "keep the original image"},
+        {"type": "image", "mimeType": "image/png", "data": kept["data"]},
+    )))
+    agent.inject(UserInput((
+        {"type": "text", "text": "supplement-only request"},
+        {**link(picture), "mimeType": "image/png"},
+    ), input_id="image-supplement"))
+    running = asyncio.create_task(agent.run())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert agent.inject_queue.status("image-supplement") is InjectionStatus.TAKEN
+        assert not llm.requests
+        if cancel:
+            assert agent.inject_queue.cancel("image-supplement") is True
+        release.set()
+        await asyncio.wait_for(running, timeout=10)
+        assert tool.prepared.success and tool.prepared.image_content
+        assert tool.calls == (2 if pause_at == "permission" else 1)
+        assert len(llm.requests) == 1
+        expected = [kept["data"]] if cancel else [kept["data"], supplement["data"]]
+        assert [block["data"] for block in image_blocks(llm.requests[0])] == expected
+        assert len(agent.image_context.images) == len(expected)
+        assert len(log.replay().images) == len(expected)
+        assert ("supplement-only request" in str(llm.requests[0])) is (not cancel)
+        assert agent.inject_queue.status("image-supplement") is (
+            InjectionStatus.CANCELLED if cancel else InjectionStatus.INJECTED)
+    finally:
+        release.set()
+        if not running.done():
+            running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+        log.close()
+
+
+@pytest.mark.asyncio
 async def test_committed_supplement_can_be_confirmed_after_restart_and_file_deletion(tmp_path):
     from box_agent.injections import submit_user_input
     path = tmp_path / 'same file.csv'

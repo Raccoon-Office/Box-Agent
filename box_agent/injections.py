@@ -302,13 +302,17 @@ class InjectionManager(asyncio.Queue[Any]):
         assert injection is not None
         temporary = []
         length = len(messages)
+        accept_input = None
         try:
             event = injection.apply(temporary)
             if self.prepare_input is not None:
-                await self.prepare_input(temporary[0], injection)
+                accept_input = await self.prepare_input(temporary[0], injection)
             if cancelled() or self.status(injection.injection_id) is InjectionStatus.CANCELLED:
                 status = InjectionStatus.CANCELLED
             else:
+                # No await between the cancellation check, image adoption and commit.
+                if accept_input is not None:
+                    accept_input()
                 messages.extend(temporary)
                 if commit is not None:
                     commit()

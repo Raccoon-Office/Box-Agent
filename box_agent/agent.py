@@ -928,12 +928,15 @@ class Agent:
         return [*images, *(result.image_content or [])], result.image_context_eligible
 
     async def prepare_injected_input(self, message, injection):
+        """Prepare facts without publishing images before cancellation is checked."""
         if message.input_facts is None:
             return
         images, eligible = await self._prepare_input_attachments(message.input_facts, list(injection.input_images))
         if images:
-            refs = self.image_context.register(message, images, source="user_upload", eligible=eligible)
-            message.input_facts["images"] = refs
+            def accept_images():
+                refs = self.image_context.register(message, images, source="user_upload", eligible=eligible)
+                message.input_facts["images"] = refs
+            return accept_images
 
     def add_user_message(self, content, *, image_content: list[dict[str, Any]] | None = None,
                          image_source: str = "user_upload", image_context_eligible: bool = True,
