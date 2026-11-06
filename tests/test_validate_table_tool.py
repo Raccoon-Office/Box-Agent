@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 
 import pytest
 
@@ -9,7 +10,7 @@ from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools.base import ToolInvocationContext
 from box_agent.tools.file.validate_table_tool import ValidateTableTool, _input_paths
-from tests.test_table_validation import FIELDS, row, write_table
+from tests.test_table_validation import FIELDS, row, windows_table_stat, write_table
 
 
 async def setup_gate(tmp_path, name="input.csv", rows=None):
@@ -19,6 +20,38 @@ async def setup_gate(tmp_path, name="input.csv", rows=None):
     messages = [Message(role="user", content=f"Process `{path}` completely")]
     gate = await tool.create_completion_gate(CompletionContext(tuple(messages), lambda: False))
     return tool, gate, path
+
+
+@pytest.mark.asyncio
+async def test_windows_table_gate_initializes_and_completes_with_different_ctime_semantics(
+    tmp_path, windows_table_stat,
+):
+    path = tmp_path / "input.csv"
+    write_table(path, [row(1), row(2)])
+    tool = ValidateTableTool(str(tmp_path))
+    checks = await CompletionChecks.create({tool.name: tool}, CompletionContext(
+        (Message(role="user", content=f"Analyze `{path}`"),), lambda: False,
+    ))
+    assert not checks.failures
+    assert [issue.code for issue in await checks.check()] == ["TABLE_VALIDATION_MISSING"]
+    result = await tool.invoke(
+        {"path": str(path), "fields": FIELDS},
+        context=ToolInvocationContext(completion_gate=checks.gates[tool.name]),
+    )
+    assert result.success and result.raw_output["records"] == 2
+    assert await checks.check() == []
+
+    # Hash checks still reject changed bytes even when size and mtime match.
+    original_stat = path.stat()
+    original_bytes = path.read_bytes()
+    path.write_bytes(original_bytes.replace(b"T1", b"T9"))
+    os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert path.stat().st_size == original_stat.st_size
+    assert path.stat().st_mtime_ns == original_stat.st_mtime_ns
+    issues = await checks.check()
+    assert [issue.code for issue in issues] == ["TABLE_SOURCE_UNVERIFIED"]
+    assert "TABLE_SOURCE_CHANGED" in issues[0].message
+    assert not issues[0].repairable
 
 
 @pytest.mark.asyncio
