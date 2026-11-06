@@ -75,6 +75,12 @@ from tests.architecture_imports import forbidden_adapter_layer_imports
 _EMPTY_CONNECTOR_CONTEXT = "\n\n<connector-status>\nnone: selected\n</connector-status>"
 
 
+def projected_history(agent):
+    from box_agent.input_context import project_user_message
+    from box_agent.connector_context import restore_connector_status
+    return restore_connector_status([project_user_message(message) for message in agent.messages])
+
+
 class DummyConn:
     def __init__(self):
         self.updates = []
@@ -1540,7 +1546,7 @@ async def test_structured_image_attachment_uses_shared_permission_retry(
         )
 
     monkeypatch.setattr(
-        "box_agent.acp.invoke_tool_with_permissions",
+        "box_agent.runtime.invoke_tool_with_permissions",
         invoke_with_permissions,
     )
     grant_store = SimpleNamespace()
@@ -1616,16 +1622,20 @@ async def test_uploaded_image_payload_reaches_user_message_boundary(tmp_path, mo
             sessionId=session.sessionId, prompt=[{"text": "Use this reference image."}],
             field_meta={"image_attachment_paths": [str(tmp_path / "reference.png")]},
         )))
+        facts = received[0].pop("input_facts")
+        assert received_text[0].user_text == "Use this reference image."
+        assert facts["blocks"] == [{"type": "text", "text": "Use this reference image."}]
+        projected_attachment = facts["image_result"]
         assert received == [{"image_content": blocks, "image_source": "user_upload",
                              "image_context_eligible": eligible,
                              "host_connector_status": _EMPTY_CONNECTOR_CONTEXT.strip()}]
         if eligible:
-            assert "prepared for native inspection" in received_text[0]
-            assert "may explicitly call inspect_images again" in received_text[0]
-            assert "already been analyzed" not in received_text[0]
-            assert "Do not call inspect_images or execute_code" not in received_text[0]
+            assert "prepared for native inspection" in projected_attachment
+            assert "may explicitly call inspect_images again" in projected_attachment
+            assert "already been analyzed" not in projected_attachment
+            assert "Do not call inspect_images or execute_code" not in projected_attachment
         else:
-            assert "already been analyzed by the inspect_images proxy" in received_text[0]
+            assert "already been analyzed by the inspect_images proxy" in projected_attachment
     finally:
         await adapter.aclose()
 
@@ -1973,7 +1983,8 @@ async def test_acp_appends_only_changed_snapshots_and_preserves_sent_prefixes(tm
             assert len(llm.requests) == before + 1
             current = llm.requests[-1]
             assert current[:len(previous)] == previous
-            latest = host._sessions[session.sessionId].agent.messages[-2]
+            assert host._sessions[session.sessionId].agent.messages[-2].content == f"hello {index}"
+            latest = next(message for message in reversed(current) if message.role == "user" and message.input_facts)
             assert ("<connector-status>" in latest.content) is emits
             if not emits:
                 assert latest.content == f"hello {index}"
@@ -2007,7 +2018,7 @@ async def test_connector_snapshot_read_failure_and_recovery_do_not_block_turns(t
         for index in range(2):
             await host.prompt(**acp_params(SimpleNamespace(
                 sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta={})))
-            message = host._sessions[session.sessionId].agent.messages[-2]
+            message = projected_history(host._sessions[session.sessionId].agent)[-2]
             if index == 0:
                 assert "status: unavailable" in message.content
             else:
@@ -2017,7 +2028,7 @@ async def test_connector_snapshot_read_failure_and_recovery_do_not_block_turns(t
             sessionId=session.sessionId, prompt=[{"text": "recovered"}],
             field_meta={"connector_statuses": [
                 {"id": "pkulaw", "name": "北大法宝", "status": "connected"}]})))
-        assert "pkulaw 北大法宝: connected" in host._sessions[session.sessionId].agent.messages[-2].content
+        assert "pkulaw 北大法宝: connected" in projected_history(host._sessions[session.sessionId].agent)[-2].content
     finally:
         log = host._sessions[session.sessionId].agent.session_log
         if log is not None:
@@ -2057,7 +2068,8 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
     state = agent._sessions[session.sessionId]
     assert state.connector_statuses is None
     assert state.connector_status_unavailable is True
-    assert state.agent.messages[-2].content == (
+    assert state.agent.messages[-2].content == "北大法宝还能用么"
+    assert projected_history(state.agent)[-2].content == (
         "北大法宝还能用么\n\n"
         "<connector-status>\n"
         "status: unavailable\n"
@@ -2083,8 +2095,8 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
 
     assert state.connector_statuses == (("pkulaw", "北大法宝", "disconnected"),)
     assert state.connector_status_unavailable is False
-    assert state.agent.messages[-2].content.startswith("现在呢\n\n[Host connector status update:")
-    assert state.agent.messages[-2].content.endswith(
+    assert projected_history(state.agent)[-2].content.startswith("现在呢\n\n[Host connector status update:")
+    assert projected_history(state.agent)[-2].content.endswith(
         "<connector-status>\n"
         "pkulaw 北大法宝: disconnected\n"
         "</connector-status>"
@@ -2125,9 +2137,9 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
     restarted = await restarted_agent.new_session(**acp_params(request))
     state = restarted_agent._sessions[restarted.sessionId]
 
-    assert restarted.sessionId != first.sessionId
+    assert restarted.sessionId == first.sessionId
     assert [(message.role, message.content) for message in state.agent.messages[1:]] == [
-        ("user", "remember this" + _EMPTY_CONNECTOR_CONTEXT),
+        ("user", "remember this"),
         ("assistant", "done"),
     ]
     assert state.agent.session_log.events[-1]["type"] == "session/end-seed"
@@ -2222,7 +2234,7 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
             expected_names = ("available-skill",) if availability == "partial" else ()
             assert state.agent.active_skill_diagnostics()["names"] == expected_names
             assert "Instructions for missing-skill." not in state.agent.system_prompt
-            assert "remember me" + _EMPTY_CONNECTOR_CONTEXT in [
+            assert "remember me" in [
                 message.content for message in state.agent.messages
             ]
             response = await restarted.prompt(
@@ -2542,7 +2554,8 @@ async def test_overlapping_request_preserves_original_task_state(
             replacement = await agent.new_session(**acp_params(SimpleNamespace(
                 cwd=str(tmp_path), field_meta={"session_id": "busy-product"},
             )))
-            assert session.sessionId not in agent._sessions
+            assert replacement.sessionId == session.sessionId
+            assert agent._sessions[session.sessionId] is not state
             assert state._closed
             restored = agent._sessions[replacement.sessionId]
             assert restored.agent.messages[1:] == history[1:]
@@ -2571,6 +2584,7 @@ async def test_prompt_preparation_failure_allows_next_task(
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "failed-product"})
     session = await agent.new_session(**acp_params(request))
+    state = agent._sessions[session.sessionId]
     original = agent._run_image_attachment_tool
 
     async def fail(**kwargs):
@@ -2586,7 +2600,8 @@ async def test_prompt_preparation_failure_allows_next_task(
         monkeypatch.setattr(agent, "_run_image_attachment_tool", original)
         if next_request == "rebind":
             replacement = await agent.new_session(**acp_params(request))
-            assert session.sessionId not in agent._sessions
+            assert replacement.sessionId == session.sessionId
+            assert agent._sessions[session.sessionId] is not state
             params.sessionId = replacement.sessionId
         response = await agent.prompt(**acp_params(params))
         assert response.field_meta["ok"] is True
@@ -2649,7 +2664,8 @@ async def test_rebinding_rejects_concurrent_prompt_and_rebind(tmp_path, monkeypa
         assert response.field_meta["ok"] is True
         release.set()
         replacement = await asyncio.wait_for(pending, 5)
-        assert session.sessionId not in agent._sessions
+        assert replacement.sessionId == session.sessionId
+        assert agent._sessions[session.sessionId] is not state
         response = await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=replacement.sessionId, prompt=[{"text": "next task"}],
         )))
@@ -3162,7 +3178,8 @@ async def test_acp_skill_selection_is_ordinary_reference_not_automatic_system_bo
     state = adapter._sessions[session.sessionId]
     assert ("get_skill" in state.agent.tools) is with_skill_tool
     user_messages = [m for m in state.agent.messages if m.role == "user"]
-    assert user_messages[0].content == original + _EMPTY_CONNECTOR_CONTEXT
+    assert user_messages[0].content == original
+    assert user_messages[0].host_connector_status == _EMPTY_CONNECTOR_CONTEXT.strip()
     assert all(message.source != "runtime" for message in user_messages[1:]) is (selection is None)
     usage = [u.update.rawOutput for u in conn.updates
              if isinstance(getattr(u.update, "rawOutput", None), dict)
@@ -4048,7 +4065,7 @@ async def test_acp_seeds_negotiated_session_continuation_once(
     assert [(message.role, message.content) for message in state.agent.messages[1:4]] == [
         ("user", "制作融资 BP"),
         ("assistant", "已生成 index.html"),
-        ("user", "修改第一页标题" + _EMPTY_CONNECTOR_CONTEXT),
+        ("user", "修改第一页标题"),
     ]
 
     await agent.prompt(
@@ -4464,12 +4481,17 @@ async def test_acp_prompt_reclaims_background_bash_at_turn_end(tmp_path):
     session = await agent.new_session(
         **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
-    response = await agent.prompt(
-        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "run server"}]))
-    )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
+    try:
+        response = await agent.prompt(
+            **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "run server"}]))
+        )
 
-    assert response.stopReason == "end_turn"
-    assert BackgroundShellManager.get_available_ids(session.sessionId) == []
+        assert response.stopReason == "end_turn"
+        assert BackgroundShellManager.get_available_ids(bash_tool.process_owner_id) == []
+    finally:
+        await bash_tool.cleanup_background_processes()
+        await agent.aclose()
 
 
 @pytest.mark.asyncio
@@ -4500,6 +4522,7 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
     session = await agent.new_session(
         **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
 
     try:
         response = await agent.prompt(
@@ -4509,7 +4532,7 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
             ))
         )
 
-        bash_ids = BackgroundShellManager.get_available_ids(session.sessionId)
+        bash_ids = BackgroundShellManager.get_available_ids(bash_tool.process_owner_id)
         assert response.stopReason == "end_turn"
         assert len(bash_ids) == 1
         assert BackgroundShellManager.get(bash_ids[0]).lifetime == "runtime"
@@ -4527,7 +4550,9 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
         else:
             pytest.fail("runtime HTTP service did not remain reachable after turn end")
     finally:
-        await BackgroundShellManager.terminate_owner(session.sessionId)
+        await bash_tool.cleanup_background_processes()
+        await agent.aclose()
+    assert BackgroundShellManager.get_available_ids(bash_tool.process_owner_id) == []
 
 
 @pytest.mark.asyncio
@@ -4594,7 +4619,7 @@ async def test_rebound_product_session_can_manage_original_runtime_service(
         previous_handle = first.sessionId
         for _ in range(3):
             rebound = await agent.new_session(**acp_params(request))
-            assert rebound.sessionId != previous_handle
+            assert rebound.sessionId == previous_handle
             state = agent._sessions[rebound.sessionId]
             tools = state.agent.tools
             # Exercise the model-facing exposure as well as direct execution.
@@ -4658,7 +4683,8 @@ async def test_rebinding_does_not_expose_previous_handles_python_kernels(tmp_pat
         rebound = await agent.new_session(**acp_params(request))
         new_tool = agent._sessions[rebound.sessionId].agent.tools["execute_code"]
         assert new_tool.get_status()["total_sessions"] == 0
-        assert new_tool.process_owner_id == rebound.sessionId
+        assert new_tool.process_owner_id != old_tool.process_owner_id
+        assert new_tool.process_owner_id.startswith("acp-runtime-")
     finally:
         await agent.aclose()
 
@@ -7514,13 +7540,13 @@ async def test_acp_can_cancel_pending_injected_message(tmp_path):
         {"sessionId": session.sessionId, "injectionId": "inj-2"},
     )
 
-    assert injected == {"ok": True, "injectionId": "inj-2"}
+    assert injected == {"ok": True, "injectionId": "inj-2", "status": "pending"}
     assert cancelled == {"ok": True}
     assert state.inject_queue.empty()
     assert await agent.ext_method("inject", {
         "sessionId": session.sessionId, "text": "改成5页", "injectionId": "inj-2",
-    }) == {"ok": True, "injectionId": "inj-2"}
-    assert state.inject_queue.qsize() == 1
+    }) == {"error": "INJECTION_IDEMPOTENCY_CONFLICT", "injectionId": "inj-2"}
+    assert state.inject_queue.empty()
 
 
 @pytest.mark.asyncio
@@ -7545,8 +7571,8 @@ async def test_acp_inject_same_id_is_idempotent(tmp_path):
     first = await agent.ext_method("inject", args)
     second = await agent.ext_method("inject", dict(args))  # retry, same id
 
-    assert first == {"ok": True, "injectionId": "dup-1"}
-    assert second == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
+    assert first == {"ok": True, "injectionId": "dup-1", "status": "pending"}
+    assert second == {"ok": True, "injectionId": "dup-1", "deduplicated": True, "status": "pending"}
     # Still exactly one queued item despite two calls.
     assert state.inject_queue.qsize() == 1
 
@@ -7554,7 +7580,7 @@ async def test_acp_inject_same_id_is_idempotent(tmp_path):
     consumed = state.inject_queue.get_nowait()
     assert _inject_item_id(consumed) == "dup-1"
     third = await agent.ext_method("inject", dict(args))
-    assert third == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
+    assert third == {"ok": True, "injectionId": "dup-1", "deduplicated": True, "status": "taken"}
     assert state.inject_queue.empty()
 
     # Cancelling consumed input cannot make a network retry run it twice.
@@ -7562,9 +7588,9 @@ async def test_acp_inject_same_id_is_idempotent(tmp_path):
         "cancel_inject",
         {"sessionId": session.sessionId, "injectionId": "dup-1"},
     )
-    assert cancelled == {"ok": False}
+    assert cancelled == {"ok": True}
     fourth = await agent.ext_method("inject", dict(args))
-    assert fourth == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
+    assert fourth == {"ok": True, "injectionId": "dup-1", "deduplicated": True, "status": "cancelled"}
     assert state.inject_queue.empty()
 
 
@@ -9015,11 +9041,13 @@ async def test_acp_rebind_closes_retired_handles_browser_context(tmp_path, monke
 
     first = await agent.new_session(**acp_params(request))
     assert closed == []
+    original_state = agent._sessions[first.sessionId]
     second = await agent.new_session(**acp_params(request))
 
-    assert second.sessionId != first.sessionId
+    assert second.sessionId == first.sessionId
     assert closed == [first.sessionId]
-    assert first.sessionId not in agent._sessions
+    assert original_state._closed
+    assert agent._sessions[second.sessionId] is not original_state
     agent._sessions[second.sessionId].agent.session_log.close()
 
 

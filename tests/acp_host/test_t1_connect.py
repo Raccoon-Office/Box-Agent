@@ -41,7 +41,7 @@ async def test_t1_01_initialize_and_session_new(make_acp_probe, tmp_path: Path) 
             ],
         )
         assert result.ok
-        assert session_id.startswith("sess-")
+        assert session_id.startswith("acp-v1-")
     except Exception as exc:
         draft = to_issue_draft(
             CaseResult(
@@ -94,7 +94,7 @@ async def test_t1_01_isolated_home_without_real_user_config(
         init = await probe.initialize()
         assert isinstance(init, dict)
         session_id = await probe.session_new(cwd=str(tmp_path / "ws"))
-        assert session_id.startswith("sess-")
+        assert session_id.startswith("acp-v1-")
         # Must not have bootstrapped a placeholder into the fake HOME.
         assert not (fake_home / ".box-agent").exists()
     finally:

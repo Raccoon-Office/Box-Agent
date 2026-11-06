@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping
+from .input import UserInput
 
 
 class ControlCommandKind(str, Enum):
@@ -88,20 +89,30 @@ class RunRequest:
     session_id: str
     user_message: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    user_input: UserInput | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.run_id, "run_id")
         _required_text(self.session_id, "session_id")
         if self.user_message is not None:
             _required_text(self.user_message, "user_message")
+        if self.user_input is not None:
+            if not isinstance(self.user_input, UserInput) or self.user_message is not None:
+                raise ValueError("provide exactly one of user_message and user_input")
         if not isinstance(self.metadata, Mapping):
             raise ValueError("metadata must be a mapping")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-compatible request payload."""
+        result = _json_value(self)
+        if self.user_input is None:
+            result.pop("user_input")
+        return result
 
-        return _json_value(self)
+    @property
+    def user_text(self) -> str | None:
+        return self.user_input.user_text if self.user_input is not None else self.user_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,10 +179,13 @@ class ControlCommand:
     @classmethod
     def inject_message(
         cls,
-        content: str,
+        content: str | UserInput,
         *,
         injection_id: str | None = None,
     ) -> "ControlCommand":
+        if isinstance(content, UserInput):
+            return cls(ControlCommandKind.INJECT_MESSAGE, injection_id or content.input_id,
+                       {"input": content.to_dict()})
         _required_text(content, "message")
         return cls(
             ControlCommandKind.INJECT_MESSAGE,

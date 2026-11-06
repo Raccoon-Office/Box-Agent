@@ -70,8 +70,8 @@ class _CheckpointInspectingLLM:
     async def generate_stream(self, **_kwargs):
         event_types = [event["type"] for event in _read_durable_events(self.path)]
         self.saw_durable_request = event_types[:4] == [
-            "turn/start",
             "user/message",
+            "turn/start",
             "step/start",
             "request/header",
         ]

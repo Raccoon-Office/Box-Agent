@@ -1,6 +1,7 @@
 """Public, protocol-neutral run contracts."""
 
 from .delivery import RunDeliveryOptions
+from .input import UserInput
 
 from .run import (
     ControlCommand,
@@ -13,6 +14,7 @@ from .run import (
 )
 
 __all__ = [
+    "UserInput",
     "RunDeliveryOptions",
     "ControlCommand",
     "ControlCommandKind",

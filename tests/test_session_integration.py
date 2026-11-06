@@ -119,12 +119,15 @@ def test_active_goal_is_injected_into_user_turn(mock_llm_client, temp_workspace)
 
     assert len(agent.messages) == 2
     assert agent.messages[1].role == "user"
-    assert "## Active Goal" in agent.messages[1].content
-    assert "Make the focused test suite pass" in agent.messages[1].content
-    assert "## Latest User Message" in agent.messages[1].content
-    assert "goal_write" in agent.messages[1].content
-    assert "/goal complete" not in agent.messages[1].content
-    assert "Run the next check" in agent.messages[1].content
+    from box_agent.input_context import project_user_message
+    assert agent.messages[1].content == "Run the next check"
+    projected = project_user_message(agent.messages[1])
+    assert "## Active Goal" in projected.content
+    assert "Make the focused test suite pass" in projected.content
+    assert "## Latest User Message" in projected.content
+    assert "goal_write" in projected.content
+    assert "/goal complete" not in projected.content
+    assert "Run the next check" in projected.content
 
 
 @pytest.mark.asyncio

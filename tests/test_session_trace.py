@@ -470,7 +470,7 @@ async def test_core_records_tool_request_and_response_without_changing_events(tm
 
 
 @pytest.mark.asyncio
-async def test_acp_uses_upstream_session_id_without_changing_generated_acp_id(
+async def test_acp_uses_upstream_session_id_with_stable_acp_identity(
     tmp_path,
     monkeypatch,
 ):
@@ -514,7 +514,7 @@ async def test_acp_uses_upstream_session_id_without_changing_generated_acp_id(
         ))
     )
 
-    assert session.sessionId.startswith("sess-0-")
+    assert session.sessionId.startswith("acp-v1-")
     await agent.prompt(
         **acp_params(SimpleNamespace(
             sessionId=session.sessionId,

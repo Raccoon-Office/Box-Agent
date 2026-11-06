@@ -15,9 +15,14 @@ from box_agent.tools.permissions import GrantStore
 class _Agent:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.workspace_dir = "."
+        self.session_log = None
 
-    def add_user_message(self, content: str) -> None:
-        self.messages.append(content)
+    def add_user_message(self, content, *, input_facts=None) -> None:
+        from box_agent.schema import Message
+        from box_agent.input_context import project_user_message
+        message = Message(role="user", content=content.user_text, input_facts=input_facts)
+        self.messages.append(project_user_message(message).content)
 
 
 @dataclass

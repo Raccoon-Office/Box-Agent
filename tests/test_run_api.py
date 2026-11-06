@@ -15,9 +15,11 @@ from box_agent.events import ContentEvent, DoneEvent, StopReason, TokenUsageEven
 class _FakeAgent:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.workspace_dir = "."
+        self.session_log = None
 
-    def add_user_message(self, content: str) -> None:
-        self.messages.append(content)
+    def add_user_message(self, content, **kwargs) -> None:
+        self.messages.append(content.user_text if hasattr(content, "user_text") else content)
 
 
 class _FakeSession:

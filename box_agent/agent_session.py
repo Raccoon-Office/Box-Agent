@@ -86,6 +86,10 @@ class AgentSession:
     mcp_fallback_tools: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.agent._input_permission_engine = self.permission_engine
+        self.agent._input_allow_full_access = bool(self.config and self.config.tools.allow_full_access)
+        if isinstance(self.inject_queue, InjectionManager):
+            self.inject_queue.prepare_input = getattr(self.agent, "prepare_injected_input", None)
         self._run_handle = AgentRunHandle(self)
         self.plugin_session: PluginSession | None = None
         self._owns_plugin_runtime = False
@@ -102,6 +106,16 @@ class AgentSession:
     @property
     def run_handle(self) -> AgentRunHandle:
         return self._run_handle
+
+    async def add_user_input(self, value, **kwargs) -> None:
+        if (self._closed or self._closing or self.turn_active or self._run_handle.is_active
+                or getattr(self, "_preparing_input", False)):
+            raise RuntimeError("session is not available for input")
+        self._preparing_input = True
+        try:
+            await self.agent.aadd_user_input(value, **kwargs)
+        finally:
+            self._preparing_input = False
 
     @classmethod
     def create(
@@ -246,6 +260,8 @@ class AgentSession:
                     **resources.state,
                 )
             session.plugin_session = plugins
+            if options.allow_full_access is not None:
+                session.agent._input_allow_full_access = options.allow_full_access
             session._owns_plugin_runtime = owns_runtime
             plugins.owner = session
             from .session_assembly import finish_session

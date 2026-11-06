@@ -392,6 +392,7 @@ async def test_edit_restores_only_prefix_images_and_their_inference_age(tmp_path
         await host.prompt(**acp_params(request(session, "Third accepted inference.", "t4")))
         assert any(isinstance(message.content, list) for message in llm.requests[-1])
         await host.prompt(**acp_params(request(session, "Fourth accepted inference.", "t5")))
-        assert not any(isinstance(message.content, list) for message in llm.requests[-1])
+        assert not any(isinstance(message.content, list) and any(block.get("type") == "input_image" for block in message.content)
+                       for message in llm.requests[-1])
     finally:
         await host.aclose()

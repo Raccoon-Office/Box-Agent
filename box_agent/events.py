@@ -357,6 +357,7 @@ class InjectedMessageEvent:
     # 将已有的注入类型传给事件消费者，用于区分文本补写、任务续跑和重试。
     # 老调用方可以不传此字段；消费者不得通过解析提示词正文猜测注入类型。
     kind: str | None = None
+    status: str = "injected"
 
 
 # ── Memory promotion proposal ───────────────────────────────────

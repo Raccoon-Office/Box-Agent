@@ -137,6 +137,9 @@ class Message(BaseModel):
     # Current trusted host snapshot, even when unchanged and omitted from text.
     # Persist for change detection/recovery; never infer state from user XML.
     host_connector_status: str | None = None
+    # Durable original input and resource associations; only ContextEngine
+    # derives the provider view. Older messages have no such record.
+    input_facts: dict[str, Any] | None = None
     # Request-only multimodal overlays may carry raw image bytes to a provider
     # without persisting them in durable traces. Excluded from serialization so
     # this remains an internal observability directive.

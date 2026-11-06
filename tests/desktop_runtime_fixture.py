@@ -96,7 +96,9 @@ class FixtureLLM:
         record_lifecycle("llm_closed")
 
     async def generate_stream(self, messages, tools=None, **kwargs):
-        users = "\n".join(str(message.content) for message in messages if message.role == "user")
+        users = "\n".join(message.content if isinstance(message.content, str) else "\n".join(
+            block.get("text", "") for block in message.content if block.get("type") == "text")
+            for message in messages if message.role == "user")
         has_results = any(message.role == "tool" for message in messages)
         mode = scenario.get()
         if mode == "file_inputs":

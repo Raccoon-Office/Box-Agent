@@ -16,6 +16,7 @@ from .kernel.context_types import InitialContextTransition
 from .schema import Message
 from .llm.capabilities import bound_context_token_limit
 from .connector_context import restore_connector_status
+from .input_context import project_user_message
 from .skill_context import (
     SkillReferenceContext, effective_system_prompt, project_legacy_system, verified_system_suffixes,
 )
@@ -42,6 +43,7 @@ class PreparedContext:
     image_context: dict[str, Any] | None = None
     image_notices: tuple[str, ...] = ()
     required_reference_tokens: int = 0
+    input_context: dict[str, Any] | None = None
 
 
 class DefaultContextEngine:
@@ -72,8 +74,19 @@ class DefaultContextEngine:
         self._transient_tokens = 0
         self._transient_reserve_tokens = 0
         self._pending_followup_blocks: list[dict[str, Any]] = []
+        self._input_adoptions: set[str] = set()
+        self._input_settled: set[str] = set()
+        self._session_store = None
 
     def configure_run(self, *, skill_engine: Any = None, session_store: Any = None) -> None:
+        self._session_store = session_store
+        self._input_adoptions = set()
+        self._input_settled = set()
+        for event in getattr(session_store, "events", ()):
+            if event["type"] == "input/adopted":
+                self._input_adoptions.add(event["data"]["id"])
+            elif event["type"] == "assistant/message" and not event["data"].get("surfaceDerived"):
+                self._input_settled.update(self._input_adoptions)
         if self.image_context is None:
             from .image_context import ImageContext
             self.image_context = ImageContext(session_store)
@@ -99,7 +112,8 @@ class DefaultContextEngine:
         return self._prepare_summary(messages, llm, preview=True)
 
     def _prepare_summary(self, messages: list[Message], llm: Any, *, preview: bool) -> list[Message]:
-        messages = restore_connector_status(messages)
+        projected = [project_user_message(message) for message in messages]
+        messages = restore_connector_status(messages if all(a is b for a, b in zip(projected, messages)) else projected)
         if self.image_context is None or not self.image_context.images:
             return messages
         prepare = self.image_context.preview if preview else self.image_context.prepare
@@ -138,7 +152,7 @@ class DefaultContextEngine:
         """Effective rules for budgeting/compaction, without reference delivery."""
         suffix = verified_system_suffixes(self.references.runtime) if self.references is not None else ()
         return restore_connector_status(
-            project_legacy_system(messages, suffix, self._system_prompt_projector),
+            project_legacy_system([project_user_message(message) for message in messages], suffix, self._system_prompt_projector),
         )
 
     @property
@@ -345,6 +359,56 @@ class DefaultContextEngine:
                 on_committed = commit_projection
             if blocked_reason:
                 on_committed = on_response = None
+        from .input_context import requires_input_contract
+        input_records = [message.input_facts for message in messages
+                         if message.input_facts and requires_input_contract(message.input_facts)]
+        input_manifest = None
+        if input_records:
+            from .input_resources import verify_input_versions
+            pending = [record for record in input_records if record["id"] not in self._input_settled]
+            input_manifest = {"phase": "candidate", "inputs": [
+                {"id": record["id"], "fingerprint": record["fingerprint"],
+                 "files": record["context"].get("files", [])} for record in input_records
+            ]}
+            try:
+                for record in pending:
+                    verify_input_versions(record["context"].get("files", []), record["workspace"])
+                    selected_images = {item["imageId"] for item in
+                                       (image_projection.manifest.get("selected", []) if image_projection else [])}
+                    if any(ref.get("eligible", True) and ref["imageId"] not in selected_images
+                           for ref in record.get("images", [])):
+                        raise ValueError("INPUT_IMAGE_NOT_ADOPTED:required_image_unavailable_or_over_budget")
+            except ValueError as exc:
+                blocked_reason = str(exc)
+            if blocked_reason:
+                on_committed = on_response = None
+            else:
+                commit_previous = on_committed
+
+                def commit_inputs() -> None:
+                    for record in pending:
+                        verify_input_versions(record["context"].get("files", []), record["workspace"])
+                    if commit_previous is not None:
+                        commit_previous()
+                    for record in pending:
+                        if self._session_store is not None and record["id"] not in self._input_adoptions:
+                            self._session_store.append("input/adopted", {
+                                "id": record["id"], "fingerprint": record["fingerprint"],
+                                "files": record["context"].get("files", []),
+                            })
+                    if self._session_store is not None:
+                        self._session_store.flush()
+                    self._input_adoptions.update(record["id"] for record in pending)
+
+                response_previous = on_response
+
+                def settle_inputs() -> None:
+                    if response_previous is not None:
+                        response_previous()
+                    self._input_settled.update(record["id"] for record in pending)
+
+                on_committed = commit_inputs
+                on_response = settle_inputs
         return PreparedContext(
             provider_messages, context_messages, references,
             self._request_reference_tokens,
@@ -354,5 +418,5 @@ class DefaultContextEngine:
             reader_required,
             image_projection.manifest if image_projection else None,
             image_projection.notices if image_projection else (),
-            required_reference_tokens,
+            required_reference_tokens, input_manifest,
         )

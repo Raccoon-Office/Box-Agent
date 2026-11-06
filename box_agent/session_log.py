@@ -68,6 +68,8 @@ KNOWN_EVENT_TYPES = frozenset(
         "step/start",
         "step/end",
         "user/message",
+        "input/contract",
+        "input/adopted",
         "assistant/chunk",
         "assistant/message",
         "tool/call",
@@ -323,6 +325,16 @@ class SessionLog:
         from .session_history import current_revision
 
         return current_revision(self._events)
+
+    def turn_binding(self, turn_id: str) -> dict[str, Any] | None:
+        """Read one request reservation without copying the session history."""
+        return next((dict(event["data"]) for event in self._events
+                     if event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id), None)
+
+    def has_committed_input(self, input_id: str) -> bool:
+        return any(event["type"] == "user/message" and
+                   (event["data"].get("input_facts") or {}).get("id") == input_id
+                   for event in self._active_events())
 
     def has_turn_binding(self, turn_id: str) -> bool:
         """Check request idempotency without copying unrelated history."""
@@ -707,6 +719,12 @@ class SessionLog:
         surface_op: str | dict[str, Any], source_event_seqs: list[int] | None = None,
     ) -> dict[str, Any]:
         pending = self._pending_message_metadata.get(id(message))
+        from .input_context import requires_input_contract
+        if (message.input_facts and requires_input_contract(message.input_facts)
+                and not any(event["type"] == "input/contract" for event in self._events)):
+            # Required feature marker: an old runtime must reject this log,
+            # rather than silently dropping resource facts it cannot project.
+            self.append("input/contract", {"schemaVersion": 1})
         if pending is not None:
             data.update(deepcopy(pending[1]))
         context_usage = _context_usage_metadata(message)
@@ -943,6 +961,24 @@ class SessionLog:
                 surface[start_index : end_index + 1] = [node]
         return surface
 
+    def history_messages(self) -> list[tuple[int, Message, dict[str, Any]]]:
+        """Replay original effective history, excluding model compaction copies."""
+        history = []
+        compacting = False
+        for event in self._active_events():
+            kind, data = event["type"], event["data"]
+            if kind == "surface/reset":
+                history.clear()
+            elif kind == "compaction/summary":
+                compacting = True
+            elif kind == "compaction/end":
+                compacting = False
+            elif (not compacting and not data.get("surfaceDerived")
+                  and kind in {"user/message", "assistant/message", "tool/result"}):
+                payload = data if kind == "user/message" else data["message"]
+                history.append((event["seq"], Message.model_validate(payload), data))
+        return history
+
     def _append_surface_message(
         self,
         message: Message,
@@ -951,13 +987,15 @@ class SessionLog:
         step: int,
         surface_op: str | dict[str, Any],
         source_event_seqs: list[int] | None = None,
+        surface_derived: bool = False,
     ) -> dict[str, Any]:
         payload = message.model_dump(mode="json", exclude_none=True)
+        metadata = {"surfaceDerived": True} if surface_derived else {}
         if message.role == "user":
             payload["source"] = message.source
             return self._append_message_event(
                 "user/message",
-                payload,
+                {**payload, **metadata},
                 message=message,
                 surface_op=surface_op,
                 source_event_seqs=source_event_seqs,
@@ -965,7 +1003,7 @@ class SessionLog:
         if message.role == "assistant":
             return self._append_message_event(
                 "assistant/message",
-                {"turn": turn, "step": step, "message": payload},
+                {"turn": turn, "step": step, "message": payload, **metadata},
                 message=message,
                 surface_op=surface_op,
                 source_event_seqs=source_event_seqs,
@@ -973,7 +1011,7 @@ class SessionLog:
         if message.role == "tool":
             return self._append_message_event(
                 "tool/result",
-                {"turn": turn, "step": step, "message": payload},
+                {"turn": turn, "step": step, "message": payload, **metadata},
                 message=message,
                 surface_op=surface_op,
                 source_event_seqs=source_event_seqs,
@@ -1006,6 +1044,7 @@ class SessionLog:
                         "end": source_seqs[-1],
                     },
                     source_event_seqs=source_seqs,
+                    surface_derived=any(messages[0] == previous for _, previous in old_nodes),
                 )
             )
             remaining = messages[1:]
@@ -1018,6 +1057,7 @@ class SessionLog:
                     turn=turn,
                     step=step,
                     surface_op="append",
+                    surface_derived=any(message == previous for _, previous in old_nodes),
                 )
             )
         return appended
