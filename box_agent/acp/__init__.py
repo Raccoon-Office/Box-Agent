@@ -38,7 +38,7 @@ import re
 import signal
 import sys
 from contextlib import AsyncExitStack, aclosing, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
@@ -3372,6 +3372,7 @@ class BoxACPAgent:
                     pending_llm=pending_llm,
                     pending_summary_llm=pending_summary_llm,
                     initial_context_transition=initial_context_transition,
+                    max_tool_calls=0 if cloud_handoff else None,
                 )
                 while (
                     auto_enabled
@@ -3517,9 +3518,8 @@ class BoxACPAgent:
             and not state.cancelled
             and not state.task_registry_error
         ):
-            result = await state.run_handle.result()
             try:
-                validate_cloud_handoff(result.final_content)
+                validate_cloud_handoff(message_display.final_content)
             except ValueError as exc:
                 state.last_error = str(exc)
                 state.last_error_code = "invalid_cloud_handoff"
@@ -4638,6 +4638,7 @@ class BoxACPAgent:
         pending_llm: SessionBoundLLM | None = None,
         pending_summary_llm: SessionBoundLLM | None = None,
         initial_context_transition: InitialContextTransition | None = None,
+        max_tool_calls: int | None = None,
     ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
         message_display = message_display or MessageDisplay()
@@ -5135,6 +5136,10 @@ class BoxACPAgent:
             ),
             current_turn_text=plan_start_text,
         )
+        if max_tool_calls is not None:
+            # A summary-only request must reject model tool calls at execution,
+            # including when the model ignores the handoff instruction.
+            run_options = replace(run_options, max_tool_calls=max_tool_calls)
         # start() creates the producer task. Bind its trace before task creation;
         # wrapping only the event consumer cannot propagate ContextVars to it.
         trace_token = (

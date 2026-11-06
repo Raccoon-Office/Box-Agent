@@ -15,7 +15,7 @@ def cloud_handoff_instruction(
             '{"instruction":"...","dependency_paths":["..."]}。'
             "instruction 必须自包含，写明目标、已有结论、约束、进度和后续工作。"
             "云端任务使用不同的会话，无法看到当前对话或本地文件。"
-            "请总结任务，不要继续执行任务。"
+            "请总结任务，不要继续执行任务或调用工具。"
             "只列出对话中已知、必要且现存的依赖文件，不扫描工作区，不猜测未知路径。"
             "使用本地文件的绝对路径，不使用 URL 或目录；没有已知依赖时返回 []。"
             "未知依赖由用户后续补充。不要上传文件或创建云端会话。"
@@ -31,7 +31,7 @@ def cloud_handoff_instruction(
         "The instruction must be self-contained: include the goal, established findings, "
         "constraints, progress and remaining work. The cloud task has a different session "
         "and cannot see this conversation or local files. Summarize the work; do not "
-        "continue executing it. List only known, necessary existing dependency files "
+        "continue executing it or call tools. List only known, necessary existing dependency files "
         "from the conversation. Do not scan the workspace or guess unknown paths. "
         "Use absolute local file paths (not URLs or directories); use [] if none are known. "
         "Unknown dependencies can be supplied by the user later. Do not upload files "

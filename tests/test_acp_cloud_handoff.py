@@ -3,6 +3,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from acp import PromptRequest, text_block
@@ -10,9 +11,10 @@ from acp import PromptRequest, text_block
 from box_agent.acp import BoxACPAgent
 from box_agent.cloud_handoff import validate_cloud_handoff
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
-from box_agent.schema import StreamEvent
+from box_agent.schema import FunctionCall, StreamEvent, ToolCall
 from tests.test_acp import DoneLLM, DummyConn
 from tests.acp_helpers import acp_params
+from tests.test_core import CountingEchoTool, PlanWriteStubTool
 
 
 class HandoffLLM(DoneLLM):
@@ -71,7 +73,7 @@ async def test_handoff_persists_instruction_in_chinese_or_english(
     assert response.field_meta["cloudHandoff"] is True
     user_text = next(
         m.content for m in reversed(adapter._sessions[session_id].agent.messages)
-        if m.role == "user"
+        if m.role == "user" and m.input_facts
     )
     if language.lower() == "zh":
         assert user_text.startswith("请基于当前本地对话")
@@ -258,6 +260,139 @@ async def test_handoff_preserves_pending_plan_without_requiring_approval(
     monkeypatch.setattr(adapter, "_run_turn", next_local_turn)
     response = await send(adapter, session_id, marker=False, text="Continue locally")
     assert response.field_meta["runStatus"] == "waiting_for_user"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_plan", [False, True])
+@pytest.mark.parametrize("parallel", [False, True])
+async def test_handoff_blocks_tools_without_changing_next_local_turn(
+    tmp_path, pending_plan, parallel,
+):
+    class CallingLLM(HandoffLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls % 2:
+                yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                    ToolCall(id=f"echo-{self.calls}-{index}", type="function", function=FunctionCall(
+                        name="echo", arguments={"text": f"action-{index}"},
+                    )) for index in range(2)
+                ])
+            else:
+                async for event in super().generate_stream(messages, tools, **kwargs):
+                    yield event
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=2, workspace_dir=str(tmp_path), enable_memory=False,
+            enable_memory_extraction=False, goal_autopilot_enabled=False,
+        ),
+        tools=ToolsConfig(
+            enable_file_tools=False, enable_bash=False, enable_mcp=False,
+            enable_sub_agent=False, enable_skills=False,
+        ),
+    )
+    tool = CountingEchoTool()
+    tool.parallel_safe = parallel
+    llm = CallingLLM('{"instruction":"Continue the analysis","dependency_paths":[]}')
+    adapter = BoxACPAgent(DummyConn(), config, llm, [tool, PlanWriteStubTool()], "system")
+    try:
+        session_id = (await adapter.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
+        state = adapter._sessions[session_id]
+        pending = (
+            {"required": True, "state": "pending", "request_id": "original-plan"}
+            if pending_plan else None
+        )
+        state.pending_plan_approval = pending
+        original_budget = state.agent.default_run_options().max_tool_calls
+
+        response = await send(adapter, session_id)
+        assert tool.calls == 0
+        assert state.pending_plan_approval == pending
+        assert response.field_meta["cloudHandoff"] is True
+        assert state.agent.default_run_options().max_tool_calls == original_budget
+
+        # The handoff restriction ends with this run. Explicit local approval
+        # still enables the ordinary execution path on the same session.
+        response = await adapter.prompt(
+            session_id=session_id, prompt=[text_block("Execute the approved local task")],
+            autoApprovePlan=True,
+        )
+        assert tool.calls == 2
+        assert state.pending_plan_approval is None
+        assert response.field_meta["ok"] is True
+        assert "cloudHandoff" not in response.field_meta
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_handoff_cannot_rewrite_the_pending_plan(handoff_session, monkeypatch):
+    adapter, session_id, llm = handoff_session
+    state = adapter._sessions[session_id]
+    pending = {"required": True, "state": "pending", "request_id": "original-plan"}
+    state.pending_plan_approval = pending.copy()
+    tool = state.agent.tools["plan_write"]
+    execute = AsyncMock(wraps=tool.execute)
+    monkeypatch.setattr(tool, "execute", execute)
+    original_stream = llm.generate_stream
+
+    async def call_plan(messages, tools=None, **kwargs):
+        llm.calls += 1
+        if llm.calls == 1:
+            yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                ToolCall(id="rewrite-plan", type="function", function=FunctionCall(
+                    name="plan_write", arguments={"action": "set", "title": "Replacement"},
+                )),
+            ])
+        else:
+            async for event in original_stream(messages, tools, **kwargs):
+                yield event
+
+    monkeypatch.setattr(llm, "generate_stream", call_plan)
+    response = await send(adapter, session_id)
+    execute.assert_not_awaited()
+    assert state.pending_plan_approval == pending
+    assert response.field_meta["cloudHandoff"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_body", [False, True])
+async def test_handoff_validates_complete_body_after_text_continuation(
+    handoff_session, monkeypatch, valid_body,
+):
+    adapter, session_id, llm = handoff_session
+    parts = (
+        ['{"instruction":"Con', 'tinue the analysis","dependency_paths":[]}']
+        if valid_body else ['{"instruction":"Partial', llm.output]
+    )
+
+    async def continued(messages, tools=None, **kwargs):
+        index = llm.calls
+        llm.calls += 1
+        yield StreamEvent(type="text", delta=parts[index])
+        yield StreamEvent(type="finish", finish_reason="length" if index == 0 else "stop")
+
+    monkeypatch.setattr(llm, "generate_stream", continued)
+    response = await send(adapter, session_id)
+    assert llm.calls == 2
+    chunks = [
+        notification.update for notification in adapter._conn.updates
+        if getattr(notification.update, "session_update", "") == "agent_message_chunk"
+        and (getattr(notification.update, "field_meta", None) or {}).get("messageDisplay")
+    ]
+    assert "".join(chunk.content.text for chunk in chunks) == "".join(parts)
+    assert len({chunk.field_meta["messageDisplay"]["messageId"] for chunk in chunks}) == 1
+    assert response.field_meta["cloudHandoff"] is valid_body
+    assert response.field_meta["ok"] is valid_body
+    assert response.field_meta["completed"] is valid_body
+    final_ids = response.field_meta["messageDisplay"]["finalMessageIds"]
+    if valid_body:
+        assert final_ids == [chunks[0].field_meta["messageDisplay"]["messageId"]]
+        assert json.loads("".join(parts))["instruction"] == "Continue the analysis"
+    else:
+        assert final_ids == []
+        assert response.field_meta["errorCode"] == "invalid_cloud_handoff"
 
 
 @pytest.mark.asyncio

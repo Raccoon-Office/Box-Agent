@@ -13,6 +13,7 @@ def test_final_receipt_matches_stream_without_output_snapshot():
     assert display.observe(ContentEvent(content="world", _streaming=True)) == first
     display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="Hello world"))
     assert display.receipt(completed=True, duration_ms=0)["finalMessageIds"] == [first["messageId"]]
+    assert display.final_content == "Hello world"
 
 
 def test_snapshot_only_continuation_preserves_answer_and_changes_output_identity():
@@ -24,6 +25,24 @@ def test_snapshot_only_continuation_preserves_answer_and_changes_output_identity
     assert first["outputId"] != second["outputId"]
     display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="ld"))
     assert display.receipt(completed=True, duration_ms=2)["finalMessageIds"] == [second["messageId"]]
+    assert display.final_content == "Hello world"
+
+
+@pytest.mark.parametrize("final_snapshot", [False, True])
+def test_final_content_combines_continuations_without_duplicating_stream_snapshots(final_snapshot):
+    display = MessageDisplay()
+    first = display.observe(ContentEvent(content="Hello wor", _streaming=True))
+    display.observe(LLMOutputEvent(step=1, content="Hello wor"))
+    display.observe(MessageInjection(InjectionKind.TEXT_CONTINUATION, "continue").apply([]))
+    second = display.observe(ContentEvent(content="ld", _streaming=True))
+    if final_snapshot:
+        display.observe(LLMOutputEvent(step=2, content="ld"))
+    display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="ld"))
+    assert first["messageId"] == second["messageId"]
+    assert display.final_content == "Hello world"
+    assert display.receipt(completed=True, duration_ms=2)["finalMessageIds"] == [first["messageId"]]
+    display.begin_run()
+    assert display.final_content == ""
 
 
 @pytest.mark.parametrize("kind", [InjectionKind.BUDGET, InjectionKind.NO_PROGRESS])
@@ -51,6 +70,8 @@ def test_new_task_or_recovery_cancels_pending_text_continuation(kind):
     display.observe(MessageInjection(kind, "new answer").apply([]))
     second = display.observe(LLMOutputEvent(step=2, content="Replacement"))
     assert first["messageId"] != second["messageId"]
+    display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="Replacement"))
+    assert display.final_content == "Replacement"
 
 
 @pytest.mark.parametrize("reason", [StopReason.CANCELLED, StopReason.ERROR, StopReason.MAX_TOKENS])
@@ -60,6 +81,7 @@ def test_non_successful_done_cannot_classify_partial_text(reason):
     display.observe(LLMOutputEvent(step=1, content="partial"))
     display.observe(DoneEvent(stop_reason=reason, final_content="partial"))
     assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == []
+    assert display.final_content == ""
 
 
 def test_tool_preamble_is_distinct_from_snapshot_only_final_answer():
@@ -70,3 +92,4 @@ def test_tool_preamble_is_distinct_from_snapshot_only_final_answer():
     assert preamble["messageId"] != final["messageId"]
     display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="Answer"))
     assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == [final["messageId"]]
+    assert display.final_content == "Answer"
