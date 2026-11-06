@@ -66,7 +66,7 @@
 
 `session/new` 返回 `acp-v1-` 加产品会话 ID 的 UTF-8 base64url 编码（去除 `=`）。未提供产品 ID 时先生成 UUID，再编码。客户端保存返回 ID 与产品 ID、工作区的绑定；旧 `sess-*` 不能直接 load，Lab 从既有产品身份派生稳定 ID 后通过 load 核验。不要把产品 ID 当作 ACP sessionId。
 
-load 只打开已有日志，不创建缺失日志、不恢复截断损坏日志。请求中的 `_meta` 使用既有会话配置；SDK 会展开 `_meta`，不得在其中重复 `session_id` 覆盖顶层 sessionId。回放使用有效历史的 user/assistant/tool 消息；不运行模型、工具或上传。图片引用读既有图片存储，缺失时显示 `[Image unavailable in saved history]`；图片预处理的工具回执也从已保存输入事实回放。
+load 只打开已有日志，不创建缺失日志，也不以空日志替换损坏历史。公共读取器仍会截掉末尾无换行的残余记录；完整换行的损坏记录按错误处理。请求中的 `_meta` 使用既有会话配置；SDK 会展开 `_meta`，不得在其中重复 `session_id` 覆盖顶层 sessionId。回放使用有效历史的 user/assistant/tool 消息；不运行模型、工具或上传。图片引用读既有图片存储，缺失时显示 `[Image unavailable in saved history]`；图片预处理的工具回执也从已保存输入事实回放。
 
 | 方向 / 功能 | 参数 | 示例 / 消费规则 |
 |---|---|---|
