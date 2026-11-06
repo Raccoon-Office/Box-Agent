@@ -669,6 +669,7 @@ async def _run_agent_loop_impl(
     session_turn: int | None = None,
     run_control: Any | None = None,
     initial_context_transition: InitialContextTransition | None = None,
+    completion_checks_enabled: bool = True,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -958,6 +959,7 @@ async def _run_agent_loop_impl(
     completion_checks = await CompletionChecks.create(
         tools,
         CompletionContext(tuple(messages), cancelled, session_log, turn_id, resume_scope=messages),
+        enabled=completion_checks_enabled,
     )
     if _on_completion_checks is not None:
         _on_completion_checks(completion_checks)
@@ -3047,6 +3049,7 @@ async def run_agent_loop(
     context_resource_ledger: ContextResourceLedger | None = None,
     context_resource_dedup_enabled: bool = True,
     session_turn: int | None = None,
+    completion_checks_enabled: bool = True,
 ) -> AsyncIterator[AgentEvent]:
     """Run with capabilities resolved by the outer composition layer."""
     run_arguments = dict(locals())

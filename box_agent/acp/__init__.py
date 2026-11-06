@@ -38,7 +38,7 @@ import re
 import signal
 import sys
 from contextlib import AsyncExitStack, aclosing, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
@@ -67,6 +67,7 @@ from acp.schema import LoadSessionResponse, UserMessageChunk
 from box_agent import __version__
 from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
+from box_agent.cloud_handoff import cloud_handoff_instruction, validate_cloud_handoff
 from box_agent.acp.message_display import MessageDisplay
 from box_agent.injections import InjectionKind, InjectionManager, MessageInjection
 from box_agent.session_context import HostBindings, SessionOptions
@@ -2619,6 +2620,11 @@ class BoxACPAgent:
         # Validate references before cancelling an edited turn, revising history,
         # binding its ID, or running any tool. This synchronous preflight does not
         # yield between session lookup and the existing request guards.
+        if meta.get("cloudHandoff") is True:
+            params.prompt = [text_block(cloud_handoff_instruction(
+                "", state.agent.workspace_dir,
+                ui_language=_meta_string(meta, "ui_language", "uiLanguage").lower(),
+            )), *params.prompt]
         input_value = UserInput(tuple(params.prompt), context,
                                 _meta_string(meta, "turn_id", "turnId") or None)
         if input_value.input_id and state.agent.session_log is not None:
@@ -2803,6 +2809,7 @@ class BoxACPAgent:
             else plan_detection_text
         )
         _bind_user_source_text(state, source_binding_text)
+        cloud_handoff = prompt_meta.get("cloudHandoff") is True
         if not state.utility_session:
             selected_connector_ids = _connector_ids_from_meta(prompt_meta)
             if selected_connector_ids is not None:
@@ -3073,8 +3080,8 @@ class BoxACPAgent:
             )
         if state.memory_extractor is not None and hasattr(state.memory_extractor, "set_turn_id"):
             state.memory_extractor.set_turn_id(turn_id)
-        plan_approval = _plan_approval_from_meta(prompt_meta)
-        if plan_approval is None:
+        plan_approval = None if cloud_handoff else _plan_approval_from_meta(prompt_meta)
+        if plan_approval is None and not cloud_handoff:
             plan_approval = _plan_approval_from_pending_text(
                 state.pending_plan_approval,
                 plan_detection_text,
@@ -3082,7 +3089,7 @@ class BoxACPAgent:
         plan_approval_approved = _plan_approval_is_approved(plan_approval)
         if plan_approval_approved:
             state.pending_plan_approval = None
-        auto_approve_plan = _meta_bool(
+        auto_approve_plan = not cloud_handoff and _meta_bool(
             prompt_meta,
             "auto_approve_plan",
             "autoApprovePlan",
@@ -3092,9 +3099,11 @@ class BoxACPAgent:
         if auto_approve_plan and state.pending_plan_approval is not None and not plan_approval_approved:
             state.pending_plan_approval = None
         session_force_plan_start = state.force_plan_start
-        if session_force_plan_start:
+        if session_force_plan_start and not cloud_handoff:
             state.force_plan_start = False
-        prompt_requests_plan_start = text_requests_plan_start(plan_detection_text)
+        prompt_requests_plan_start = (
+            not cloud_handoff and text_requests_plan_start(plan_detection_text)
+        )
         prompt_force_plan_hint = _meta_bool(
             prompt_meta,
             "force_plan_start",
@@ -3106,7 +3115,7 @@ class BoxACPAgent:
             if plan_approval_approved
             else prompt_requests_plan_start
         )
-        require_plan_approval = (
+        require_plan_approval = not cloud_handoff and (
             (force_plan_start and not auto_approve_plan)
             or (
                 state.pending_plan_approval is not None
@@ -3325,7 +3334,8 @@ class BoxACPAgent:
             _meta_string(prompt_meta, "browser_host_binding") or None
         )
         auto_enabled = (
-            state.config.agent.goal_autopilot_enabled
+            not cloud_handoff
+            and state.config.agent.goal_autopilot_enabled
             and state.config.agent.goal_autopilot_max_turns > 0
         )
         message_display = MessageDisplay()
@@ -3362,6 +3372,8 @@ class BoxACPAgent:
                     pending_llm=pending_llm,
                     pending_summary_llm=pending_summary_llm,
                     initial_context_transition=initial_context_transition,
+                    max_tool_calls=0 if cloud_handoff else None,
+                    completion_checks_enabled=not cloud_handoff,
                 )
                 while (
                     auto_enabled
@@ -3500,6 +3512,21 @@ class BoxACPAgent:
                 reset_browser_host_binding(browser_host_token)
             turn_meter = get_token_meter()
             reset_token_meter(meter_token)
+        cloud_handoff_ready = False
+        if (
+            cloud_handoff
+            and stop_reason == StopReason.END_TURN.value
+            and not state.cancelled
+            and not state.task_registry_error
+        ):
+            try:
+                validate_cloud_handoff(message_display.final_content)
+            except ValueError as exc:
+                state.last_error = str(exc)
+                state.last_error_code = "invalid_cloud_handoff"
+                stop_reason = StopReason.ERROR.value
+            else:
+                cloud_handoff_ready = True
         waiting_for_user = stop_reason == StopReason.WAITING_FOR_USER.value
         state.waiting_for_user_input = waiting_for_user
         wrap_up_incomplete = bool(
@@ -3642,7 +3669,7 @@ class BoxACPAgent:
             completed=(
                 not failed
                 and not waiting_for_user
-                and state.pending_plan_approval is None
+                and (cloud_handoff or state.pending_plan_approval is None)
                 and stop_reason == StopReason.END_TURN.value
                 and not autopilot.budget_exhausted
                 and not autopilot.no_progress_exhausted
@@ -3652,6 +3679,15 @@ class BoxACPAgent:
         )
         if state.wrap_up_requested:
             response_meta["wrapUp"] = {"requested": True, "goalIncomplete": wrap_up_incomplete}
+        if cloud_handoff:
+            response_meta["cloudHandoff"] = (
+                cloud_handoff_ready
+                and not failed
+                and not state.cancelled
+                and stop_reason == StopReason.END_TURN.value
+                and acp_stop_reason == "end_turn"
+                and not wrap_up_incomplete
+            )
         if state.agent.goal is not None or autopilot.continuations > 0:
             response_meta["goalAutopilot"] = {
                 "enabled": auto_enabled,
@@ -4603,6 +4639,8 @@ class BoxACPAgent:
         pending_llm: SessionBoundLLM | None = None,
         pending_summary_llm: SessionBoundLLM | None = None,
         initial_context_transition: InitialContextTransition | None = None,
+        max_tool_calls: int | None = None,
+        completion_checks_enabled: bool = True,
     ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
         message_display = message_display or MessageDisplay()
@@ -5099,7 +5137,12 @@ class BoxACPAgent:
                 fingerprint,
             ),
             current_turn_text=plan_start_text,
+            completion_checks_enabled=completion_checks_enabled,
         )
+        if max_tool_calls is not None:
+            # A summary-only request must reject model tool calls at execution,
+            # including when the model ignores the handoff instruction.
+            run_options = replace(run_options, max_tool_calls=max_tool_calls)
         # start() creates the producer task. Bind its trace before task creation;
         # wrapping only the event consumer cannot propagate ContextVars to it.
         trace_token = (

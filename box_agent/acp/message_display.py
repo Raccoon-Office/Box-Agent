@@ -34,7 +34,9 @@ class MessageDisplay:
         self.text_parts: list[str] = []
         self.last_text = ""
         self.answer_ids: list[str] = []
+        self.answer_parts: list[str] = []
         self.final_ids: list[str] = []
+        self.final_content = ""
 
     def observe(self, event: object) -> dict | None:
         if isinstance(event, ContentEvent) and not event._header and event.content:
@@ -50,7 +52,13 @@ class MessageDisplay:
             # A no-tool output is only a candidate, never a final-answer signal.
             if event.tool_calls or not event.content:
                 self.answer_ids = []
+                self.answer_parts = []
             else:
+                if self.answer_ids != [identifier]:
+                    self.answer_parts = []
+                # The snapshot replaces this output's streamed chunks. Only
+                # text continuations share an answer ID with earlier outputs.
+                self.answer_parts.append(event.content)
                 self.answer_ids = [identifier]
             self.last_text = event.content
             self.message_id = None
@@ -77,8 +85,11 @@ class MessageDisplay:
             text = "".join(self.text_parts)
             if self.message_id and text == event.final_content and text.strip():
                 self.final_ids = [self.message_id]
+                prefix = self.answer_parts if self.answer_ids == self.final_ids else []
+                self.final_content = "".join([*prefix, text])
             elif self.last_text == event.final_content and self.last_text.strip():
                 self.final_ids = self.answer_ids.copy()
+                self.final_content = "".join(self.answer_parts)
         return None
 
     def receipt(self, *, completed: bool, duration_ms: int) -> dict:
