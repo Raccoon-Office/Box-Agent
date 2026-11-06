@@ -4481,12 +4481,17 @@ async def test_acp_prompt_reclaims_background_bash_at_turn_end(tmp_path):
     session = await agent.new_session(
         **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
-    response = await agent.prompt(
-        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "run server"}]))
-    )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
+    try:
+        response = await agent.prompt(
+            **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "run server"}]))
+        )
 
-    assert response.stopReason == "end_turn"
-    assert BackgroundShellManager.get_available_ids(session.sessionId) == []
+        assert response.stopReason == "end_turn"
+        assert BackgroundShellManager.get_available_ids(bash_tool.process_owner_id) == []
+    finally:
+        await bash_tool.cleanup_background_processes()
+        await agent.aclose()
 
 
 @pytest.mark.asyncio
@@ -4517,6 +4522,7 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
     session = await agent.new_session(
         **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
 
     try:
         response = await agent.prompt(
@@ -4526,7 +4532,7 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
             ))
         )
 
-        bash_ids = BackgroundShellManager.get_available_ids(agent._sessions[session.sessionId].agent.tools["bash"].process_owner_id)
+        bash_ids = BackgroundShellManager.get_available_ids(bash_tool.process_owner_id)
         assert response.stopReason == "end_turn"
         assert len(bash_ids) == 1
         assert BackgroundShellManager.get(bash_ids[0]).lifetime == "runtime"
@@ -4544,7 +4550,9 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
         else:
             pytest.fail("runtime HTTP service did not remain reachable after turn end")
     finally:
-        await BackgroundShellManager.terminate_owner(session.sessionId)
+        await bash_tool.cleanup_background_processes()
+        await agent.aclose()
+    assert BackgroundShellManager.get_available_ids(bash_tool.process_owner_id) == []
 
 
 @pytest.mark.asyncio
