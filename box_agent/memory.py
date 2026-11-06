@@ -17,8 +17,9 @@ import logging
 import re
 import threading
 import uuid
-from contextlib import aclosing, asynccontextmanager, contextmanager
+from contextlib import aclosing, asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -3041,6 +3042,10 @@ def uses_local_memory(manager: Any) -> bool:
 
 def create_memory_backend(settings: AgentConfig, *, manager_factory: Any = MemoryManager) -> Any:
     """统一构造后端，本地存储同时承载独立的纠错记忆能力。"""
+    if settings.memory_backend_type == "desktop":
+        from .desktop_memory.backend import DesktopMemoryBackend
+
+        return DesktopMemoryBackend(settings.memory_desktop)
     tenant_id, user_id = memory_identity(settings.memory_tenant_id, settings.memory_user_id)
     local = manager_factory(
         memory_dir=scoped_memory_dir(settings.memory_dir, tenant_id, user_id),
@@ -3089,6 +3094,13 @@ class ExternalMemoryBackend:
                                       if getattr(config, name, None) is not None)
         if backend_type in {"mem0", "memu"}:
             logger.warning("memory backend=%s 使用 generic 映射，尚未提供原生协议适配", backend_type)
+
+    def clone_for_session(self) -> ExternalMemoryBackend:
+        """Borrow configuration, keeping per-session remote state independent."""
+        return type(self)(self.backend_type, self.config, self.tenant_id, self.user_id, self.corrections)
+
+    def create_runtime(self) -> MemoryRuntime:
+        return MemoryRuntime(self)
 
     @property
     def correction_curator(self) -> Any:
@@ -3581,6 +3593,9 @@ class _MemoryTurn:
     turn_id: str
     timestamp: int
     handle: Any = None
+    logged_user_text: str | None = None
+    user_message: Any = None
+    input_context: dict[str, Any] | None = None
 
 
 class MemoryRuntime:
@@ -3599,6 +3614,10 @@ class MemoryRuntime:
         """Wake a remote preload without cancelling the host's prompt task."""
         if self._refresh_cancel is not None:
             self._refresh_cancel.set()
+
+    def user_turn_scope(self, turn: _MemoryTurn):
+        """Optional non-persistent capability scope around the user execution."""
+        return nullcontext()
 
     async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
         if getattr(session, "cancelled", False):
@@ -3648,6 +3667,9 @@ class MemoryRuntime:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
+    def end_turn(self, turn: _MemoryTurn) -> None:
+        """Optional capability cleanup, including exceptional user-turn exits."""
+
     async def _save(self, turn: _MemoryTurn) -> None:
         context = {"session_id": turn.session_id, "turn_id": turn.turn_id, "timestamp": turn.timestamp}
         try:
@@ -3683,7 +3705,9 @@ class MemoryRuntime:
 
 @asynccontextmanager
 async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
-                           turn_id: str) -> AsyncIterator[_MemoryTurn | None]:
+                           turn_id: str, logged_user_text: str | None = None,
+                           user_message: Any = None,
+                           input_context: dict[str, Any] | None = None) -> AsyncIterator[_MemoryTurn | None]:
     """宿主声明真实用户轮次，内部续跑复用同一边界。"""
     runtime = getattr(session, "memory_runtime", None)
     if runtime is None:
@@ -3692,24 +3716,35 @@ async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
     if runtime.active is not None:
         yield runtime.active
         return
-    turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000))
+    turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000),
+                       logged_user_text=logged_user_text, user_message=user_message,
+                       input_context=deepcopy(input_context))
     runtime.active = turn
-    try:
-        await runtime.refresh(session, turn)
-        yield turn
-    except BaseException:
-        raise
-    else:
-        runtime.schedule(turn)
-    finally:
-        runtime.active = None
+    with runtime.user_turn_scope(turn):
+        try:
+            await runtime.refresh(session, turn)
+            yield turn
+        except BaseException:
+            raise
+        else:
+            runtime.schedule(turn)
+        finally:
+            runtime.end_turn(turn)
+            runtime.active = None
 
 
 async def memory_run_events(session: Any, request: Any, options: Any) -> AsyncIterator[AgentEvent]:
     """共享服务运行包装器，普通运行和 CLI/ACP 外层轮次使用同一策略。"""
     user_text = request.user_text if request.user_text is not None else (getattr(options, "current_turn_text", None) or "")
+    user_message = None
+    runtime = getattr(session, "memory_runtime", None)
+    if request.user_text is not None and getattr(runtime, "requires_user_message", False):
+        user_message = next((message for message in reversed(session.agent.messages)
+                             if getattr(message, "role", None) == "user"
+                             and getattr(message, "source", None) == "user"), None)
     async with memory_user_turn(session, user_text=user_text, session_id=request.session_id,
-                                turn_id=getattr(options, "turn_id", "") or request.run_id) as turn:
+                                turn_id=getattr(options, "turn_id", "") or request.run_id,
+                                user_message=user_message) as turn:
         if turn is not None:
             turn.handle = session._run_handle
         async with aclosing(session.run_events(options=options)) as events:

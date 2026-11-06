@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from contextlib import nullcontext
 import logging
@@ -46,6 +47,23 @@ class PreparedContext:
     input_context: dict[str, Any] | None = None
 
 
+class ModelInputGuard(ABC):
+    """Optional capability checks on final input, without editing durable history."""
+
+    @abstractmethod
+    def bind_context(self, context: DefaultContextEngine) -> None:
+        """Borrow the exact run's schemas, history and input budget."""
+
+    @abstractmethod
+    def prepare_context(self, projection: PreparedContext) -> PreparedContext:
+        """Compose delivery callbacks or reject a projection before dispatch."""
+
+    def project_messages(self, messages: list[Message], *, tools: PreparedTools, token_limit: int,
+                         tail: tuple[Message, ...] = (), reserve_tokens: int = 0) -> list[Message]:
+        """Bound owned optional input before references and shared budget checks."""
+        return messages
+
+
 class DefaultContextEngine:
     """Own request coverage and budgets, borrowing the final resolved services.
 
@@ -64,6 +82,7 @@ class DefaultContextEngine:
         self.thinking_enabled = thinking_enabled
         self.initial_context_transition = initial_context_transition
         self._memory_lookup = None
+        self._input_guard: ModelInputGuard | None = None
         self.references: SkillReferenceContext | None = None
         self.prepared_tools: PreparedTools | None = None
         self._history: list[Message] = []
@@ -128,6 +147,10 @@ class DefaultContextEngine:
     def bind_memory(self, memory_lookup: Any) -> None:
         """Bind optional memory after run capabilities have been resolved."""
         self._memory_lookup = memory_lookup
+        guard = getattr(memory_lookup, "model_input_guard", None)
+        self._input_guard = guard if isinstance(guard, ModelInputGuard) else None
+        if self._input_guard is not None:
+            self._input_guard.bind_context(self)
 
     def bind_history(self, messages: list[Message]) -> None:
         """Observe exact tool history before Kernel may compact it; never edit it."""
@@ -275,6 +298,12 @@ class DefaultContextEngine:
             0, self._transient_tokens - _fallback_context_estimate([transient_message], {}),
         ) if transient_message is not None else 0)
         context_messages = self.project_history([*messages, *extra_messages])
+        if self._input_guard is not None:
+            context_messages = self._input_guard.project_messages(
+                context_messages, tools=prepared_tools, token_limit=token_limit,
+                tail=(transient_message,) if transient_message is not None else (),
+                reserve_tokens=self._transient_reserve_tokens,
+            )
         references: tuple[dict[str, Any], ...] = ()
         self._request_reference_tokens = 0
         blocked_reason = None
@@ -409,7 +438,7 @@ class DefaultContextEngine:
 
                 on_committed = commit_inputs
                 on_response = settle_inputs
-        return PreparedContext(
+        projection = PreparedContext(
             provider_messages, context_messages, references,
             self._request_reference_tokens,
             self._request_reference_tokens + self._transient_tokens
@@ -420,3 +449,4 @@ class DefaultContextEngine:
             image_projection.notices if image_projection else (),
             required_reference_tokens, input_manifest,
         )
+        return self._input_guard.prepare_context(projection) if self._input_guard is not None else projection

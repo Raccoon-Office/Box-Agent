@@ -1732,9 +1732,19 @@ class BoxACPAgent:
             agent_info=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
         skills = self._skills_meta()
+        response_meta: dict[str, Any] = {}
         if skills is not None:
             # Pydantic alias: _meta ↔ field_meta
-            kwargs["field_meta"] = {"skills": skills}
+            response_meta["skills"] = skills
+        if self._config.agent.memory_backend_type == "desktop":
+            response_meta["desktop_memory"] = {
+                "protocol_version": 2,
+                "backend": "desktop",
+                "enabled": self._config.agent.enable_memory,
+                "attempt_log_v1": True,
+            }
+        if response_meta:
+            kwargs["field_meta"] = response_meta
         resp = InitializeResponse(**kwargs)
         log.info("initialize", message=f"Initialized box-agent v{__version__}, skills={len(skills) if skills else 0}")
         return resp
@@ -2666,6 +2676,14 @@ class BoxACPAgent:
                     log_store.flush()
             if log_store is not None and context:
                 log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
+            config = state.config or self._config
+            if config.agent.memory_backend_type == "desktop":
+                from ..payload_privacy import private_payload_scope
+
+                # Include prompt preparation/finalization and their failures,
+                # not only the inner model iterator's private scope.
+                with private_payload_scope():
+                    return await self._prompt_for_session(params, session_id, state, context, prepared_input)
             return await self._prompt_for_session(params, session_id, state, context, prepared_input)
         except Exception as exc:
             if edit is not None:
@@ -3320,6 +3338,10 @@ class BoxACPAgent:
         try:
             async with memory_user_turn(
                 state, user_text=plan_detection_text,
+                logged_user_text=user_text,
+                input_context=context,
+                user_message=next((message for message in reversed(state.agent.messages)
+                                   if message.role == "user" and message.source == "user"), None),
                 session_id=state.upstream_session_id or session_id, turn_id=turn_id,
             ):
                 stop_reason = await self._run_turn(
@@ -4138,6 +4160,16 @@ class BoxACPAgent:
         return injected
 
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._config.agent.memory_backend_type == "desktop":
+            from ..payload_privacy import private_payload_scope
+
+            # Titles/summaries can contain the same private QA as the main
+            # conversation, even though this endpoint creates no memory turn.
+            with private_payload_scope():
+                return await self._run_llm_prompt(params)
+        return await self._run_llm_prompt(params)
+
+    async def _run_llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single tool-free completion (titles/summaries/rewrites).
 
         Bypasses ``newSession``: no MCP wait, no skills metadata, no tools, no
@@ -6103,6 +6135,9 @@ async def _close_acp_connection(
 async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
     config = config or Config.load()
+    from ..desktop_memory.launch import desktop_launch_agent
+
+    config = config.model_copy(update={"agent": desktop_launch_agent(config.agent)})
 
     # ── Playwright default cache path ──────────────────────
     # Host (e.g. officev3) can override by exporting PLAYWRIGHT_BROWSERS_PATH

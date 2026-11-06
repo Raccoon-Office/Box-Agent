@@ -611,13 +611,15 @@ async def test_acp_cancel_stops_memory_preload_and_next_turn_recovers(tmp_path, 
     state = host._sessions[info.sessionId]
     original = state.memory_manager.load_context
     started, cleaned = asyncio.Event(), asyncio.Event()
+    cleanup_started, allow_cleanup = asyncio.Event(), asyncio.Event()
 
     async def blocked_context(**kwargs):
         started.set()
         try:
             await asyncio.Event().wait()
         finally:
-            await asyncio.sleep(0)
+            cleanup_started.set()
+            await allow_cleanup.wait()
             cleaned.set()
 
     monkeypatch.setattr(state.memory_manager, "load_context", blocked_context)
@@ -626,7 +628,12 @@ async def test_acp_cancel_stops_memory_preload_and_next_turn_recovers(tmp_path, 
     try:
         await asyncio.wait_for(started.wait(), 1)
         await host.cancel(**acp_params(SimpleNamespace(sessionId=info.sessionId)))
-        response = await asyncio.wait_for(asyncio.shield(prompt), 0.5)
+        await asyncio.wait_for(cleanup_started.wait(), 5)
+        assert not prompt.done(), "cancel response must wait for preload cleanup"
+        assert llm.calls == 0
+        allow_cleanup.set()
+        # A deadlock bound, not a subsecond CI machine performance assertion.
+        response = await asyncio.wait_for(asyncio.shield(prompt), 5)
         assert response.stopReason == "cancelled"
         assert cleaned.is_set()
         assert llm.calls == 0
@@ -637,6 +644,7 @@ async def test_acp_cancel_stops_memory_preload_and_next_turn_recovers(tmp_path, 
         assert response.stopReason == "end_turn"
         assert llm.calls == 1
     finally:
+        allow_cleanup.set()
         prompt.cancel()
         await asyncio.gather(prompt, return_exceptions=True)
         await host.aclose()

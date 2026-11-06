@@ -342,6 +342,30 @@ class SessionLog:
                    and event["data"].get("turn_id") == turn_id
                    for event in self._events)
 
+    @property
+    def event_count(self) -> int:
+        """Return a stable exclusive cursor without copying session history."""
+        return len(self._events)
+
+    def event_page(self, start: int, *, limit: int = 64) -> tuple[dict[str, Any], ...]:
+        """Read a detached bounded page; callers own their end cursor and flush."""
+        if (type(start) is not int or not 0 <= start <= len(self._events)
+                or type(limit) is not int or not 1 <= limit <= 256):
+            raise ValueError("invalid session event page")
+        if self._closed or self._failed:
+            raise SessionLogDurabilityError("session log unavailable")
+        return tuple(deepcopy(self._events[start:start + limit]))
+
+    def events_of_type(self, event_type: str):
+        """Iterate detached events of one type without copying unrelated payloads."""
+        if self._closed or self._failed:
+            raise SessionLogDurabilityError("session log unavailable")
+        end = len(self._events)
+        for index in range(end):
+            event = self._events[index]
+            if event["type"] == event_type:
+                yield deepcopy(event)
+
     def next_turn_number(self) -> int:
         """Inspect recorded starts without copying history or reserving a turn."""
 
@@ -978,6 +1002,22 @@ class SessionLog:
                 payload = data if kind == "user/message" else data["message"]
                 history.append((event["seq"], Message.model_validate(payload), data))
         return history
+
+    def surface_message_sequence(self, messages: list[Message], target: Message) -> int | None:
+        """Resolve a live message by position, never by matching its text alone."""
+        positions = [index for index, message in enumerate(messages) if message is target]
+        if len(positions) != 1:
+            raise ValueError("message is not uniquely present in the live surface")
+        nodes = self._surface_nodes()
+        common = min(len(nodes), len(messages))
+        if len(nodes) > len(messages) or any(
+            nodes[index][1].model_dump(mode="json", exclude_none=True)
+            != messages[index].model_dump(mode="json", exclude_none=True)
+            for index in range(common)
+        ):
+            raise ValueError("session surface diverged")
+        index = positions[0]
+        return nodes[index][0] if index < len(nodes) else None
 
     def _append_surface_message(
         self,

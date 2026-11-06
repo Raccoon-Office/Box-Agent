@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -74,6 +74,7 @@ from box_agent.llm.model_routing import resolve_model_client
 from box_agent.llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS
 from box_agent.schema import LLMProvider, Message
 from box_agent.session_trace import SessionTraceWriter, traced_session_turn
+from box_agent.payload_privacy import private_payload_scope
 from box_agent.tools.base import Tool
 from box_agent.tools.browser_runtime_scope import set_browser_session_key
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
@@ -262,7 +263,17 @@ def _config_display_value(value: Any, parts: list[str]) -> Any:
     normalized = parts[1:] if parts[:1] == ["agent"] else parts
     if normalized[:2] == ["memory_external", "headers"]:
         return "****" if value else value
+    if normalized[:1] == ["memory_desktop"]:
+        return "****" if value else value
     return _mask_secret(value) if _is_secret_path(parts) else value
+
+
+@contextmanager
+def _cli_traced_turn(writer: SessionTraceWriter, *, content: str, desktop: bool):
+    """Protect both the trace's entry and exit, including exceptional exits."""
+    with private_payload_scope() if desktop else nullcontext():
+        with traced_session_turn(writer, content=content) as turn:
+            yield turn
 
 
 def _config_error_details(error: Exception) -> str:
@@ -2353,7 +2364,8 @@ async def run_agent(
                     no_progress_limit=agent_session.config.agent.goal_autopilot_no_progress_turns,
                 )
                 try:
-                    with traced_session_turn(trace_writer, content=task) as traced_turn:
+                    with _cli_traced_turn(trace_writer, content=task,
+                                          desktop=agent_session.config.agent.memory_backend_type == "desktop") as traced_turn:
                         async with memory_user_turn(
                             agent_session, user_text=task, session_id=logical_session_id,
                             turn_id=traced_turn.turn_id,
@@ -2745,7 +2757,8 @@ async def run_agent(
                     esc_thread.start()
 
                     try:
-                        with traced_session_turn(trace_writer, content=user_input) as traced_turn:
+                        with _cli_traced_turn(trace_writer, content=user_input,
+                                              desktop=agent_session.config.agent.memory_backend_type == "desktop") as traced_turn:
                             agent_task = asyncio.create_task(
                                 _run_session_turn(
                                     agent_session,

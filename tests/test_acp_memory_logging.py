@@ -1,0 +1,124 @@
+"""Memory diagnostic omission covers ACP stderr/file without changing results."""
+import asyncio
+
+import pytest
+
+from box_agent.acp.debug_logger import ACPDebugLogger
+from box_agent.payload_privacy import private_payload_scope, private_payloads
+
+
+@pytest.mark.parametrize("log_format", ["json", "text"])
+async def test_inject_preserves_instruction_but_logs_only_metadata(tmp_path, monkeypatch, capsys, log_format):
+    from types import SimpleNamespace
+
+    from box_agent.acp import BoxACPAgent
+    from box_agent.injections import InjectionManager
+
+    monkeypatch.setenv("BOX_AGENT_LOG_LEVEL", "debug")
+    monkeypatch.setenv("BOX_AGENT_LOG_FORMAT", log_format)
+    monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(tmp_path / "inject.log"))
+    logger = ACPDebugLogger()
+    monkeypatch.setattr("box_agent.acp.log", logger)
+    state = SimpleNamespace(turn_active=True, inject_queue=InjectionManager(),
+                            agent=SimpleNamespace(workspace_dir=tmp_path, session_log=None), permission_engine=None)
+    canary = "SYNTHETIC_PRIVATE_INJECTION"
+    stub = SimpleNamespace(_sessions={"session": state})
+    try:
+        assert not private_payloads()
+        result = await BoxACPAgent.ext_method(stub, "inject", {
+            "sessionId": "session", "injectionId": "fixture-injection", "text": canary})
+        assert result["ok"]
+        queued = state.inject_queue.get_nowait()
+        assert queued.content == canary and queued.injection_id == "fixture-injection"
+        logfile = tmp_path / "inject.log"
+        output = capsys.readouterr().err + (logfile.read_text() if logfile.exists() else "")
+        assert canary not in output
+    finally:
+        logger.close()
+
+
+@pytest.mark.parametrize('log_format', ['json', 'text'])
+@pytest.mark.parametrize('private_scope', [True, False])
+def test_memory_tool_payloads_and_raw_errors_never_reach_any_log_level(
+    tmp_path, monkeypatch, capsys, log_format, private_scope,
+):
+    from contextlib import nullcontext
+    canary = 'MV2-LOG-PRIVATE-short-body'
+    logfile = tmp_path / 'agent.log'
+    monkeypatch.setenv('BOX_AGENT_LOG_LEVEL', 'debug')
+    monkeypatch.setenv('BOX_AGENT_LOG_FORMAT', log_format)
+    monkeypatch.setenv('BOX_AGENT_LOG_FILE', str(logfile))
+    monkeypatch.setenv('BOX_AGENT_LOG_FULL_PAYLOAD', '1')
+    logger = ACPDebugLogger()
+    arguments = {'content': canary, 'source': canary}
+    try:
+        with private_payload_scope() if private_scope else nullcontext():
+            for tool in ['memory_read', 'memory_managed_read', 'memory_write', 'memory_edit', 'memory_save']:
+                for method, event in [(logger.debug, 'tool/start'), (logger.info, 'tool/end'), (logger.warn, 'tool/fail'), (logger.error, 'tool/cancel')]:
+                    method(event, tool_name=tool, tool_call_id='tc-1', arguments=arguments,
+                           result=canary, error=canary, content=canary, raw_output=arguments,
+                           source=canary, traceback=canary, user_visible=True, duration_ms=25)
+                try:
+                    raise ValueError(canary)
+                except ValueError as exc:
+                    logger.exception('tool/fail', exc, tool_name=tool, tool_call_id='tc-1')
+        output = capsys.readouterr().err + logfile.read_text()
+        assert canary not in output
+        assert 'tc-1' in output and 'memory_read' in output and 'duration_ms' in output
+        assert 'payload_redacted' in output
+        assert arguments['content'] == canary
+    finally:
+        logger.close()
+
+
+async def test_private_acp_scope_covers_unknown_errors_and_cancellation_then_resets(monkeypatch, capsys):
+    monkeypatch.setenv('BOX_AGENT_LOG_LEVEL', 'debug')
+    monkeypatch.delenv('BOX_AGENT_LOG_FILE', raising=False)
+    logger = ACPDebugLogger()
+    canary = 'MV2-LOG-PRIVATE-error-body'
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            with private_payload_scope():
+                logger.error('session/prompt', error=canary, traceback=canary, session_id='s-1')
+                raise asyncio.CancelledError()
+        assert not private_payloads()
+        assert canary not in capsys.readouterr().err
+        logger.info('ordinary', message='ordinary diagnostics remain')
+        assert 'ordinary diagnostics remain' in capsys.readouterr().err
+    finally:
+        logger.close()
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+async def test_desktop_prompt_failure_and_cancellation_reset_privacy_and_reservation(tmp_path, monkeypatch, capsys, cancelled):
+    from types import SimpleNamespace
+    from box_agent.acp import BoxACPAgent, SessionState
+    monkeypatch.setenv('BOX_AGENT_LOG_LEVEL', 'debug')
+    monkeypatch.delenv('BOX_AGENT_LOG_FILE', raising=False)
+    logger = ACPDebugLogger()
+    canary = 'MV2-PROMPT-PRIVATE-failure'
+    from tests.test_agent_session import session_config
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = 'desktop'
+    state = SessionState(agent=SimpleNamespace(session_log=None, workspace_dir=tmp_path), config=config)
+
+    async def fail_prompt(*_):
+        assert private_payloads()
+        try:
+            raise asyncio.CancelledError(canary) if cancelled else RuntimeError(canary)
+        except BaseException as exc:
+            logger.exception('session/prompt', exc, session_id='s-1')
+            raise
+
+    stub = SimpleNamespace(_config=config, _require_accepting_requests=lambda: None,
+                           _session_bindings_in_progress={}, _sessions={'s-1':state},
+                           _prompt_for_session=fail_prompt)
+    try:
+        with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+            await BoxACPAgent.prompt(stub, session_id='s-1', prompt=[{'type': 'text', 'text': 'private request'}])
+        assert not private_payloads()
+        assert not state._prompt_in_progress
+        assert state._prompt_finished.done()
+        assert canary not in capsys.readouterr().err
+    finally:
+        logger.close()
