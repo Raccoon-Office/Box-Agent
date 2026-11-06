@@ -87,7 +87,7 @@ class MessageInjection:
 def parse_queued_injection(item: object) -> MessageInjection | None:
     """Accept the existing string/dict queue interface with its original defaults."""
     if isinstance(item, MessageInjection):
-        return item if item.content else None
+        return item if item.content or (item.input_context or {}).get("files") else None
     kind = InjectionKind.USER_SUPPLEMENT
     injection_id = None
     user_visible = True
@@ -103,7 +103,7 @@ def parse_queued_injection(item: object) -> MessageInjection | None:
         input_context = item.get("input_context")
     else:
         content = str(item)
-    if not content:
+    if not content and not (input_context or {}).get("files"):
         return None
     return MessageInjection(kind, content, injection_id, user_visible, input_context=input_context)
 

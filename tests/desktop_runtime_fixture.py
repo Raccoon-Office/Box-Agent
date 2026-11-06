@@ -99,6 +99,35 @@ class FixtureLLM:
         users = "\n".join(str(message.content) for message in messages if message.role == "user")
         has_results = any(message.role == "tool" for message in messages)
         mode = scenario.get()
+        if mode == "file_inputs":
+            record_lifecycle("file_model_input", messages=[message.model_dump(mode="json") for message in messages])
+            files = {}
+            for line in users.splitlines():
+                if line.startswith('{"files":'):
+                    files.update({item["path"]: item for item in json.loads(line)["files"]})
+            completed = {message.tool_call_id for message in messages if message.role == "tool"}
+            read_paths = {
+                call.function.arguments["path"]
+                for message in messages for call in (message.tool_calls or [])
+                if call.function.name == "read_file" and call.id in completed
+            }
+            pending = [path for path in files if path not in read_paths]
+            if pending:
+                if not read_paths:
+                    yield StreamEvent(type="text", delta="FILES_READY")
+                    await asyncio.sleep(0.5)
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                    call("read_file", {"path": path}, len(read_paths) + index)
+                    for index, path in enumerate(pending)
+                ])
+                return
+            contents = "\n".join(str(message.content) for message in messages if message.role == "tool")
+            result = {"readCount": len(read_paths), "tokens": re.findall(r"TOKEN=([a-zA-Z0-9-]+)", contents),
+                      "sum": sum(int(value) for value in re.findall(r"VALUE=(\d+)", contents))}
+            record_lifecycle("file_read_result", **result)
+            yield StreamEvent(type="text", delta=json.dumps(result))
+            yield StreamEvent(type="finish", finish_reason="stop")
+            return
         if mode == "input_context":
             record_lifecycle("model_input", messages=[message.model_dump(mode="json") for message in messages])
             if not has_results:
@@ -264,6 +293,16 @@ def install_fixture(acp, root):
                 block_binding.reset(token)
 
         async def aclose(self):
+            if os.environ.get("BOX_AGENT_DESKTOP_TEST_HOLD_SHUTDOWN") == "1":
+                # Keep the real server's signal handlers installed until the
+                # transport test has delivered its concurrent shutdown signal.
+                (root / "shutdown-waiting").touch()
+
+                async def wait_for_release():
+                    while not (root / "shutdown-release").exists():
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(wait_for_release(), 10)
             states = list(self._sessions.values())
             await super().aclose()
             record_lifecycle("adapter_closed", remaining_sessions=len(self._sessions),
@@ -331,7 +370,7 @@ def main():
         agent=AgentConfig(workspace_dir=str(root / "profile/workspaces"), max_steps=5,
                           enable_memory=False, enable_memory_extraction=False,
                           memory_maintainer_enabled=False, memory_promotion_proposal_enabled=False),
-        tools=ToolsConfig(enable_file_tools=False, enable_bash=False, enable_todo=False,
+        tools=ToolsConfig(enable_file_tools=os.environ.get("BOX_AGENT_DESKTOP_TEST_FILE_INPUTS") == "1", enable_bash=False, enable_todo=False,
                           enable_plan=False, enable_sub_agent=True, enable_skills=False, enable_mcp=False),
     )
     config.tool_limits.general.max_delegated_tool_calls = 3
