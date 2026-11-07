@@ -2808,6 +2808,7 @@ async def _run_agent_loop_impl(
         if tool_summary is None:
             raise RuntimeError("Tool engine ended without a step summary")
         step_made_progress = tool_summary.made_progress
+        turn_continuation.record_tool_progress(step_made_progress)
         visible_tool_call_total += tool_summary.visible_calls
         completed_turn_ending_tool = tool_summary.completed_turn_ending_tool
         plan_write_succeeded = plan_write_succeeded or "plan_write" in tool_summary.successful_tools

@@ -13,6 +13,27 @@ of every commit.
 - Contract and proof entry points: [ACP SDK 0.12 integration](../integration/acp-sdk-0.12.md#2a输入事实与-agent-职责), `tests/test_input_context.py`, `tests/test_message_injections.py`, and `tests/test_acp_history_edit.py`. These are source references, not a claim of a test run or packaged-host acceptance.
 - Reverting the change requires coordinating the Agent and paired host input behavior; installed-runtime and real-model verification remain separate from source-level evidence.
 
+## 2026-11-07 — Actionable turn recovery after tool progress
+
+- The completion judge may return a bounded `next_action` hint with an incomplete
+  verdict. Recovery identifies that missing action; legacy boolean-only verdicts
+  fall back to the candidate response. Hints remain reference data and cannot
+  grant permissions, choose for the user, or expand the task.
+- Two recovery attempts are allowed between tool-progress outcomes. The existing
+  tool engine defines progress as a successful result with non-empty content,
+  excluding empty file searches. Failed or empty results do not renew recovery;
+  the second attempt directs the model to resume from the current state, preserve
+  completed work, and perform the first remaining action. When only verification
+  remains, it checks the existing result.
+  This is an execution signal, not proof that the whole task is complete.
+- The run's step and tool budgets still apply. Persistent incomplete responses
+  still report `TURN_COMPLETION_INCOMPLETE`; cancellation, manual decisions and
+  completion gates retain their existing behavior. CLI and ACP share the policy.
+- No public boolean judge API, host protocol, configuration or Session Log schema
+  changes. Packaged hosts require a runtime rebuild, restart and fresh-task check.
+- Regression coverage: `tests/test_turn_continuation.py` and
+  `tests/test_turn_continuation_thinking.py`.
+
 ## 2026-11-02 — Incomplete file delivery and bounded recovery
 
 - Omitting `chunk_index` during an active `write_file` transaction now reports
