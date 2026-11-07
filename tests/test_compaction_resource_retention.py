@@ -143,13 +143,40 @@ async def test_compaction_discards_superseded_skill_bodies_in_history_and_summar
     assert 'CURRENT_METHOD_BODY' not in result.messages[1].content
 
 
-def test_changed_skill_body_in_protected_tool_tail_becomes_reread_notice(tmp_path):
+@pytest.mark.asyncio
+async def test_compaction_excludes_withdrawn_reference_without_restoring_it():
+    runtime = SkillRuntime(None, append_only_context=True)
+    context = SkillReferenceContext(runtime)
+    history = [Message(role='system', content='BASE'), Message(role='user', content='task')]
+    runtime.register_reference('withdrawn', 'WITHDRAWN_METHOD_BODY\n')
+    history.extend(context.prepare_request(history, budget_chars=50000).materialized_messages)
+    runtime.clear_references()
+    context.prepare_request(history, budget_chars=50000)
+    assert not runtime.read_facts and 'WITHDRAWN_METHOD_BODY' in str(history)
+    source = context.compaction_source(history)
+    assert 'WITHDRAWN_METHOD_BODY' not in str(source)
+    result = await DefaultCompactEngine().compact_if_needed(CompactionInput(
+        history=tuple(history), token_limit=10000, llm=object(), force=True,
+        allow_llm_summary=False, compaction_source_projector=context.compaction_source,
+        compacted_history_projector=lambda compacted: context.compact_history(history, compacted),
+    ))
+    assert not result.blocked and result.messages is not None
+    assert 'WITHDRAWN_METHOD_BODY' not in str(result.messages)
+    assert not runtime.read_facts
+    user_copy = history[-1].model_copy(update={'role': 'user', 'source': 'user'})
+    assert context.compaction_source([user_copy]) == [user_copy]
+
+
+@pytest.mark.parametrize('withdrawn', [False, True])
+def test_changed_skill_body_in_protected_tool_tail_becomes_reread_notice(tmp_path, withdrawn):
     runtime, context, history = skill_context(tmp_path)
     read(context, history, 'analysis', limit=1)
     old_result = history[-1]
     path = tmp_path / 'skills/analysis/SKILL.md'
     path.write_text(path.read_text().replace('ANALYSIS_BODY', 'NEW_METHOD'))
     runtime.loader.discover_skills()
+    if withdrawn:
+        runtime.clear_references()
     changed = context.compact_history(history, history)
     replacement = next(message for message in changed if message.tool_call_id == old_result.tool_call_id)
     assert replacement.name == old_result.name and replacement.role == 'tool'

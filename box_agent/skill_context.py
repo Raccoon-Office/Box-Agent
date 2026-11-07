@@ -255,10 +255,14 @@ class SkillReferenceContext:
                     or parsed[0]["name"] not in current_names
                     or self._compaction_reference(message, facts) is None):
                 name = parsed[0]["name"]
-                missing.add(name)
+                if name in facts:
+                    missing.add(name)
                 # Preserve a tool result's call ID and protocol group.
                 if message.role == "tool":
-                    rebuilt.append(message.model_copy(update={"content": locator(name)}))
+                    notice = (locator(name) if name in facts else
+                              f"Skill '{name}' revision {parsed[0]['revision']} was removed from active references. "
+                              "Use get_skill if this method is needed again; its previous body is not current guidance.")
+                    rebuilt.append(message.model_copy(update={"content": notice}))
             else:
                 rebuilt.append(message)
         remaining = max(0, budget_chars)
@@ -305,12 +309,14 @@ class SkillReferenceContext:
             return None
         if runtime_text and parsed[0].get("kind") != "runtime_skill_instructions":
             return None
+        if not current_only:
+            return parsed
         previous = facts.get(parsed[0]["name"])
         if previous is None:
             return None
         # Historical envelopes may be discarded even after their read fact was
         # superseded. Only verified current pages can be restored as instructions.
-        if current_only and not visible_ranges([message], name=previous.name, revision=previous.revision,
+        if not visible_ranges([message], name=previous.name, revision=previous.revision,
                               lines=previous.prompt.splitlines(keepends=True),
                               source=previous.source, path=previous.path):
             return None
