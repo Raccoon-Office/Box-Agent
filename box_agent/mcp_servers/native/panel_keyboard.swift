@@ -1,4 +1,4 @@
-// Native menu/file-panel input. No target AXRaise or global HID post.
+// Native file-panel keyboard transport and read-only front verification.
 import AppKit
 import ApplicationServices
 
@@ -25,6 +25,11 @@ func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
     guard let value = attribute(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
     return unsafeBitCast(value, to: AXUIElement.self)
 }
+func isSystemFilePanel(_ element: AXUIElement) -> Bool {
+    guard let identifier = attribute(element, "AXIdentifier") as? String else { return false }
+    return ["open-panel", "save-panel"].contains(identifier)
+}
+
 // Public AXUIElementGetPid reports the host for AppKit's remote proxies.
 // Codex's receiver resolution uses actualPID, not that logical host PID.
 func actualPID(_ element: AXUIElement) -> pid_t? {
@@ -41,281 +46,190 @@ func windowID(_ element: AXUIElement) -> UInt32? {
     return getWindowID(element, &value) == .success && value != 0 ? value : nil
 }
 
-// Only dispatch to the current editable responder. Role, ancestry, actual
-// receiver PID and writable text attributes are required; app names are not.
-func writable(_ element: AXUIElement, _ name: String) -> Bool {
-    var value: DarwinBoolean = false
-    return AXUIElementIsAttributeSettable(element, name as CFString, &value) == .success
-        && value.boolValue
-}
-func editableResponder(_ element: AXUIElement, in window: AXUIElement, pid: pid_t,
-                       textAttribute: String) -> Bool {
-    guard actualPID(element) == pid,
-          (attribute(element, "AXEnabled") as? NSNumber)?.boolValue == true,
-          (attribute(element, "AXFocused") as? NSNumber)?.boolValue == true,
-          writable(element, textAttribute) else { return false }
-    var cursor = element
-    var seen = Set<AXUIElement>()
-    while seen.count < 128 && seen.insert(cursor).inserted {
-        if CFEqual(cursor, window) { return true }
-        guard let parent = elementAttribute(cursor, "AXParent") else { return false }
-        cursor = parent
-    }
-    return false
-}
-
-// Foreground-only app activation for Drivers that require an ordinary window.
-if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "activate-app" {
-    guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
-          let running = NSRunningApplication(processIdentifier: pid),
-          running.bundleIdentifier == CommandLine.arguments[3], !running.isTerminated
-    else { refuse("application_identity_changed") }
-    let accepted = running.activate(options: [])
-    finish(["effect": "unverifiable", "code": "app_activation_requested",
-            "accepted": accepted, "pid": pid])
-}
-
-if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "search-escape" {
+// Explicit foreground fallback for remote AppKit file panels. No input is posted.
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "focus-file-panel" {
     guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
           let expected = UInt32(CommandLine.arguments[3]), expected > 0,
-          let bytes = CommandLine.arguments[4].data(using: .utf8),
-          let frame = try? JSONSerialization.jsonObject(with: bytes) as? [Double], frame.count == 4,
-          AXIsProcessTrusted(), CGPreflightPostEventAccess()
-    else { refuse("search_escape_unavailable") }
+          AXIsProcessTrusted() else { refuse("file_panel_invalid_target") }
     let app = AXUIElementCreateApplication(pid)
-    guard let window = elementAttribute(app, "AXFocusedWindow"), windowID(window) == expected,
-          axFrame(window) == frame,
-          (attribute(window, "AXSheets") as? [AXUIElement] ?? []).isEmpty,
-          let field = elementAttribute(app, "AXFocusedUIElement"),
-          attribute(field, "AXRole") as? String == "AXTextField",
-          attribute(field, "AXSubrole") as? String == "AXSearchField",
-          windowID(field) == expected,
-          editableResponder(field, in: window, pid: pid, textAttribute: "AXValue"),
-          let down = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
-          let up = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false)
-    else { refuse("search_escape_not_focused") }
-    guard elementAttribute(app, "AXFocusedUIElement").map({ CFEqual($0, field) }) == true,
-          elementAttribute(app, "AXFocusedWindow").map({ CFEqual($0, window) }) == true,
-          axFrame(window) == frame,
-          editableResponder(field, in: window, pid: pid, textAttribute: "AXValue"),
-          (attribute(window, "AXSheets") as? [AXUIElement] ?? []).isEmpty
-    else { refuse("search_escape_target_changed") }
-    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-    for event in [down, up] {
-        event.flags = []
-        for n: UInt32 in [91, 92] {
-            event.setIntegerValueField(CGEventField(rawValue: n)!, value: Int64(expected))
+    var matches:[AXUIElement] = []
+    func findPanel(_ element:AXUIElement, _ depth:Int) {
+        let identifier = attribute(element,"AXIdentifier") as? String
+        if windowID(element) == expected,
+           ["open-panel","save-panel","GoToWindow"].contains(identifier ?? "") {
+            if !matches.contains(where: { CFEqual($0,element) }) { matches.append(element) }
         }
-        preparationStarted = true
-        event.postToPid(pid); usleep(10000)
-    }
-    finish(["effect": "unverifiable", "code": "search_escape_posted", "keyboard_posted": true,
-            "requested_window_id": expected, "frontmost_before": front,
-            "frontmost_after": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0])
-}
-
-// Focused editor insertion preserves rich text: never replace AXValue or move the
-// selection implicitly. Navigation remains a real document navigation key.
-if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "focused-editor" {
-    guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
-          let expected = UInt32(CommandLine.arguments[3]), expected > 0,
-          let bytes = CommandLine.arguments[4].data(using: .utf8),
-          let request = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-          let frame = request["frame"] as? [Double], frame.count == 4,
-          AXIsProcessTrusted(), CGPreflightPostEventAccess()
-    else { refuse("focused_editor_unavailable") }
-    let app = AXUIElementCreateApplication(pid)
-    guard let window = elementAttribute(app, "AXFocusedWindow"), windowID(window) == expected,
-          axFrame(window) == frame, attribute(window, "AXRole") as? String == "AXWindow"
-    else { refuse("focused_editor_window_mismatch") }
-    guard (attribute(window, "AXSheets") as? [AXUIElement] ?? []).isEmpty
-    else { refuse("focused_editor_sheet_open") }
-    guard let focus = elementAttribute(app, "AXFocusedUIElement"), windowID(focus) == expected,
-          actualPID(focus) == pid
-    else { refuse("focused_editor_focus_mismatch") }
-
-    // Some editors expose the focused document container, with the selection on
-    // a descendant AXTextArea. Background Word also reports AXEnabled=false on
-    // that text area. Resolve within the current focus, without changing focus
-    // or treating the background enabled flag as a keyboard capability check.
-    func editorSelection(_ element: AXUIElement) -> (String, CFTypeRef)? {
-        guard attribute(element, "AXRole") as? String == "AXTextArea",
-              windowID(element) == expected, actualPID(element) == pid,
-              writable(element, "AXSelectedText") || writable(element, "AXValue"),
-              let text = attribute(element, "AXValue") as? String,
-              let selection = attribute(element, "AXSelectedTextRange"),
-              CFGetTypeID(selection) == AXValueGetTypeID() else { return nil }
-        var range = CFRange()
-        guard AXValueGetValue(unsafeBitCast(selection, to: AXValue.self), .cfRange, &range),
-              range.location >= 0, range.length >= 0,
-              range.location <= text.utf16.count,
-              range.length <= text.utf16.count - range.location else { return nil }
-        return (text, selection)
-    }
-    func resolveEditor() -> AXUIElement? {
-        if editorSelection(focus) != nil { return focus }
-        guard ["AXSplitGroup", "AXGroup", "AXScrollArea"].contains(
-            attribute(focus, "AXRole") as? String ?? "") else { return nil }
-        var pending = [focus], seen = Set<AXUIElement>(), candidates = [AXUIElement]()
-        while let element = pending.popLast() {
-            if !seen.insert(element).inserted { continue }
-            if seen.count > 2048 { return nil }
-            if editorSelection(element) != nil { candidates.append(element) }
-            pending.append(contentsOf: attribute(element, "AXChildren") as? [AXUIElement] ?? [])
-        }
-        if candidates.count == 1 { return candidates[0] }
-        let focused = candidates.filter { (attribute($0, "AXFocused") as? NSNumber)?.boolValue == true }
-        return focused.count == 1 ? focused[0] : nil
-    }
-    guard let body = resolveEditor(), let (before, selection) = editorSelection(body)
-    else { refuse("focused_editor_selection_unresolved") }
-    let document = attribute(window, "AXDocument") as? String
-    func unchangedTarget() -> Bool {
-        return elementAttribute(app, "AXFocusedWindow").map { CFEqual($0, window) } == true
-            && elementAttribute(app, "AXFocusedUIElement").map { CFEqual($0, focus) } == true
-            && windowID(body) == expected && axFrame(window) == frame
-            && resolveEditor().map { CFEqual($0, body) } == true
-            && attribute(window, "AXDocument") as? String == document
-            && (attribute(window, "AXSheets") as? [AXUIElement] ?? []).isEmpty
-    }
-    var events = [CGEvent]()
-    if let text = request["text"] as? String {
-        // CGEvent Unicode payloads are bounded; split at scalar boundaries so a
-        // surrogate pair is never divided. Allocate all events before delivery.
-        var chunks = [[UniChar]](), chunk = [UniChar]()
-        for scalar in text.unicodeScalars {
-            let units = Array(String(scalar).utf16)
-            if chunk.count + units.count > 20 { chunks.append(chunk); chunk = [] }
-            chunk.append(contentsOf: units)
-        }
-        if !chunk.isEmpty { chunks.append(chunk) }
-        for units in chunks {
-            for down in [true, false] {
-                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)
-                else { refuse("event_allocation_failed") }
-                event.flags = []
-                event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-                events.append(event)
+        if depth < 2 {
+            for child in attribute(element,"AXChildren") as? [AXUIElement] ?? [] {
+                findPanel(child,depth+1)
             }
         }
-    } else if let keycode = request["keycode"] as? UInt16,
-              let modifiers = request["modifiers"] as? [String] {
-        let flagMap: [String: CGEventFlags] = ["cmd": .maskCommand, "shift": .maskShift,
-            "ctrl": .maskControl, "option": .maskAlternate, "fn": .maskSecondaryFn]
-        guard modifiers.allSatisfy({ flagMap[$0] != nil })
-        else { refuse("focused_editor_operation_unsupported") }
-        let flags = modifiers.reduce(CGEventFlags()) { $0.union(flagMap[$1]!) }
-        for down in [true, false] {
-            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keycode, keyDown: down)
-            else { refuse("event_allocation_failed") }
-            event.flags = flags; events.append(event)
-        }
-    } else { refuse("focused_editor_operation_unsupported") }
-    guard unchangedTarget(), attribute(body, "AXValue") as? String == before,
-          attribute(body, "AXSelectedTextRange").map({ CFEqual($0, selection) }) == true
-    else { refuse("focused_editor_target_changed") }
-    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-    for (index, event) in events.enumerated() {
-        // Never leave a delivered key-down without its key-up. Stop between
-        // pairs if focus changes; already posted input must never be replayed.
-        if index % 2 == 0 && !unchangedTarget() { refuse("focused_editor_target_changed") }
-        event.setIntegerValueField(.eventSourceUserData, value: 7312026)
-        for field: UInt32 in [91, 92] {
-            event.setIntegerValueField(CGEventField(rawValue: field)!, value: Int64(expected))
-        }
-        preparationStarted = true
-        event.postToPid(pid); usleep(10000)
     }
-    finish(["effect": "unverifiable", "code": "focused_editor_posted",
-            "keyboard_posted": !events.isEmpty, "requested_window_id": expected,
-            "focus_role": attribute(focus, "AXRole") as? String ?? "",
-            "editor_role": attribute(body, "AXRole") as? String ?? "",
-            "frontmost_before": front,
-            "frontmost_after": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0])
+    for window in attribute(app,"AXWindows") as? [AXUIElement] ?? [] { findPanel(window,0) }
+    guard matches.count == 1, let panel = matches.first,
+          let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],
+                                                kCGNullWindowID) as? [[String:Any]],
+          rows.filter({ ($0["kCGWindowNumber"] as? UInt32) == expected }).count == 1,
+          let row = rows.first(where: { ($0["kCGWindowNumber"] as? UInt32) == expected }),
+          (row["kCGWindowOwnerPID"] as? Int32) == pid,
+          (row["kCGWindowIsOnscreen"] as? Bool) == true,
+          let frame = panelFrame(panel),
+          let b = row["kCGWindowBounds"] as? [String:Any],
+          let x = b["X"] as? Double, let y = b["Y"] as? Double,
+          let w = b["Width"] as? Double, let h = b["Height"] as? Double,
+          frame == CGRect(x:x,y:y,width:w,height:h),
+          ["AXWindow", "AXSheet"].contains(attribute(panel,"AXRole") as? String ?? ""),
+          let running = NSRunningApplication(processIdentifier:pid)
+    else { refuse("file_panel_identity_unverified") }
+    preparationStarted = true
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+        guard running.activate(options:[]) else { refuse("file_panel_activation_failed") }
+    }
+    let raised = AXUIElementPerformAction(panel,kAXRaiseAction as CFString)
+    // AXRaise alone restored the exact sheet focus in the live PS reproduction.
+    // Do not add a second focus mutation when the first is unverifiable.
+    guard raised == .success else { refuse("file_panel_raise_failed") }
+    usleep(300000)
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+          let focused = elementAttribute(app,"AXFocusedWindow"),
+          windowID(focused) == expected, CFEqual(focused,panel)
+    else { refuse("file_panel_focus_unverified") }
+    finish(["effect":"confirmed", "code":"file_panel_focus_verified",
+            "pid":pid, "window_id":expected, "frontmost_pid":pid,
+            "focused_window_id":expected, "keyboard_posted":false])
 }
 
-// Re-resolve an observed attached sheet without reusing parent-window Driver tokens.
-func axFrame(_ element: AXUIElement) -> [Double]? {
-    guard let pos = attribute(element, "AXPosition"), let size = attribute(element, "AXSize"),
-          CFGetTypeID(pos) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
-    var p = CGPoint.zero, s = CGSize.zero
-    guard AXValueGetValue(unsafeBitCast(pos, to: AXValue.self), .cgPoint, &p),
-          AXValueGetValue(unsafeBitCast(size, to: AXValue.self), .cgSize, &s) else { return nil }
-    return [p.x, p.y, s.width, s.height]
-}
-
-if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "sheet-action" {
+// Read-only verification; never activate, raise, prepare focus, or post events.
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "verify-panel-front" {
     guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
-          let expected = UInt32(CommandLine.arguments[3]), expected > 0,
-          let bytes = CommandLine.arguments[4].data(using: .utf8),
-          let request = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
-          let frame = request["frame"] as? [Double], frame.count == 4,
-          let sheetFrame = request["sheet_frame"] as? [Double], sheetFrame.count == 4,
-          let role = request["role"] as? String, let action = request["action"] as? String,
-          AXIsProcessTrusted() else { refuse("sheet_action_invalid_request") }
+          let expected = UInt32(CommandLine.arguments[3]), expected > 0
+    else { refuse("file_panel_invalid_target") }
+    guard AXIsProcessTrusted() else { refuse("file_panel_permission_unavailable") }
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+    else { refuse("file_panel_not_frontmost") }
+    let app = AXUIElementCreateApplication(pid)
+    guard let focused = elementAttribute(app, "AXFocusedWindow"), windowID(focused) == expected,
+          let identifier = attribute(focused, "AXIdentifier") as? String,
+          ["open-panel", "save-panel", "GoToWindow"].contains(identifier),
+          let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                               kCGNullWindowID) as? [[String: Any]]
+    else { refuse("file_panel_identity_unverified") }
+    func bounds(_ row: [String: Any]) -> CGRect? {
+        guard let b = row["kCGWindowBounds"] as? [String: Any],
+              let x = b["X"] as? Double, let y = b["Y"] as? Double,
+              let w = b["Width"] as? Double, let h = b["Height"] as? Double,
+              [x,y,w,h].allSatisfy({ $0.isFinite }), w > 0, h > 0 else { return nil }
+        return CGRect(x:x,y:y,width:w,height:h)
+    }
+    let targets = rows.enumerated().filter { ($0.element["kCGWindowNumber"] as? UInt32) == expected }
+    guard targets.count == 1, let target = targets.first,
+          (target.element["kCGWindowOwnerPID"] as? Int32) == pid,
+          (target.element["kCGWindowIsOnscreen"] as? Bool) == true,
+          let frame = bounds(target.element), panelFrame(focused) == frame
+    else { refuse("file_panel_window_unverified") }
+    if identifier == "GoToWindow" {
+        var parent = focused, seen = Set<AXUIElement>()
+        while !isSystemFilePanel(parent), let next = elementAttribute(parent,"AXParent") {
+            guard seen.count < 128, seen.insert(next).inserted else { refuse("file_panel_parent_unverified") }
+            parent = next
+        }
+        guard isSystemFilePanel(parent) else { refuse("file_panel_parent_unverified") }
+    }
+    var count:UInt32 = 0
+    guard CGGetActiveDisplayList(0,nil,&count) == .success, count > 0 else { refuse("display_unknown") }
+    var displays = [CGDirectDisplayID](repeating:0,count:Int(count))
+    guard CGGetActiveDisplayList(count,&displays,&count) == .success else { refuse("display_unknown") }
+    func display(_ rect:CGRect) -> CGDirectDisplayID? {
+        var best:CGDirectDisplayID? = nil; var area:CGFloat = 0
+        for id in displays.prefix(Int(count)) {
+            let intersection = rect.intersection(CGDisplayBounds(id))
+            let size = intersection.isNull ? 0 : intersection.width * intersection.height
+            if size > area { best = id; area = size }
+        }
+        return best
+    }
+    guard let targetDisplay = display(frame) else { refuse("display_unknown") }
+    for row in rows.prefix(target.offset) where (row["kCGWindowOwnerPID"] as? Int32) == pid {
+        guard let other = bounds(row), let otherDisplay = display(other) else { refuse("window_order_unknown") }
+        if otherDisplay == targetDisplay { refuse("file_panel_obstructed") }
+    }
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+          let latest = elementAttribute(app,"AXFocusedWindow"), CFEqual(latest,focused),
+          windowID(latest) == expected else { refuse("file_panel_focus_changed") }
+    finish(["effect":"confirmed", "code":"file_panel_front_verified", "pid":pid,
+            "window_id":expected, "layer":target.element["kCGWindowLayer"] ?? 0,
+            "focused_window_id":expected, "frontmost_pid":pid,
+            "frame":[frame.minX,frame.minY,frame.width,frame.height], "panel_identifier":identifier,
+            "display_id":targetDisplay, "read_only":true])
+}
+
+// Geometry shared by read-only panel verification.
+func panelFrame(_ element: AXUIElement) -> CGRect? {
+    guard let p = attribute(element, "AXPosition"), let s = attribute(element, "AXSize"),
+          CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+    var origin = CGPoint.zero, size = CGSize.zero
+    guard AXValueGetValue(unsafeBitCast(p, to: AXValue.self), .cgPoint, &origin),
+          AXValueGetValue(unsafeBitCast(s, to: AXValue.self), .cgSize, &size) else { return nil }
+    return CGRect(origin: origin, size: size)
+}
+
+// Read-only host/sheet geometry proof. Mouse delivery belongs to Driver's
+// explicit foreground desktop route; this helper never posts mouse events here.
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "panel-geometry" {
+    guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
+          let expected = UInt32(CommandLine.arguments[3]), AXIsProcessTrusted()
+    else { refuse("panel_geometry_invalid_request") }
     let app = AXUIElementCreateApplication(pid)
     guard let sheet = elementAttribute(app, "AXFocusedWindow"), windowID(sheet) == expected,
-          attribute(sheet, "AXRole") as? String == "AXSheet", axFrame(sheet) == sheetFrame
-    else { refuse("sheet_action_window_changed") }
-    func hasLabel(_ element: AXUIElement, _ label: String) -> Bool {
-        if ["AXTitle", "AXDescription", "AXValue"].contains(where: { attribute(element, $0) as? String == label }) { return true }
-        var pending = attribute(element, "AXChildren") as? [AXUIElement] ?? [], seen = Set<AXUIElement>()
-        while let child = pending.popLast() {
-            if !seen.insert(child).inserted { continue }
-            if attribute(child, "AXRole") as? String == "AXStaticText",
-               attribute(child, "AXValue") as? String == label { return true }
-            pending.append(contentsOf: attribute(child, "AXChildren") as? [AXUIElement] ?? [])
+          attribute(sheet, "AXRole") as? String == "AXSheet",
+          attribute(sheet, "AXIdentifier") as? String == "GoToWindow",
+          let sf = panelFrame(sheet) else { refuse("panel_geometry_sheet_unresolved") }
+    var host = sheet, seen = Set<AXUIElement>()
+    var ancestry = [sheet]
+    while let parent = elementAttribute(host, "AXParent") {
+        if attribute(parent, "AXRole") as? String == "AXApplication" { break }
+        guard seen.count < 128, seen.insert(parent).inserted else { refuse("panel_geometry_parent_unresolved") }
+        host = parent
+        if ["AXWindow", "AXSheet"].contains(attribute(parent, "AXRole") as? String ?? ""),
+           let id = windowID(parent), id != windowID(ancestry.last!) {
+            ancestry.append(parent)
         }
-        return false
     }
-    func matches(_ element: AXUIElement) -> Bool {
-        guard attribute(element, "AXRole") as? String == role, axFrame(element) == frame else { return false }
-        if attribute(element, "AXEnabled") as? Bool == false { return false }
-        if let label = request["label"] as? String, !hasLabel(element, label) { return false }
-        if let value = request["old_value"] as? String,
-           attribute(element, "AXValue") as? String != value { return false }
-        if let identifier = request["identifier"] as? String,
-           attribute(element, "AXIdentifier") as? String != identifier { return false }
-        return true
+    guard let panel = ancestry.dropFirst().first(where: isSystemFilePanel),
+          let parentID = windowID(panel), parentID != expected, let pf = panelFrame(panel),
+          // Compact save panels can be narrower/shorter than their GoTo sheet.
+          // AX ancestry and exact CG frames prove ownership, not containment.
+          // The capture still uses the parent's own bounds and may be clipped.
+          pf.intersects(sf),
+          let rows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String:Any]]
+    else { refuse("panel_geometry_parent_unresolved") }
+    func matches(_ id:UInt32, _ frame:CGRect) -> Bool {
+        let found = rows.filter { ($0["kCGWindowNumber"] as? UInt32) == id }
+        guard found.count == 1, let row = found.first,
+              row["kCGWindowOwnerPID"] as? Int32 == pid,
+              let b = row["kCGWindowBounds"] as? [String:Any],
+              let x=b["X"] as? Double, let y=b["Y"] as? Double,
+              let w=b["Width"] as? Double, let h=b["Height"] as? Double
+        else { return false }
+        return frame == CGRect(x:x,y:y,width:w,height:h)
     }
-    var pending = [sheet], seen = Set<AXUIElement>(), candidates = [AXUIElement]()
-    while let element = pending.popLast() {
-        if !seen.insert(element).inserted { continue }
-        if matches(element) { candidates.append(element) }
-        var children: CFTypeRef?
-        let error = AXUIElementCopyAttributeValue(element, "AXChildren" as CFString, &children)
-        guard error == .success || error == .attributeUnsupported || error == .noValue
-        else { refuse("sheet_action_tree_unavailable") }
-        pending.append(contentsOf: children as? [AXUIElement] ?? [])
+    var frames = [[String:Any]]()
+    for surface in ancestry {
+        guard let id = windowID(surface), let frame = panelFrame(surface), matches(id, frame)
+        else { refuse("panel_geometry_ancestor_changed") }
+        frames.append(["window_id":id, "frame":[frame.minX,frame.minY,frame.width,frame.height],
+                       "role":attribute(surface,"AXRole") as? String ?? ""])
     }
-    guard candidates.count == 1 else { refuse("sheet_action_target_not_unique") }
-    let target = candidates[0]
-    if action == "set_value" {
-        var writable: DarwinBoolean = false
-        guard role == "AXTextField", request["value"] is String,
-              AXUIElementIsAttributeSettable(target, "AXValue" as CFString, &writable) == .success,
-              writable.boolValue else { refuse("sheet_value_not_writable") }
-    } else {
-        var actions: CFArray?
-        guard ["AXPress", "AXOpen", "AXPick", "AXShowMenu", "AXConfirm", "AXCancel"].contains(action),
-              AXUIElementCopyActionNames(target, &actions) == .success,
-              (actions as? [String] ?? []).contains(action) else { refuse("sheet_action_not_advertised") }
-    }
-    guard elementAttribute(app, "AXFocusedWindow").map({ CFEqual($0, sheet) }) == true,
-          windowID(sheet) == expected, axFrame(sheet) == sheetFrame, matches(target)
-    else { refuse("sheet_action_target_changed") }
-    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-    let pointer = CGEvent(source: nil)?.location ?? .zero
-    // AX errors can follow successful application actions. Never authorize replay.
-    let result = action == "set_value"
-        ? AXUIElementSetAttributeValue(target, "AXValue" as CFString, request["value"] as! CFString)
-        : AXUIElementPerformAction(target, action as CFString)
-    let after = CGEvent(source: nil)?.location ?? .zero
-    finish(["effect": "unverifiable", "code": "sheet_action_invoked", "ax_result": result.rawValue,
-            "action_posted": true, "requested_pid": pid, "requested_window_id": expected,
-            "resolved_pid": actualPID(target) ?? pid, "receiver_window_id": windowID(target) ?? expected,
-            "frontmost_before": front, "frontmost_after": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0,
-            "pointer_before": [pointer.x, pointer.y], "pointer_after": [after.x, after.y]])
+    guard matches(expected,sf), matches(parentID,pf),
+          let latest=elementAttribute(app,"AXFocusedWindow"),CFEqual(latest,sheet)
+    else { refuse("panel_geometry_changed") }
+    finish(["effect":"confirmed", "code":"panel_geometry_verified", "read_only":true,
+            "pid":pid, "window_id":expected, "parent_window_id":parentID,
+            "sheet_frame":[sf.minX,sf.minY,sf.width,sf.height],
+            "parent_frame":[pf.minX,pf.minY,pf.width,pf.height],
+            "sheet_contained_in_parent":pf.contains(sf),
+            "ancestry":frames,
+            "frontmost_pid":NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0])
 }
 
 // Resolve lease eligibility through the logical host. The remote panel service
@@ -325,15 +239,16 @@ func hasSystemPanelReceiver(_ pid: pid_t, host hostPID: pid_t, window expected: 
     guard var panel = elementAttribute(app, "AXFocusedWindow") else { return false }
     var ancestors = Set<AXUIElement>()
     var matchedWindow = windowID(panel) == expected
-    while let parent = elementAttribute(panel, "AXParent") {
+    while !isSystemFilePanel(panel), let parent = elementAttribute(panel, "AXParent") {
         if attribute(parent, "AXRole") as? String == "AXApplication" { break }
-        guard ancestors.insert(parent).inserted else { return false }
+        guard ancestors.count < 128, ancestors.insert(parent).inserted else { return false }
         panel = parent
         matchedWindow = matchedWindow || windowID(parent) == expected
     }
     guard matchedWindow,
-          attribute(panel, "AXIdentifier") as? String == "open-panel",
-          attribute(panel, "AXSubrole") as? String == "AXDialog" else { return false }
+          isSystemFilePanel(panel),
+          (attribute(panel, "AXSubrole") as? String == "AXDialog"
+           || attribute(panel, "AXRole") as? String == "AXSheet") else { return false }
     if pid == hostPID { return true }
     guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
         == "com.apple.appkit.xpc.openAndSavePanelService" else { return false }
@@ -415,6 +330,28 @@ func requirePanelLease() {
           owner > 0, kill(owner, 0) == 0 else { refuse("panel_lease_required") }
 }
 
+// Shared construction for host and cold-receiver window focus preparation.
+func panelWindowClickEvents(_ id: UInt32, origin: CGPoint, size: CGSize,
+                            eventNumbers: [Int]) -> [CGEvent]? {
+    let point = CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2)
+    var events = [CGEvent]()
+    for (index, type) in [NSEvent.EventType.leftMouseDown, .leftMouseUp].enumerated() {
+        guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+            timestamp: 0, windowNumber: Int(id), context: nil, eventNumber: eventNumbers[index],
+            clickCount: 1, pressure: 1)?.cgEvent else { return nil }
+        event.flags = []
+        event.location = point
+        event.setIntegerValueField(.mouseEventButtonNumber, value: 0)
+        event.setIntegerValueField(.mouseEventSubtype, value: 3)
+        for field: UInt32 in [91, 92] {
+            event.setIntegerValueField(CGEventField(rawValue: field)!, value: Int64(id))
+        }
+        setWindowLocation(event, CGPoint(x: size.width / 2, y: size.height / 2))
+        events.append(event)
+    }
+    return events
+}
+
 // Existing system-panel preparation; not used to synthesize editor/search focus.
 func prepareWindow(_ pid: pid_t, _ window: AXUIElement) -> Bool {
     guard let id = windowID(window),
@@ -431,20 +368,8 @@ func prepareWindow(_ pid: pid_t, _ window: AXUIElement) -> Bool {
               modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
               subtype: Int16(bitPattern: 0x8000), data1: 0, data2: 0)?.cgEvent
     else { return false }
-    let point = CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2)
-    var events: [CGEvent] = []
-    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-        guard let event = NSEvent.mouseEvent(with: type, location: point,
-            modifierFlags: [], timestamp: 0, windowNumber: Int(id), context: nil,
-            eventNumber: 1, clickCount: 1, pressure: 1)?.cgEvent else { return false }
-        event.location = point
-        event.setIntegerValueField(.mouseEventSubtype, value: 3)
-        for number: UInt32 in [91, 92] {
-            event.setIntegerValueField(CGEventField(rawValue: number)!, value: Int64(id))
-        }
-        setWindowLocation(event, CGPoint(x: size.width / 2, y: size.height / 2))
-        events.append(event)
-    }
+    guard var events = panelWindowClickEvents(id, origin: origin, size: size,
+                                             eventNumbers: [1, 1]) else { return false }
     events.append(focus)
     preparationStarted = true
     for event in events { event.postToPid(pid); usleep(50000) }
@@ -452,114 +377,80 @@ func prepareWindow(_ pid: pid_t, _ window: AXUIElement) -> Bool {
     return elementAttribute(app, "AXFocusedWindow").map { CFEqual($0, window) } == true
 }
 
-// Indexed field clicks request semantic focus. Coordinate clicks retain the
-// Driver path and its caret-placement semantics.
-if CommandLine.arguments.count == 8 && CommandLine.arguments[1] == "focus-field" {
-    guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
-          let expected = UInt32(CommandLine.arguments[3]),
-          let x = Double(CommandLine.arguments[4]), let y = Double(CommandLine.arguments[5]),
-          let width = Double(CommandLine.arguments[6]), let height = Double(CommandLine.arguments[7]),
-          [x, y, width, height].allSatisfy({ $0.isFinite }), width > 0, height > 0,
-          AXIsProcessTrusted() else { refuse("field_focus_unavailable") }
-    let app = AXUIElementCreateApplication(pid)
-    guard let sheet = elementAttribute(app, "AXFocusedWindow"), windowID(sheet) == expected,
-          attribute(sheet, "AXRole") as? String == "AXSheet"
-    else { refuse("field_sheet_mismatch") }
-    var host = sheet
-    var ancestors = Set<AXUIElement>()
-    while let parent = elementAttribute(host, "AXParent") {
-        if attribute(parent, "AXRole") as? String == "AXApplication" { break }
-        guard ancestors.insert(parent).inserted else { refuse("ax_parent_cycle") }
-        host = parent
+struct PanelKeyboardTarget {
+    let pid: pid_t
+    let window: UInt32
+}
+
+func resolvePanelKeyboardTarget(app: AXUIElement, hostPID pid: pid_t,
+                                focusedWindow: UInt32, requestedField: AXUIElement?) -> PanelKeyboardTarget {
+    guard var candidate = elementAttribute(app, "AXFocusedUIElement")
+    else { refuse("focused_element_unavailable") }
+    if let requestedField = requestedField, !CFEqual(requestedField, candidate) {
+        refuse("panel_field_identity_changed")
     }
-    guard attribute(host, "AXIdentifier") as? String == "open-panel"
-    else { refuse("not_open_panel") }
-    var pending = [sheet], seen = Set<AXUIElement>(), matches = [AXUIElement]()
-    while let element = pending.popLast() {
-        if !seen.insert(element).inserted { continue }
-        if attribute(element, "AXRole") as? String == "AXTextField",
-           let p = attribute(element, "AXPosition"), CFGetTypeID(p) == AXValueGetTypeID(),
-           let s = attribute(element, "AXSize"), CFGetTypeID(s) == AXValueGetTypeID() {
-            var point = CGPoint.zero, size = CGSize.zero
-            if AXValueGetValue(unsafeBitCast(p, to: AXValue.self), .cgPoint, &point),
-               AXValueGetValue(unsafeBitCast(s, to: AXValue.self), .cgSize, &size),
-               point.x == x, point.y == y, size.width == width, size.height == height {
-                matches.append(element)
-            }
+    var visited = Set<AXUIElement>()
+    var remote: (pid_t, UInt32)?
+    while visited.insert(candidate).inserted {
+        guard let owner = actualPID(candidate) else { refuse("ax_actual_owner_unavailable") }
+        if owner != pid && owner > 0 {
+            guard NSRunningApplication(processIdentifier: owner)?.bundleIdentifier
+                    == "com.apple.appkit.xpc.openAndSavePanelService"
+            else { refuse("not_file_panel_service") }
+            // Remote path fields may expose no window ID through the host proxy.
+            // Read the receiver's focused window, verifying the same focused field.
+            let receiver = AXUIElementCreateApplication(owner)
+            let receiverFocus = elementAttribute(receiver, "AXFocusedUIElement")
+            let receiverWindow = elementAttribute(receiver, "AXFocusedWindow")
+            let id = windowID(candidate) ?? (
+                receiverFocus.map { CFEqual($0, candidate) } == true
+                && receiverWindow.flatMap(actualPID) == owner
+                ? receiverWindow.flatMap(windowID) : nil)
+            guard let id = id else { refuse("receiver_window_unavailable") }
+            remote = (owner, id)
+            break
         }
-        if let children = attribute(element, "AXChildren") as? [AXUIElement] { pending.append(contentsOf: children) }
+        guard let parent = elementAttribute(candidate, "AXParent") else { break }
+        candidate = parent
     }
-    guard matches.count == 1 else { refuse("field_target_ambiguous") }
-    let field = matches[0]
-    var settable: DarwinBoolean = false
-    guard AXUIElementIsAttributeSettable(field, "AXFocused" as CFString, &settable) == .success,
-          settable.boolValue, let latest = elementAttribute(app, "AXFocusedWindow"), windowID(latest) == expected
-    else { refuse("field_focus_unavailable") }
-    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-    let result = AXUIElementSetAttributeValue(field, "AXFocused" as CFString, kCFBooleanTrue)
-    let verified = result == .success && (attribute(field, "AXFocused") as? NSNumber)?.boolValue == true
-        && elementAttribute(app, "AXFocusedUIElement").map { CFEqual($0, field) } == true
-    finish(["effect": verified ? "confirmed" : "unverifiable", "code": "panel_field_focus",
-            "ax_result": result.rawValue, "requested_pid": pid, "requested_window_id": expected,
-            "frontmost_before": front,
-            "frontmost_after": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0])
+    let (target, window) = remote ?? (pid, focusedWindow)
+    return PanelKeyboardTarget(pid: target, window: window)
+}
+
+// Command policy is separate from the shared receiver/focus/event transport.
+// These are the validated panel operations, not a general keyboard allowlist.
+enum PanelCommand: UInt16 {
+    case goToFolder = 5
+    case confirm = 36
+    case cancel = 53
+
+    var modifiers: CGEventFlags { self == .goToFolder ? [.maskCommand, .maskShift] : [] }
+    var permitsColdReceiverPreparation: Bool { self == .goToFolder }
+    var permitsAddressedConfirmation: Bool { self == .confirm }
 }
 
 guard CommandLine.arguments.count == 4,
       let pid = Int32(CommandLine.arguments[1]), pid > 0,
       let expectedWindow = UInt32(CommandLine.arguments[2]),
-      let key = CGKeyCode(CommandLine.arguments[3]), [5, 31, 36, 53].contains(key)
+      let code = UInt16(CommandLine.arguments[3]), let command = PanelCommand(rawValue: code)
 else { refuse("invalid_arguments") }
 guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else { refuse("native_helper_permission_unavailable") }
 let app = AXUIElementCreateApplication(pid)
 guard let focused = elementAttribute(app, "AXFocusedWindow"), let focusedID = windowID(focused)
 else { refuse("focused_window_unavailable") }
-// Cmd+O uses the app's declared, enabled menu equivalent, without focus synthesis.
-if key == 31 {
-    guard focusedID == expectedWindow else { refuse("focused_window_mismatch") }
-    guard let menu = elementAttribute(app, "AXMenuBar") else { refuse("menu_unavailable") }
-    var pending = [menu]
-    var seen = Set<AXUIElement>()
-    var matches = [AXUIElement]()
-    while let element = pending.popLast() {
-        if !seen.insert(element).inserted { continue }
-        if attribute(element, "AXRole") as? String == "AXMenuItem",
-           (attribute(element, "AXMenuItemCmdChar") as? String)?.uppercased() == "O",
-           (attribute(element, "AXMenuItemCmdModifiers") as? NSNumber)?.intValue == 0,
-           (attribute(element, "AXEnabled") as? NSNumber)?.boolValue == true {
-            matches.append(element)
-        }
-        if let children = attribute(element, "AXChildren") as? [AXUIElement] { pending.append(contentsOf: children) }
-    }
-    guard matches.count == 1 else {
-        refuse("no_unique_open_menu_equivalent")
-    }
-    var owner: pid_t = 0
-    guard AXUIElementGetPid(matches[0], &owner) == .success, owner == pid,
-          let latest = elementAttribute(app, "AXFocusedWindow"),
-          windowID(latest) == expectedWindow, CFEqual(latest, focused)
-    else { refuse("focused_window_changed") }
-    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-    let result = AXUIElementPerformAction(matches[0], "AXPress" as CFString)
-    // Once invoked, an AX error is not proof that no action occurred.
-    finish(["effect": "unverifiable", "code": "menu_equivalent_invoked",
-            "menu_key": "o",
-            "ax_result": result.rawValue, "requested_pid": pid,
-            "requested_window_id": expectedWindow, "frontmost_before": front,
-            "frontmost_after": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0])
-}
 var host = focused
 var ancestors = Set<AXUIElement>()
 var windowIDs: Set<UInt32> = [focusedID]
-while let parent = elementAttribute(host, "AXParent") {
+while !isSystemFilePanel(host), let parent = elementAttribute(host, "AXParent") {
     if attribute(parent, "AXRole") as? String == "AXApplication" { break }
-    guard ancestors.insert(parent).inserted else { refuse("ax_parent_cycle") }
+    guard ancestors.count < 128, ancestors.insert(parent).inserted else { refuse("ax_parent_cycle") }
     host = parent
     if let id = windowID(parent) { windowIDs.insert(id) }
 }
 guard windowIDs.contains(expectedWindow) else { refuse("focused_window_mismatch") }
-guard attribute(host, "AXIdentifier") as? String == "open-panel",
-      attribute(host, "AXSubrole") as? String == "AXDialog"
+guard isSystemFilePanel(host),
+      (attribute(host, "AXSubrole") as? String == "AXDialog"
+       || attribute(host, "AXRole") as? String == "AXSheet")
 else { refuse("not_open_panel") }
 // File panels require window focus without marking the panel host active.
 // A host app-active notification raises its modal panels to layer 8 even when
@@ -571,7 +462,7 @@ requirePanelLease()
 // that currently owns focus. Do not turn an arbitrary indexed action into Return.
 var requestedField: AXUIElement?
 if let encoded = ProcessInfo.processInfo.environment["BOX_CUA_PANEL_FIELD_FRAME"] {
-    guard key == 36, let data = encoded.data(using: .utf8),
+    guard command.permitsAddressedConfirmation, let data = encoded.data(using: .utf8),
           let frame = try? JSONSerialization.jsonObject(with: data) as? [Double],
           frame.count == 4, frame.allSatisfy({ $0.isFinite }),
           frame[2] > 0, frame[3] > 0,
@@ -601,40 +492,11 @@ if elementAttribute(app, "AXFocusedUIElement") == nil || focusedID != expectedWi
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == before
     else { refuse("foreground_changed_during_preparation") }
 }
-// Resolve the receiving process from the focused element's ancestry. A remote
-// sibling elsewhere in the document must not become the keyboard recipient.
-guard var candidate = elementAttribute(app, "AXFocusedUIElement")
-else { refuse("focused_element_unavailable") }
-if let requestedField = requestedField, !CFEqual(requestedField, candidate) {
-    refuse("panel_field_identity_changed")
-}
-var visited = Set<AXUIElement>()
-var remote: (pid_t, UInt32)?
-while visited.insert(candidate).inserted {
-    guard let owner = actualPID(candidate) else { refuse("ax_actual_owner_unavailable") }
-    if owner != pid && owner > 0 {
-        guard NSRunningApplication(processIdentifier: owner)?.bundleIdentifier
-                == "com.apple.appkit.xpc.openAndSavePanelService"
-        else { refuse("not_file_panel_service") }
-        // Remote path fields may expose no window ID through the host proxy.
-        // Read the receiver's focused window, verifying the same focused field.
-        let receiver = AXUIElementCreateApplication(owner)
-        let receiverFocus = elementAttribute(receiver, "AXFocusedUIElement")
-        let receiverWindow = elementAttribute(receiver, "AXFocusedWindow")
-        let id = windowID(candidate) ?? (
-            receiverFocus.map { CFEqual($0, candidate) } == true
-            && receiverWindow.flatMap(actualPID) == owner
-            ? receiverWindow.flatMap(windowID) : nil)
-        guard let id = id else { refuse("receiver_window_unavailable") }
-        remote = (owner, id)
-        break
-    }
-    guard let parent = elementAttribute(candidate, "AXParent") else { break }
-    candidate = parent
-}
-// Codex falls back to the application's own PID when its focused element has
-// no out-of-process container. Preserve the exact focused window in this case.
-let (target, remoteWindow) = remote ?? (pid, focusedID)
+// Every panel command uses the same live receiver resolution.
+let resolved = resolvePanelKeyboardTarget(app: app, hostPID: pid,
+                                         focusedWindow: focusedID, requestedField: requestedField)
+let target = resolved.pid
+let remoteWindow = resolved.window
 if ProcessInfo.processInfo.environment["BOX_CUA_RESOLVE_PANEL"] == "1" {
     finish(["effect": "not_sent", "code": "panel_target_resolved",
             "resolved_pid": target, "receiver_window_id": remoteWindow])
@@ -649,7 +511,7 @@ var receiverWindow = remoteWindow
 if elementAttribute(panelApp, "AXFocusedWindow") == nil {
     // A cold panel needs a window activation click, not just an app-active
     // notification. These window-directed mouse events use subtype 3 and never use HID.
-    guard key == 5,
+    guard command.permitsColdReceiverPreparation,
           let hostID = windowID(host),
           let position = attribute(host, "AXPosition"), CFGetTypeID(position) == AXValueGetTypeID(),
           let size = attribute(host, "AXSize"), CFGetTypeID(size) == AXValueGetTypeID()
@@ -661,22 +523,10 @@ if elementAttribute(panelApp, "AXFocusedWindow") == nil {
           origin.x.isFinite, origin.y.isFinite, extent.width.isFinite, extent.height.isFinite,
           extent.width > 0, extent.height > 0
     else { refuse("panel_geometry_unavailable") }
-    let point = CGPoint(x: origin.x + extent.width / 2, y: origin.y + extent.height / 2)
-    // The host modal window needs focus, not application activation.
-    for (index, type) in [NSEvent.EventType.leftMouseDown, .leftMouseUp].enumerated() {
-        guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
-            timestamp: 0, windowNumber: Int(hostID), context: nil, eventNumber: index + 1,
-            clickCount: 1, pressure: 1)?.cgEvent else { refuse("event_allocation_failed") }
-        event.flags = []
-        event.location = point
-        event.setIntegerValueField(.mouseEventButtonNumber, value: 0)
-        event.setIntegerValueField(.mouseEventSubtype, value: 3)
-        for field: UInt32 in [91, 92] {
-            event.setIntegerValueField(CGEventField(rawValue: field)!, value: Int64(hostID))
-        }
-        setWindowLocation(event, CGPoint(x: extent.width / 2, y: extent.height / 2))
-        preparation.append(event)
-    }
+    guard let events = panelWindowClickEvents(hostID, origin: origin, size: extent,
+                                              eventNumbers: [1, 2])
+    else { refuse("event_allocation_failed") }
+    preparation = events
     receiverWindow = remoteWindow
 }
 guard let latest = elementAttribute(app, "AXFocusedWindow"), windowID(latest) == focusedID
@@ -693,10 +543,10 @@ guard let activation = NSEvent.otherEvent(
         with: focusType, location: .zero, modifierFlags: [],
         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: 0,
         context: nil, subtype: Int16(bitPattern: 0x8000), data1: 0, data2: 0)?.cgEvent,
-    let down = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: key, keyDown: true),
-    let up = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: key, keyDown: false)
+    let down = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: command.rawValue, keyDown: true),
+    let up = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: command.rawValue, keyDown: false)
 else { refuse("event_allocation_failed") }
-down.flags = key == 5 ? [.maskCommand, .maskShift] : []
+down.flags = command.modifiers
 up.flags = down.flags
 // The adapter owns the lease across keys. No per-key deactivation: releasing
 // that state here would also dismiss the current modal panel focus.

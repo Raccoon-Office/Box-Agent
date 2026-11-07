@@ -19,15 +19,15 @@ from urllib.request import HTTPRedirectHandler, build_opener
 from uuid import uuid4
 import zipfile
 
-VERSION = "0.28.2"
+VERSION = "0.38.0"
 HASHES = {
-    "darwin-universal": "e273181b26709c88b1d809474deb3c592b4efae3530b11d76318f1887fc3fbb1",
-    "linux-arm64": "55e8a32839a4ac369a773df4dac87b345bd4567779221ade4a5e39223a45a2e8",
-    "linux-x86_64": "a1d99fd04bb4927ef5ffdbe60eb91ed8b51a2bab60e10fc604a75bd59ce69c3e",
-    "windows-arm64": "578b88ff2dd56f06eb7e984d73aaf5e76f59c6fde9542c967d6a30d00213c680",
-    "windows-x86_64": "1f4bfceeab64cb7f56be7aad774c3dc2d2910d1427e4be1d79939c706e8029ba",
+    "darwin-universal": "121cf20cafd2cfa69dd720e8967350c6406b22e558be6889de7a1ae3343b6d4b",
+    "linux-arm64": "80c9ae66bc7322052dd426c6133c96086b33894bf06c972bca8215384400b33d",
+    "linux-x86_64": "31ab9709dd91ce73677e49b9f3e75c6f0d3e4d9625c286c9e58262bfbea698dd",
+    "windows-arm64": "d25c8ebfffb34e4c095ea170baf47b87c35dc0d1116f42e46b39df2bcbff8700",
+    "windows-x86_64": "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5",
 }
-DIRECTORY = re.compile(r"^0\.28\.2-(darwin|linux|win32)-(arm64|x64)-[a-f0-9-]+$")
+DIRECTORY = re.compile(rf"^{re.escape(VERSION)}-(darwin|linux|win32)-(arm64|x64)-[a-f0-9-]+$")
 
 
 def shared_root() -> Path:
@@ -122,7 +122,7 @@ def extract(archive: Path, destination: Path) -> None:
 
 def verify(driver: Path) -> None:
     output = subprocess.run([str(driver), "--version"], check=True, capture_output=True, text=True, timeout=20).stdout
-    if not re.search(r"\b0\.28\.2\b", output):
+    if not re.search(rf"(?<![\w.]){re.escape(VERSION)}(?![\w.])", output):
         raise ValueError(f"CUA driver must be version {VERSION}")
     if sys.platform == "darwin":
         bundle = driver.parents[2]

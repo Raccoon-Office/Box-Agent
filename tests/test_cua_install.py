@@ -39,7 +39,7 @@ def test_release_matches_desktop_assets(monkeypatch, system, machine, target, su
     monkeypatch.setattr(installer.sys, "platform", system)
     monkeypatch.setattr(installer.platform, "machine", lambda: machine)
     url, digest = installer.release("https://cdn.example/cua")
-    assert url == f"https://cdn.example/cua/cua-driver-rs-v0.28.2/cua-driver-rs-0.28.2-{target}{suffix}"
+    assert url == f"https://cdn.example/cua/cua-driver-rs-v0.38.0/cua-driver-rs-0.38.0-{target}{suffix}"
     assert len(digest) == 64
     assert installer.release()[0].startswith("https://github.com/trycua/cua/releases/download/")
 
@@ -62,10 +62,31 @@ def test_shared_pointer_cannot_escape(isolated_root):
     assert installer.shared_driver() is None
 
 
+def test_old_shared_resource_requires_upgrade(isolated_root):
+    isolated_root.mkdir()
+    (isolated_root / 'current.json').write_text(json.dumps({'directory': '0.28.2-linux-x64-aabb-1234'}))
+    assert installer.shared_driver() is None
+
+
+@pytest.mark.parametrize('version,accepted', [
+    ('cua-driver 0.38.0', True), ('cua-driver 0.28.2', False),
+    ('cua-driver 0.38.0.1', False), ('cua-driver 10.38.0', False),
+])
+def test_driver_version_must_match_pin(monkeypatch, version, accepted):
+    from types import SimpleNamespace
+    monkeypatch.setattr(installer.sys, 'platform', 'linux')
+    monkeypatch.setattr(installer.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=version))
+    if accepted:
+        installer.verify(Path('/fixture/cua-driver'))
+    else:
+        with pytest.raises(ValueError, match='0.38.0'):
+            installer.verify(Path('/fixture/cua-driver'))
+
+
 def test_cli_discovers_desktop_published_resource(isolated_root, monkeypatch):
     monkeypatch.setattr(installer.sys, "platform", "linux")
     monkeypatch.setattr(installer.platform, "machine", lambda: "x86_64")
-    directory = "0.28.2-linux-x64-aabb-1234"
+    directory = "0.38.0-linux-x64-aabb-1234"
     driver = isolated_root / directory / "cua-driver"
     driver.parent.mkdir(parents=True)
     driver.write_bytes(b"fixture")
@@ -116,14 +137,14 @@ def test_install_publishes_verified_resource_and_second_install_reuses(isolated_
     url = "https://cdn.example/archive"
     monkeypatch.setattr(installer, "release", lambda base: (url, hashlib.sha256(payload).hexdigest()))
     checks = []
-    previous = isolated_root / "0.28.2-linux-x64-aabb-1234" / "cua-driver"
+    previous = isolated_root / "0.38.0-linux-x64-aabb-1234" / "cua-driver"
     if broken_existing:
         previous.parent.mkdir(parents=True)
         previous.write_bytes(b"broken driver")
         (isolated_root / "current.json").write_text(json.dumps({"directory": previous.parent.name}))
     def verify(driver):
         if driver == previous:
-            raise ValueError("CUA driver must be version 0.28.2")
+            raise ValueError("CUA driver must be version 0.38.0")
         checks.append(driver)
     monkeypatch.setattr(installer, "verify", verify)
     class Response(io.BytesIO):
