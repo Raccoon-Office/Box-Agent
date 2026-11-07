@@ -10,7 +10,8 @@ from tests.acp_host.probe import AcpHostProbe
 
 
 @pytest.mark.asyncio
-async def test_sdk_restart_replays_originals_and_tools_before_load_response_twice():
+@pytest.mark.parametrize("method", ["session/load", "session/resume"])
+async def test_sdk_restart_restores_history_with_method_specific_replay(method):
     repository = Path(__file__).resolve().parents[1]
     workspace = repository / 'workspace'
     workspace.mkdir(exist_ok=True)
@@ -39,21 +40,32 @@ async def test_sdk_restart_replays_originals_and_tools_before_load_response_twic
         second = probe()
         await second.start()
         try:
-            await second.initialize()
+            initialized = await second.initialize()
+            assert initialized['agentCapabilities']['sessionCapabilities']['resume'] == {}
             def calls():
                 return [json.loads(line) for line in (root / 'lifecycle.jsonl').read_text().splitlines()
                         if json.loads(line)['event'] in {'file_model_input', 'file_read_result'}]
             before = calls()
             for _ in range(2):
-                await second.request('session/load', {'sessionId': identifier, 'cwd': str(cwd), 'mcpServers': []})
+                result = await second.request(method, {'sessionId': identifier, 'cwd': str(cwd), 'mcpServers': []})
                 updates = [note['params']['update'] for note in second.drain_notifications()
                            if note.get('method') == 'session/update']
+                if method == 'session/resume':
+                    assert result['_meta']['history_revision_id']
+                    assert 'replayed' not in result['_meta']
+                    assert updates == [] and calls() == before
+                    continue
                 assert updates and all(update['_meta']['replay'] for update in updates)
                 assert len({update['_meta']['eventId'] for update in updates}) == len(updates)
                 types = [update['sessionUpdate'] for update in updates]
                 assert 'user_message_chunk' in types and 'tool_call' in types and 'tool_call_update' in types
                 assert any(update.get('content', {}).get('uri') == file.as_uri() for update in updates)
                 assert calls() == before
-            await second.session_prompt(identifier, 'continue', meta={'turn_id': 'continued-turn'})
+            await second.session_prompt(identifier, 'fixture:file_inputs continue', meta={'turn_id': 'continued-turn'})
+            model_input = [event for event in calls() if event['event'] == 'file_model_input'][-1]
+            assert any(
+                message['role'] == 'tool' and 'SDK-719' in str(message['content'])
+                for message in model_input['messages']
+            )
         finally:
             await second.stop()
