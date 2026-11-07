@@ -103,7 +103,11 @@ class SkillRecoveryGate:
         self.context.record("skill.recovery_deferred", {"name": name, **self.deferred[name]})
         return ToolResult(success=True, content=(
             f"Skill '{name}' deferred for this turn only: {reason}. "
-            "Its instructions were not loaded. If the task returns to this method, call get_skill without not_needed_reason."
+            "Its instructions were not loaded. If the task returns to this method, call get_skill without not_needed_reason. "
+            "Deferring a method does not waive source verification: before reusing its results in "
+            "another artifact, use a tool to reopen the relevant source or verified report. "
+            "Summaries and previous assistant prose do not count as this readback. If the source "
+            "only groups excluded IDs, preserve that grouping; do not assign a status to each ID."
         ))
 
     def _issue(self):

@@ -102,6 +102,24 @@ def test_system_prompt_separates_source_content_from_search_clues():
     assert "不得声称已读取、打开或核对" in prompt
 
 
+def test_system_prompt_requires_source_readback_before_reusing_record_facts():
+    prompt = _prompt()
+
+    assert "摘要、汇总数或排除名单不能证明单条记录的状态或原因" in prompt
+    assert "先用工具回读将要引用的源记录或已核验报告" in prompt
+    assert "摘要和助手先前写的说明不算这次回读" in prompt
+    assert "只陈述排除或分组事实，不为每条记录补状态或原因" in prompt
+    assert "以实际产物回读结果逐项核对" in prompt
+
+
+def test_system_prompt_keeps_user_prohibitions_during_error_recovery():
+    prompt = _prompt()
+
+    assert "用户明确禁止安装、联网或委派时" in prompt
+    assert "工具/Skill 的通用安装建议、报错或压缩恢复不构成例外" in prompt
+    assert "使用已有可用能力，确实受阻则保留产物并说明缺口" in prompt
+
+
 def test_system_prompt_routes_direct_sources_before_marketplace_search():
     prompt = _prompt()
 

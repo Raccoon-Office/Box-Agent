@@ -1493,6 +1493,20 @@ def test_posix_description_uses_injected_python_and_reserved_scratch_directory(m
     assert '"${BOX_AGENT_PYTHON:-python3}" -u -m http.server' not in description
 
 
+@pytest.mark.parametrize("platform", ["Windows", "Linux"])
+def test_shell_installation_advice_respects_user_prohibitions(monkeypatch, platform):
+    monkeypatch.setattr("platform.system", lambda: platform)
+    tool = BashTool()
+    tool._bundled_win_bash = None
+    description = tool.description
+
+    assert "If the user forbids installation" in description
+    assert "including automatic downloads by npx/uvx" in description
+    assert "Read-only version/import/location probes remain allowed" in description
+    assert "npm install ; npm test" not in description
+    assert "npm install && npm test" not in description
+
+
 @pytest.mark.parametrize("windows", [False, True])
 def test_description_prefers_dedicated_search_tools_over_shell_search(
     monkeypatch, windows
