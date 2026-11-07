@@ -18,6 +18,7 @@ class CompletionContext:
     session_log: Any = None
     turn_id: str = ""
     resume_scope: Any = None
+    skill_reader: Any = None
 
     def record(self, kind: str, data: dict) -> None:
         payload = {**data, "turn_id": self.turn_id}

@@ -125,6 +125,10 @@ _C5_SCHEMA_CHANGES = json.loads(
 _CWD_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/session_cwd_schema_changes.json").read_text()
 )
+_CWD_SCHEMA_CHANGES["write_file"][0]["after"] = (
+    "Prefer a path relative to the active file root (the configured working root). "
+    "Absolute paths are used exactly as supplied."
+)
 _PPTX_ENTRY_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/pptx_entry_schema_changes.json").read_text()
 )
@@ -451,6 +455,18 @@ def _assert_schema_contract(tools, profile):
                 target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
+        if tool.name == "get_skill":
+            anchor = "Use list_skills for names and availability. "
+            entry["schema"]["description"] = entry["schema"]["description"].replace(anchor, anchor + (
+                "After compaction, reread a missing method before resuming its work; a summary is insufficient. "
+                "Only for an unrelated method, set not_needed_reason to explicitly defer it for this turn. "
+                "Before finishing, check every required deliverable in the method, including separate audit "
+                "receipts and sidecar files; values embedded in another report do not replace required files. "
+            ))
+            entry["schema"]["input_schema"]["properties"]["not_needed_reason"] = {
+                "type": "string", "minLength": 1,
+                "description": "Only when a previously read method is missing after compaction AND unrelated to this turn: explain why it is not needed instead of reading it. Do not use this for a method the user asks to resume.",
+            }
         if tool.name == "query_jsonl":
             before = (
                 "If a one-line read exceeds that limit, use another permitted file-copy "

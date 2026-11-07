@@ -88,7 +88,7 @@ async def probe():
     second = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     restored = await second.new_session(**acp_params(request))
     state = second._sessions[restored.sessionId]
-    assert [message.content for message in state.agent.messages][-2:] == [
+    assert [message.content for message in state.agent.messages if message.source != "runtime"][-2:] == [
         "fixture", "done",
     ]
     state.agent.session_log.close()

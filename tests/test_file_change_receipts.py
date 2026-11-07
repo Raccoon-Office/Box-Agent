@@ -430,7 +430,7 @@ async def test_acp_native_revisions_keep_delivery_policy_without_workspace_snaps
 
     config = Config(
         llm=LLMConfig(api_key='test'),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path), tool_interface_version=1),
         tools=ToolsConfig(enable_sub_agent=False, enable_todo=False),
     )
     conn = Connection()

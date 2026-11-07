@@ -21,4 +21,6 @@ class DefaultCompactEngine:
             summary_input_token_limit=inputs.summary_input_token_limit,
             summary_projector=inputs.summary_projector,
             request_headroom_tokens=inputs.request_headroom_tokens,
+            compacted_history_projector=inputs.compacted_history_projector,
+            compaction_source_projector=inputs.compaction_source_projector,
         )

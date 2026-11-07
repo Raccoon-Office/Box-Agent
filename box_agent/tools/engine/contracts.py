@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+import json
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -105,11 +106,15 @@ class PreparedTools:
     mcp_generations: Mapping[str, int]
     _tool_exposure: MCPToolExposureManager | None = field(default=None, repr=False)
     _registered_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+    routed_targets: Mapping[str, Tool] = field(default_factory=dict, repr=False)
+    routed_definitions: Mapping[str, ToolDefinitionView] = field(default_factory=dict, repr=False)
+    route_refs: Mapping[str, str] = field(default_factory=dict, repr=False)
+    route_visible: Callable[[str], bool] | None = field(default=None, repr=False)
     _definitions_by_name: Mapping[str, ToolDefinitionView] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "definitions", tuple(self.definitions))
-        for name in ("targets", "call_names", "mcp_generations"):
+        for name in ("targets", "call_names", "mcp_generations", "routed_targets", "routed_definitions", "route_refs"):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
         object.__setattr__(
             self, "_definitions_by_name",
@@ -122,19 +127,69 @@ class PreparedTools:
         normalized = []
         for call in calls:
             execution_call = call.model_copy(deep=True)
+            execution_call, _, _ = self.resolve_call(execution_call)
             name = execution_call.function.name
             execution_call.function.name = self.call_names.get(name, name)
             normalized.append(execution_call)
         return normalized
 
+    def resolve_call(self, call: ToolCall) -> tuple[ToolCall, bool, str | None]:
+        """Resolve against the request snapshot without modifying provider history."""
+        result = call.model_copy(deep=True)
+        if result.function.name != "call_tool" or not self.route_refs and "call_tool" not in self.targets:
+            return result, False, None
+        args = result.function.arguments
+        if not isinstance(args, dict) or set(args) != {"tool_ref", "arguments_json"} or not all(isinstance(args[k], str) for k in args):
+            return result, True, "Invalid call_tool arguments: expected tool_ref and arguments_json strings."
+        name = self.route_refs.get(args["tool_ref"])
+        if name is None:
+            return result, True, "Unknown or expired tool_ref; search again on a later model step."
+        def unique_pairs(pairs):
+            output = {}
+            for key, value in pairs:
+                if key in output:
+                    raise ValueError("duplicate key")
+                output[key] = value
+            return output
+        try:
+            arguments = json.loads(args["arguments_json"], object_pairs_hook=unique_pairs,
+                                   parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid constant")))
+        except (ValueError, TypeError, RecursionError):
+            return result, True, "Invalid arguments_json: expected a valid JSON object."
+        if not isinstance(arguments, dict):
+            return result, True, "Invalid arguments_json: expected a JSON object."
+        result.function.name = name
+        result.function.arguments = arguments
+        return result, True, self.validate_routed_call(name)
+
+    def validate_routed_call(self, name: str) -> str | None:
+        target = self.routed_targets.get(name)
+        definition = self.routed_definitions.get(name)
+        if target is None or definition is None:
+            return "Unknown or expired tool_ref; search again."
+        if self.route_visible is not None and not self.route_visible(name):
+            return f"Tool '{name}' is not available in this conversation."
+        if self._tool_exposure is not None:
+            error = self._tool_exposure.validate_call(name, self.mcp_generations.get(name), target)
+            if error:
+                return error
+            if not self._tool_exposure.is_current_target(name, target):
+                return f"Tool '{name}' changed or is unavailable; search again."
+        try:
+            if definition.description == target.description and definition.matches_target(target):
+                return None
+        except Exception:
+            pass
+        return f"Tool '{name}' definition changed; search again."
+
     def allows_batch_deduplication(self, name: str) -> bool:
         """Use only the offered target's unchanged, trusted opt-in."""
         name = self.call_names.get(name, name)
-        definition = self._definitions_by_name.get(name)
+        definition = self._definitions_by_name.get(name) or self.routed_definitions.get(name)
         return (
             definition is not None
             and definition._deduplicate_within_batch
-            and self.validate_call(name) is None
+            and (self.validate_routed_call(name) if name in self.routed_targets else self.validate_call(name)) is None
         )
 
     def admission_error(self, name: str) -> str | None:
@@ -170,6 +225,8 @@ class PreparedTools:
                 "Use tool_search and call an activated result on the next step."
             )
         generation = self.mcp_generations.get(name)
+        if self._tool_exposure is not None and getattr(self._tool_exposure, "stable_prefix", False) and not self._tool_exposure.is_current_target(name, target):
+            return f"Tool '{name}' is no longer available."
         if self._tool_exposure is not None:
             error = self._tool_exposure.validate_call(name, generation, target)
             if error is not None:
@@ -196,7 +253,7 @@ class PreparedTools:
     def target_identity(self, name: str) -> tuple[str | None, str | None]:
         """Return the original MCP identity for execution events and logging."""
 
-        definition = self._definitions_by_name.get(self.call_names.get(name, name))
+        definition = self._definitions_by_name.get(self.call_names.get(name, name)) or self.routed_definitions.get(name)
         if definition is None:
             return None, None
         tool_id, server_name = definition._identity[1:3]

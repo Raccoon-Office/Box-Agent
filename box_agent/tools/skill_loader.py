@@ -1652,6 +1652,32 @@ class SkillSelector:
         """
         if self._prefix is None or self._suffix is None:
             return None
+        previous = self._last_metadata
+        skills_md = self.render_catalog(user_input, refresh=refresh)
+        if skills_md == previous:
+            return None
+        return self._prefix + skills_md + self._suffix
+
+    def catalog_scope_version(self) -> str:
+        """Digest visible metadata, including entries outside the bounded preview."""
+        rows = []
+        for skill in self._loader._skill_pool(include_disabled=self._include_disabled).values():
+            if not skill.user_visible or is_skill_blocked(
+                skill.name, self._blocked_skill_names, self._explicitly_allowed_skill_names
+            ):
+                continue
+            if (skill.name not in self._sticky_skill_names and self._skill_filter is not None
+                    and not self._skill_filter(skill)):
+                continue
+            rows.append({key: getattr(skill, key, None) for key in (
+                "name", "source", "description", "broken", "allowed_tools",
+                "required_skills", "related_skills", "capabilities",
+            )})
+        rows.sort(key=lambda row: row["name"])
+        return sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+    def render_catalog(self, user_input: str, *, refresh: bool = True) -> str:
+        """Render the same bounded recommendation independently of system text."""
         if refresh:
             self._loader.maybe_reload()
         if user_input and user_input.strip():
@@ -1686,7 +1712,5 @@ class SkillSelector:
             else:
                 skills_md = ""
         self._last_matched_names = matched_names
-        if skills_md == self._last_metadata:
-            return None
         self._last_metadata = skills_md
-        return self._prefix + skills_md + self._suffix
+        return skills_md

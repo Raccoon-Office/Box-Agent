@@ -1,0 +1,4 @@
+现在验证真实 MCP 工具：
+1. 调用 tool_search，server_name="cache-probe-server"，tool_names=["cache_probe_echo"]。服务的 tools/list 在本次搜索发起后返回，请正常等待结果。
+2. 使用返回的 tool_ref 通过 call_tool 调用 cache_probe_echo，text="mid-task-mcp-ok"。不要直接调用隐藏工具名，也不要模拟服务。
+3. 收到结果后，将 receipt 和 echo 的实际值作为最终回答。不需创建文件。没有成功结果就如实报告失败。

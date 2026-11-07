@@ -56,7 +56,7 @@ async def test_acp_prompt_places_hint_beside_the_user_request(tmp_path, text, hi
     await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": text}],
                                        field_meta={"ui_language": "zh"})))
 
-    [user_message] = [content for role, content in llm.calls[0] if role == "user"]
+    [user_message] = [content for role, content in llm.calls[0] if role == "user" and text in content]
     assert user_message.startswith("[Host UI language: Chinese.")
     assert user_message.endswith(_EMPTY_CONNECTOR_CONTEXT)
     assert ("[Deliverable language: English." in user_message) is hinted

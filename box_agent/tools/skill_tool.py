@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Mapping, MutableSet, Optional, Tup
 from ..execution_profile import is_skill_blocked
 from ..skill_dependencies import SkillDependencyError
 from .base import Tool, ToolResult, ToolInvocationContext
+from .completion_checks import CompletionCheck, CompletionContext
 from .skill_loader import SKILL_USAGE_GUIDANCE, SkillLoader, SkillSource, SkillValidation
 
 
@@ -50,6 +51,10 @@ class GetSkillTool(Tool):
             "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
             "when paged. Read required_skills before their steps; related_skills are optional. "
             "Skill guidance does not grant tools or permission. Use list_skills for names and availability. "
+            "After compaction, reread a missing method before resuming its work; a summary is insufficient. "
+            "Only for an unrelated method, set not_needed_reason to explicitly defer it for this turn. "
+            "Before finishing, check every required deliverable in the method, including separate audit "
+            "receipts and sidecar files; values embedded in another report do not replace required files. "
             + SKILL_USAGE_GUIDANCE
         )
 
@@ -65,6 +70,7 @@ class GetSkillTool(Tool):
                 "offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset; omit to read the whole Skill when it fits."},
                 "limit": {"type": "integer", "minimum": 1, "description": "Maximum lines for a bounded page."},
                 "revision": {"type": "string", "description": "Version returned by a previous page; restart if it changed."},
+                "not_needed_reason": {"type": "string", "minLength": 1, "description": "Only when a previously read method is missing after compaction AND unrelated to this turn: explain why it is not needed instead of reading it. Do not use this for a method the user asks to resume."},
             },
             "required": ["skill_name"],
             "additionalProperties": False,
@@ -112,8 +118,20 @@ class GetSkillTool(Tool):
         return read(name, **kwargs)
 
     async def execute(self, skill_name: str, offset: int = 0, limit: int | None = None,
-                      revision: str | None = None) -> ToolResult:
+                      revision: str | None = None, not_needed_reason: str | None = None) -> ToolResult:
+        if not_needed_reason is not None:
+            return ToolResult(success=False, error="Skill deferral requires an active recovery checkpoint.")
         return await self._aread(skill_name, offset=offset, limit=limit, revision=revision)
+
+    async def create_completion_gate(self, context: CompletionContext) -> CompletionCheck | None:
+        from .skill_recovery import SkillRecoveryGate
+
+        return SkillRecoveryGate.create(context)
+
+    async def restore_completion_gate(self, context: CompletionContext, state: dict) -> CompletionCheck:
+        from .skill_recovery import SkillRecoveryGate
+
+        return SkillRecoveryGate.restore(context, state)
 
     async def _aread(self, skill_name: str, *, reader=None, **arguments: Any) -> ToolResult:
         from ..skill_runtime import SkillRuntime
@@ -147,6 +165,15 @@ class GetSkillTool(Tool):
 
     async def _invoke_validated(self, arguments: dict[str, Any], *,
                                 context: ToolInvocationContext | None) -> ToolResult:
+        if "not_needed_reason" in arguments:
+            from .skill_recovery import SkillRecoveryGate
+
+            gate = context.completion_gate if context is not None else None
+            if not isinstance(gate, SkillRecoveryGate):
+                return ToolResult(success=False, error="Skill deferral requires an active recovery checkpoint.")
+            if any(key in arguments for key in ("offset", "limit", "revision")):
+                return ToolResult(success=False, error="Do not combine Skill deferral with reading arguments.")
+            return gate.defer(arguments["skill_name"], arguments["not_needed_reason"])
         return await self._aread(**arguments, reader=context.skill_reader if context is not None else None)
 
 

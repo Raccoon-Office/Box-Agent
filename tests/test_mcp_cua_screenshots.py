@@ -243,6 +243,7 @@ async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
                 yield StreamEvent(type="finish", finish_reason="stop")
 
     config = session_config(tmp_path, max_steps=5)
+    config.agent.tool_interface_version = 1
     config.plugins["cua"] = {
         "server_name": "desktop", "feed_screenshots": feed_screenshots,
         "persist_images": persist_images,

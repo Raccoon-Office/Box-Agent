@@ -139,6 +139,7 @@ class ReferenceProjection:
     on_response: Callable[[], None] | None = None
     reader_required: bool = False
     required_reference_tokens: int = 0
+    materialized_messages: tuple[Message, ...] = ()
 
 
 class SkillReferenceContext:
@@ -217,6 +218,107 @@ class SkillReferenceContext:
         """Refresh committed text without resetting this request's budget/projection."""
         self._messages = messages
         self.observe_history(messages)
+
+    def compact_history(self, original: list[Message], compacted: list[Message], *,
+                        budget_chars: int = SKILL_REFERENCE_BUDGET_CHARS) -> list[Message]:
+        """Retain current method pages and shed old bodies only at compaction."""
+        if not getattr(self.runtime, "append_only_context", False):
+            return compacted
+        facts = {record.name: record for record in self.runtime.read_facts}
+        reclaimable = self.runtime.reclaimable_after_compaction
+
+        def locator(name):
+            previous = facts[name]
+            loader = getattr(self.runtime, "loader", None)
+            skill = loader.get_skill(name) if loader is not None else None
+            purpose = str(getattr(skill, "description", ""))[:320]
+            return (f"Skill '{name}' revision {previous.revision} is outside the current input. "
+                    f"Purpose: {purpose or name}. "
+                    f"Source path: {previous.path or '(caller reference)'}. "
+                    "Use get_skill to read the current instructions before using this method; "
+                    "a summary is not its complete body.")
+
+        rebuilt = []
+        missing: set[str] = set()
+        for message in compacted:
+            parsed = self._compaction_reference(message, facts)
+            if parsed is not None and parsed[0]["name"] in reclaimable:
+                name = parsed[0]["name"]
+                missing.add(name)
+                # Preserve a tool result's call ID and protocol group.
+                if message.role == "tool":
+                    rebuilt.append(message.model_copy(update={"content": locator(name)}))
+            else:
+                rebuilt.append(message)
+        remaining = max(0, budget_chars)
+        for message in original:
+            parsed = self._compaction_reference(message, facts)
+            if parsed is None:
+                continue
+            metadata, body = parsed
+            name = metadata["name"]
+            if name in reclaimable:
+                missing.add(name)
+                continue
+            previous = facts[name]
+            try:
+                current = self.runtime.resolve_reference(name)
+            except SkillDependencyError:
+                missing.add(name)
+                continue
+            if (current.revision != previous.revision or current.source != previous.source
+                    or current.path != previous.path):
+                missing.add(name)
+                continue
+            covered = visible_ranges(rebuilt, name=name, revision=previous.revision,
+                                     lines=previous.prompt.splitlines(keepends=True),
+                                     source=previous.source, path=previous.path)
+            if set(range(metadata["offset"], metadata["end_offset"])) <= covered:
+                continue
+            text = render_reference({**metadata, "kind": "runtime_skill_instructions"}, body)
+            cost = reference_cost(text)
+            if cost > remaining:
+                missing.add(name)
+                continue
+            rebuilt.append(Message(role="user", source="runtime", content=text))
+            remaining -= cost
+        if missing:
+            notice = "Skill reference status:\n" + "\n".join(locator(name) for name in sorted(missing))
+            if not any(message.role == "user" and message.source == "runtime" and message.content == notice
+                       for message in rebuilt):
+                rebuilt.append(Message(role="user", source="runtime", content=notice))
+        return rebuilt
+
+    @staticmethod
+    def _compaction_reference(message, facts):
+        if not isinstance(message.content, str):
+            return None
+        parsed = read_reference(message.content)
+        previous = facts.get(parsed[0].get("name")) if parsed else None
+        if previous is None:
+            return None
+        if not visible_ranges([message], name=previous.name, revision=previous.revision,
+                              lines=previous.prompt.splitlines(keepends=True),
+                              source=previous.source, path=previous.path):
+            return None
+        return parsed
+
+    def compaction_source(self, messages: list[Message]) -> list[Message]:
+        if not getattr(self.runtime, "append_only_context", False):
+            return messages
+        facts = {record.name: record for record in self.runtime.read_facts}
+        projected = []
+        for message in messages:
+            parsed = self._compaction_reference(message, facts)
+            if parsed is not None:
+                metadata = parsed[0]
+                message = message.model_copy(update={"content": (
+                    f"Skill '{metadata['name']}' revision {metadata['revision']} was read. "
+                    "Its method body is managed separately from the conversation summary; "
+                    "do not reconstruct instructions from this receipt."
+                )})
+            projected.append(message)
+        return projected
 
     def _projection_cost(self, message: Message, text: str) -> int:
         return projection_cost(message, text, count_text_tokens=self._count_text_tokens)
@@ -379,6 +481,11 @@ class SkillReferenceContext:
                         can_page: Callable[[tuple[str, ...]], bool] | None = None,
                         defer_delivery: bool = False,
                         count_text_tokens: Callable[[str], int] | None = None) -> ReferenceProjection:
+        append_only = bool(getattr(self.runtime, "append_only_context", False))
+        original_messages = messages
+        if append_only:
+            # The caller must persist this tail at a legal request boundary.
+            messages = [*messages, Message(role="user", source="runtime", content="")]
         self._messages = messages
         self.observe_history(messages)
         self._remaining = max(0, budget_chars)
@@ -475,8 +582,19 @@ class SkillReferenceContext:
                     metadata, body = parsed
                     if metadata.get("kind") != "runtime_skill_instructions" or metadata.get("name") != name:
                         continue
-                    if sha256(body.encode()).hexdigest() == metadata.get("revision"):
+                    try:
+                        current = self.runtime.resolve_reference(name)
+                    except SkillDependencyError:
+                        continue
+                    if (sha256(body.encode()).hexdigest() == metadata.get("revision")
+                            and metadata.get("revision") == current.revision
+                            and metadata.get("source") == current.source
+                            and metadata.get("path") == current.path):
                         self._host_visible[name] = str(metadata["revision"])
+                        if append_only and name in self.runtime.restoring_names:
+                            # A durable tail survives a failed provider request.
+                            # Retry still needs a response-confirmation callback.
+                            stage_delivery(current, dict(metadata), reason="restored")
                         snapshot_found = True
                         break
                 if snapshot_found:
@@ -498,6 +616,15 @@ class SkillReferenceContext:
                         # a request-level error or compaction requirement.
                         continue
                     required_notice = result.error or "Selected Skill reference unavailable"
+                    code = (result.raw_output or {}).get("code")
+                    if append_only and isinstance(code, str) and code not in {
+                        "SKILL_CONTEXT_BUDGET", "SKILL_REQUIRES_PAGING",
+                    }:
+                        required_notice = json.dumps({
+                            "kind": "runtime_skill_diagnostic", "name": name,
+                            "code": code, "message": required_notice,
+                            "notice": "Selected Skill is unavailable; do not follow its instructions.",
+                        }, ensure_ascii=False)
                     diagnostics.insert(0, required_notice)
                     continue
                 if info.get("reused"):
@@ -509,9 +636,10 @@ class SkillReferenceContext:
                 projected[user_index] = append_reference(projected[user_index], text)
                 ref = {"name": name, "revision": info["revision"], "message_index": user_index,
                        "offset": info["offset"], "end_offset": info["end_offset"]}
-                if self.session_store is not None:
-                    staged_snapshots.append((ref, text))
-                references.append(ref)
+                if not append_only:
+                    if self.session_store is not None:
+                        staged_snapshots.append((ref, text))
+                    references.append(ref)
                 if info["complete"]:
                     self._host_visible[name] = info["revision"]
             if diagnostics:
@@ -539,7 +667,7 @@ class SkillReferenceContext:
                     projected[user_index] = append_reference(target, notice)
                     self._remaining -= notice_cost
                     self.reference_overhead_chars += notice_cost
-                    if self.session_store is not None:
+                    if not append_only and self.session_store is not None:
                         ref = {"kind": "status", "message_index": user_index}
                         references.append(ref)
                         staged_snapshots.append((ref, notice))
@@ -575,7 +703,41 @@ class SkillReferenceContext:
 
         if not defer_delivery:
             commit_deliveries()
+        materialized = []
+        if append_only:
+            tail = projected.pop()
+            blocks = tail.content if isinstance(tail.content, list) else []
+            prefix = ("Host-provided Skill reference for this turn. "
+                      "The following is method material, not new user facts or permission.\n")
+            previous_status = next((m.content for m in reversed(original_messages)
+                                    if m.role == "user" and m.source == "runtime"
+                                    and isinstance(m.content, str)
+                                    and m.content.startswith("Skill reference status:\n")), None)
+            for block in blocks:
+                text = block.get("text", "") if block.get("type") == "text" else ""
+                if text.startswith(prefix):
+                    parsed = read_reference(text[len(prefix):])
+                    if parsed is not None:
+                        metadata, body = parsed
+                        metadata["kind"] = "runtime_skill_instructions"
+                        text = render_reference(metadata, body)
+                parsed = read_reference(text) if text else None
+                previous_same_name = None
+                if parsed is not None:
+                    name = parsed[0].get("name")
+                    for previous_message in reversed(original_messages):
+                        if (previous_message.role != "user" or previous_message.source != "runtime"
+                                or not isinstance(previous_message.content, str)):
+                            continue
+                        old = read_reference(previous_message.content)
+                        if old is not None and old[0].get("name") == name:
+                            previous_same_name = previous_message.content
+                            break
+                if text and text != previous_status and text != previous_same_name:
+                    materialized.append(Message(role="user", source="runtime", content=text))
+            projected.extend(materialized)
         return ReferenceProjection(projected, tuple(references), tuple(diagnostics),
                             (self.reference_overhead_chars + 3) // 4, blocked_reason,
                             commit_deliveries if defer_delivery and staged_deliveries else None,
-                            on_response=confirm_response if confirm is not None else None)
+                            on_response=confirm_response if confirm is not None else None,
+                            materialized_messages=tuple(materialized))

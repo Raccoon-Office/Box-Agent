@@ -231,6 +231,7 @@ class SubAgentTool(EventEmittingTool):
         # ``Agent.__init__`` after the agent's ``self.tools`` dict (which
         # ``register_mcp_tools`` mutates in place) is built.
         self._tool_provider: Callable[[], dict[str, Tool]] | None = None
+        self._tool_exposure_provider: Callable[[], Any] | None = None
         self._skill_provider: Callable[[], Any] | None = None
         self._skill_access_filter: Callable[[Any], bool] | None = None
         self._capability_state_provider: Callable[[], Any] | None = None
@@ -305,6 +306,10 @@ class SubAgentTool(EventEmittingTool):
         snapshot and silently lose late-activated tools.
         """
         self._tool_provider = provider
+
+    def set_tool_exposure_provider(self, provider: Callable[[], Any]) -> None:
+        """Supply parent validation authority for a scoped stable child session."""
+        self._tool_exposure_provider = provider
 
     def set_skill_provider(self, provider: Callable[[], Any]) -> None:
         """Wire a callable returning the current live SkillLoader."""
@@ -832,6 +837,7 @@ class SubAgentTool(EventEmittingTool):
         sub_agent_id: str,
         title: str,
         session_log: SessionLog | None = None,
+        tool_exposure_manager: Any | None = None,
     ) -> ToolResult:
         # Import lazily because the runtime facade initializes the core, which
         # imports tool contracts while this module may still be loading.
@@ -852,6 +858,7 @@ class SubAgentTool(EventEmittingTool):
                 llm=llm,
                 messages=messages,
                 tools=child_tools,
+                tool_exposure_manager=tool_exposure_manager,
                 thinking_enabled=self._thinking_enabled,
                 max_steps=max_steps,
                 max_tool_calls=max_tool_calls,
@@ -1500,6 +1507,9 @@ class SubAgentTool(EventEmittingTool):
                 child_tools["execute_code"] = child_sandbox
             if "sandbox_status" in child_tools:
                 child_tools["sandbox_status"] = SandboxStatusTool(child_sandbox)
+        parent_exposure = self._tool_exposure_provider() if self._tool_exposure_provider else None
+        child_exposure = (parent_exposure.for_inherited_tools(child_tools)
+                          if parent_exposure is not None and parent_exposure.stable_prefix else None)
         messages = self._bounded_explicit_messages(parsed, resolved, child_tools)
         if isinstance(messages, CapabilityFailure):
             return self._failure_result(messages, parsed)
@@ -1569,6 +1579,7 @@ class SubAgentTool(EventEmittingTool):
                 sub_agent_id=sub_agent_id,
                 title=sub_title,
                 session_log=child_session_log,
+                tool_exposure_manager=child_exposure,
             )
         finally:
             reset_browser_session_key(token)

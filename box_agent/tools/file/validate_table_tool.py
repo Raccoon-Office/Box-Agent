@@ -244,6 +244,52 @@ class TableCompletionGate:
             )
         return None
 
+    async def check_invocation(self, tool_name: str, arguments: dict) -> CompletionIssue | None:
+        """Require original-input evidence before general-purpose execution.
+
+        Readers and discovery stay available for learning the field contract.
+        This does not attempt to infer data flow from arbitrary code or MCP schemas.
+        File operations use their declared original-input preparation, not the
+        final-state completion check (which would prevent edits and moves).
+        """
+        if tool_name not in {"execute_code", "bash", "sub_agent"}:
+            return None
+        for path, expected in self.sources.items():
+            mode = self.source_modes.get(path, "input")
+            if mode == "delete_target" or (mode == "replace_target" and path in self.contracts):
+                continue
+            receipt = self.original_receipts.get(path)
+            if receipt is None or not receipt.complete:
+                issue = CompletionIssue(
+                    "TABLE_VALIDATION_REQUIRED_BEFORE_EXECUTION",
+                    f"{path}: use read_file to inspect the header/sample and validate_table "
+                    "to scan every original record with the complete field contract first. "
+                    "Then retry execution; validating after calculations cannot satisfy this order.",
+                )
+            elif not receipt.valid and self.purpose != "diagnosis" and mode != "edit_target":
+                issue = CompletionIssue(
+                    "TABLE_VALIDATION_FAILED",
+                    f"{path}: original input has invalid records; preserve and report diagnostics "
+                    "instead of calculating from invalid data.", False,
+                )
+            elif mode in {"edit_target", "move_target"}:
+                # Their final bytes/location are verified at completion. The
+                # original scan is sufficient to begin the declared operation.
+                continue
+            else:
+                denial = await self.pin(path)
+                if denial is None and receipt.source_sha256 == expected:
+                    continue
+                issue = CompletionIssue(
+                    "TABLE_SOURCE_UNVERIFIED",
+                    f"{path}: {denial.error if denial else 'validated source hash does not match'}", False,
+                )
+            self.context.record("table.execution_blocked", {
+                "tool": tool_name, "path": str(path), "code": issue.code,
+            })
+            return issue
+        return None
+
 
 class ValidateTableTool(ReadTool):
     """A real parser produces evidence; model claims cannot credit this gate."""
@@ -259,8 +305,9 @@ class ValidateTableTool(ReadTool):
     def description(self) -> str:
         return (
             "Validate EVERY original CSV/TSV record to EOF before filtering or deduplication. "
-            "For explicitly supplied table inputs this is required before completion, even if Python "
-            "already calculated outputs. Provide fields for ALL columns using the task's rules: "
+            "For explicitly supplied table inputs, original validation is required before Python, "
+            "Shell or sub-agent execution. Inspect headers/samples with read_file first. "
+            "Completion also verifies final input state. Provide fields for ALL columns using the task's rules: "
             "text/integer/decimal/date(YYYY-MM-DD)/boolean(true,false)/enum. Required by default; "
             "use nullable=true only when allowed. Decimal is finite and supports minimum/maximum "
             "as strings and scale. Enum requires explicit values. Schema is locked after a scan, "

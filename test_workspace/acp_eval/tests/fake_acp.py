@@ -14,6 +14,7 @@ from typing import Any
 
 
 MODES = {
+    "multi-turn", "multi-turn-error", "multi-turn-timeout", "multi-turn-wrong-id",
     "normal",
     "malformed",
     "timeout",
@@ -132,6 +133,33 @@ def run(mode: str) -> int:
     prompt = receive()
     if mode != "missing-trace":
         write_trace(upstream_session_id, acp_session_id, mode)
+
+    if mode.startswith("multi-turn"):
+        for number in range(1, 4):
+            if number > 1:
+                prompt = receive()
+            assert prompt["method"] == "session/prompt"
+            assert prompt["params"]["sessionId"] == acp_session_id
+            if number == 2 and mode == "multi-turn-timeout":
+                time.sleep(60)
+            turn_id = prompt["params"]["_meta"]["turnId"]
+            if number == 2 and mode == "multi-turn-wrong-id":
+                turn_id = turn_id.replace("turn-2", "turn-1")
+            usage = {"sessionId": upstream_session_id, "turnId": turn_id,
+                     "promptTokens": number * 10, "completionTokens": number}
+            (workspace / f"turn-{number}.txt").write_text(prompt["params"]["prompt"][0]["text"])
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": acp_session_id, "update": {"sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": f"answer-{number}"}}}})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": acp_session_id, "update": {"sessionUpdate": "tool_call_update",
+                "rawOutput": {"type": "turn_usage", "turnId": turn_id, "tokenUsage": usage}}}})
+            failed = number == 2 and mode == "multi-turn-error"
+            send({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn",
+                  "_meta": {"ok": not failed, "completed": not failed, "usage": usage}}})
+            if failed:
+                return 0
+        return 0
 
     if mode in {"rate-limit", "rate-limit-once", "rate-limit-after-tool", "provider-error", "rate-limit-after-content"}:
         marker = Path(__file__).with_suffix(".limited")

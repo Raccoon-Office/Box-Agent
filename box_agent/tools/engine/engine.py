@@ -89,6 +89,8 @@ class DefaultToolEngine:
         is_tool_visible: Callable[[str], bool] | None = None,
     ) -> PreparedTools:
         """Prepare the model's definitions without copying tool instances."""
+        if self._tool_exposure is not None and getattr(self._tool_exposure, "stable_prefix", False):
+            self._tool_exposure._live_candidates = lambda tools=self._tools: tools
         return prepare_tools(
             list(self._tools.values()),
             tool_exposure=self._tool_exposure,
@@ -225,7 +227,7 @@ class DefaultToolEngine:
         context = self._context
         path_error = self._prepare_paths(call)
         intent_error = context.policy_error(call.name, call.arguments)
-        offer_error = prepared.admission_error(call.name)
+        offer_error = call.resolution_error or (prepared.validate_routed_call(call.name) if call.routed else prepared.admission_error(call.name))
         if offer_error and intent_error:
             offer_error = f"{intent_error}\n{offer_error}"
         placeholder = _model_history_placeholder_argument(call.name, call.arguments)
@@ -276,7 +278,7 @@ class DefaultToolEngine:
                 ))
             if call.allowed:
                 final_path_error = self._prepare_paths(call)
-                final_error = (prepared.admission_error(call.name)
+                final_error = ((prepared.validate_routed_call(call.name) if call.routed else prepared.admission_error(call.name))
                                or context.policy_error(call.name, call.arguments)
                                or self._argument_error(call, summary) or final_path_error)
                 if final_error:
@@ -309,7 +311,7 @@ class DefaultToolEngine:
         )
 
     def _request(self, call: ToolCallRecord, prepared: PreparedTools) -> ToolInvocationRequest:
-        error = call.rejection if not call.allowed else prepared.validate_call(call.name)
+        error = call.rejection if not call.allowed else (prepared.validate_routed_call(call.name) if call.routed else prepared.validate_call(call.name))
         if call.allowed and call.target is None:
             error = f"Unknown tool: {call.name}"
         result = ToolResult(
@@ -319,6 +321,7 @@ class DefaultToolEngine:
             call.call_id, call.name, call.arguments, immediate_result=result,
             on_invoke=lambda: setattr(call, "invoked", True),
             invocation_context=self._invocation_context(call),
+            admission_check=(lambda: (prepared.validate_routed_call(call.name) if call.routed else prepared.validate_call(call.name)) or self._context.policy_error(call.name, call.arguments)) if call.routed or getattr(self._tool_exposure, "stable_prefix", False) else None,
         )
 
     def _invocation_context(self, call: ToolCallRecord) -> ToolInvocationContext:
@@ -327,6 +330,7 @@ class DefaultToolEngine:
             child_budgets=self._child_budgets, budget_charge=call.budget_charge,
             chat_references=self._references,
             completion_gate=self._context.completion_gates.get(call.name),
+            capability_gates=tuple(self._context.completion_gates.values()),
         )
 
     def _log_result(self, call: ToolCallRecord, result: ToolResult) -> None:
@@ -354,13 +358,14 @@ class DefaultToolEngine:
                 async with aclosing(stream_tool_permission_chain(
                     result=result, permission_negotiator=context.permission_negotiator,
                     tool_name=call.name, tool=call.target, arguments=call.arguments,
-                    retry_offer_error=lambda: prepared.validate_call(call.name),
+                    retry_offer_error=lambda: (prepared.validate_routed_call(call.name) if call.routed else prepared.validate_call(call.name)) or context.policy_error(call.name, call.arguments),
                     retry_records=lambda approval: self._scheduler.invoke_serial(
                         ToolInvocationRequest(
                             call.call_id, call.name, call.arguments,
                             approved_permission_request=approval,
                             invocation_context=self._invocation_context(call),
                             on_invoke=lambda: setattr(call, "invoked", True),
+                            admission_check=(lambda: (prepared.validate_routed_call(call.name) if call.routed else prepared.validate_call(call.name)) or context.policy_error(call.name, call.arguments)) if call.routed or getattr(self._tool_exposure, "stable_prefix", False) else None,
                         )
                     ),
                     on_retry=lambda retry: self._log_result(call, retry),
@@ -452,6 +457,10 @@ class DefaultToolEngine:
             hook_text_modified=hook_text_modified,
             correction_observer=context.correction_observer, executed=call.executed,
         ))
+        if (call.name == "tool_search" and call.requested_name == "tool_search"
+                and result.success and self._tool_exposure is not None
+                and getattr(self._tool_exposure, "stable_prefix", False)):
+            self._tool_exposure.record_search_result(call.call_id, result.content)
         self._search.record_result(outcome, search)
         if context.hook_dispatch is not None and not context.is_cancelled():
             await context.hook_dispatch.observe(self._hook_context(
@@ -543,9 +552,13 @@ class DefaultToolEngine:
         context = self._context
         self._execution_targets.clear()
         self._execution_targets.update(prepared.targets)
+        self._execution_targets.update(prepared.routed_targets)
         summary, search = ToolStepSummary(), SearchBatch()
         unique, duplicates, first_by_signature = [], [], {}
-        for original, normalized in zip(calls, prepared.canonicalize_calls(calls)):
+        for original in calls:
+            normalized, routed, resolution_error = prepared.resolve_call(original)
+            if not routed:
+                normalized = prepared.canonicalize_calls([original])[0]
             name, arguments = normalized.function.name, normalized.function.arguments
             deduplicate = prepared.allows_batch_deduplication(name)
             signature = (
@@ -553,7 +566,8 @@ class DefaultToolEngine:
             ) if deduplicate else None
             tool_id, server_name = prepared.target_identity(name)
             call = ToolCallRecord(normalized.id, original.function.name, name, arguments,
-                                  prepared.targets.get(name), tool_id, server_name)
+                                  (prepared.routed_targets.get(name) if routed else prepared.targets.get(name)), tool_id, server_name,
+                                  routed=routed, resolution_error=resolution_error)
             if deduplicate and signature in first_by_signature:
                 duplicates.append((call, first_by_signature[signature]))
             else:

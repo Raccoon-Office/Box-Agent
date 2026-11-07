@@ -409,6 +409,7 @@ async def test_handoff_preserves_paused_table_checks_for_local_resume(
         agent=AgentConfig(
             max_steps=4, workspace_dir=str(tmp_path), enable_memory=False,
             enable_memory_extraction=False, goal_autopilot_enabled=False,
+            tool_interface_version=1,
         ),
         tools=ToolsConfig(
             enable_file_tools=False, enable_bash=False, enable_mcp=False,

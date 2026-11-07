@@ -958,7 +958,8 @@ async def _run_agent_loop_impl(
     turn_continuation = TurnContinuationController()
     completion_checks = await CompletionChecks.create(
         tools,
-        CompletionContext(tuple(messages), cancelled, session_log, turn_id, resume_scope=messages),
+        CompletionContext(tuple(messages), cancelled, session_log, turn_id, resume_scope=messages,
+                          skill_reader=context_engine.tool_reader if context_engine is not None else None),
         enabled=completion_checks_enabled,
     )
     if _on_completion_checks is not None:
@@ -1131,6 +1132,15 @@ async def _run_agent_loop_impl(
         summary_projector = getattr(context_engine, "prepare_summary", None)
         if initial_context_transition is not None:
             summary_projector = getattr(context_engine, "preview_summary", summary_projector)
+
+        def project_compacted_history(history):
+            if getattr(tool_exposure_manager, "stable_prefix", False):
+                history = tool_exposure_manager.restore_compacted_descriptions(history)
+            project = getattr(context_engine, "compact_history", None)
+            if callable(project):
+                history = project(messages, history)
+            return history
+
         return await compact_engine.compact_if_needed(CompactionInput(
             history=tuple(effective_messages), token_limit=history_token_limit,
             llm=llm, api_total_tokens=api_total_tokens,
@@ -1146,6 +1156,8 @@ async def _run_agent_loop_impl(
                                        if initial_context_transition is not None else token_limit),
             summary_projector=summary_projector,
             request_headroom_tokens=request_headroom_tokens,
+            compacted_history_projector=project_compacted_history,
+            compaction_source_projector=getattr(context_engine, "compaction_source", None),
         ))
 
     def commit_compaction(result: CompactionOutcome):
@@ -1300,7 +1312,9 @@ async def _run_agent_loop_impl(
                 if injection.kind is InjectionKind.USER_SUPPLEMENT and injected_event.status == "injected":
                     continuation_user_request = injection.content
                     await completion_checks.include_inputs(
-                        tools, CompletionContext(tuple(messages), cancelled, session_log, turn_id),
+                        tools, CompletionContext(tuple(messages), cancelled, session_log, turn_id,
+                                                 resume_scope=messages,
+                                                 skill_reader=context_engine.tool_reader if context_engine is not None else None),
                     )
                 yield injected_event
 
@@ -1321,6 +1335,8 @@ async def _run_agent_loop_impl(
                 if plan_approval_gate_enabled
                 else _FORCED_PLAN_GUIDANCE
             )
+            if getattr(tool_exposure_manager, "stable_prefix", False):
+                guidance += " Invoke plan_write through call_tool using its delivered tool_ref."
             yield MessageInjection(
                 InjectionKind.PLAN, guidance,
             ).apply(messages)
@@ -1372,6 +1388,15 @@ async def _run_agent_loop_impl(
         prepared_tools = _services.tool_engine.prepare_tools(
             is_tool_visible=browser_intent_policy.is_tool_visible,
         )
+        stable_tool_context = bool(getattr(tool_exposure_manager, "stable_prefix", False))
+
+        def append_tool_descriptions(history):
+            if stable_tool_context:
+                descriptions = tool_exposure_manager.pending_bootstrap_descriptions(visible_history=history)
+                history.extend(Message(role="user", source="runtime", name="tool_descriptions",
+                                       content=description) for description in descriptions)
+
+        append_tool_descriptions(messages)
         tool_list = list(prepared_tools.definitions)
         offered_tools_by_name = prepared_tools.targets
         budget_tools_by_name = {tool.name: tool for tool in tool_list}
@@ -1461,6 +1486,7 @@ async def _run_agent_loop_impl(
         image_manifest = None
         on_request_committed = None
         on_response_received = None
+        materialized_skill_messages = ()
         if context_engine is not None:
             output_budget = getattr(llm, "max_output_tokens", 0)
             prepare = getattr(context_engine, "aprepare_request", context_engine.prepare_request)
@@ -1498,6 +1524,7 @@ async def _run_agent_loop_impl(
                     )
                     if result.messages is not None and not result.blocked and not cancelled():
                         result.messages[0] = messages[0]
+                        append_tool_descriptions(result.messages)
                         projection = await prepare_request(result.messages)
                 if cancelled():
                     yield await cancellation_done_event()
@@ -1575,6 +1602,7 @@ async def _run_agent_loop_impl(
             if initial_context_transition is None and result.messages is not None:
                 # Rebinding is mandatory: persistent read facts do not prove
                 # the corresponding tool text survived compaction.
+                append_tool_descriptions(messages)
                 projection = await prepare_request(messages)
             if projection.blocked_reason:
                 msg = projection.blocked_reason or "Context remains above the safe input limit after bounded compaction."
@@ -1590,6 +1618,7 @@ async def _run_agent_loop_impl(
             request_overlay_tokens = projection.request_only_input_tokens
             on_request_committed = getattr(projection, "on_committed", None)
             on_response_received = getattr(projection, "on_response", None)
+            materialized_skill_messages = getattr(projection, "materialized_skill_messages", ())
             image_manifest = getattr(projection, "image_context", None)
             for notice in getattr(projection, "image_notices", ()):
                 yield ErrorEvent(message=notice, is_fatal=False, error_code="IMAGE_NOT_DELIVERED")
@@ -1619,6 +1648,32 @@ async def _run_agent_loop_impl(
         if cancelled():
             yield await cancellation_done_event()
             return
+
+        # The final Context projection may materialize bounded reference text.
+        # Commit these exact tail messages before dispatch; preview/compaction
+        # attempts must never publish their provisional projections.
+        if materialized_skill_messages:
+            messages.extend(materialized_skill_messages)
+        if (materialized_skill_messages or stable_tool_context) and session_log is not None and session_turn is not None:
+            session_log.append_unlogged_messages(
+                session_log_messages(messages), turn=session_turn, step=step + 1,
+            )
+            session_log.flush()
+
+        if stable_tool_context:
+            tool_exposure_manager.acknowledge_search_results(provider_request_messages)
+            tool_exposure_manager.ack_bootstrap_descriptions(
+                message.content for message in provider_request_messages
+                if message.role == "user" and message.source == "runtime"
+                and message.name == "tool_descriptions" and isinstance(message.content, str)
+            )
+            # A result delivered in this request can be used by its response.
+            # Refresh only execution routes; provider definitions are frozen in
+            # the session manager. A same-response search cannot expand them.
+            prepared_tools = _services.tool_engine.prepare_tools(
+                is_tool_visible=browser_intent_policy.is_tool_visible,
+            )
+            offered_tools_by_name = {**prepared_tools.targets, **prepared_tools.routed_targets}
 
         if session_log is not None and session_turn is not None:
             request_provider = getattr(llm, "provider", None)
@@ -2461,7 +2516,10 @@ async def _run_agent_loop_impl(
             ):
                 forced_plan_retry_injected = True
                 yield MessageInjection(
-                    InjectionKind.PLAN, _FORCED_PLAN_RETRY_GUIDANCE,
+                    InjectionKind.PLAN, _FORCED_PLAN_RETRY_GUIDANCE + (
+                        " Invoke plan_write through call_tool using its delivered tool_ref."
+                        if getattr(tool_exposure_manager, "stable_prefix", False) else ""
+                    ),
                 ).apply(messages)
                 elapsed = perf_counter() - step_start
                 total = perf_counter() - run_start

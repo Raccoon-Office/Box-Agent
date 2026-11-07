@@ -37,4 +37,6 @@ jobs:
           BOX_AGENT_TEST_REQUIRE_RG: "1"
         # Integration tests that need box_agent/config/config.yaml or mcp.json
         # auto-skip in CI; deselect the network-flaky timeout test.
+        # tests/ includes offline context-cache contracts and a local stdio MCP
+        # fixture. Real cache measurements are explicit manual ACP runs only.
         run: bash general_review/ci/test.sh

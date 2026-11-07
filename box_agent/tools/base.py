@@ -107,6 +107,9 @@ class ToolInvocationContext:
     budget_charge: BudgetCharge = field(default_factory=BudgetCharge)
     chat_references: Any = None
     completion_gate: Any = None
+    # Capability-owned optional check_invocation(name, arguments) callbacks.
+    # Kept off the public model schema and evaluated before tool side effects.
+    capability_gates: tuple[Any, ...] = ()
 
 
 class Tool:

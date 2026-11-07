@@ -41,9 +41,25 @@ async def invoke_tool_once(
     *,
     approved_permission_request: dict[str, Any] | None = None,
     on_invoke: Callable[[], None] | None = None,
+    admission_check: Callable[[], str | None] | None = None,
 ) -> ToolResult:
     """Invoke the validated tool interface once, preserving legacy overrides."""
     context = context or ToolInvocationContext()
+    for gate in context.capability_gates:
+        check = getattr(gate, "check_invocation", None)
+        if check is None:
+            continue
+        try:
+            issue = await check(tool.name, arguments)
+        except Exception as exc:
+            result = ToolResult(success=False, error=f"CAPABILITY_CHECK_FAILED: {exc}")
+        else:
+            if issue is None:
+                continue
+            result = ToolResult(success=False, error=f"{issue.code}: {issue.message}")
+        result._invocation_rejected = True
+        context.budget_charge.release_unexecuted()
+        return result
     guard = context.chat_references
     allowed_deletions = frozenset()
     if guard is not None:
@@ -75,6 +91,11 @@ async def invoke_tool_once(
             return tool._invalid_arguments_result(issues)
         if not context.budget_charge.reserve(ledgers):
             return ToolResult(success=False, error="DELEGATED_BUDGET_EXHAUSTED: ancestor execution quota exhausted")
+    if admission_check is not None:
+        error = admission_check()
+        if error:
+            context.budget_charge.release_unexecuted()
+            return ToolResult(success=False, error=error)
     try:
         if approved_permission_request is not None:
             _approve_tool_permission(tool, approved_permission_request)

@@ -154,7 +154,8 @@ def has_human_browser_handoff_intent(user_text: str | None) -> bool:
 
 def has_recent_successful_browser_context(messages: Sequence[Message]) -> bool:
     """Return whether the prior turn successfully used the real-browser context."""
-    user_indices = [index for index, message in enumerate(messages) if message.role == "user"]
+    user_indices = [index for index, message in enumerate(messages)
+                    if message.role == "user" and message.source == "user"]
     if len(user_indices) < 2:
         return False
 

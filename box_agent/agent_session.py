@@ -184,6 +184,7 @@ class AgentSession:
                 and config.tools.enable_mcp
                 and config.tools.mcp.deferred_loading_enabled
             ),
+            tool_interface_version=1 if utility else settings.tool_interface_version,
             session_log=session_log,
             **({"enable_builtin_tools": False} if utility else {}),
             **({"plugins": plugins} if plugins else {}),

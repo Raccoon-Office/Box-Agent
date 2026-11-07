@@ -268,7 +268,8 @@ async def test_acp_profile_session_sends_prompt_within_explicit_window(
 
     async def stream(client, messages, tools=None, **kwargs):
         if kwargs.get("call_kind") != "context_summary":
-            main_requests.append((client.context_window, messages[-1].content))
+            main_requests.append((client.context_window, next(m.content for m in messages
+                if m.role == "user" and m.source == "user" and user_text in str(m.content))))
         yield StreamEvent(type="text", delta="done")
         yield StreamEvent(type="finish", finish_reason="stop")
 

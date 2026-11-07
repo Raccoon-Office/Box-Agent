@@ -2268,9 +2268,13 @@ async def run_agent(
                 if agent_session.skill_selector is None:
                     _sync_cli_cache_fingerprint_context()
                     return ()
-                new_prompt = agent_session.skill_selector.update(user_input, refresh=False)
-                if new_prompt is not None:
-                    _set_agent_system_prompt(new_prompt)
+                update_catalog = getattr(agent, "update_skill_catalog", None)
+                if callable(update_catalog):
+                    update_catalog(agent_session.skill_selector, user_input, refresh=False)
+                else:
+                    new_prompt = agent_session.skill_selector.update(user_input, refresh=False)
+                    if new_prompt is not None:
+                        _set_agent_system_prompt(new_prompt)
                 _sync_cli_cache_fingerprint_context()
                 return agent_session.skill_selector.matched_skill_names
 

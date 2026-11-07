@@ -212,6 +212,12 @@ def crowded_history(runtime, *, prior_read=False, summary_fits=False):
 
 @pytest.mark.asyncio
 async def test_loop_compacts_once_and_reprojects_without_trusting_old_read_facts(runtime, monkeypatch):
+    from box_agent.kernel import context_engine
+
+    # Force the summary-only instruction over budget independently of the
+    # evolving tool schemas, which are not sent to the summary model.
+    monkeypatch.setattr(context_engine, "_SUMMARY_REQUEST",
+                        context_engine._SUMMARY_REQUEST + "\n" + "summary instruction " * 512)
     history = crowded_history(runtime, prior_read=True)
     runtime.select(["demo"])
     tool = GetSkillTool(runtime.loader)

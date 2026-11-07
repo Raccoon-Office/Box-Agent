@@ -1,0 +1,2 @@
+PHASE_ONE_READY
+下一步只调用 read_file 读取 phase-2.txt。

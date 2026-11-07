@@ -45,6 +45,7 @@ class PreparedContext:
     image_notices: tuple[str, ...] = ()
     required_reference_tokens: int = 0
     input_context: dict[str, Any] | None = None
+    materialized_skill_messages: tuple[Message, ...] = ()
 
 
 class ModelInputGuard(ABC):
@@ -182,6 +183,19 @@ class DefaultContextEngine:
     def tool_reader(self):
         return self._read_reference if self.references is not None else None
 
+    def compact_history(self, original: list[Message], compacted: list[Message]) -> list[Message]:
+        """Apply resource retention only after the existing compaction decision."""
+        if self.references is None:
+            return compacted
+        definitions = self.prepared_tools.definitions if self.prepared_tools is not None else ()
+        budget = skill_reference_budget_chars(compacted, definitions, self._token_limit,
+                                             self._output_tokens, llm=self.llm)
+        return self.references.compact_history(original, compacted, budget_chars=budget)
+
+    def compaction_source(self, messages: list[Message]) -> list[Message]:
+        """Keep method bodies out of both generated and deterministic summaries."""
+        return self.references.compaction_source(messages) if self.references is not None else messages
+
 
     def reserve_followup(self, blocks: list[dict[str, Any]]) -> None:
         """Reserve already accepted request-only material during a serial batch."""
@@ -305,6 +319,7 @@ class DefaultContextEngine:
                 reserve_tokens=self._transient_reserve_tokens,
             )
         references: tuple[dict[str, Any], ...] = ()
+        materialized_skill_messages: tuple[Message, ...] = ()
         self._request_reference_tokens = 0
         blocked_reason = None
         budget_blocked = False
@@ -328,6 +343,15 @@ class DefaultContextEngine:
                 ),
             )
             context_messages, references = projection.messages, projection.references
+            materialized_skill_messages = projection.materialized_messages
+            if materialized_skill_messages:
+                # Ephemeral request extras must follow the persisted tail so
+                # the next request retains the same historical prefix.
+                count = len(materialized_skill_messages)
+                tail = context_messages[-count:]
+                rest = context_messages[:-count]
+                insertion = min(len(messages), len(rest))
+                context_messages = [*rest[:insertion], *tail, *rest[insertion:]]
             blocked_reason = projection.blocked_reason
             budget_blocked = projection.budget_blocked
             reader_required = projection.reader_required
@@ -354,7 +378,14 @@ class DefaultContextEngine:
                     acknowledge()
 
                 on_committed = commit_materialized
-        if (not blocked_reason and base_input_tokens + self._request_reference_tokens > token_limit):
+        actual_input_tokens = base_input_tokens + self._request_reference_tokens
+        if getattr(self.references.runtime if self.references else None, "append_only_context", False):
+            actual_input_tokens = request_input_tokens(
+                [*context_messages, *((transient_message,) if transient_message is not None else ())],
+                prepared_tools.definitions, llm=self.llm,
+            ) + self._transient_reserve_tokens
+        if (not blocked_reason and max(base_input_tokens + self._request_reference_tokens,
+                                       actual_input_tokens) > token_limit):
             blocked_reason = "Model input exceeds the safe context budget. Compact context before retrying."
             budget_blocked = True
             on_committed = None
@@ -447,6 +478,6 @@ class DefaultContextEngine:
             reader_required,
             image_projection.manifest if image_projection else None,
             image_projection.notices if image_projection else (),
-            required_reference_tokens, input_manifest,
+            required_reference_tokens, input_manifest, materialized_skill_messages,
         )
         return self._input_guard.prepare_context(projection) if self._input_guard is not None else projection

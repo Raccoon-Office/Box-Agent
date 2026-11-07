@@ -60,7 +60,8 @@ async def test_session_uses_supplied_runtime_for_ordinary_selected_material(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["context_append", "context_flush"])
-async def test_session_retry_preserves_restored_material_after_uncommitted_request(tmp_path, fault):
+@pytest.mark.parametrize("version", [1, 2])
+async def test_session_retry_preserves_restored_material_after_uncommitted_request(tmp_path, fault, version):
     log = SessionLog.create(tmp_path / "sessions", session_id="restore", cwd=tmp_path)
     log.append("skill/change", {"skills": [{
         "name": "demo", "sha256": sha256(BODY.encode()).hexdigest(), "loadOrder": 1,
@@ -69,8 +70,10 @@ async def test_session_retry_preserves_restored_material_after_uncommitted_reque
     provider = CapturingProvider()
     runtime = SkillRuntime(None)
     try:
+        config = session_config(tmp_path)
+        config.agent.tool_interface_version = version
         session = AgentSession.create(
-            config=session_config(tmp_path), llm_client=provider, system_prompt="BASE", tools=[],
+            config=config, llm_client=provider, system_prompt="BASE", tools=[],
             skill_runtime=runtime, session_log=RecoverableStore(log, fault),
         )
         session.agent.restore_active_skill_instructions([
@@ -90,7 +93,10 @@ async def test_session_retry_preserves_restored_material_after_uncommitted_reque
         session.agent.clear_active_skill_instructions()
         session.agent.add_user_message("Continue without that method")
         _ = [event async for event in session.run_events()]
-        assert BODY not in str(provider.requests[-1])
+        # V2 keeps delivered text as historical context after deactivation;
+        # v1 retains its request-only projection behavior.
+        assert (BODY in str(provider.requests[-1])) is (version == 2)
+        assert runtime.current_active_names == ()
         assert log.replay().skills == []
     finally:
         log.close()
