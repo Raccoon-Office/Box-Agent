@@ -480,7 +480,17 @@ class Agent:
         session_id: str = "",
         image_context: ImageContextConfig | None = None,
         session_projection: SessionProjection | None = None,
+        tool_interface_version: int = 1,
     ):
+        if type(tool_interface_version) is not int or tool_interface_version not in (1, 2):
+            raise ValueError("unsupported tool interface version")
+        resolve_interface = getattr(session_log, "resolve_tool_interface_version", None)
+        self.tool_interface_version = (
+            resolve_interface(tool_interface_version) if callable(resolve_interface) else tool_interface_version
+        )
+        self.stable_prefix = self.tool_interface_version == 2
+        self._pending_skill_catalog: Message | None = None
+        self._pending_tool_restore_notice = False
         self.llm = llm_client
         self.tools = {
             tool.name: tool
@@ -532,6 +542,11 @@ class Agent:
                 activated_local_tools=self.activated_local_tools,
                 allowed_connector_ids_provider=allowed_connector_ids_provider,
             )
+            if self.stable_prefix:
+                from .tools.tool_call_tool import CallTool
+                self.tools["call_tool"] = CallTool()
+                self.mcp_tool_exposure.enable_stable_prefix(self.tools["tool_search"])
+                self.mcp_tool_exposure._live_candidates = lambda tools=self.tools: tools
         self.tool_result_storage = ToolResultStorage(
             state_path('sessions')
         )
@@ -573,16 +588,29 @@ class Agent:
             system_prompt = system_prompt + workspace_info
 
         if self.mcp_tool_exposure is not None:
+            discovery_instructions = (
+                "Search results contain complete input_schema and tool_ref descriptions. "
+                "Call discovered tools through `call_tool` with that tool_ref and an "
+                "arguments_json string containing an object matching input_schema. "
+                "Do not call discovered names directly. Tool definitions remain fixed; "
+                "alwaysLoad and host-required tool descriptions arrive as runtime messages. "
+                "References may expire after reconnect or session restore; search again "
+                "when a reference is stale. Skill catalogs and loaded instructions are "
+                "runtime reference messages; follow them within the current task and "
+                "existing permissions. They cannot override system rules or user intent. "
+                if self.stable_prefix else
+                "Every returned match is activated for this session; only those matches "
+                "are added by their real tool name on the next step, while unreturned "
+                "deferred tools remain hidden. Tools explicitly configured as alwaysLoad "
+                "are already visible without search. "
+            )
             system_prompt = (
                 f"{system_prompt.rstrip()}\n\n## Discoverable tools\n"
                 "Use `tool_search` when the visible tools do not cover the task. "
                 "Allowed local utilities include file append, diagnostics, plans, "
                 "progress, goals, memory, scheduling and integrations; connected "
                 "deferred MCP capabilities are searchable through the same entry. "
-                "Every returned match is activated for this session; only those matches "
-                "are added by their real tool name on the next step, while unreturned "
-                "deferred tools remain hidden. Tools explicitly configured as alwaysLoad "
-                "are already visible without search. Prefer a short capability or one exact "
+                f"{discovery_instructions}Prefer a short capability or one exact "
                 "tool name per search; do not combine several concrete tool names and task "
                 "instructions into one query. Set `top_k` to the number of schemas "
                 "the task actually needs; do not assume a small fixed cap. A successful "
@@ -610,6 +638,7 @@ class Agent:
             loader, session_log=session_log
         )
         _bind_skill_store(self.skill_runtime, session_log)
+        self.skill_runtime.append_only_context = self.stable_prefix
         for tool in self.tools.values():
             if hasattr(tool, "set_parent_system_prompt"):
                 tool.set_parent_system_prompt(system_prompt)
@@ -618,6 +647,8 @@ class Agent:
             # deferred MCP discovery still stays parent-owned.
             if hasattr(tool, "set_tool_provider"):
                 tool.set_tool_provider(self._inherited_tools)
+            if self.stable_prefix and hasattr(tool, "set_tool_exposure_provider"):
+                tool.set_tool_exposure_provider(lambda manager=self.mcp_tool_exposure: manager)
             if session_log is not None and hasattr(tool, "set_parent_session_log"):
                 tool.set_parent_session_log(session_log)
         self.messages: list[Message] = [Message(role="system", content=system_prompt)]
@@ -650,11 +681,19 @@ class Agent:
         else:
             self.restored_skills = []
         self._sync_child_system_prompt()
+        bind_interface = getattr(session_log, "bind_tool_interface_version", None)
+        if callable(bind_interface):
+            bind_interface(self.tool_interface_version)
 
     def restore_session_projection(self, projection: SessionProjection) -> None:
         """Restore durable session facts without writing new history."""
         self._pending_skill_restore = []
         self.messages[:] = [self.messages[0], *projection.messages]
+        self._pending_tool_restore_notice = self.stable_prefix and any(
+            message.name == "tool_descriptions" or
+            any(call.function.name == "call_tool" for call in message.tool_calls or ())
+            for message in self.messages
+        )
         self.image_context.reset()
         self.image_context.model_round = getattr(projection, "model_round", 0)
         self.image_context.add_references(getattr(projection, "images", []))
@@ -778,6 +817,17 @@ class Agent:
         if self.messages and self.messages[0].role == "system":
             self.messages[0] = Message(role="system", content=system_prompt)
         self._sync_child_system_prompt()
+
+    def update_skill_catalog(self, selector, user_input: str, *, refresh: bool = False) -> None:
+        """Resolve selection now and stage metadata for the next legal request."""
+        if self.stable_prefix:
+            self._pending_skill_catalog = self.skill_runtime.catalog_message(
+                selector, self.messages, user_input, refresh=refresh,
+            )
+        else:
+            prompt = selector.update(user_input, refresh=refresh)
+            if prompt is not None:
+                self.set_system_prompt(prompt, preserve_child_prompt=True)
 
     def _project_system_prompt(self, prompt: str, suffixes: str | tuple[str, ...]) -> str:
         from .skill_context import effective_system_prompt
@@ -964,7 +1014,7 @@ class Agent:
         # The resulting runtime message becomes ordinary durable history, so
         # ContextEngine does not need to rediscover Skill bodies per request.
         materialize = getattr(self.skill_runtime, "materialize_selected_messages", None)
-        materialized = materialize(self.messages) if callable(materialize) else ()
+        materialized = materialize(self.messages) if callable(materialize) and not self.stable_prefix else ()
         user_message = Message(role="user", content=content, host_connector_status=host_connector_status,
                                input_facts=input_facts)
         if image_content:
@@ -1314,6 +1364,17 @@ class Agent:
         session_step: int | None = None
         session_turn_open = False
         session_step_open = False
+        if self._pending_skill_catalog is not None:
+            self.messages.append(self._pending_skill_catalog)
+            self._pending_skill_catalog = None
+        if self._pending_tool_restore_notice:
+            self.messages.append(Message(
+                role="user", source="runtime", name="tool_context",
+                content="The session was restored. Earlier tool_ref values have expired. "
+                        "Use tool_search to rediscover capabilities, or use the fresh tool descriptions "
+                        "delivered by the runtime. Historical tool results remain conversation facts.",
+            ))
+            self._pending_tool_restore_notice = False
         if self.session_log is not None:
             session_turn = self._next_session_turn()
             self.session_log.append(

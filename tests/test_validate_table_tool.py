@@ -608,12 +608,16 @@ async def test_declared_file_deletion_completes_only_when_the_file_is_actually_g
     )]
     if remove:
         deletion = next(e for e in events if isinstance(e, ToolCallResult) and e.tool_name == bash.name)
-        assert deletion.success, deletion.error
-        assert any("chat_reference_delete" in request for request in approvals)
+        assert deletion.success is declared
+        if declared:
+            assert any("chat_reference_delete" in request for request in approvals)
+        else:
+            assert "TABLE_VALIDATION_REQUIRED_BEFORE_EXECUTION" in deletion.error
+            assert not approvals
     assert next(e for e in events if isinstance(e, DoneEvent)).stop_reason == (
         StopReason.END_TURN if declared and remove else StopReason.ERROR
     )
-    assert path.exists() is not remove
+    assert path.exists() is not (declared and remove)
     if declared:
         result = next(e for e in events if isinstance(e, ToolCallResult) and e.tool_name == tool.name)
         assert result.success and result.raw_output["operation_ready"]

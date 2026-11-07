@@ -72,12 +72,19 @@ class WorkspaceSetup:
 
 
 @dataclass(frozen=True)
+class FollowUpTurn:
+    query: str
+    prompt: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class CaseMetadata:
     """Explicit ACP controls supported by offline cases; identity stays runner-owned."""
 
     session: Mapping[str, Any] = field(default_factory=dict)
     prompt: Mapping[str, Any] = field(default_factory=dict)
     allowed_directories: tuple[str, ...] = ()
+    follow_up_turns: tuple[FollowUpTurn, ...] = ()
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> "CaseMetadata":
@@ -111,7 +118,20 @@ class CaseMetadata:
             for path in directories
         ):
             raise ValueError("case metadata: session_allowed_directories must be absolute paths")
-        return cls(session=session, prompt=prompt, allowed_directories=tuple(directories))
+        turns = record.get("follow_up_turns", [])
+        if not isinstance(turns, list):
+            raise ValueError("case metadata: follow_up_turns must be a list")
+        follow_up_turns = []
+        for turn in turns:
+            if not isinstance(turn, dict) or set(turn) - {"query", "prompt_meta"}:
+                raise ValueError("case metadata: unsupported follow-up turn fields or type")
+            query = turn.get("query")
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError("case metadata: follow-up query must be a non-empty string")
+            controls = cls.from_record({"prompt_meta": turn.get("prompt_meta", {})})
+            follow_up_turns.append(FollowUpTurn(query=query, prompt=controls.prompt))
+        return cls(session=session, prompt=prompt, allowed_directories=tuple(directories),
+                   follow_up_turns=tuple(follow_up_turns))
 
 
 @dataclass(frozen=True)

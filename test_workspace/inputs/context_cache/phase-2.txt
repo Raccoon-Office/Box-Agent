@@ -1,0 +1,7 @@
+按顺序执行，每一步等待上一轮结果再继续：
+1. 调用 tool_search，tool_names=["append_file"]，精确发现此工具。
+2. 使用返回的 tool_ref 通过 call_tool 给 probe-result.txt 追加 tool-loaded-ok 和一个末尾换行。arguments_json 严格按返回的 schema 编码。
+3. 调用 read_file 读取 probe-result.txt，核验新增的那一行。
+4. 调用 list_skills，query="cache-probe-method"，读取目录元数据。
+5. 调用 get_skill，skill_name="cache-probe-method"。不要提前读取 Skill 本地路径。执行正文要求的写入和读回验证。
+6. 完成 Skill 验证后，只调用 read_file 读取 phase-3.txt，继续其中步骤。

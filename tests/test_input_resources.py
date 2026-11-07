@@ -89,7 +89,7 @@ async def test_model_receives_complete_file_facts_and_user_text_unchanged(tmp_pa
         facts, _ = json.JSONDecoder().raw_decode(model_text[model_text.index('{"files":'):])
         assert [item["name"] for item in facts["files"]] == [path.name for path in paths]
         assert host._sessions[session.session_id].source_text == text
-        assert text in str(llm.requests[-1][-1].content)
+        assert text in str(next(m.content for m in reversed(llm.requests[-1]) if m.role == "user" and m.source == "user"))
     finally:
         await host.aclose()
 
@@ -116,8 +116,8 @@ async def test_missing_file_cannot_accept_or_revise_history_and_same_id_can_retr
         path.write_text("random-value,73")
         await host.prompt(**acp_params(req))
         assert log.has_turn_binding("t2")
-        assert "original" not in str(llm.requests[-1][-1].content)
-        assert path.name in str(llm.requests[-1][-1].content)
+        assert "original" not in str(next(m.content for m in reversed(llm.requests[-1]) if m.role == "user" and m.source == "user"))
+        assert path.name in str(next(m.content for m in reversed(llm.requests[-1]) if m.role == "user" and m.source == "user"))
     finally:
         await host.aclose()
 

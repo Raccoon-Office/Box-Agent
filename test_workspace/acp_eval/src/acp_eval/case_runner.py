@@ -22,7 +22,7 @@ from acp_eval import SCHEMA_VERSION
 from acp_eval.effect_client import EffectEvaluationConfig, evaluate_attempt
 from acp_eval.ids import new_attempt_id
 from acp_eval.lifecycle import ProcessRecorder, drain_stream, stop_process
-from acp_eval.models import AttemptManifest, CaseMetadata, RunResult, WorkspaceSetup
+from acp_eval.models import AttemptManifest, CaseMetadata, FollowUpTurn, RunResult, WorkspaceSetup
 from acp_eval.protocol import ACPAccumulator, ProtocolRecorder
 from acp_eval.snapshots import build_artifact_inventory, write_snapshot
 from acp_eval.stderr_scan import scan_stderr, summarize_stderr
@@ -71,6 +71,7 @@ class _AttemptState:
     phase: str = "starting"
     timeout_details: dict[str, Any] | None = None
     prompt_turn_id: str | None = None
+    turns: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _iso_now() -> str:
@@ -267,6 +268,7 @@ def _resolve_model_binding(
 def _prompt_params(
     session_id: str, query: str, case_id: str, metadata: CaseMetadata | None = None,
     input_files: Sequence[Path] = (),
+    *, turn_number: int = 1,
 ) -> dict[str, Any]:
     metadata = metadata or CaseMetadata()
     prompt: list[dict[str, Any]] = [{"type": "text", "text": query}]
@@ -297,7 +299,7 @@ def _prompt_params(
         "sessionId": session_id,
         "prompt": prompt,
         "_meta": {
-            "title": "acp", "turnId": f"eval-acp-{case_id}-turn-1", **metadata.prompt,
+            "title": "acp", "turnId": f"eval-acp-{case_id}-turn-{turn_number}", **metadata.prompt,
         },
     }
 
@@ -434,30 +436,43 @@ async def _exchange(
         raise RuntimeError("ACP session/new response has no sessionId")
     state.acp_session_id = acp_session_id
 
-    state.phase = "prompt"
-    prompt_params = _prompt_params(acp_session_id, query, case_id, metadata, input_files)
-    state.prompt_turn_id = prompt_params["_meta"]["turnId"]
-    await _send(
-        process,
-        protocol,
-        {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "session/prompt",
+    metadata = metadata or CaseMetadata()
+    turns = (FollowUpTurn(query=query, prompt=metadata.prompt), *metadata.follow_up_turns)
+    for number, turn in enumerate(turns, 1):
+        state.phase = "prompt"
+        prompt_params = _prompt_params(
+            acp_session_id, turn.query, case_id, CaseMetadata(prompt=turn.prompt),
+            input_files if number == 1 else (), turn_number=number,
+        )
+        state.prompt_turn_id = prompt_params["_meta"]["turnId"]
+        assistant_offset = len(accumulator.assistant_text)
+        accumulator.token_usage = None
+        accumulator.final_response = None
+        accumulator.final_response_metadata = None
+        observed = {"turn_id": state.prompt_turn_id, "request_id": number + 2,
+                    "started_at": _iso_now(), "status": "running"}
+        state.turns.append(observed)
+        if metadata.follow_up_turns:
+            atomic_write_json(protocol.attempt_dir / "turns.json", state.turns)
+        await _send(process, protocol, {
+            "jsonrpc": "2.0", "id": number + 2, "method": "session/prompt",
             "params": prompt_params,
-        },
-    )
-    response = await _read_until_response(
-        process,
-        stdout_reader,
-        protocol,
-        accumulator,
-        process_recorder,
-        state,
-        3,
-        deadline,
-    )
-    state.acp_status = _response_status(response)
+        })
+        response = await _read_until_response(
+            process, stdout_reader, protocol, accumulator, process_recorder, state,
+            number + 2, deadline,
+        )
+        state.acp_status = _response_status(response)
+        observed.update(finished_at=_iso_now(), status=state.acp_status,
+                        assistant_text=accumulator.assistant_text[assistant_offset:],
+                        token_usage=accumulator.token_usage, response=response)
+        process_recorder.write("acp.turn_completed", turn_id=state.prompt_turn_id,
+                               status=state.acp_status)
+        if metadata.follow_up_turns:
+            atomic_write_json(protocol.attempt_dir / "turns.json", state.turns)
+            write_snapshot(workspace, protocol.attempt_dir / f"files-after-turn-{number}.json")
+        if state.acp_status != "completed":
+            break
     process_recorder.write("acp.completed", status=state.acp_status)
 
 
@@ -680,6 +695,12 @@ async def _run_process(
             process_recorder,
             state,
         )
+        if metadata and metadata.follow_up_turns:
+            if state.turns and state.turns[-1]["status"] == "running":
+                state.turns[-1].update(status=state.acp_status, finished_at=_iso_now(),
+                                       error=state.error)
+            _try_finalize("turns", lambda: atomic_write_json(attempt_dir / "turns.json", state.turns),
+                          process_recorder, state)
 
 
 def _process_events(path: Path) -> list[dict[str, Any]]:
@@ -896,6 +917,7 @@ def _identity_validation(
                 issues.append("identity_mismatch:run.json:acp_session_id")
 
     expected_turn_id: str | None = None
+    request_turn_ids: dict[Any, str] = {}
     for message in protocol_sent:
         method = message.get("method")
         params = message.get("params")
@@ -920,6 +942,7 @@ def _identity_validation(
             turn_id = metadata.get("turnId") if isinstance(metadata, Mapping) else None
             if isinstance(turn_id, str):
                 expected_turn_id = turn_id
+                request_turn_ids[message.get("id")] = turn_id
 
     run_document = _read_json_mapping(attempt_dir / "run.json")
     if run_document is not None and expected_turn_id is not None:
@@ -974,7 +997,7 @@ def _identity_validation(
                 if (
                     expected_turn_id is not None
                     and isinstance(observed_turn, str)
-                    and observed_turn != expected_turn_id
+                    and observed_turn not in request_turn_ids.values()
                 ):
                     issues.append("identity_mismatch:protocol:turn_id")
 
@@ -1003,7 +1026,7 @@ def _identity_validation(
         if (
             expected_turn_id is not None
             and isinstance(observed_turn, str)
-            and observed_turn != expected_turn_id
+            and observed_turn != request_turn_ids.get(message.get("id"), expected_turn_id)
         ):
             issues.append("identity_mismatch:protocol:turn_id")
 
@@ -1138,6 +1161,7 @@ def _run_payload(
             "error": state.error,
             "timeout_budget": state.timeout_budget,
             "timeout_details": state.timeout_details,
+            "turns": state.turns,
         }
     )
     return payload

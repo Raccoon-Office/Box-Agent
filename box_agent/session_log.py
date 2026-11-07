@@ -69,6 +69,7 @@ KNOWN_EVENT_TYPES = frozenset(
         "step/end",
         "user/message",
         "input/contract",
+        "tools/contract",
         "input/adopted",
         "assistant/chunk",
         "assistant/message",
@@ -306,6 +307,8 @@ class SessionLog:
         self._lock_handle = lock_handle
         self._closed = False
         self._failed = False
+        self._newly_created = False
+        self._bound_tool_interface_version: int | None = None
         # Keep the actual objects alive until commit; an id-only map could
         # attach an abandoned image to an unrelated Message after id reuse.
         self._pending_message_metadata: dict[int, tuple[Message, dict[str, Any]]] = {}
@@ -319,6 +322,30 @@ class SessionLog:
         """Return detached committed and pending events in log order."""
 
         return tuple(deepcopy(self._events))
+
+    def resolve_tool_interface_version(self, requested: int) -> int:
+        """Read the protocol without publishing state during construction."""
+        if type(requested) is not int or requested not in (1, 2):
+            raise ValueError("unsupported tool interface version")
+        contracts = [event["data"].get("version") for event in self._events
+                     if event["type"] == "tools/contract"]
+        if contracts:
+            if any(type(version) is not int or version not in (1, 2)
+                   for version in contracts) or len(set(contracts)) != 1:
+                raise SessionLogIncompatible("session tool interface version is unsupported")
+            return contracts[0]
+        if self._bound_tool_interface_version is not None:
+            return self._bound_tool_interface_version
+        return requested if self._newly_created else 1
+
+    def bind_tool_interface_version(self, requested: int) -> int:
+        """Pin v2 before its first request; legacy logs remain backward readable."""
+        version = self.resolve_tool_interface_version(requested)
+        if version == 2 and not any(event["type"] == "tools/contract" for event in self._events):
+            self.append("tools/contract", {"version": version})
+            self.flush()
+        self._bound_tool_interface_version = version
+        return version
 
     def current_revision(self) -> str:
         """Read the revision without exposing or copying the event history."""
@@ -471,7 +498,9 @@ class SessionLog:
         except BaseException:
             _release_writer_lock(lock_handle)
             raise
-        return cls(path, header, [], handle, lock_handle)
+        session = cls(path, header, [], handle, lock_handle)
+        session._newly_created = True
+        return session
 
     @classmethod
     def open(
@@ -587,6 +616,13 @@ class SessionLog:
                         raise SessionLogCorrupted(
                             f"session log record {seq + 1} has invalid event data"
                         )
+                    if event_type == "tools/contract":
+                        version = event["data"].get("version")
+                        if type(version) is not int or version not in (1, 2):
+                            raise SessionLogIncompatible("session tool interface version is unsupported")
+                        if any(previous["type"] == "tools/contract" and
+                               previous["data"]["version"] != version for previous in events):
+                            raise SessionLogIncompatible("session tool interface version cannot change")
                     events.append(event)
                 session = cls(path, header, events, handle, lock_handle)
                 projection = session.replay() if project else None

@@ -59,7 +59,8 @@ def test_full_suite_entries_share_bounded_parallelism_and_original_coverage(fake
         result = _run(PREFLIGHT if entry == "preflight" else TEST_SCRIPT)
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line)["args"] for line in fake_uv.read_text().splitlines()]
-    pytest_call, = [args for args in calls if args[:2] == ["run", "pytest"]]
+    pytest_call, acp_call = [args for args in calls if args[:2] == ["run", "pytest"]]
+    assert acp_call == ["run", "pytest", "test_workspace/acp_eval/tests", "-q", "--tb=short"]
     assert pytest_call[:3] == ["run", "pytest", "tests/"]
     assert pytest_call[pytest_call.index("-n") + 1] == "auto"
     assert "--maxprocesses=4" in pytest_call
@@ -73,9 +74,9 @@ def test_full_suite_entries_share_bounded_parallelism_and_original_coverage(fake
         assert calls[0] == ["sync", "--frozen", "--all-extras"]
         assert calls[1] == ["run", "python", "-m", "compileall", "-q", "box_agent"]
         assert calls[2] == pytest_call
-        assert calls[3:] == [["build"]]
+        assert calls[3:] == [acp_call, ["build"]]
     else:
-        assert calls == [pytest_call]
+        assert calls == [pytest_call, acp_call]
 
 
 @pytest.mark.parametrize("failed_gate,count", [("sync", 1), ("compileall", 2), ("pytest", 3)])
@@ -92,5 +93,6 @@ def test_full_suite_preserves_standard_serial_worker_override(fake_uv, monkeypat
     monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "0")
     result = _run(TEST_SCRIPT)
     assert result.returncode == 0, result.stderr
-    call, = [json.loads(line) for line in fake_uv.read_text().splitlines()]
-    assert call["workers"] == "0"
+    calls = [json.loads(line) for line in fake_uv.read_text().splitlines()]
+    assert len(calls) == 2
+    assert all(call["workers"] == "0" for call in calls)

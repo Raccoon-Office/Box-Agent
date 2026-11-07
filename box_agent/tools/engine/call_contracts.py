@@ -102,6 +102,8 @@ class ToolCallRecord:
     parallel: bool = False
     invoked: bool = False
     executed: bool = False
+    routed: bool = False
+    resolution_error: str | None = None
     hook_rejection: dict[str, Any] | None = None
     artifact_evidence_text: str | None = None
     artifact_evidence_files: tuple[Path, ...] = ()

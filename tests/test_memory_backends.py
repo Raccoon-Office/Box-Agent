@@ -691,7 +691,8 @@ async def test_acp_autopilot_saves_latest_user_request_with_session_identity(tmp
     from tests.test_acp import DummyConn, GoalAutopilotCompleteLLM
 
     config = session_config(tmp_path)
-    config.agent = backend_settings(tmp_path, max_steps=3, goal_autopilot_max_turns=2)
+    # GoalAutopilotCompleteLLM scripts direct legacy goal_write calls.
+    config.agent = backend_settings(tmp_path, max_steps=3, goal_autopilot_max_turns=2, tool_interface_version=1)
     config.agent.enable_memory_extraction = False
     host = BoxACPAgent(DummyConn(), config, GoalAutopilotCompleteLLM(), [], "system")
     try:
@@ -1011,7 +1012,8 @@ async def test_memsense_read_rules_reach_model_tool_message_but_not_system_promp
                 yield StreamEvent(type="text", delta="已读取")
                 yield StreamEvent(type="finish", finish_reason="stop")
 
-    session, _ = await managed_session(tmp_path)
+    # ReadThenAnswerLLM scripts a direct legacy memory_read call.
+    session, _ = await managed_session(tmp_path, backend_settings(tmp_path, tool_interface_version=1))
     llm = ReadThenAnswerLLM()
     try:
         activated = await session.agent.tools["tool_search"].execute(tool_names=["memory_read", "memory_write", "memory_edit"])

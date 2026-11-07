@@ -45,6 +45,8 @@ class CompactionInput:
     summary_input_token_limit: int | None = None
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None
     request_headroom_tokens: int | None = None
+    compacted_history_projector: Callable[[list[Message]], list[Message]] | None = None
+    compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None
 
 
 @dataclass(frozen=True)

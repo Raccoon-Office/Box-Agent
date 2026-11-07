@@ -94,6 +94,53 @@ def run_mode(tmp_path: Path, mode: str, timeout: float = 2.0):
     return result, attempts[0], config, record
 
 
+@pytest.mark.parametrize("mode, statuses, completeness", [
+    ("multi-turn", ["completed"] * 3, "complete"),
+    ("multi-turn-error", ["completed", "error"], "complete"),
+    ("multi-turn-timeout", ["completed", "timeout"], "complete"),
+    ("multi-turn-wrong-id", ["completed"] * 3, "corrupt"),
+])
+def test_follow_up_turns_share_session_and_preserve_each_result(tmp_path, mode, statuses, completeness):
+    config = make_config(tmp_path, mode, timeout=0.5 if mode.endswith("timeout") else 2.0)
+    result = run_case({
+        "id": mode, "query": "analyze", "input_files": [],
+        "prompt_meta": {"selected_skill_names": ["analysis"]},
+        "follow_up_turns": [
+            {"query": "make slides", "prompt_meta": {"selected_skill_names": ["slides"]}},
+            {"query": "return to analysis"},
+        ],
+    }, config)
+    attempt = next((config.evaluation_dir / "cases" / mode / "attempts").iterdir())
+    turns = json.loads((attempt / "turns.json").read_text())
+    assert [t["status"] for t in turns] == statuses
+    assert result.acp_status == statuses[-1]
+    assert result.completeness_status == completeness
+    sent = [row["message"] for row in read_jsonl(attempt / "protocol.jsonl") if row["direction"] == "sent"]
+    assert sum(m.get("method") == "session/new" for m in sent) == 1
+    prompts = [m for m in sent if m.get("method") == "session/prompt"]
+    assert [m["id"] for m in prompts] == list(range(3, 3 + len(statuses)))
+    assert [m["params"]["_meta"]["turnId"] for m in prompts] == [
+        f"eval-acp-{mode}-turn-{i}" for i in range(1, 1 + len(statuses))]
+    assert prompts[1]["params"]["_meta"]["selected_skill_names"] == ["slides"]
+    if len(prompts) == 3:
+        assert "selected_skill_names" not in prompts[2]["params"]["_meta"]
+    assert turns[0]["assistant_text"] == "answer-1"
+    assert turns[0]["token_usage"]["promptTokens"] == 10
+    assert [f["path"] for f in read_json(attempt / "files-after-turn-1.json")["files"]] == ["turn-1.txt"]
+    assert read_json(attempt / "run.json")["turns"] == turns
+
+
+@pytest.mark.parametrize("turns", [None, {}, ["text"], [{}], [{"query": " "}],
+    [{"query": "ok", "session_meta": {}}],
+    [{"query": "ok", "prompt_meta": {"turnId": "spoof"}}],
+    [{"query": "ok", "prompt_meta": {"selected_skill_names": "bad"}}],
+])
+def test_follow_up_turn_metadata_rejects_invalid_or_runner_owned_fields(turns):
+    from acp_eval.models import CaseMetadata
+    with pytest.raises(ValueError):
+        CaseMetadata.from_record({"follow_up_turns": turns})
+
+
 @pytest.mark.parametrize("mode", ["normal", "malformed"])
 def test_isolated_profile_traces_are_captured_after_process_exit(tmp_path, monkeypatch, mode):
     profile = tmp_path / "profile"

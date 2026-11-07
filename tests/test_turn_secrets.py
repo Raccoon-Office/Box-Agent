@@ -71,7 +71,7 @@ async def test_acp_prompt_places_credential_notice_after_the_request(tmp_path):
 
     await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": text}], field_meta={})))
 
-    [user_message] = [content for role, content in llm.calls[0] if role == "user"]
+    [user_message] = [content for role, content in llm.calls[0] if role == "user" and text in content]
     assert user_message.startswith(text)
     assert "[敏感信息：本条消息含疑似凭据（`sk-live-…5a36`）" in user_message
     assert user_message.endswith(_EMPTY_CONNECTOR_CONTEXT)

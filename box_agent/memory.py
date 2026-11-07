@@ -1669,10 +1669,10 @@ class MemoryManager:
 
     @staticmethod
     def _build_transcript(messages: list[Message], *, max_chars_per_msg: int = 2000) -> str:
-        """Build a condensed text transcript from messages, skipping system messages."""
+        """Build a transcript without system or runtime-injected user messages."""
         parts: list[str] = []
         for msg in messages:
-            if msg.role == "system":
+            if msg.role == "system" or (msg.role == "user" and msg.source == "runtime"):
                 continue
             text = msg.content if isinstance(msg.content, str) else str(msg.content)
             parts.append(f"{msg.role.capitalize()}: {text[:max_chars_per_msg]}")
@@ -2706,7 +2706,8 @@ def _has_high_signal_for_loop_end(messages: list[Message]) -> bool:
     Keep loop-end extraction for turns with explicit preference/profile signal,
     tool-backed work, or enough conversation substance to justify curation.
     """
-    non_system = [m for m in messages if m.role != "system"]
+    non_system = [m for m in messages if m.role != "system"
+                  and not (m.role == "user" and m.source == "runtime")]
     if not non_system:
         return False
 

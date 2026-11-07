@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
+import secrets
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .base import Tool, ToolResult, build_tool_name_index
 from .mcp_tool_catalog import MCPToolCatalog, MCPToolEntry, _normalize
 
+if TYPE_CHECKING:
+    from ..schema import Message
+    from .engine.contracts import ToolDefinitionView
+
 TOOL_SEARCH_NAME = "tool_search"
+_DISCOVERY_ENTRY_BUDGET_CHARS = 48_000
 _ACTIVATION_COMPANIONS: dict[str, tuple[str, ...]] = {
     # Playwright navigation returns metadata before the page-body snapshot.
     # Exposing one without the other creates a runtime state the model cannot
@@ -49,6 +56,7 @@ class ToolSearchTool(Tool):
         local_tools_provider: Callable[[], Iterable[Tool]] | None = None,
         activated_local_tools: OrderedDict[str, Tool] | None = None,
     ) -> None:
+        self._stable_manager = None
         self._catalog = catalog
         self._activated = activated
         self._protected_names_provider = protected_names_provider
@@ -72,6 +80,8 @@ class ToolSearchTool(Tool):
 
     @property
     def description(self) -> str:
+        if self._stable_manager is not None:
+            return "Search allowed tools. Returned complete schemas and tool_ref values may be used with call_tool on the next model step."
         return (
             "Search allowed local utilities and the connected deferred MCP catalog "
             "by capability. Local utilities include file append, diagnostics, "
@@ -246,6 +256,7 @@ class ToolSearchTool(Tool):
                 self._local_tools_provider() if self._local_tools_provider is not None else ()
             )
             if getattr(tool, "mcp_tool_id", None) is None and tool.name != TOOL_SEARCH_NAME
+            and (self._stable_manager is None or self._stable_manager.is_discoverable(tool))
         }
         local_index = {
             _normalize(name): tool
@@ -274,6 +285,8 @@ class ToolSearchTool(Tool):
 
         def entry_is_in_scope(entry) -> bool:
             if not self._entry_is_allowed(entry):
+                return False
+            if self._stable_manager is not None and not self._stable_manager.is_discoverable(entry.tool):
                 return False
             if normalized_connector and (
                 resolved_connector_id is None
@@ -356,58 +369,54 @@ class ToolSearchTool(Tool):
             else frozenset()
         )
         local_activated_count = 0
+        omitted_count = 0
+        oversized_count = 0
+        entry_chars = 0
         for entry in hits:
-            if entry.tool_id.startswith("local:"):
-                already_active = self._activated_local.get(entry.model_name) is entry.tool
-                self._activated_local[entry.model_name] = entry.tool
-                local_activated_count += 1
-                activated_results.append({
-                    "name": entry.model_name, "source": "local",
-                    "description": entry.description, "already_active": already_active,
+            local = entry.tool_id.startswith("local:")
+            if not local and (entry.name_conflict or entry.model_name == TOOL_SEARCH_NAME
+                              or entry.model_name in protected_names):
+                conflicts.append({
+                    "tool_id": entry.tool_id, "name": entry.model_name,
+                    "server_name": entry.server_name,
+                    "error": ("reserved deferred-search tool name" if entry.model_name == TOOL_SEARCH_NAME
+                              else "conflicts with stable core tool" if entry.model_name in protected_names
+                              else "duplicate model-facing tool name"),
                 })
                 continue
-            if (
-                entry.name_conflict
-                or entry.model_name == TOOL_SEARCH_NAME
-                or entry.model_name in protected_names
-            ):
-                conflicts.append(
-                    {
-                        "tool_id": entry.tool_id,
-                        "name": entry.model_name,
-                        "server_name": entry.server_name,
-                        "error": (
-                            "reserved deferred-search tool name"
-                            if entry.model_name == TOOL_SEARCH_NAME
-                            else (
-                                "conflicts with stable core tool"
-                                if entry.model_name in protected_names
-                                else "duplicate model-facing tool name"
-                            )
-                        ),
-                    }
+            if local:
+                already_active = self._activated_local.get(entry.model_name) is entry.tool
+                item = {"name": entry.model_name, "source": "local",
+                        "description": entry.description, "already_active": already_active}
+            else:
+                previous = self._activated.get(entry.tool_id)
+                already_active = previous is not None and previous.generation == entry.generation
+                item = {"name": entry.model_name, "server_name": entry.server_name,
+                        "connector_id": entry.connector_id, "connector_name": entry.connector_name,
+                        "remote_name": entry.remote_name, "description": entry.description,
+                        "already_active": already_active}
+            if self._stable_manager is not None:
+                placeholder = "tool:v1:" + "x" * 32
+                preview = {**item, "tool_ref": placeholder, "input_schema": entry.tool.parameters,
+                           "call_example": {"tool_ref": placeholder, "arguments_json": "{}"}}
+                size = len(json.dumps(preview, ensure_ascii=False)) + 2
+                if size > _DISCOVERY_ENTRY_BUDGET_CHARS:
+                    oversized_count += 1
+                    continue
+                if entry_chars + size > _DISCOVERY_ENTRY_BUDGET_CHARS:
+                    omitted_count += 1
+                    continue
+                entry_chars += size
+                item.update(self._stable_manager.describe(entry.tool, entry.generation))
+                self._stable_manager._remember_search_descriptor(item)
+            if local:
+                self._activated_local[entry.model_name] = entry.tool
+                local_activated_count += 1
+            else:
+                self._activated[entry.tool_id] = ActivatedMCPTool(
+                    tool_id=entry.tool_id, model_name=entry.model_name, generation=entry.generation,
                 )
-                continue
-            previous = self._activated.get(entry.tool_id)
-            already_active = (
-                previous is not None and previous.generation == entry.generation
-            )
-            self._activated[entry.tool_id] = ActivatedMCPTool(
-                tool_id=entry.tool_id,
-                model_name=entry.model_name,
-                generation=entry.generation,
-            )
-            activated_results.append(
-                {
-                    "name": entry.model_name,
-                    "server_name": entry.server_name,
-                    "connector_id": entry.connector_id,
-                    "connector_name": entry.connector_name,
-                    "remote_name": entry.remote_name,
-                    "description": entry.description,
-                    "already_active": already_active,
-                }
-            )
+            activated_results.append(item)
         payload = {
             "success": not conflicts or bool(activated_results),
             **search_input,
@@ -435,6 +444,16 @@ class ToolSearchTool(Tool):
                 )
             ),
         }
+        if self._stable_manager is not None:
+            payload["omitted_for_size_count"] = omitted_count
+            payload["oversized_schema_count"] = oversized_count
+            if oversized_count or omitted_count:
+                payload["notice"] = (
+                    "Some complete tool schemas were omitted due to the size limit. "
+                    "Search exact tool_names or use a smaller top_k; an individually oversized schema cannot be delivered."
+                )
+            elif activated_results:
+                payload["notice"] = "Use the returned tool_ref with call_tool on the next model step."
         if self._local_tools_provider is not None:
             payload.update(
                 local_tool_count=len(scoped_locals),
@@ -442,11 +461,26 @@ class ToolSearchTool(Tool):
                 local_activated_count=local_activated_count,
                 mcp_state="ready" if mcp_ready else "loading",
             )
+        if self._stable_manager is not None:
+            # Echoed query and diagnostic metadata must not defeat the result budget.
+            for key in ("query", "server_name", "connector", "resolved_connector_id"):
+                if isinstance(payload.get(key), str):
+                    payload[key] = payload[key][:256]
+            for key in ("queries", "tool_names", "missing", "conflicts"):
+                values = payload.get(key)
+                if not isinstance(values, list):
+                    continue
+                payload[f"{key}_total"] = len(values)
+                payload[key] = [
+                    {k: v[:256] if isinstance(v, str) else v for k, v in item.items()}
+                    if isinstance(item, dict) else item[:256] if isinstance(item, str) else item
+                    for item in values[:12]
+                ]
         if not mcp_ready:
             payload.update(
                 success=bool(activated_results),
                 state="partial_catalog_loading" if activated_results else "catalog_loading",
-                pending_tool_names=pending,
+                pending_tool_names=([name[:256] for name in pending[:12]] if self._stable_manager is not None else pending),
                 notice=(
                     "Local discovery completed; the MCP catalog is still loading. "
                     "Retry MCP searches after the runtime readiness update."
@@ -490,6 +524,227 @@ class MCPToolExposureManager:
         self._deferred_local_names_provider = deferred_local_names_provider
         self._deferred_mcp = deferred_mcp
         self._allowed_connector_ids_provider = allowed_connector_ids_provider
+        self.stable_prefix = False
+        self._stable_direct: dict[str, tuple[Tool, ToolDefinitionView]] | None = None
+        self._stable_refs: dict[str, tuple[Tool, ToolDefinitionView, int | None]] = {}
+        self._search_refs: set[str] = set()
+        self._pending_search_descriptors: dict[str, set[str]] = {}
+        self._search_result_calls: dict[str, set[tuple[str, str]]] = {}
+        self._stable_candidates: dict[str, Tool] = {}
+        self._live_candidates: Callable[[], Mapping[str, Tool]] = lambda: self._stable_candidates
+        self._stable_visibility: Callable[[str], bool] | None = None
+        self._bootstrap_acked: set[str] = set()
+        self._bootstrap_issued: set[str] = set()
+        self._scope_parent: MCPToolExposureManager | None = None
+        self._scope_upstreams: dict[str, Tool] = {}
+        self._direct_generations: dict[str, int] = {}
+
+    def for_inherited_tools(self, child_tools: dict[str, Tool]) -> MCPToolExposureManager:
+        """Freeze a child's resolved subset; borrow only parent validation authority."""
+        from .engine.contracts import ToolDefinitionView
+
+        allowed = self.inherited_tools(dict(self._live_candidates()))
+        scoped = MCPToolExposureManager(
+            self._catalog, OrderedDict(), deferred_mcp=self._deferred_mcp,
+            allowed_connector_ids_provider=self._allowed_connector_ids_provider,
+        )
+        scoped.stable_prefix = True
+        scoped._scope_parent = self
+        scoped._stable_direct = {}
+        for name, tool in child_tools.items():
+            upstream = allowed.get(name)
+            if upstream is None or name in {TOOL_SEARCH_NAME, "call_tool"}:
+                continue
+            scoped._scope_upstreams[name] = upstream
+            scoped._stable_direct[name] = (tool, ToolDefinitionView.from_tool(tool))
+            if getattr(upstream, "mcp_tool_id", None) is not None:
+                entry = self._catalog.get_by_model_name(name)
+                scoped._direct_generations[name] = entry.generation if entry is not None and entry.tool is upstream else -1
+        return scoped
+
+    def enable_stable_prefix(self, search_tool: ToolSearchTool) -> None:
+        self.stable_prefix = True
+        search_tool._stable_manager = self
+        # Do not persist only a truncated description while issuing its reference.
+        search_tool.max_result_size_chars = float("inf")
+        search_tool._local_tools_provider = lambda: tuple(self._stable_candidates.values())
+
+    def is_discoverable(self, tool: Tool) -> bool:
+        return (tool.name not in {"tool_search", "call_tool"}
+                and tool.name not in (self._stable_direct or {})
+                and (self._stable_visibility is None or self._stable_visibility(tool.name)))
+
+    def describe(self, tool: Tool, generation: int | None) -> dict:
+        from .engine.contracts import ToolDefinitionView
+        definition = ToolDefinitionView.from_tool(tool)
+        # Reuse a ref only while both the object and definition remain current.
+        for ref, (old_tool, old_definition, old_generation) in self._stable_refs.items():
+            if old_tool is tool and old_generation == generation and old_definition.description == tool.description and old_definition.matches_target(tool):
+                break
+        else:
+            ref = "tool:v1:" + secrets.token_urlsafe(24)
+            self._stable_refs[ref] = (tool, definition, generation)
+        return {"tool_ref": ref, "input_schema": definition.parameters,
+                "call_example": {"tool_ref": ref, "arguments_json": "{}"}}
+
+    @staticmethod
+    def _canonical_descriptor(item: dict) -> str:
+        return json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    def _remember_search_descriptor(self, item: dict) -> None:
+        self._pending_search_descriptors.setdefault(item["tool_ref"], set()).add(
+            self._canonical_descriptor(item)
+        )
+
+    def record_search_result(self, call_id: str, content: str) -> None:
+        """Bind descriptors to a tool-search call committed by the engine."""
+        if not call_id:
+            return
+        matches = self._matching_search_descriptors(content)
+        if matches:
+            self._search_result_calls[call_id] = matches
+
+    def _matching_search_descriptors(self, content: str) -> set[tuple[str, str]]:
+        def unique_pairs(pairs):
+            output = {}
+            for key, value in pairs:
+                if key in output:
+                    raise ValueError("duplicate key")
+                output[key] = value
+            return output
+        try:
+            payload = json.loads(content, object_pairs_hook=unique_pairs,
+                                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid constant")))
+            items = payload.get("activated") if isinstance(payload, dict) else None
+            if not isinstance(items, list):
+                return set()
+            matched = set()
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("tool_ref"), str):
+                    continue
+                ref = item["tool_ref"]
+                canonical = self._canonical_descriptor(item)
+                if canonical in self._pending_search_descriptors.get(ref, ()):
+                    matched.add((ref, canonical))
+            return matched
+        except (TypeError, ValueError, RecursionError):
+            return set()
+
+    def acknowledge_search_results(self, messages: Iterable[Message]) -> None:
+        """Acknowledge complete issued descriptions in final projected tool messages.
+
+        Only call IDs recorded when an actual search result was committed qualify.
+        Already-prepared request snapshots are immutable and gain no new refs.
+        """
+        for message in messages:
+            if (getattr(message, "role", None) != "tool"
+                    or getattr(message, "name", None) != TOOL_SEARCH_NAME
+                    or not isinstance(getattr(message, "content", None), str)):
+                continue
+            issued = self._search_result_calls.get(getattr(message, "tool_call_id", None), set())
+            for ref, _ in self._matching_search_descriptors(message.content) & issued:
+                self._search_refs.add(ref)
+
+    def is_current_target(self, name: str, tool: Tool) -> bool:
+        if self._scope_parent is not None:
+            upstream = self._scope_upstreams.get(name)
+            return (self._live_candidates().get(name) is tool and upstream is not None
+                    and self._scope_parent.is_current_target(name, upstream))
+        if getattr(tool, "mcp_tool_id", None) is not None:
+            current = self._catalog.get_by_model_name(name)
+            return current is not None and current.tool is tool and self._entry_is_allowed(current)
+        return self._live_candidates().get(name) is tool
+
+    def pending_bootstrap_descriptions(self, visible_history: Iterable[Message] | None = None) -> tuple[str, ...]:
+        from .local_tool_exposure import DISCOVERABLE_LOCAL_NAMES
+
+        visible = (self._bootstrap_acked if visible_history is None else {
+            message.content for message in visible_history
+            if getattr(message, "role", None) == "user"
+            and getattr(message, "source", None) == "runtime"
+            and getattr(message, "name", None) == "tool_descriptions"
+            and isinstance(getattr(message, "content", None), str)
+        })
+        if visible_history is not None:
+            self._bootstrap_acked.intersection_update(visible)
+        pending = []
+        pending_size = 0
+        omitted = 0
+        def queue(text: str) -> None:
+            nonlocal pending_size, omitted
+            if text in visible:
+                return
+            if pending_size + len(text) > _DISCOVERY_ENTRY_BUDGET_CHARS - 1024:
+                omitted += 1
+                return
+            pending.append(text)
+            pending_size += len(text)
+
+        def render(name: str, description: str, tool: Tool, generation: int | None) -> str:
+            placeholder = "tool:v1:" + "x" * 32
+            preview = {"name": name, "description": description, "tool_ref": placeholder,
+                       "input_schema": tool.parameters,
+                       "call_example": {"tool_ref": placeholder, "arguments_json": "{}"}}
+            if len(json.dumps(preview, ensure_ascii=False)) > _DISCOVERY_ENTRY_BUDGET_CHARS:
+                return json.dumps({"name": name[:256], "error": "Tool schema exceeds the discovery size limit and cannot be delivered."}, ensure_ascii=False)
+            return json.dumps({"name": name, "description": description,
+                               **self.describe(tool, generation)}, ensure_ascii=False)
+        if self._scope_parent is not None:
+            return ()
+        if self._deferred_local_names_provider is not None:
+            deferred = self._deferred_local_names_provider()
+            for name, tool in self._stable_candidates.items():
+                if (name not in DISCOVERABLE_LOCAL_NAMES or name in deferred
+                        or getattr(tool, "mcp_tool_id", None) is not None
+                        or not self.is_discoverable(tool) or not self.is_current_target(name, tool)):
+                    continue
+                text = render(name, tool.description, tool, 0)
+                queue(text)
+        for entry in self._catalog.snapshot():
+            if not entry.always_load or entry.name_conflict or not self._entry_is_allowed(entry) or not self.is_discoverable(entry.tool):
+                continue
+            text = render(entry.model_name, entry.description, entry.tool, entry.generation)
+            queue(text)
+        if omitted:
+            notice = json.dumps({"error": "Some tool descriptions were omitted due to the bootstrap size limit. Search exact tool_names to obtain individual schemas.", "omitted_count": omitted}, ensure_ascii=False)
+            if notice not in visible:
+                pending.append(notice)
+        self._bootstrap_issued.update(pending)
+        return tuple(pending)
+
+    def ack_bootstrap_descriptions(self, descriptions: Iterable[str]) -> None:
+        self._bootstrap_acked.update(text for text in descriptions if text in self._bootstrap_issued)
+
+    def restore_compacted_descriptions(self, messages: list[Message]) -> list[Message]:
+        """Replay acknowledged, still-valid discoveries without issuing new refs."""
+        from ..schema import Message
+
+        visible: set[str] = set()
+        for message in messages:
+            if not isinstance(message.content, str):
+                continue
+            if message.role == "tool" and message.name == TOOL_SEARCH_NAME:
+                issued = self._search_result_calls.get(message.tool_call_id, set())
+                visible.update(text for _, text in self._matching_search_descriptors(message.content) & issued)
+            elif message.role == "user" and message.source == "runtime" and message.name == "tool_descriptions":
+                visible.add(message.content)
+        restored = list(messages)
+        for ref, (tool, definition, generation) in self._stable_refs.items():
+            mcp_generation = generation if getattr(tool, "mcp_tool_id", None) is not None else None
+            if (ref not in self._search_refs or not self.is_current_target(tool.name, tool)
+                    or not self.is_discoverable(tool) or not definition.matches_target(tool)
+                    or definition.description != tool.description
+                    or self.validate_call(tool.name, mcp_generation, tool) is not None):
+                continue
+            descriptions = self._pending_search_descriptors.get(ref, ())
+            if any(text in visible for text in descriptions):
+                continue
+            # Search may have returned the same ref more than once. Deliver
+            # one complete, deterministic descriptor, not all search receipts.
+            if descriptions:
+                restored.append(Message(role="user", source="runtime", name="tool_descriptions",
+                                        content=min(descriptions)))
+        return restored
 
     def _entry_is_allowed(self, entry) -> bool:
         return self._connector_is_allowed(entry.connector_id)
@@ -530,6 +785,13 @@ class MCPToolExposureManager:
         return activated
 
     def prepare_tools(self, candidates: list[Tool]) -> ToolExposure:
+        if self._scope_parent is not None:
+            available = {tool.name: tool for tool in candidates}
+            scoped = [tool for name, (tool, _) in self._stable_direct.items()
+                      if available.get(name) is tool and self.is_current_target(name, tool)]
+            return ToolExposure(scoped, frozenset(tool.name for tool in scoped),
+                                {name: generation for name, generation in self._direct_generations.items()
+                                 if name in {tool.name for tool in scoped}})
         # ``candidates`` is the session's stable core-tool registry. Ordinary
         # MCP tools live only in the process catalog and are appended here
         # after an explicit activation (or alwaysLoad). Keeping the two stores
@@ -582,10 +844,12 @@ class MCPToolExposureManager:
     def inherited_tools(self, tool_map: dict[str, Tool]) -> dict[str, Tool]:
         """Retain allowed local capabilities and only activated/eager remote tools."""
         exposure = self.prepare_tools(list(tool_map.values()))
+        if self._scope_parent is not None:
+            return {tool.name: tool for tool in exposure.tools}
         return {
             tool.name: tool
             for tool in [*tool_map.values(), *exposure.tools]
-            if tool.name != TOOL_SEARCH_NAME and (
+            if tool.name not in {TOOL_SEARCH_NAME, "call_tool"} and (
                 getattr(tool, "mcp_tool_id", None) is None
                 or tool.name in exposure.offered_names
             )
@@ -597,6 +861,11 @@ class MCPToolExposureManager:
         offered_generation: int | None,
         target_tool: Tool | None = None,
     ) -> str | None:
+        if self._scope_parent is not None:
+            upstream = self._scope_upstreams.get(name)
+            if upstream is None or not self._scope_parent.is_current_target(name, upstream):
+                return f"Tool '{name}' is no longer available to this child."
+            return self._scope_parent.validate_call(name, offered_generation, upstream)
         if target_tool is not None and not self._connector_is_allowed(
             getattr(target_tool, "mcp_connector_id", None)
         ):

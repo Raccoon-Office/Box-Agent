@@ -396,6 +396,8 @@ async def test_real_session_keeps_single_frozen_block_and_same_batch_mutation_is
     manager = backend(host)
     config = session_config(tmp_path)
     config.agent.memory_backend_type = "desktop"
+    # This scripted model uses the legacy direct-tool protocol.
+    config.agent.tool_interface_version = 1
     llm = ReadWriteLLM()
     session = await AgentSession.open(config=config, host=HostBindings(
         llm_client=llm, memory_manager=manager, tools=create_memory_tools(manager), system_prompt="BASE"),
@@ -1093,6 +1095,8 @@ async def test_revocation_removes_preload_from_next_model_request(tmp_path, host
     process = backend(host)
     config = session_config(tmp_path)
     config.agent.memory_backend_type = 'desktop'
+    # This scripted model uses the legacy direct-tool protocol.
+    config.agent.tool_interface_version = 1
     model = SearchThenAnswer()
     session = await AgentSession.open(config=config, host=HostBindings(
         llm_client=model, memory_manager=process, tools=create_memory_tools(process), system_prompt='BASE'),

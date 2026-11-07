@@ -468,9 +468,11 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
             if skill is not None and getattr(skill, "source", None) == "connector":
                 grants.add(skill.name)
     if session_skill_loader:
-        from box_agent.tools.skill_loader import SkillSelector, move_skill_slot_to_end
+        from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillSelector, move_skill_slot_to_end
 
-        relocated_prompt = move_skill_slot_to_end(agent.messages[0].content)
+        relocated_prompt = (agent.messages[0].content.replace(SKILL_SLOT_SENTINEL, "")
+                            if getattr(agent, "stable_prefix", False)
+                            else move_skill_slot_to_end(agent.messages[0].content))
         if relocated_prompt != agent.messages[0].content:
             agent.set_system_prompt(relocated_prompt, preserve_child_prompt=True)
         selector = SkillSelector(
@@ -485,9 +487,13 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
         )
         selector.bind(agent.messages[0].content)
         if expert_context:
-            expert_skill_prompt = selector.update(expert_context.skill_query(), refresh=False)
-            if expert_skill_prompt is not None:
-                agent.set_system_prompt(expert_skill_prompt, preserve_child_prompt=True)
+            update_catalog = getattr(agent, "update_skill_catalog", None)
+            if callable(update_catalog):
+                update_catalog(selector, expert_context.skill_query(), refresh=False)
+            else:
+                expert_skill_prompt = selector.update(expert_context.skill_query(), refresh=False)
+                if expert_skill_prompt is not None:
+                    agent.set_system_prompt(expert_skill_prompt, preserve_child_prompt=True)
         session.skill_selector = selector
 
 

@@ -48,6 +48,19 @@ test_workspace/inputs/smoke_test/dataset.jsonl
 - `query`：发送给 Agent 的任务。
 - `input_files`：输入文件路径列表；路径相对于评测集所在目录。
 
+同一 ACP 会话的多轮任务可增加 `follow_up_turns`，例如：
+
+```json
+{"id":"handoff","query":"分析销售数据","input_files":[],"follow_up_turns":[{"query":"把结果做成 PPT","prompt_meta":{"selected_skill_names":["slides"]}},{"query":"继续修改 PPT"}]}
+```
+
+各轮按顺序发送 `session/prompt`，共享会话和工作区，使用不同的 runner-owned `turnId`。
+后续轮的 `prompt_meta` 独立设置，不继承上一轮选择的 Skill；附件只在第一轮附带。
+任一轮失败、取消、不完整或超时即停止后续轮，超时预算覆盖整个 Case。
+多轮 attempt 额外保存 `turns.json` 和每轮完成后的 `files-after-turn-N.json`；
+`run.json.turns` 保留每轮状态、回答和 usage，原始协议仍完整保留。
+`run.json.token_usage` 仍是最后一轮观测值，整段任务用量需逐轮或按模型请求汇总，不能把它当成总量。
+
 ## 运行评测
 
 从仓库根目录准备依赖：
@@ -210,3 +223,31 @@ uv run --project test_workspace/trace_viewer trace-viewer \
 打开 Case 后的“效果指标”标签可查看评分与关键证据、性能耗时、成本，以及当前数据无法评估的指标。
 
 详细规范见 [AGENTS.md](AGENTS.md)，组件说明见 [acp_eval/README.md](acp_eval/README.md) 和 [trace_viewer/README.md](trace_viewer/README.md)。
+
+## Tool / Skill / MCP 缓存评测
+
+CI 离线检查与手动真实 ACP 缓存评测见 [context_cache](inputs/context_cache/README.md)。手动入口：
+
+```bash
+uv run python -m test_workspace.context_cache run --model sn-kimi-k3-p
+```
+
+结果保留逐次 usage、加载后下一条请求、原始 ACP 证据和源码/样本指纹，可显式指定只读基线比较。普通 CI 不调用模型。
+
+### 表格处理与数值文案回归
+
+`tests/test_table_execution_gate.py` 检查原始 CSV/TSV 的完整校验证据必须先于
+Python、Shell 或子任务执行；读表头、读取 Skill、发现工具仍可继续。原地修复、
+诊断、删除、替换、移动沿用各自声明的契约，最终文件状态仍由完成门禁检查。
+禁用完成检查的特殊运行不参与该门禁。此约束不分析任意 MCP 工具内部的数据流。
+
+`tests/test_table_quality_eval.py` 与 `test_workspace/table_quality.py` 提供离线验收：
+逐项检查样本要求的派生指标、负号、百分比单位、重复/缺失项，并列出正文中无法
+映射到计算结果的小数。已知数字出现在别的句子里不代表那句话正确；仍须独立
+诊断语义、整数计数、单位和真实 PPT 产物，不能把工具成功或 JSON 总额正确当成
+整份报告正确。上述测试已进入普通 CI 和 `--context-cache-only` 检查。
+
+真实评测继续只走 `run_acp_eval.py` 的多轮 ACP 入口。对照应固定相同数据、Skill、
+模型配置与任务序列，封存改前/改后源码，分别报告协议完成率、产物正确率、执行
+顺序和缓存命中率。增加派生数值要求时，两组必须同时更新样本；旧轮次的原始
+结果保持不变，不能与新样本直接计算提升比例。

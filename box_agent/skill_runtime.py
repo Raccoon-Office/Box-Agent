@@ -27,12 +27,14 @@ class SkillRuntime:
     """Borrow the loader; own source validity, selection and delivery facts."""
 
     def __init__(self, loader: SkillLoader | None, *, session_log: Any = None,
-                 allow_partial_restore: bool = False):
+                 allow_partial_restore: bool = False, append_only_context: bool = False):
         self.loader = loader
+        self.append_only_context = append_only_context
         self.session_log = session_log
         self._allow_partial_restore = allow_partial_restore
         self.state = SkillSessionState()
         self.turn_deliveries: dict[str, dict[str, Any]] = {}
+        self._compaction_candidates: set[str] = set()
         self._pending_materialized_messages: list[Any] = []
         self._restore_pending: tuple[str, ...] = ()
         self._restoring: tuple[str, ...] = ()
@@ -44,11 +46,48 @@ class SkillRuntime:
         self._reference_validation: SkillValidation | None = None
         self.validation_timeout_seconds = SKILL_VALIDATION_TIMEOUT_SECONDS
 
+    def catalog_message(self, selector: Any, messages: list[Any], user_input: str,
+                        *, refresh: bool = True) -> Any | None:
+        """Return a changed trusted catalog snapshot for durable tail insertion."""
+        from .schema import Message
+
+        catalog = selector.render_catalog(user_input, refresh=refresh)
+        content = ("[Host Skill catalog: current visible recommendations; this snapshot "
+                   "supersedes earlier Skill catalog snapshots. Metadata is not permission. "
+                   "Use list_skills for the full catalog.]\n" +
+                   (catalog or "No Skill recommendations are currently visible.") +
+                   "\nVisible catalog version: " + selector.catalog_scope_version())
+        marker = "[Host Skill catalog: current visible recommendations;"
+        previous = next((message.content for message in reversed(messages)
+                         if message.role == "user" and message.source == "runtime"
+                         and isinstance(message.content, str) and message.content.startswith(marker)), None)
+        if previous == content:
+            return None
+        return Message(role="user", source="runtime", content=content)
+
     def begin_turn(self) -> None:
+        # Mark only: normal requests retain their exact historical prefix.
+        self._compaction_candidates = set(self.state.reads)
         self.turn_deliveries.clear()
         # A rejected request has not delivered its restored methods. Retain
         # them across retries until a complete read or explicit removal.
         self._restoring = self._restore_pending
+
+    @property
+    def reclaimable_after_compaction(self) -> frozenset[str]:
+        active = set(self.selected_names) | set(self.restoring_names) | set(self.turn_deliveries)
+        if self.loader is not None and active:
+            names = sorted(name for name in active
+                           if name not in self.state.reads or self.state.reads[name].source != "caller")
+            try:
+                active.update(skill.name for skill in resolve_required_skills(self.loader, names))
+            except SkillDependencyError:
+                # A failed selection is not evidence that older methods can
+                # be discarded. Normal request validation reports the error.
+                return frozenset()
+        # A new turn alone does not establish a task switch. Without a current
+        # method selection/read, conservatively preserve possible continuation.
+        return frozenset(self._compaction_candidates - active) if active else frozenset()
 
     def select(self, names: list[str] | tuple[str, ...]) -> None:
         self.state.selected = tuple(dict.fromkeys(name.strip() for name in names if name.strip()))
@@ -181,6 +220,7 @@ class SkillRuntime:
 
     def clear_references(self) -> None:
         self.state = SkillSessionState()
+        self._compaction_candidates.clear()
         self._restore_pending = self._restoring = ()
         self._restore_diagnostics.clear()
         self._deferred_restore_records = []

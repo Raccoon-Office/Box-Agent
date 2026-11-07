@@ -757,6 +757,8 @@ async def _maybe_summarize(
     before_summary: Callable[[int], None] | None = None,
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None,
     request_headroom_tokens: int | None = None,
+    compacted_history_projector: Callable[[list[Message]], list[Message]] | None = None,
+    compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None,
 ) -> CompactionOutcome:
     """Compact once when the complete next request exceeds its safe limit."""
     if skip_check:
@@ -837,6 +839,7 @@ async def _maybe_summarize(
         )
         session_log.flush()
 
+    summary_source = compaction_source_projector(messages) if compaction_source_projector else messages
     summary_calls = 0
     error: str | None = None
     error_type = "none"
@@ -847,7 +850,7 @@ async def _maybe_summarize(
         summary_calls = 1
         summary = await _create_summary(
             summary_llm or llm,
-            messages,
+            summary_source,
             1,
             session_id=session_id,
             turn_id=turn_id,
@@ -867,7 +870,7 @@ async def _maybe_summarize(
             "summarization failed: %s — using deterministic bounded fallback",
             exc,
         )
-        summary = _deterministic_history_fallback(messages[1:])
+        summary = _deterministic_history_fallback(summary_source[1:])
 
     runtime_state = await _restore_runtime_state(messages, tools)
     bounded_summary = _bound_text_middle(
@@ -888,6 +891,8 @@ async def _maybe_summarize(
         ]
         if runtime_state is not None:
             rebuilt.append(runtime_state)
+        if compacted_history_projector is not None:
+            rebuilt = compacted_history_projector(rebuilt)
         return rebuilt
 
     new_messages = build_compacted_messages(bounded_summary)
@@ -907,6 +912,18 @@ async def _maybe_summarize(
             summary_limit,
             label="summary",
         )
+        new_messages = build_compacted_messages(bounded_summary)
+        estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
+    # A 2,000-character summary is a preferred floor, not a reason to abort a
+    # task whose protected history and restored resources can otherwise fit.
+    # Only an actually over-budget candidate takes this bounded fallback;
+    # never trim user input, tool-call arguments, or split protocol groups.
+    for summary_limit in (1_000, 512):
+        if estimated_after <= token_limit:
+            break
+        if len(bounded_summary) <= summary_limit:
+            continue
+        bounded_summary = _bound_text_middle(summary, summary_limit, label="summary")
         new_messages = build_compacted_messages(bounded_summary)
         estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
     if estimated_after > token_limit:

@@ -266,6 +266,9 @@ class AgentConfig(BaseModel):
     """Agent configuration"""
 
     max_steps: int = 300
+    # New host sessions pin this protocol in Session Log. Existing sessions
+    # retain their recorded version; unmarked historical logs use v1.
+    tool_interface_version: Literal[1, 2] = 2
     workspace_dir: str = Field(default_factory=default_workspace_dir)
     # Hard ceiling on how many parallel_safe tool calls (sub_agent,
     # generate_image) run concurrently within a single step, regardless of how

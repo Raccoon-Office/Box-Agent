@@ -3259,16 +3259,20 @@ class BoxACPAgent:
                 current_system = state.agent.messages[0].content
                 if SKILL_SLOT_SENTINEL in current_system:
                     state.skill_selector.bind(current_system)
-                new_prompt = state.skill_selector.update(skill_selection_text, refresh=False)
-                if new_prompt is not None:
-                    self._set_agent_system_prompt(state.agent, new_prompt)
-                    log.info(
-                        "skills/filtered",
-                        session_id=session_id,
-                        matched=",".join(state.skill_selector.matched_skill_names),
-                        query_chars=len(state.skill_selector.cumulative_query),
-                        prompt_chars=len(new_prompt),
-                    )
+                update_catalog = getattr(state.agent, "update_skill_catalog", None)
+                if callable(update_catalog):
+                    update_catalog(state.skill_selector, skill_selection_text, refresh=False)
+                else:
+                    new_prompt = state.skill_selector.update(skill_selection_text, refresh=False)
+                    if new_prompt is not None:
+                        self._set_agent_system_prompt(state.agent, new_prompt)
+                        log.info(
+                            "skills/filtered",
+                            session_id=session_id,
+                            matched=",".join(state.skill_selector.matched_skill_names),
+                            query_chars=len(state.skill_selector.cumulative_query),
+                            prompt_chars=len(new_prompt),
+                        )
                 self._sync_cache_fingerprint_context(state)
             except Exception as exc:
                 log.warn("skills/filter_error", session_id=session_id, message=str(exc))
@@ -4152,7 +4156,14 @@ class BoxACPAgent:
                 or not session.mcp_runtime_updates_requested
             ):
                 continue
-            if state == "ready":
+            if state == "ready" and getattr(session.agent, "stable_prefix", False):
+                content = (
+                    f"[MCP runtime update] Initial MCP catalog discovery is complete "
+                    f"with {tool_count} registered tools. Retry tool_search if an earlier "
+                    "search reported loading. Use returned tool_ref with call_tool; "
+                    "alwaysLoad tool descriptions and references will be delivered in runtime messages."
+                )
+            elif state == "ready":
                 visibility = (
                     f" {always_load_count} alwaysLoad tool(s) are already visible;"
                     if always_load_count
@@ -4165,7 +4176,13 @@ class BoxACPAgent:
                     "ordinary deferred schemas remain hidden until selected by tool_search."
                 )
             elif state == "connected":
-                if session.agent.mcp_tool_exposure is not None:
+                if getattr(session.agent, "stable_prefix", False):
+                    detail = (
+                        f"{tool_count} tools are registered in the catalog. Use tool_search "
+                        "to discover a tool and pass its returned tool_ref to call_tool. "
+                        "alwaysLoad tool descriptions and references will be delivered in runtime messages."
+                    )
+                elif session.agent.mcp_tool_exposure is not None:
                     visibility = (
                         f"{always_load_count} alwaysLoad tool(s) are already visible. "
                         if always_load_count
@@ -5094,7 +5111,8 @@ class BoxACPAgent:
         def _schedule_follow_up_suggestions(final_content: str) -> None:
             latest_user_request = ""
             for message in reversed(agent.messages):
-                if message.role == "user" and isinstance(message.content, str):
+                if (message.role == "user" and message.source != "runtime"
+                        and isinstance(message.content, str)):
                     latest_user_request = message.content
                     break
             task = asyncio.create_task(

@@ -1983,7 +1983,8 @@ async def test_acp_appends_only_changed_snapshots_and_preserves_sent_prefixes(tm
             assert len(llm.requests) == before + 1
             current = llm.requests[-1]
             assert current[:len(previous)] == previous
-            assert host._sessions[session.sessionId].agent.messages[-2].content == f"hello {index}"
+            assert next(message for message in reversed(host._sessions[session.sessionId].agent.messages)
+                        if message.role == "user" and message.source == "user").content == f"hello {index}"
             latest = next(message for message in reversed(current) if message.role == "user" and message.input_facts)
             assert ("<connector-status>" in latest.content) is emits
             if not emits:
@@ -2018,7 +2019,7 @@ async def test_connector_snapshot_read_failure_and_recovery_do_not_block_turns(t
         for index in range(2):
             await host.prompt(**acp_params(SimpleNamespace(
                 sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta={})))
-            message = projected_history(host._sessions[session.sessionId].agent)[-2]
+            message = next(m for m in reversed(projected_history(host._sessions[session.sessionId].agent)) if m.role == "user" and m.source == "user")
             if index == 0:
                 assert "status: unavailable" in message.content
             else:
@@ -2028,7 +2029,7 @@ async def test_connector_snapshot_read_failure_and_recovery_do_not_block_turns(t
             sessionId=session.sessionId, prompt=[{"text": "recovered"}],
             field_meta={"connector_statuses": [
                 {"id": "pkulaw", "name": "北大法宝", "status": "connected"}]})))
-        assert "pkulaw 北大法宝: connected" in projected_history(host._sessions[session.sessionId].agent)[-2].content
+        assert "pkulaw 北大法宝: connected" in next(m for m in reversed(projected_history(host._sessions[session.sessionId].agent)) if m.role == "user" and m.source == "user").content
     finally:
         log = host._sessions[session.sessionId].agent.session_log
         if log is not None:
@@ -2068,8 +2069,8 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
     state = agent._sessions[session.sessionId]
     assert state.connector_statuses is None
     assert state.connector_status_unavailable is True
-    assert state.agent.messages[-2].content == "北大法宝还能用么"
-    assert projected_history(state.agent)[-2].content == (
+    assert next(m for m in reversed(state.agent.messages) if m.role == "user" and m.source == "user").content == "北大法宝还能用么"
+    assert next(m for m in reversed(projected_history(state.agent)) if m.role == "user" and m.source == "user").content == (
         "北大法宝还能用么\n\n"
         "<connector-status>\n"
         "status: unavailable\n"
@@ -2095,8 +2096,8 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
 
     assert state.connector_statuses == (("pkulaw", "北大法宝", "disconnected"),)
     assert state.connector_status_unavailable is False
-    assert projected_history(state.agent)[-2].content.startswith("现在呢\n\n[Host connector status update:")
-    assert projected_history(state.agent)[-2].content.endswith(
+    assert next(m for m in reversed(projected_history(state.agent)) if m.role == "user" and m.source == "user").content.startswith("现在呢\n\n[Host connector status update:")
+    assert next(m for m in reversed(projected_history(state.agent)) if m.role == "user" and m.source == "user").content.endswith(
         "<connector-status>\n"
         "pkulaw 北大法宝: disconnected\n"
         "</connector-status>"
@@ -2138,7 +2139,8 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
     state = restarted_agent._sessions[restarted.sessionId]
 
     assert restarted.sessionId == first.sessionId
-    assert [(message.role, message.content) for message in state.agent.messages[1:]] == [
+    assert [(message.role, message.content) for message in state.agent.messages[1:]
+            if message.source != "runtime"] == [
         ("user", "remember this"),
         ("assistant", "done"),
     ]
@@ -2165,7 +2167,8 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
     assert [message.content for message in state.agent.messages].count(
         "stale migration seed"
     ) == 0
-    assert [(message.role, message.content) for message in state.agent.messages[-2:]] == [
+    assert [(message.role, message.content) for message in state.agent.messages[1:]
+            if message.source != "runtime"][-2:] == [
         ("user", "continue after restart"),
         ("assistant", "done"),
     ]
@@ -3180,7 +3183,9 @@ async def test_acp_skill_selection_is_ordinary_reference_not_automatic_system_bo
     user_messages = [m for m in state.agent.messages if m.role == "user"]
     assert user_messages[0].content == original
     assert user_messages[0].host_connector_status == _EMPTY_CONNECTOR_CONTEXT.strip()
-    assert all(message.source != "runtime" for message in user_messages[1:]) is (selection is None)
+    references = [message for message in user_messages[1:] if message.source == "runtime"
+                  and "UNIQUE_SKILL_REFERENCE_BODY" in str(message.content)]
+    assert bool(references) is bool(selection)
     usage = [u.update.rawOutput for u in conn.updates
              if isinstance(getattr(u.update, "rawOutput", None), dict)
              and u.update.rawOutput.get("type") == "turn_usage"]
@@ -3371,8 +3376,11 @@ async def test_acp_research_prompt_catalog_and_reader_follow_current_turn_policy
         )))
         available = profile != "fast" or selected
         system = "\n".join(str(content) for role, content in llm.calls[-1] if role == "system")
-        assert ("research-synthesis" in system) is available
-        assert ("Research evidence" in system) is available
+        catalogs = [str(content) for role, content in llm.calls[-1]
+                    if role == "user" and str(content).startswith("[Host Skill catalog:")]
+        assert catalogs and "research-synthesis" not in system
+        assert ('"name": "research-synthesis"' in catalogs[-1]) is available
+        assert ("Research evidence" in catalogs[-1]) is available
         assert ("research-synthesis" in state.skill_selector.matched_skill_names) is available
         catalog = state.agent.tools["list_skills"]
         browse = await catalog.execute()
@@ -3767,9 +3775,11 @@ class MalformedActionHintLLM:
 class SubAgentLLM:
     def __init__(self):
         self.calls = 0
+        self.tool_sets = []
 
     async def generate_stream(self, messages, tools, **_):
         self.calls += 1
+        self.tool_sets.append([tool.name for tool in tools])
         if self.calls == 1:
             yield StreamEvent(
                 type="finish",
@@ -3790,7 +3800,7 @@ class SubAgentLLM:
                     ToolCall(
                         id="child1",
                         type="function",
-                        function=FunctionCall(name="echo", arguments={"text": "child"}),
+                        function=FunctionCall(name="read_file", arguments={"path": "child.txt"}),
                     )
                 ],
             )
@@ -3870,8 +3880,9 @@ async def test_mcp_reconnect_injects_hidden_deferred_state_into_active_turns_onl
     assert update["user_visible"] is False
     assert update["source"] == "runtime"
     assert "connected" in update["content"]
-    assert "deferred catalog" in update["content"]
-    assert "alwaysLoad tool(s) are already visible" in update["content"]
+    assert "catalog" in update["content"]
+    assert "alwaysLoad tool descriptions" in update["content"]
+    assert "tool_ref" in update["content"] and "call_tool" in update["content"]
     assert "tool_search" in update["content"]
     assert inactive_state.inject_queue.empty()
 
@@ -4111,7 +4122,7 @@ async def test_initial_mcp_catalog_ready_is_injected_into_active_turn(tmp_path):
     assert update["user_visible"] is False
     assert "catalog discovery is complete" in update["content"]
     assert "Retry tool_search" in update["content"]
-    assert "ordinary deferred schemas remain hidden" in update["content"]
+    assert "tool_ref" in update["content"] and "call_tool" in update["content"]
 
 
 @pytest.mark.asyncio
@@ -4141,7 +4152,8 @@ async def test_mcp_status_during_greeting_does_not_add_model_request(tmp_path, s
         )))
         assert response.stopReason == "end_turn"
     assert llm.calls == 2
-    assert not any(message.source == "runtime" for message in state.agent.messages)
+    assert not any(message.source == "runtime" and "[MCP runtime update]" in str(message.content)
+                   for message in state.agent.messages)
 
 
 @pytest.mark.asyncio
@@ -4209,8 +4221,9 @@ async def test_mcp_discovery_can_retry_after_readiness_update_and_call_discovere
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", ["mcp_config", "remote_echo"])
+@pytest.mark.parametrize("interface_version", [1, 2])
 async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_updates(
-    tmp_path, tool_name,
+    tmp_path, tool_name, interface_version,
 ):
     class ActiveMCPTool(EchoTool):
         @property
@@ -4222,7 +4235,7 @@ async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_update
         tool.server_name = "demo"
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        agent=AgentConfig(workspace_dir=str(tmp_path), tool_interface_version=interface_version),
         tools=ToolsConfig(
             enable_sub_agent=False,
             mcp=MCPConfig(deferred_loading_enabled=False),
@@ -4233,13 +4246,23 @@ async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_update
         async def generate_stream(self, messages, tools=None, **kwargs):
             self.calls += 1
             if self.calls == 1:
+                name, arguments = tool_name, {"text": "test"}
+                if interface_version == 2 and tool_name == "mcp_config":
+                    descriptor = next(json.loads(message.content) for message in messages
+                                      if message.source == "runtime" and message.name == "tool_descriptions"
+                                      and json.loads(message.content).get("name") == tool_name)
+                    name, arguments = "call_tool", {
+                        "tool_ref": descriptor["tool_ref"], "arguments_json": json.dumps(arguments),
+                    }
                 yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
                     ToolCall(id="mcp-call", type="function", function=FunctionCall(
-                        name=tool_name, arguments={"text": "test"},
+                        name=name, arguments=arguments,
                     )),
                 ])
                 return
             if self.calls == 2:
+                result = next(message for message in messages if message.tool_call_id == "mcp-call")
+                assert result.content == "tool:test"
                 assert agent._inject_mcp_runtime_update(name="demo", state="connected") == 1
             else:
                 assert messages[-1].source == "runtime"
@@ -5330,7 +5353,8 @@ async def test_acp_goal_ext_method_injects_active_goal_into_prompt(tmp_path):
 
     await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}])))
 
-    latest_user = [content for role, content in llm.calls[-1] if role == "user"][-1]
+    latest_user = next(content for role, content in llm.calls[-1]
+                       if role == "user" and "## Active Goal" in str(content))
     assert "## Active Goal" in latest_user
     assert "Make the ACP goal flow verifiable" in latest_user
     assert "## Latest User Message" in latest_user
@@ -5361,7 +5385,8 @@ async def test_acp_goal_pause_stops_prompt_injection(tmp_path):
 
     await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "side question"}])))
 
-    latest_user = [content for role, content in llm.calls[-1] if role == "user"][-1]
+    latest_user = next(content for role, content in llm.calls[-1]
+                       if role == "user" and str(content).startswith("side question"))
     assert latest_user == "side question" + _EMPTY_CONNECTOR_CONTEXT
 
 
@@ -5406,7 +5431,7 @@ async def test_acp_new_session_goal_meta_restores_goal_state(tmp_path):
 async def test_acp_goal_write_tool_completes_goal_and_emits_snapshot(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
@@ -5448,6 +5473,7 @@ async def test_acp_goal_autopilot_continues_active_goal_until_complete(tmp_path)
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(
+            tool_interface_version=1,
             max_steps=3,
             workspace_dir=str(tmp_path),
             goal_autopilot_max_turns=2,
@@ -5564,6 +5590,7 @@ async def test_acp_goal_autopilot_stops_when_goal_blocks(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(
+            tool_interface_version=1,
             max_steps=3,
             workspace_dir=str(tmp_path),
             goal_autopilot_max_turns=3,
@@ -6479,7 +6506,8 @@ async def test_presentation_resume_reports_actions_without_reconfirming_mode(tmp
     await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId,
         prompt=[{"text": "请按选择继续原任务"}], field_meta={"userDecision": response, "ui_language": "zh"})))
     assert len(llm.calls) == 1
-    user_messages = [content for role, content in llm.calls[0] if role == "user"]
+    user_messages = [content for role, content in llm.calls[0] if role == "user"
+                     and "[HOST_USER_DECISION_RESPONSE]" in str(content)]
     assert len(user_messages) == 1
     text = user_messages[0]
     assert ("Host presentation progress guidance:" in text) == has_guidance
@@ -6541,7 +6569,8 @@ async def test_acp_skill_filter_ignores_host_ui_language_instruction(tmp_path):
     assert state.skill_selector.matched_skill_names == ()
     assert state.preloaded_skill_names == []
     assert "## Auto-Loaded Skill Instructions" not in llm.calls[0][0][1]
-    user_messages = [content for role, content in llm.calls[0] if role == "user"]
+    user_messages = [content for role, content in llm.calls[0] if role == "user"
+                     and "孙宇晨最新的回复是什么" in str(content)]
     assert user_messages == [
         "[Host UI language: Chinese. Use this language for user-visible "
         "intermediate summaries, progress updates, and the final response unless the user "
@@ -8168,7 +8197,7 @@ async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(
 async def test_acp_emits_todo_snapshot_raw_output(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=4, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=4, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
@@ -8209,7 +8238,7 @@ async def test_acp_emits_todo_snapshot_raw_output(tmp_path):
 async def test_acp_emits_plan_snapshot_raw_output(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
@@ -8405,7 +8434,7 @@ plan: {"title": "执行计划", "steps": [{"title": "旧步骤"}]}"""
 async def test_acp_latest_user_plan_request_still_triggers_plan_with_history(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
@@ -8445,7 +8474,7 @@ plan: {"title": "旧计划", "steps": []}
 async def test_acp_prompt_text_plan_request_waits_for_approval_without_meta(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
@@ -8482,7 +8511,7 @@ async def test_acp_prompt_text_plan_request_waits_for_approval_without_meta(tmp_
 async def test_acp_prompt_text_plan_request_auto_approves_with_meta(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
@@ -8522,7 +8551,7 @@ async def test_acp_prompt_text_plan_request_auto_approves_with_meta(tmp_path):
 async def test_acp_organic_plan_write_waits_for_approval_without_meta(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
@@ -8590,7 +8619,7 @@ async def test_acp_organic_plan_write_auto_approves_with_meta(tmp_path):
 async def test_acp_plan_approval_text_continues_pending_plan(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
@@ -8650,8 +8679,10 @@ async def test_acp_sub_agent_progress_has_stable_grouping_fields(tmp_path):
         agent=AgentConfig(max_steps=5, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_todo=False),
     )
+    (tmp_path / "child.txt").write_text("child", encoding="utf-8")
     conn = DummyConn()
-    agent = BoxACPAgent(conn, config, SubAgentLLM(), [EchoTool()], "system")
+    llm = SubAgentLLM()
+    agent = BoxACPAgent(conn, config, llm, [EchoTool()], "system")
 
     session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "delegate"}])))
@@ -8670,7 +8701,7 @@ async def test_acp_sub_agent_progress_has_stable_grouping_fields(tmp_path):
     assert {item["sub_agent_id"] for item in progress}
     # Short distinct label is forwarded for host-side rendering.
     assert all(item["title"] == "file probe" for item in progress)
-    assert any(item["event"] == "tool_start" and item["tool_name"] == "echo" for item in progress)
+    assert any(item["event"] == "tool_start" and item["tool_name"] == "read_file" for item in progress), str(llm.tool_sets) + json.dumps(progress, ensure_ascii=False)
     assert any(item["event"] == "llm_output" and item["content"] == "child summary" for item in progress)
 
 

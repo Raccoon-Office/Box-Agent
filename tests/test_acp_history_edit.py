@@ -86,9 +86,9 @@ async def test_first_turn_and_repeated_edits_use_exact_prefix(tmp_path):
         session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "first"})))
         await host.prompt(**acp_params(request(session, "old-first", "t1")))
         await host.prompt(**acp_params(request(session, "new-first", "t2", edit("t1"))))
-        assert [m.role for m in llm.requests[-1]] == ["system", "user"]
+        assert [m.role for m in llm.requests[-1] if m.source != "runtime"] == ["system", "user"]
         await host.prompt(**acp_params(request(session, "newer-first", "t3", edit("t2", "t2"))))
-        assert [m.role for m in llm.requests[-1]] == ["system", "user"]
+        assert [m.role for m in llm.requests[-1] if m.source != "runtime"] == ["system", "user"]
         assert "new-first" not in str(llm.requests[-1])
         assert "newer-first" in str(llm.requests[-1])
     finally:
@@ -171,7 +171,7 @@ async def test_edit_waits_for_old_prompt_to_stop(tmp_path):
     class SlowLLM(CaptureLLM):
         async def generate_stream(self, messages, tools=None, **kwargs):
             self.requests.append(deepcopy(messages))
-            if "old-running" in str(messages[-1].content):
+            if any(m.role == "user" and m.source == "user" and "old-running" in str(m.content) for m in messages):
                 started.set()
                 await asyncio.Event().wait()
             yield StreamEvent(type="text", delta="answer")
@@ -214,7 +214,7 @@ async def test_retry_after_revision_commit_and_restart_does_not_revise_twice(tmp
         await host.prompt(**acp_params(request(resumed, "new", "t2", edit("t1"))))
         events = host._sessions[resumed.sessionId].agent.session_log.events
         assert sum(e["type"] == "history/revise" for e in events) == 1
-        messages = llm.requests[-1]
+        messages = [message for message in llm.requests[-1] if message.source != "runtime"]
         assert [message.role for message in messages] == ["system", "user"]
         assert messages[-1].content.splitlines()[0] == "new"
         assert "old" not in messages[-1].content
@@ -279,7 +279,7 @@ async def test_duplicate_edit_does_not_cancel_its_already_running_turn(tmp_path)
     class WaitingLLM(CaptureLLM):
         async def generate_stream(self, messages, tools=None, **kwargs):
             self.requests.append(deepcopy(messages))
-            if "new-running" in str(messages[-1].content):
+            if any(m.role == "user" and m.source == "user" and "new-running" in str(m.content) for m in messages):
                 entered.set()
                 await release.wait()
             yield StreamEvent(type="text", delta="answer")

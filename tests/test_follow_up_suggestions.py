@@ -69,7 +69,8 @@ class _DedicatedFollowUpLLM:
     async def generate(self, messages, tools=None, **_):
         if _.get("call_kind") == "turn_continuation_judge":
             return LLMResponse(content='{"continue":false}', finish_reason="stop")
-        self.generate_calls.append({**_, "max_tokens": self.max_output_tokens})
+        self.generate_calls.append({**_, "max_tokens": self.max_output_tokens,
+                                    "messages": [message.model_copy(deep=True) for message in messages]})
         await self.release_suggestions.wait()
         return LLMResponse(
             content='{"suggestions":["核对项目当前的 React 版本", "查看 React 19.2 的新增内容"]}',
@@ -236,13 +237,26 @@ async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_skill_catalog", [False, True])
 async def test_acp_generates_suggestions_in_background_without_blocking_prompt(
     tmp_path,
     monkeypatch,
+    with_skill_catalog,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     conn = _RecordingConn()
     llm = _DedicatedFollowUpLLM()
+    loader = None
+    if with_skill_catalog:
+        from box_agent.tools.skill_loader import SkillLoader
+        folder = tmp_path / "skills" / "react-helper"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(
+            "---\nname: react-helper\ndescription: React version helper\nkeywords: [React]\n---\nMethod\n",
+            encoding="utf-8",
+        )
+        loader = SkillLoader(folder.parent)
+        loader.discover_skills()
     agent = BoxACPAgent(
         conn,
         Config(
@@ -253,6 +267,7 @@ async def test_acp_generates_suggestions_in_background_without_blocking_prompt(
         llm,
         [],
         "system",
+        skill_loader=loader,
     )
     session = await agent.new_session(
         **acp_params(SimpleNamespace(
@@ -286,6 +301,12 @@ async def test_acp_generates_suggestions_in_background_without_blocking_prompt(
 
     llm.release_suggestions.set()
     await suggestion_task
+    suggestion_input = "\n".join(str(message.content) for message in llm.generate_calls[-1]["messages"])
+    assert "React 最新版是多少" in suggestion_input
+    assert "[Host Skill catalog:" not in suggestion_input
+    if with_skill_catalog:
+        assert any(message.source == "runtime" and "[Host Skill catalog:" in str(message.content)
+                   for message in agent._sessions[session.sessionId].agent.messages)
     assert llm.generate_calls[-1]["max_tokens"] == 8_192
     assert llm.max_output_tokens == 100_000
     suggestion_updates = [

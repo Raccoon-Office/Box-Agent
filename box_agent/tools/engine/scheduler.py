@@ -45,6 +45,7 @@ class ToolInvocationRequest:
     invocation_context: ToolInvocationContext | None = None
     approved_permission_request: dict[str, Any] | None = None
     on_invoke: Callable[[], None] | None = None
+    admission_check: Callable[[], str | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,10 @@ class ToolEngine:
             return ToolResult(
                 success=False, content="", error="Tool execution cancelled before invocation.",
             )
+        if request.admission_check is not None:
+            error = request.admission_check()
+            if error:
+                return ToolResult(success=False, error=error)
         context = request.invocation_context
         if event_queue is not None:
             from dataclasses import replace
@@ -158,6 +163,7 @@ class ToolEngine:
                 tool, request.arguments, context=context,
                 approved_permission_request=request.approved_permission_request,
                 on_invoke=request.on_invoke,
+                admission_check=request.admission_check,
             )
 
     async def invoke_serial(

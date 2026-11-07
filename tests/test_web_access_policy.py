@@ -205,7 +205,8 @@ def session_config(workspace, *, sub_agents=False):
 
 @pytest.mark.parametrize("profile", ["acp", "cli", "python"])
 @pytest.mark.parametrize("discovery", ["before_session", "between_turns"])
-async def test_default_session_keeps_policy_when_catalog_tools_arrive(tmp_path, monkeypatch, profile, discovery):
+@pytest.mark.parametrize("version", [1, 2])
+async def test_default_session_keeps_policy_when_catalog_tools_arrive(tmp_path, monkeypatch, profile, discovery, version):
     # ACP's shared MCP catalog may already be ready, or finish after creation.
     # Neither path adds catalog-only tools to resources.tools.
     catalog = mcp_tool_catalog.MCPToolCatalog()
@@ -213,8 +214,10 @@ async def test_default_session_keeps_policy_when_catalog_tools_arrive(tmp_path, 
     if discovery == "before_session":
         catalog.replace_server("playwright", [browser_tool()])
     llm = RequestCapture()
+    config = session_config(tmp_path)
+    config.agent.tool_interface_version = version
     session = await AgentSession.open(
-        config=session_config(tmp_path),
+        config=config,
         options=SessionOptions(profile=profile, workspace_dir=tmp_path, sandbox_mode=False),
         host=HostBindings(llm_client=llm, base_tools=[], output=lambda _: None),
     )
@@ -229,7 +232,8 @@ async def test_default_session_keeps_policy_when_catalog_tools_arrive(tmp_path, 
         for prompt, names in llm.requests:
             assert "tool_search" in names
             assert prompt.count("## Web Access Routing") == 1
-        assert "managed_browser_navigate" in llm.requests[-1][1]
+        assert ("managed_browser_navigate" in llm.requests[-1][1]) is (version == 1)
+        assert ("call_tool" in llm.requests[-1][1]) is (version == 2)
     finally:
         await session.aclose()
 

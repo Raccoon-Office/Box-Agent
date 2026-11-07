@@ -810,7 +810,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
                     "type": "string",
                     "description": (
                         "Prefer a path relative to the active file root "
-                        f"({self.relative_root_dir}). Absolute paths are used exactly "
+                        "(the configured working root). Absolute paths are used exactly "
                         "as supplied."
                     ),
                 },

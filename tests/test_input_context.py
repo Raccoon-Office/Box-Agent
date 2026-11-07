@@ -126,7 +126,7 @@ async def test_model_receives_facts_history_restores_them_and_edits_drop_discard
         await host.prompt(**acp_params(req))
         state = host._sessions[session.sessionId]
         assert state.source_text == "解释这段，不要改文件"
-        model_text = str(llm.requests[-1][-1].content)
+        model_text = str(next(m.content for m in llm.requests[-1] if m.role == "user" and m.source == "user"))
         for value in ("MAPLE excerpt", "ORCHID", "CEDAR", "public.orders", "source.relativePath"):
             assert value in model_text
         assert "<desktop_response_format>" not in model_text

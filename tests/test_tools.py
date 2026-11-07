@@ -1167,7 +1167,7 @@ async def test_write_tool():
         print("✅ WriteTool test passed")
 
 
-def test_write_tool_schema_names_active_relative_root(tmp_path):
+def test_write_tool_schema_uses_stable_relative_root_description(tmp_path):
     artifact_root = tmp_path / "output"
     tool = WriteTool(
         workspace_dir=str(tmp_path),
@@ -1177,7 +1177,8 @@ def test_write_tool_schema_names_active_relative_root(tmp_path):
     description = tool.parameters["properties"]["path"]["description"]
 
     assert "Prefer a path relative to the active file root" in description
-    assert str(artifact_root) in description
+    assert "the configured working root" in description
+    assert str(artifact_root) not in description
     assert "Absolute paths are used exactly as supplied" in description
 
 
