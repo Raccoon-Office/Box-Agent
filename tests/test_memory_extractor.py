@@ -58,10 +58,11 @@ async def test_runtime_reference_does_not_trigger_low_signal_memory_extraction(m
 
 
 @pytest.mark.parametrize("trigger", ["loop_end", "pre_summarize"])
-async def test_memory_extraction_keeps_user_and_tool_facts_without_runtime_reference(mgr, trigger):
+async def test_memory_extraction_keeps_user_and_tool_facts_without_runtime_reference(mgr, trigger, monkeypatch):
     from box_agent.schema import Message
 
-    extractor = _make_extractor(mgr, '{"additions": [], "merges": []}')
+    monkeypatch.setattr("box_agent.memory.monotonic", lambda: 1.0)
+    extractor = _make_extractor(mgr, '{"additions": [], "merges": []}', cooldown=0)
     messages = [Message(role="user", content="Remember that I prefer Python"),
                 Message(role="user", source="runtime", content="CATALOG_SCHEMA_NOT_USER_FACTS"),
                 Message(role="tool", content="ACTUAL_TOOL_OBSERVATION", tool_call_id="observed"),
