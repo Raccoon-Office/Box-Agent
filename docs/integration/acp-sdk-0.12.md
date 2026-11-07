@@ -6,14 +6,14 @@ SDK 包版本与 ACP 线协议版本是两回事：`initialize.protocolVersion` 
 
 ## 接口与职责
 
-- Agent Python 接口为 `initialize`、`new_session`、`load_session`、`prompt`、`cancel`、`ext_method`，
+- Agent Python 接口为 `initialize`、`new_session`、`load_session`、`resume_session`、`prompt`、`cancel`、`ext_method`，
   接收 SDK 展开的参数；反向调用使用 `session_update`、`request_permission`、`ext_method`。
 - 标准 JSON 字段仍为 `protocolVersion`、`sessionId`、`stopReason`、`toolCallId`、`optionId` 等。
   私有方法在 wire 上只有一个 `_` 前缀；传给 SDK `ext_method` 时不加此前缀。
 - 宿主身份扩展改为 `_meta.host_client_info`。标准 `clientInfo` 保持原义。
   SDK 将 `_meta` 合并到方法参数，旧扩展名 `client_info` 会覆盖标准参数，因此两端同时改名。
   每轮 `turn_id`、历史编辑、模型绑定、宿主能力和会话恢复等现有元数据继续传递。
-- 能力声明为 `loadSession: true` 及图片输入。支持工作区内的 `resource_link`；
+- 能力声明为 `loadSession: true`、`sessionCapabilities.resume: {}` 及图片输入。支持工作区内的 `resource_link`；
   不包含音频、云端上传或跨机器 URI 转换。
   当界面与 Agent 不在同一机器时，本地 `file://` 不会自动成为云电脑可读文件；
   下一阶段须先准备 Agent 可读资源，再发送引用。
@@ -72,13 +72,17 @@ Lab 真实 SDK 子进程测试使用 9 个中文/空格/特殊字符同名文件
 
 `request/context.inputContext.phase=candidate` 表示准备候选；`PreparedContext.on_committed` 复核版本并写 `input/adopted`。有效响应前不静默换版本，必需图片超出预算或丢失时明确阻止模型调用。摘要压缩保留原始展示历史及资源引用，现有资源存储不因移出模型上下文而删除图片；此变更不新增垃圾回收。摘要计算成本为 O(文件总字节数)，按 1 MiB 流式读取；约束仅覆盖声明的输入资源，不快照整个工作区。
 
-稳定 ACP ID 为 `acp-v1-` 加产品会话 ID 的 base64url 编码。`session/load` 只打开既有日志，按原有效历史顺序回放 user/assistant/tool 更新，再返回成功；不调用模型、不执行工具、不重新上传附件。回放 `_meta` 包含 `replay`、`eventId`、`turnId`，补充带 `inputKind`/`inputId`。未知、错目录、损坏、活跃会话分别失败，回放中断关闭 writer。旧 `sess-*` 或仅产品 ID 的原生绑定先派生稳定 ID，再通过 load 核验日志存在、身份及工作区；失败不得降级创建。load 的 `_meta` 不携带 `session_id`，避免 SDK 将其覆盖到顶层会话参数。
+稳定 ACP ID 为 `acp-v1-` 加产品会话 ID 的 base64url 编码。`session/load` 只打开既有日志，按原有效历史顺序回放 user/assistant/tool 更新，再返回成功；不调用模型、不执行工具、不重新上传附件。回放 `_meta` 包含 `replay`、`eventId`、`turnId`，补充带 `inputKind`/`inputId`，回放中断关闭 writer。
+
+`session/resume` 接受与 load 相同的会话参数，共用既有日志、身份、工作区及并发校验，但不发送历史 `session/update`。响应保留 `_meta.history_revision_id` 等会话元数据，不含 `replayed`；下一次 prompt 使用原模型上下文。宿主先检查 `sessionCapabilities.resume`。SDK 0.12.1 的服务端连接须开启 `use_unstable_protocol` 才能路由 resume；这不表示 Box-Agent 实现了 fork、close 等其他生命周期方法。
+
+两个恢复入口对未知、错目录、损坏、活跃会话均失败，失败不得降级创建。旧 `sess-*` 或仅产品 ID 的原生绑定先派生稳定 ID，再通过所选恢复入口核验日志存在、身份及工作区。load/resume 请求的 `_meta` 不携带 `session_id`，避免 SDK 将其覆盖到顶层会话参数。
 
 图片预处理的真实工具 ID、参数和文本结果随输入一起保存；回放展示这些回执，不重新运行图片工具。图片字节仍只保存在会话图片存储。
 
-Lab 原生 SQLite 保存 ACP ID、产品 ID 和工作区绑定。重开时进入缓冲回放，按 eventId 去重；成功后以事务更新对应助手视图和绑定。工具卡片只读，保留原生用户附件；找不到 turnId 对应历史行时回滚，保留原 SQLite 历史。失败不自动开始下一轮。
+Lab 原生 SQLite 保存 ACP ID、产品 ID 和工作区绑定。普通重开直接展示 SQLite 历史，发送前 resume。中断/错误快照、未确认补充或发送后尚未入库的持久标记触发 load 对账；resume 本身不会修复 SQLite 漏存。对账进入缓冲回放，按 eventId 去重，并与实时宿主动作隔离；成功后以事务更新对应助手视图、状态、补充回执及绑定，再决定是否自动续跑。工具卡片只读，保留原生用户附件；找不到 turnId 对应历史行或保存失败时保留原 SQLite 历史并阻止发送，重试成功后放行。旧版本无标记且已丢失整轮的记录不能自动识别。
 
-`_inject` 按字段存在性要求 `prompt`、`text` 恰好一个；结构化请求必传稳定 injectionId。回执 `pending` 仅表示接收，`injected` 才表示有效提交，`cancelled`/`discarded` 为未生效终态。相同 ID 的查询先于文件读取，响应丢失后即使文件被删除仍可得到原状态；同 ID 不同语义返回 `INJECTION_IDEMPOTENCY_CONFLICT`。进程重启仅能从有效日志确认已提交项，未提交状态不推断成功。Lab 持久保存未确认草稿，重开回放确认已提交 ID，其余保留为错误草稿，不自动重发。
+`_inject` 按字段存在性要求 `prompt`、`text` 恰好一个；结构化请求必传稳定 injectionId。回执 `pending` 仅表示接收，`injected` 才表示有效提交，`cancelled`/`discarded` 为未生效终态。相同 ID 的查询先于文件读取，响应丢失后即使文件被删除仍可得到原状态；同 ID 不同语义返回 `INJECTION_IDEMPOTENCY_CONFLICT`。进程重启仅能从有效日志确认已提交项，未提交状态不推断成功。Lab 持久保存未确认草稿，需要对账时通过 load 回放确认已提交 ID，其余保留为错误草稿，不自动重发。
 
 旧文本日志按原样恢复，不猜拆历史提示词。有结构化事实或派生策略的新日志写入不可忽略的 `input/contract`，旧运行包会拒绝这些日志，不能用降级运行包继续新会话。升级前的纯文字日志保持可读。旧 `text + resources`、旧图片字段仅在旧调用者全部迁移并验证后才可删除。
 
@@ -96,11 +100,13 @@ Lab 原生 SQLite 保存 ACP ID、产品 ID 和工作区绑定。重开时进入
 {"method":"session/load","params":{"sessionId":"acp-v1-ZGVtbw","cwd":"/workspace","mcpServers":[]}}
 {"method":"session/update","params":{"sessionId":"acp-v1-ZGVtbw","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"核对表格"},"_meta":{"replay":true,"eventId":"7:0","turnId":"t1","turnStatus":"complete"}}}}
 {"result":{"_meta":{"replayed":true}}}
+{"method":"session/resume","params":{"sessionId":"acp-v1-ZGVtbw","cwd":"/workspace","mcpServers":[]}}
+{"result":{"_meta":{"history_revision_id":"initial"}}}
 ```
 
-普通/仅附件/图片和编辑请求最终返回标准 `stopReason`，原字段与工具通知继续保留。load 的所有回放更新先于其成功响应。内联图片示例用标准 `{"type":"image","mimeType":"image/png","data":"<base64>"}` 替换图片 link；证据和诊断材料不得包含该正文。
+普通/仅附件/图片和编辑请求最终返回标准 `stopReason`，原字段与工具通知继续保留。load 的所有回放更新先于其成功响应；resume 无回放，示例响应省略其他会话元数据，实际 history_revision_id 使用当前日志版本。内联图片示例用标准 `{"type":"image","mimeType":"image/png","data":"<base64>"}` 替换图片 link；证据和诊断材料不得包含该正文。
 
-新增回归入口：`test_user_input_contract.py`、`test_acp_input_restart_stdio.py`；Lab 的 manager、storage、eventProcessor、inputState 和 `client-supplements.test.mjs` 覆盖回放事务及补充终态。真实 SDK 子进程测试与真实模型/本地 UI 验收分开记录，云端资源仍为待联调。
+新增回归入口：`test_user_input_contract.py`、`test_acp_input_restart_stdio.py`；后者在真实 stdio 重启后分别验证 load 回放、resume 无回放及下一轮保留原工具结果。Lab 的 manager、bridge、storage、eventProcessor、inputState 和 `client-supplements.test.mjs` 覆盖按需对账、失败发送阻断、回放事务及补充终态。真实 SDK 子进程测试与真实模型/本地 UI 验收分开记录，云端资源仍为待联调。
 
 ## 长驻进程约束
 
