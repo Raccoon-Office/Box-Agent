@@ -54,7 +54,7 @@ async def test_judge_forks_existing_transcript_without_duplicate_candidate(
     decision, decision_tool_available,
 ) -> None:
     # This verifies the protocol, not the real model's semantic classification.
-    llm = JudgeLLM(json.dumps({"continue": decision}))
+    llm = JudgeLLM(json.dumps({"continue": decision, "next_action": "询问演示文稿用途。"}))
     request = "制作一个关于紫砂壶的 PPT。"
     candidate = "为避免方向偏差，请先选择这份紫砂壶 PPT 的主要用途。"
     messages = _history(request, candidate)
@@ -279,6 +279,72 @@ async def test_controller_legacy_scalar_arguments_remain_supported() -> None:
         cancelled=False,
     )
     assert request is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("next_action", ["用 edit_file 补全交付单的两条图注，然后读回核对。", None, {"tool": "edit_file"}])
+async def test_recovery_identifies_the_unfinished_action_without_granting_authority(next_action):
+    candidate = "我会补全交付单中的两条图注并读回核对。"
+    llm = JudgeLLM(json.dumps({"continue": True, "next_action": next_action}))
+    request = await TurnContinuationController().evaluate(
+        llm=llm, messages=_history("完成交付单。", candidate),
+        finish_reason="stop", tools_available=True, step=0, max_steps=5,
+        cancelled=False,
+    )
+    assert request is not None
+    assert (next_action if isinstance(next_action, str) else candidate) in request.prompt
+    assert "reference data" in request.prompt
+    assert "permissions" in request.prompt
+    assert "manual choice" in request.prompt
+
+
+@pytest.mark.asyncio
+async def test_recovery_bounds_long_hints_and_redacts_multimodal_fallback_evidence():
+    candidate = Message(role="assistant", content=[
+        {"type": "text", "text": "我会补全图注。"},
+        {"type": "image", "content": "PRIVATE_IMAGE_PAYLOAD"},
+        {"type": "reasoning", "content": "PRIVATE_REASONING"},
+    ], thinking="PRIVATE_THINKING")
+    for hint in ("补全图注。" * 2_000, None):
+        request = await TurnContinuationController().evaluate(
+            llm=JudgeLLM(json.dumps({"continue": True, "next_action": hint})),
+            messages=[Message(role="user", content="完成交付。"), candidate],
+            finish_reason="stop", tools_available=True, step=0, max_steps=5,
+            cancelled=False,
+        )
+        assert request is not None
+        assert len(request.prompt) < 4_000
+        assert "PRIVATE_" not in request.prompt
+        assert "补全图注" in request.prompt
+
+
+@pytest.mark.asyncio
+async def test_second_recovery_directs_the_model_to_preserve_completed_work():
+    controller = TurnContinuationController()
+    arguments = dict(
+        llm=JudgeLLM(), messages=_history("补全图注。", "我会补全图注。"),
+        finish_reason="stop", tools_available=True, step=0, max_steps=5,
+        cancelled=False,
+    )
+    first = await controller.evaluate(**arguments)
+    second = await controller.evaluate(**arguments)
+    assert first is not None and second is not None
+    assert second.prompt != first.prompt
+    assert "Resume from the current state" in second.prompt
+    assert "Reuse existing results and preserve completed work" in second.prompt
+    assert "If only verification remains, verify the existing result" in second.prompt
+
+
+@pytest.mark.asyncio
+async def test_tool_progress_does_not_override_the_total_step_limit():
+    controller = TurnContinuationController()
+    controller.record_tool_progress(True)
+    with pytest.raises(ContinuationLimitReached):
+        await controller.evaluate(
+            llm=JudgeLLM(), messages=_history("完成文件。", "我会继续检查。"),
+            finish_reason="stop", tools_available=True, step=2, max_steps=3,
+            cancelled=False,
+        )
 
 
 class MockLLM:
@@ -719,6 +785,79 @@ async def test_loop_distinguishes_completion_after_bounded_continuations(complet
     assert done.stop_reason is (StopReason.END_TURN if completed else StopReason.ERROR)
     if not completed:
         assert [event for event in events if isinstance(event, ErrorEvent)][-1].error_code == "TURN_COMPLETION_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_successful_file_work_renews_recovery_for_the_next_unfinished_action(tmp_path):
+    from box_agent.tools.file_tools import WriteTool
+
+    def write(name):
+        return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+            id=name, type="function", function=FunctionCall(
+                name="write_file", arguments={"path": name, "content": "done"},
+            ),
+        )])
+
+    llm = MockLLM([
+        LLMResponse(content="我会创建第一份文件。", finish_reason="stop"),
+        LLMResponse(content="我现在创建第一份文件。", finish_reason="stop"),
+        write("first.txt"),
+        LLMResponse(content="接着创建第二份文件。", finish_reason="stop"),
+        write("second.txt"),
+        LLMResponse(content="两份文件已创建。", finish_reason="stop"),
+    ], judge_decisions=[True, True, True, False])
+    tool = WriteTool(str(tmp_path))
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="创建两份文件。")],
+        tools={tool.name: tool}, max_steps=8,
+    ))
+    assert (tmp_path / "first.txt").read_text() == "done"
+    assert (tmp_path / "second.txt").read_text() == "done"
+    assert len([e for e in events if isinstance(e, InjectedMessageEvent)]) == 3
+    assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.END_TURN]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "empty", "empty_search"])
+async def test_failed_or_empty_tool_results_do_not_renew_recovery(outcome):
+    class CheckTool(SearchTool):
+        @property
+        def name(self):
+            return "search_files" if outcome == "empty_search" else "check_progress"
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {"probe": {"type": "integer"}}}
+
+        async def execute(self, probe):
+            return ToolResult(
+                success=outcome != "failed",
+                content="No matches found." if outcome == "empty_search" else "",
+                error="Unable to execute" if outcome == "failed" else None,
+            )
+
+    tool = CheckTool()
+
+    def call(index):
+        return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+            id=f"check-{index}", type="function",
+            function=FunctionCall(name=tool.name, arguments={"probe": index}),
+        )])
+
+    llm = MockLLM([
+        LLMResponse(content="我会完成检查。", finish_reason="stop"),
+        call(1),
+        LLMResponse(content="我会完成检查。", finish_reason="stop"),
+        call(2),
+        LLMResponse(content="我会完成检查。", finish_reason="stop"),
+    ], judge_decisions=[True, True, True])
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="检查文件。")],
+        tools={tool.name: tool}, max_steps=8,
+    ))
+    assert len([e for e in events if isinstance(e, InjectedMessageEvent)]) == 2
+    assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.ERROR]
+    assert [e.error_code for e in events if isinstance(e, ErrorEvent)][-1] == "TURN_COMPLETION_INCOMPLETE"
 
 
 @pytest.mark.asyncio
