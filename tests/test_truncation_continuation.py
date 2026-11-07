@@ -33,6 +33,8 @@ from box_agent.schema import LLMResponse, Message, StreamEvent, TokenUsage
         "the",
         "未闭合的 **加粗",
         "一句没有结尾的话",
+        "Results:\nrate: not yet available",
+        "Results:\ncount: +",
     ],
 )
 def test_looks_like_truncated_true(text):
@@ -65,6 +67,10 @@ def test_looks_like_truncated_true(text):
         "https://example.com/a?id=1",
         "```text\n001 alpha\n```\nQA211-D-END",
         "Result:\noutput/report.md",
+        "Results:\nchange_rate: -18.6%",
+        "Results:\nlatency_ms = 125.50",
+        "Results:\ncount: 14",
+        "Results:\nnet-change: +0.25\n",
         "",
         "   \n  ",
     ],
@@ -162,6 +168,25 @@ def _truncated(content: str, completion_tokens: int = 200) -> LLMResponse:
         finish_reason="stop",
         usage=TokenUsage(completion_tokens=completion_tokens, total_tokens=completion_tokens),
     )
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "end_turn", None])
+async def test_complete_numeric_metric_line_finishes_without_appending_a_closing_sentence(finish_reason):
+    text = "The calculations and source checks are complete.\ncount: 14\nchange_rate: -18.6%"
+    response = _truncated(text)
+    response.finish_reason = finish_reason
+    llm = MockLLM([response, _truncated("This is the complete result.")])
+    messages = _msgs()
+
+    events = await _collect(run_agent_loop(
+        llm=llm, messages=messages, tools={}, max_steps=3,
+        truncation_continuation_enabled=True,
+    ))
+
+    assert llm.calls == 1
+    assert not any(isinstance(event, InjectedMessageEvent) for event in events)
+    assert "".join(m.content or "" for m in messages if m.role == "assistant") == text
+    assert [event for event in events if isinstance(event, DoneEvent)][-1].stop_reason == StopReason.END_TURN
 
 
 async def test_continues_once_on_suspected_truncation():

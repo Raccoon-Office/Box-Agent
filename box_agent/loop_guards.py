@@ -317,6 +317,9 @@ _CLEAN_ENDING_CHARS: Final[frozenset[str]] = frozenset(
 # Markdown structural last-lines that are complete as-is.
 _TABLE_ROW_RE: Final = re.compile(r"^\s*\|.*\|\s*$")
 _LIST_ITEM_RE: Final = re.compile(r"^\s*([-*+]|\d+[.)])\s+\S")
+_NUMERIC_FIELD_RE: Final = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_-]*\s*[:=]\s*[+-]?[0-9]+(?:\.[0-9]+)?%?"
+)
 _ATOMIC_ASCII_REPLY_RE: Final = re.compile(
     r"^[A-Za-z0-9./\\:@+#%?&=~_-]{1,256}$"
 )
@@ -354,6 +357,8 @@ def looks_like_truncated_output(text: str) -> bool:
     if stripped[-1] in _CLEAN_ENDING_CHARS:
         return False
     last_line = stripped.rsplit("\n", 1)[-1].strip()
+    if _NUMERIC_FIELD_RE.fullmatch(last_line):
+        return False
     if _looks_like_atomic_ascii_reply(last_line):
         return False
     if last_line.startswith("```"):
