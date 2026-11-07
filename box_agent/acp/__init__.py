@@ -63,6 +63,7 @@ from acp import (
 from acp.agent.connection import AgentSideConnection
 from acp.schema import AgentCapabilities, Implementation, McpCapabilities, PromptCapabilities
 from acp.schema import LoadSessionResponse, UserMessageChunk
+from acp.schema import ResumeSessionResponse, SessionCapabilities, SessionResumeCapabilities
 
 from box_agent import __version__
 from box_agent.artifacts import is_intermediate_artifact
@@ -1729,6 +1730,7 @@ class BoxACPAgent:
             protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
                 load_session=True, prompt_capabilities=PromptCapabilities(image=True),
+                session_capabilities=SessionCapabilities(resume=SessionResumeCapabilities()),
             ),
             agent_info=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
@@ -2423,10 +2425,10 @@ class BoxACPAgent:
             kwargs["field_meta"] = response_meta
         return NewSessionResponse(**kwargs)
 
-    async def load_session(
+    async def _restore_session(
         self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,
-    ) -> LoadSessionResponse:
-        """Open and replay existing facts; never create a missing session or run tools."""
+    ) -> NewSessionResponse:
+        """Bind an existing log using the same validation for load and resume."""
         self._require_accepting_requests()
         import base64
         try:
@@ -2447,12 +2449,25 @@ class BoxACPAgent:
                                    field_meta={**meta, "session_id": upstream})
         from box_agent.session_log import SessionLogCorrupted, SessionLogInUseError, SessionLogWorkspaceMismatch
         try:
-            response = await self._new_session_with_binding(params, load_existing=True)
+            return await self._new_session_with_binding(params, load_existing=True)
         except (FileNotFoundError, SessionLogCorrupted, SessionLogInUseError, SessionLogWorkspaceMismatch) as exc:
             code = ("UNKNOWN_SESSION_ID" if isinstance(exc, FileNotFoundError) else
                     "SESSION_WORKSPACE_MISMATCH" if isinstance(exc, SessionLogWorkspaceMismatch) else
                     "SESSION_BUSY" if isinstance(exc, SessionLogInUseError) else "SESSION_LOG_CORRUPTED")
             raise RequestError(-32012, code, {"code": code}) from exc
+
+    async def resume_session(
+        self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,
+    ) -> ResumeSessionResponse:
+        """Restore context for the next prompt without replaying history."""
+        response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
+        return ResumeSessionResponse(field_meta=response.field_meta)
+
+    async def load_session(
+        self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,
+    ) -> LoadSessionResponse:
+        """Open and replay existing facts; never create a missing session or run tools."""
+        response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
         state = self._sessions[session_id]
         state._prompt_in_progress = True
         try:
@@ -6337,6 +6352,9 @@ async def run_acp_server(config: Config | None = None) -> None:
 
         connection = AgentSideConnection(
             create_adapter, StdioTransport(reader, writer, on_disconnect=shutdown_event.set),
+            # SDK 0.12.1 gates session/resume behind this flag. The other
+            # gated lifecycle methods have no handler on BoxACPAgent.
+            use_unstable_protocol=True,
         )
 
         release_received_frames(connection._conn)
