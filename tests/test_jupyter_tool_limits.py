@@ -30,6 +30,17 @@ def test_execute_code_description_does_not_ban_shell_package_installation():
     assert "Never use the bash tool" not in description
 
 
+def test_execute_code_installation_advice_respects_user_prohibitions():
+    description = JupyterSandboxTool().description
+
+    assert "If the user forbids installation" in description
+    assert "do not install packages or trigger environment provisioning" in description
+    assert "Use existing compatible capabilities or report the blocker" in description
+    assert "only for top-level module names (no dots)" in description
+    assert "catch ImportError" in description
+    assert "does not verify transitive dependencies" in description
+
+
 @pytest.mark.asyncio
 async def test_execute_code_rejects_oversized_code_before_kernel_start(monkeypatch):
     def fail_if_sandbox_requested(self):

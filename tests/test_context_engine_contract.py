@@ -125,6 +125,37 @@ async def test_context_summary_collects_text_from_streaming_llm():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_compaction_recovers_sources_and_user_constraints_in_messages_only(fallback):
+    from box_agent.kernel.context_engine import _maybe_summarize
+
+    class SummaryProvider:
+        async def generate_stream(self, **kwargs):
+            instruction = kwargs["messages"][-1].content
+            assert "explicit user prohibitions" in instruction
+            assert "source paths" in instruction
+            yield StreamEvent(type="text", delta="<summary>Excluded records are listed in analysis.json.</summary>")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    system = Message(role="system", content="Stable system prefix")
+    history = [system, Message(role="user", content="Continue the report without installing dependencies.")]
+    outcome = await _maybe_summarize(
+        SummaryProvider(), history, token_limit=10000, api_total_tokens=0,
+        skip_check=False, force=True, allow_llm_summary=not fallback,
+    )
+    assert outcome.mode == ("fallback" if fallback else "summary")
+    assert outcome.messages[0] is system
+    recovery = outcome.messages[1]
+    assert recovery.source == "runtime" and recovery.role == "user"
+    assert "reopen the relevant source" in recovery.content
+    assert "exact value, status and record ID" in recovery.content
+    assert "Before reusing facts in the next artifact mutation, use a tool" in recovery.content
+    assert "not a per-record status mapping" in recovery.content
+    assert "Explicit user prohibitions still apply" in recovery.content
+    assert outcome.messages[-1] is history[-1]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("extra_chars", [20_000, 60_000])
 async def test_summary_checks_complete_projected_input_against_its_own_capacity(extra_chars):
     from types import SimpleNamespace

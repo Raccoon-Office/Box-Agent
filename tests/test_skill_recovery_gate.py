@@ -76,6 +76,10 @@ async def test_deferral_is_explicit_scoped_to_one_turn_and_not_a_read(tmp_path):
     result = await reader.invoke({'skill_name': 'analysis', 'not_needed_reason': 'Only editing slides this turn'},
                                  context=invocation)
     assert result.success and 'not loaded' in result.content
+    assert 'Deferring a method does not waive source verification' in result.content
+    assert 'reopen the relevant source' in result.content
+    assert 'before reusing its results' in result.content
+    assert 'do not assign a status to each ID' in result.content
     assert before == runtime.log_records()
     assert await gate.check_invocation('write_file', {}) is None
     runtime.begin_turn()

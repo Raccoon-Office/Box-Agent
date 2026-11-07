@@ -1811,6 +1811,14 @@ class JupyterSandboxTool(Tool):
     def description(self) -> str:
         return f"""Execute Python code in a persistent Jupyter kernel sandbox.
 
+If the user forbids installation, do not install packages or trigger environment provisioning.
+Use existing compatible capabilities or report the blocker; do not switch tools to bypass the restriction.
+Installation guidance below applies only when consistent with the user's constraints.
+The default kernel may auto-install after ModuleNotFoundError: under a no-install constraint,
+use importlib.util.find_spec only for top-level module names (no dots); dotted lookups import parents.
+For availability checks and subsequent imports, catch ImportError and report the missing dependency
+without re-raising it. Finding a spec does not verify transitive dependencies.
+
 This tool runs Python code in a **real Jupyter kernel**:
 - Use only application-managed Python, normally the default host-prepared sandbox.
   If it is not ready, use local_environment(action="ensure", capability="python") when available
@@ -1834,7 +1842,7 @@ Example workflow:
   1. execute_code(code="import pandas as pd\\ndf = pd.read_csv('data.csv')")
   2. execute_code(code="print(df.describe())")
   3. execute_code(code="from bs4 import BeautifulSoup  # already installed")
-  4. execute_code(code="%pip install some_uncommon_pkg")  # only if truly missing
+  4. execute_code(code="%pip install some_uncommon_pkg")  # only if missing and installation is permitted
 
 **Full Python state persists in the same session!**
 
@@ -1944,7 +1952,9 @@ Output formats:
                     "HTML-first workflow (deck.html -> screenshots -> images_to_pptx) "
                     "or confirmed PptxGenJS native workflow instead. Python is "
                     "allowed for data preparation, extraction, QA, and narrow edits "
-                    "to existing decks."
+                    "to existing decks. This error does not authorize installing dependencies: "
+                    "respect the user's no-install constraints and use an already available "
+                    "permitted workflow, or report the blocker."
                 ),
             )
         if self._looks_like_controlled_deck_rewrite(code):

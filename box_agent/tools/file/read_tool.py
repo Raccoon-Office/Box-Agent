@@ -221,6 +221,19 @@ class ReadTool(Tool):
             return ToolResult(success=False, content="", error=device_error)
         if not file_path.exists():
             suggestions = _similar_file_suggestions(file_path)
+            candidate = self._resolve_file_path(file_path.name)
+            if (
+                candidate != file_path
+                and candidate.is_file()
+                and self._validate_readable_file(
+                    candidate, str(candidate), text_only=False,
+                ) is None
+            ):
+                # A misplaced helper may already exist in the active directory
+                # or workspace. Suggest it without substituting or reading it.
+                suggestions = [str(candidate), *(
+                    path for path in suggestions if path != str(candidate)
+                )][:5]
             suggestion_text = f" Did you mean: {', '.join(suggestions)}" if suggestions else ""
             return ToolResult(
                 success=False,

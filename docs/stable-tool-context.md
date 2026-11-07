@@ -37,6 +37,35 @@ including separate receipts, must be checked against the full method before
 completion. Applicability and prose requirements still require model judgment;
 the recovery check does not claim to validate every arbitrary Skill instruction.
 
+Recovery guidance treats a compacted summary as a source locator, not evidence.
+Before reusing facts across tasks or changing an artifact after compaction, the
+model must use a tool to reopen the relevant source or verified report, then
+read back the resulting artifact. A summary or earlier assistant prose does not
+count as that readback. A list of excluded IDs or a mixed-status group does not
+establish each record's status; preserve the grouping unless the source provides
+the individual mapping, and omit optional details that cannot be verified. Deferring an
+old method does not waive this source check. User prohibitions on installation,
+network access and delegation continue to apply during recovery and tool errors;
+general setup advice does not override them. Use existing permitted capabilities
+or report the blocker. These are model instructions, not a deterministic semantic
+validator or an execution sandbox for natural-language restrictions. In particular,
+the Python sandbox's existing environment preparation and missing-module retry
+can install packages; use an already prepared environment under a no-install
+constraint. Limit `find_spec` checks to top-level module names: dotted lookups
+import parents. Catch `ImportError` during probes and imports and report the
+missing dependency without re-raising; a found spec does not verify transitive
+dependencies. The compaction trigger and
+the session's fixed system/tool interface remain unchanged.
+
+If a helper or source path is missing, `read_file` first suggests an existing
+same-named file resolved from the active directory or workspace, provided the
+current read permissions allow it. The failed call does not read or substitute
+that file; the model must explicitly inspect the candidate before using it.
+
+Complete numeric key/value lines are valid answer endings under a normal provider
+finish. The suspected-truncation detector does not append a closing sentence to
+such a line; an explicit token-limit finish still uses the existing continuation.
+
 Compaction rewrites message history and is a cache boundary of its own. The [cache evaluation](../test_workspace/inputs/context_cache/README.md) checks append-only loading separately from offline compaction/recovery contracts. It never reports a rewritten-history sample as proof that ordinary loading preserved the cache prefix.
 
 For rollback of **new sessions**, set the following in the host YAML configuration:

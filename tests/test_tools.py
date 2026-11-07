@@ -91,6 +91,79 @@ async def test_read_tool():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("candidate_root", ["active", "workspace"])
+async def test_read_missing_file_suggests_existing_active_or_workspace_path(
+    tmp_path, candidate_root
+):
+    active = tmp_path / "task"
+    active.mkdir()
+    skill = tmp_path / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("method instructions", encoding="utf-8")
+    candidate = (active if candidate_root == "active" else tmp_path) / "render.py"
+    candidate.write_text("existing permitted renderer", encoding="utf-8")
+    missing = skill / candidate.name
+    tool = ReadTool(
+        workspace_dir=str(tmp_path), relative_root_dir=str(active),
+        allow_full_access=False,
+    )
+
+    result = await tool.execute(path=str(missing))
+
+    assert result.success is False
+    assert result.content == ""
+    assert f"File not found: {missing}." in result.error
+    assert f"Did you mean: {candidate}" in result.error
+    assert "existing permitted renderer" not in result.error
+    recovered = await tool.execute(path=str(candidate))
+    assert recovered.success is True
+    assert "existing permitted renderer" in recovered.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_engine", [False, True])
+async def test_read_missing_file_does_not_suggest_a_denied_symlink(tmp_path, with_engine):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skill = workspace / "skills"
+    skill.mkdir()
+    outside = tmp_path / "private.py"
+    outside.write_text("private content", encoding="utf-8")
+    candidate = workspace / "render.py"
+    candidate.symlink_to(outside)
+    engine = (
+        PermissionEngine(CapabilityPolicy(filesystem_scope="session_workspace"), workspace)
+        if with_engine else None
+    )
+    tool = ReadTool(
+        workspace_dir=str(workspace), allow_full_access=False, permission_engine=engine,
+    )
+
+    result = await tool.execute(path=str(skill / candidate.name))
+
+    assert result.success is False
+    assert "Did you mean" not in result.error
+    assert str(candidate) not in result.error
+    assert str(outside) not in result.error
+    assert result.permission_request is None
+    assert result.content == ""
+
+
+@pytest.mark.asyncio
+async def test_read_missing_file_keeps_nearby_suggestions_without_root_match(tmp_path):
+    skill = tmp_path / "skills"
+    skill.mkdir()
+    nearby = skill / "render-old.py"
+    nearby.write_text("older renderer", encoding="utf-8")
+    missing = skill / "render.py"
+
+    result = await ReadTool(workspace_dir=str(tmp_path)).execute(path=str(missing))
+
+    assert result.success is False
+    assert result.error == f"File not found: {missing}. Did you mean: {nearby}"
+
+
+@pytest.mark.asyncio
 async def test_read_tool_keeps_large_generated_page_as_model_content(tmp_path):
     page = tmp_path / "generated.html"
     marker = "EXACT_GENERATED_PAGE_CONTENT"

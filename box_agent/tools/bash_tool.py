@@ -1477,6 +1477,8 @@ class BashTool(Tool):
         shell_examples = {
             "Windows": f"""Execute PowerShell commands in foreground or background.
 
+If the user forbids installation, do not install dependencies or provision environments, including automatic downloads by npx/uvx. Use existing compatible capabilities or report the blocker; do not switch tools to bypass the restriction. Read-only version/import/location probes remain allowed. Installation guidance below applies only when consistent with the user's constraints.
+
 Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") for that capability when available; join any active installation. Do not use or install alternate runtimes or ask the user to switch environments. On failure, report the returned cause or retry the managed installer.
 
 Do NOT use Get-Content/type to read files; use read_file instead.
@@ -1493,7 +1495,7 @@ Parameters:
 
 Tips:
   - Quote file paths with spaces: cd "My Documents"
-  - Chain dependent commands with semicolon: npm install ; npm test
+  - Run dependent commands separately and check each exit status before continuing
   - Use absolute paths instead of cd when possible
   - For background commands, monitor with bash_output and terminate with bash_kill
   - Use lifetime=runtime only when the user explicitly needs a service or command to remain available after the final response
@@ -1503,6 +1505,8 @@ Examples:
   - npm test
   - python -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true; read the dynamic port with bash_output)""",
             "Unix": f"""Execute bash commands in foreground or background.
+
+If the user forbids installation, do not install dependencies or provision environments, including automatic downloads by npx/uvx. Use existing compatible capabilities or report the blocker; do not switch tools to bypass the restriction. Read-only version/import/location probes remain allowed. Installation guidance below applies only when consistent with the user's constraints.
 
 Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") for that capability when available; join any active installation. Do not use or install alternate runtimes or ask the user to switch environments. On failure, report the returned cause or retry the managed installer.
 
@@ -1520,7 +1524,7 @@ Parameters:
 
 Tips:
   - Quote file paths with spaces: cd "My Documents"
-  - Chain dependent commands with &&: npm install && npm test
+  - Chain dependent commands with &&: npm run build && npm test
   - Use absolute paths instead of cd when possible
   - Put disposable patch/check scripts and other intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm or publish/link temporary scripts as deliverables
   - If cleanup returns CHAT_REFERENCE_PROTECTED, leave those files in place and continue the task. Do not retry via another command/tool or ask for automatic-cleanup approval

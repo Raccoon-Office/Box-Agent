@@ -53,6 +53,20 @@ prs.save("deck.pptx")
     assert JupyterSandboxTool._looks_like_python_pptx_new_deck(code)
 
 
+@pytest.mark.asyncio
+async def test_pptx_workflow_error_preserves_no_install_constraints(monkeypatch):
+    def fail_if_sandbox_requested(self):
+        raise AssertionError("workflow rejection must precede sandbox startup")
+
+    monkeypatch.setattr(JupyterSandboxTool, "_get_sandbox_env", fail_if_sandbox_requested)
+    result = await JupyterSandboxTool().execute(code="from pptx import Presentation\nPresentation()")
+
+    assert not result.success
+    assert result.error.startswith("PYTHON_PPTX_NEW_DECK_BLOCKED")
+    assert "does not authorize installing dependencies" in result.error
+    assert "already available" in result.error
+
+
 def test_execute_code_allows_existing_pptx_inspection():
     code = """\
 from pptx import Presentation

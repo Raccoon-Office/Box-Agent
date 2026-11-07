@@ -595,6 +595,29 @@ def _assert_schema_contract(tools, profile):
                     "this kernel session; a path change requires a new session_id."
                 ),
             }
+        # Intentional static guidance changes; keep the historical schema fixture.
+        if tool.name in {"bash", "execute_code"}:
+            header, body = entry["schema"]["description"].split("\n\n", 1)
+            if tool.name == "bash":
+                guidance = (
+                    "If the user forbids installation, do not install dependencies or provision environments, "
+                    "including automatic downloads by npx/uvx. Use existing compatible capabilities or report "
+                    "the blocker; do not switch tools to bypass the restriction. Read-only version/import/location "
+                    "probes remain allowed. Installation guidance below applies only when consistent with the user's constraints."
+                )
+                body = body.replace("npm install && npm test", "npm run build && npm test")
+            else:
+                guidance = (
+                    "If the user forbids installation, do not install packages or trigger environment provisioning.\n"
+                    "Use existing compatible capabilities or report the blocker; do not switch tools to bypass the restriction.\n"
+                    "Installation guidance below applies only when consistent with the user's constraints.\n"
+                    "The default kernel may auto-install after ModuleNotFoundError: under a no-install constraint,\n"
+                    "use importlib.util.find_spec only for top-level module names (no dots); dotted lookups import parents.\n"
+                    "For availability checks and subsequent imports, catch ImportError and report the missing dependency\n"
+                    "without re-raising it. Finding a spec does not verify transitive dependencies."
+                )
+                body = body.replace("# only if truly missing", "# only if missing and installation is permitted")
+            entry["schema"]["description"] = f"{header}\n\n{guidance}\n\n{body}"
         assert list(tool.aliases) == entry["aliases"], tool.name
         assert _normalized_schema(tool.to_schema(), profile) == entry["schema"], tool.name
         schema = entry["schema"]
