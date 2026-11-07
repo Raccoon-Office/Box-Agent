@@ -46,6 +46,26 @@ def call(ref, arguments):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_exposure", [False, True])
+async def test_legacy_custom_call_tool_keeps_its_original_arguments(with_exposure):
+    class CustomCallTool(Deferred):
+        name = "call_tool"
+
+    target = CustomCallTool()
+    manager = MCPToolExposureManager(MCPToolCatalog(), OrderedDict()) if with_exposure else None
+    engine = DefaultToolEngine(tools={target.name: target}, tool_exposure=manager)
+    prepared = engine.prepare_tools()
+    request = ToolCall(id="custom", type="function", function=FunctionCall(
+        name="call_tool", arguments={"value": "legacy value"},
+    ))
+    resolved, routed, error = prepared.resolve_call(request)
+    assert not routed and error is None
+    assert prepared.validate_call(resolved.function.name) is None
+    result = await target.execute(**resolved.function.arguments)
+    assert result.success and result.content == "legacy value"
+
+
+@pytest.mark.asyncio
 async def test_search_returns_complete_schema_and_next_snapshot_resolves():
     engine, search, target, _ = setup()
     before = engine.prepare_tools()

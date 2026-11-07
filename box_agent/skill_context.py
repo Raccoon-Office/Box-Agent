@@ -226,13 +226,22 @@ class SkillReferenceContext:
             return compacted
         facts = {record.name: record for record in self.runtime.read_facts}
         reclaimable = self.runtime.reclaimable_after_compaction
+        current_names = set()
+        for name, previous in facts.items():
+            try:
+                current = self.runtime.resolve_reference(name)
+            except SkillDependencyError:
+                continue
+            if (current.revision == previous.revision and current.source == previous.source
+                    and current.path == previous.path):
+                current_names.add(name)
 
         def locator(name):
             previous = facts[name]
             loader = getattr(self.runtime, "loader", None)
             skill = loader.get_skill(name) if loader is not None else None
             purpose = str(getattr(skill, "description", ""))[:320]
-            return (f"Skill '{name}' revision {previous.revision} is outside the current input. "
+            return (f"Skill '{name}' revision {previous.revision} is not retained in the current context. "
                     f"Purpose: {purpose or name}. "
                     f"Source path: {previous.path or '(caller reference)'}. "
                     "Use get_skill to read the current instructions before using this method; "
@@ -241,8 +250,10 @@ class SkillReferenceContext:
         rebuilt = []
         missing: set[str] = set()
         for message in compacted:
-            parsed = self._compaction_reference(message, facts)
-            if parsed is not None and parsed[0]["name"] in reclaimable:
+            parsed = self._compaction_reference(message, facts, current_only=False)
+            if parsed is not None and (parsed[0]["name"] in reclaimable
+                    or parsed[0]["name"] not in current_names
+                    or self._compaction_reference(message, facts) is None):
                 name = parsed[0]["name"]
                 missing.add(name)
                 # Preserve a tool result's call ID and protocol group.
@@ -257,19 +268,10 @@ class SkillReferenceContext:
                 continue
             metadata, body = parsed
             name = metadata["name"]
-            if name in reclaimable:
+            if name in reclaimable or name not in current_names:
                 missing.add(name)
                 continue
             previous = facts[name]
-            try:
-                current = self.runtime.resolve_reference(name)
-            except SkillDependencyError:
-                missing.add(name)
-                continue
-            if (current.revision != previous.revision or current.source != previous.source
-                    or current.path != previous.path):
-                missing.add(name)
-                continue
             covered = visible_ranges(rebuilt, name=name, revision=previous.revision,
                                      lines=previous.prompt.splitlines(keepends=True),
                                      source=previous.source, path=previous.path)
@@ -290,14 +292,25 @@ class SkillReferenceContext:
         return rebuilt
 
     @staticmethod
-    def _compaction_reference(message, facts):
+    def _compaction_reference(message, facts, *, current_only=True):
         if not isinstance(message.content, str):
             return None
+        tool_text = (message.role == "tool" and message.name in {"get_skill", "skill_view"}
+                     and bool(message.tool_call_id))
+        runtime_text = message.role == "user" and message.source == "runtime"
+        if not (tool_text or runtime_text):
+            return None
         parsed = read_reference(message.content)
-        previous = facts.get(parsed[0].get("name")) if parsed else None
+        if parsed is None or not isinstance(parsed[0].get("name"), str):
+            return None
+        if runtime_text and parsed[0].get("kind") != "runtime_skill_instructions":
+            return None
+        previous = facts.get(parsed[0]["name"])
         if previous is None:
             return None
-        if not visible_ranges([message], name=previous.name, revision=previous.revision,
+        # Historical envelopes may be discarded even after their read fact was
+        # superseded. Only verified current pages can be restored as instructions.
+        if current_only and not visible_ranges([message], name=previous.name, revision=previous.revision,
                               lines=previous.prompt.splitlines(keepends=True),
                               source=previous.source, path=previous.path):
             return None
@@ -309,7 +322,7 @@ class SkillReferenceContext:
         facts = {record.name: record for record in self.runtime.read_facts}
         projected = []
         for message in messages:
-            parsed = self._compaction_reference(message, facts)
+            parsed = self._compaction_reference(message, facts, current_only=False)
             if parsed is not None:
                 metadata = parsed[0]
                 message = message.model_copy(update={"content": (

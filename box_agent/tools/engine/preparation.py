@@ -37,7 +37,7 @@ def prepare_tools(
                 tool_exposure._catalog.remove_server(server)
             for server, members in groups.items():
                 current = [entry.tool for entry in tool_exposure._catalog.snapshot() if entry.server_name == server]
-                if len(current) != len(members) or any(a is not b for a, b in zip(current, members)):
+                if sorted(map(id, current)) != sorted(map(id, members)):
                     tool_exposure._catalog.replace_server(server, members)
         def visible_name(name: str) -> bool:
             target = tool_exposure._stable_candidates.get(name)

@@ -83,6 +83,40 @@ def test_always_load_ref_is_ineligible_until_description_acknowledged():
     assert len(manager.pending_bootstrap_descriptions()) == 1
 
 
+@pytest.mark.asyncio
+async def test_eager_mcp_tool_order_preserves_discovered_refs_until_replacement():
+    from tests.test_mcp_tool_search import FakeMCPTool
+
+    catalog, activated = MCPToolCatalog(), OrderedDict()
+    manager = MCPToolExposureManager(catalog, activated, deferred_mcp=False)
+    search = ToolSearchTool(catalog, activated)
+    manager.enable_stable_prefix(search)
+    tools = {tool.name: tool for tool in [
+        search, CallTool(), FakeMCPTool("z_tool", "demo"), FakeMCPTool("a_tool", "demo"),
+    ]}
+    engine = DefaultToolEngine(tools=tools, tool_exposure=manager)
+    before = engine.prepare_tools()
+    result = await search.execute(tool_names=["z_tool"])
+    ref = json.loads(result.content)["activated"][0]["tool_ref"]
+    manager.record_search_result("search", result.content)
+    manager.acknowledge_search_results([Message(
+        role="tool", name="tool_search", tool_call_id="search", content=result.content,
+    )])
+    generation = catalog.get_by_model_name("z_tool").generation
+    call = ToolCall(id="invoke", type="function", function=FunctionCall(
+        name="call_tool", arguments={"tool_ref": ref, "arguments_json": "{}"},
+    ))
+    for _ in range(3):
+        prepared = engine.prepare_tools()
+        assert catalog.get_by_model_name("z_tool").generation == generation
+        resolved, routed, error = prepared.resolve_call(call)
+        assert routed and error is None and resolved.function.name == "z_tool"
+        assert [t.to_schema() for t in prepared.definitions] == [t.to_schema() for t in before.definitions]
+    tools["z_tool"] = FakeMCPTool("z_tool", "demo")
+    assert engine.prepare_tools().resolve_call(call)[2] is not None
+    assert catalog.get_by_model_name("z_tool").generation > generation
+
+
 def test_host_required_local_tool_descriptions_follow_plan_and_goal_without_schema_changes():
     class Local(Tool):
         description = "Local capability"

@@ -118,6 +118,45 @@ def test_budget_and_changed_skill_use_reread_notice(tmp_path):
     assert 'ANALYSIS_BODY' not in str(result) and 'NEW_METHOD' not in str(result)
 
 
+@pytest.mark.asyncio
+async def test_compaction_discards_superseded_skill_bodies_in_history_and_summary():
+    runtime = SkillRuntime(None, append_only_context=True)
+    context = SkillReferenceContext(runtime)
+    history = [Message(role='system', content='BASE'), Message(role='user', content='task')]
+    for body in ('OLD_METHOD_BODY\n', 'CURRENT_METHOD_BODY\n'):
+        runtime.register_reference('analysis', body)
+        projected = context.prepare_request(history, budget_chars=50000)
+        history.extend(projected.materialized_messages)
+    assert 'OLD_METHOD_BODY' in str(history) and 'CURRENT_METHOD_BODY' in str(history)
+    history.append(Message(role='user', content='Continue the analysis'))
+    summary_source = context.compaction_source(history)
+    assert 'OLD_METHOD_BODY' not in str(summary_source)
+    assert 'CURRENT_METHOD_BODY' not in str(summary_source)
+    result = await DefaultCompactEngine().compact_if_needed(CompactionInput(
+        history=tuple(history), token_limit=10000, llm=object(), force=True,
+        allow_llm_summary=False, compaction_source_projector=context.compaction_source,
+        compacted_history_projector=lambda compacted: context.compact_history(history, compacted),
+    ))
+    assert not result.blocked and result.messages is not None
+    assert 'OLD_METHOD_BODY' not in str(result.messages)
+    assert 'CURRENT_METHOD_BODY' in str(result.messages)
+    assert 'CURRENT_METHOD_BODY' not in result.messages[1].content
+
+
+def test_changed_skill_body_in_protected_tool_tail_becomes_reread_notice(tmp_path):
+    runtime, context, history = skill_context(tmp_path)
+    read(context, history, 'analysis', limit=1)
+    old_result = history[-1]
+    path = tmp_path / 'skills/analysis/SKILL.md'
+    path.write_text(path.read_text().replace('ANALYSIS_BODY', 'NEW_METHOD'))
+    runtime.loader.discover_skills()
+    changed = context.compact_history(history, history)
+    replacement = next(message for message in changed if message.tool_call_id == old_result.tool_call_id)
+    assert replacement.name == old_result.name and replacement.role == 'tool'
+    assert read_reference(replacement.content) is None and 'Use get_skill' in replacement.content
+    assert 'NEW_METHOD' not in str(changed)
+
+
 def test_legacy_and_untrusted_skill_text_are_not_promoted(tmp_path):
     runtime, context, history = skill_context(tmp_path)
     read(context, history, 'analysis')

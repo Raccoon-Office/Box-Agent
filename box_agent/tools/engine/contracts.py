@@ -136,7 +136,8 @@ class PreparedTools:
     def resolve_call(self, call: ToolCall) -> tuple[ToolCall, bool, str | None]:
         """Resolve against the request snapshot without modifying provider history."""
         result = call.model_copy(deep=True)
-        if result.function.name != "call_tool" or not self.route_refs and "call_tool" not in self.targets:
+        if (result.function.name != "call_tool"
+                or not getattr(self._tool_exposure, "stable_prefix", False)):
             return result, False, None
         args = result.function.arguments
         if not isinstance(args, dict) or set(args) != {"tool_ref", "arguments_json"} or not all(isinstance(args[k], str) for k in args):

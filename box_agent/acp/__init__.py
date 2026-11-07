@@ -5111,7 +5111,8 @@ class BoxACPAgent:
         def _schedule_follow_up_suggestions(final_content: str) -> None:
             latest_user_request = ""
             for message in reversed(agent.messages):
-                if message.role == "user" and isinstance(message.content, str):
+                if (message.role == "user" and message.source != "runtime"
+                        and isinstance(message.content, str)):
                     latest_user_request = message.content
                     break
             task = asyncio.create_task(

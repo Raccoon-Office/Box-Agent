@@ -4221,8 +4221,9 @@ async def test_mcp_discovery_can_retry_after_readiness_update_and_call_discovere
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", ["mcp_config", "remote_echo"])
+@pytest.mark.parametrize("interface_version", [1, 2])
 async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_updates(
-    tmp_path, tool_name,
+    tmp_path, tool_name, interface_version,
 ):
     class ActiveMCPTool(EchoTool):
         @property
@@ -4234,7 +4235,7 @@ async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_update
         tool.server_name = "demo"
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        agent=AgentConfig(workspace_dir=str(tmp_path), tool_interface_version=interface_version),
         tools=ToolsConfig(
             enable_sub_agent=False,
             mcp=MCPConfig(deferred_loading_enabled=False),
@@ -4245,13 +4246,23 @@ async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_update
         async def generate_stream(self, messages, tools=None, **kwargs):
             self.calls += 1
             if self.calls == 1:
+                name, arguments = tool_name, {"text": "test"}
+                if interface_version == 2 and tool_name == "mcp_config":
+                    descriptor = next(json.loads(message.content) for message in messages
+                                      if message.source == "runtime" and message.name == "tool_descriptions"
+                                      and json.loads(message.content).get("name") == tool_name)
+                    name, arguments = "call_tool", {
+                        "tool_ref": descriptor["tool_ref"], "arguments_json": json.dumps(arguments),
+                    }
                 yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
                     ToolCall(id="mcp-call", type="function", function=FunctionCall(
-                        name=tool_name, arguments={"text": "test"},
+                        name=name, arguments=arguments,
                     )),
                 ])
                 return
             if self.calls == 2:
+                result = next(message for message in messages if message.tool_call_id == "mcp-call")
+                assert result.content == "tool:test"
                 assert agent._inject_mcp_runtime_update(name="demo", state="connected") == 1
             else:
                 assert messages[-1].source == "runtime"

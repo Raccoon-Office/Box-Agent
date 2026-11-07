@@ -41,6 +41,38 @@ def _make_extractor(mgr: MemoryManager, response_text: str, **kwargs) -> MemoryE
 # ── Extraction → persistent memory ───────────────────────────
 
 
+@pytest.mark.parametrize("runtime_body", [
+    "[Host Skill catalog:] " + "Available method description. " * 60,
+    "Tool instructions: remember the default argument and verified schema.",
+])
+async def test_runtime_reference_does_not_trigger_low_signal_memory_extraction(mgr, runtime_body):
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(mgr, '{"additions": [], "merges": []}')
+    messages = [Message(role="user", content="What is a CSV file?"),
+                Message(role="user", source="runtime", content=runtime_body),
+                Message(role="user", source="runtime", content="Available tool schema. " * 60),
+                Message(role="assistant", content="A comma-separated table.")]
+    assert await extractor.maybe_extract(messages, "loop_end") is False
+    extractor._llm.generate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("trigger", ["loop_end", "pre_summarize"])
+async def test_memory_extraction_keeps_user_and_tool_facts_without_runtime_reference(mgr, trigger):
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(mgr, '{"additions": [], "merges": []}')
+    messages = [Message(role="user", content="Remember that I prefer Python"),
+                Message(role="user", source="runtime", content="CATALOG_SCHEMA_NOT_USER_FACTS"),
+                Message(role="tool", content="ACTUAL_TOOL_OBSERVATION", tool_call_id="observed"),
+                Message(role="assistant", content="Preference noted.")]
+    assert await extractor.maybe_extract(messages, trigger)
+    prompt = extractor._llm.generate.await_args.kwargs["messages"][1].content
+    assert "Remember that I prefer Python" in prompt
+    assert "ACTUAL_TOOL_OBSERVATION" in prompt
+    assert "CATALOG_SCHEMA_NOT_USER_FACTS" not in prompt
+
+
 async def test_extract_additions(mgr: MemoryManager):
     """Additions are appended to CONTEXT.md."""
     from box_agent.schema import Message
