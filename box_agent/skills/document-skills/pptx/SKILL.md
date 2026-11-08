@@ -34,6 +34,27 @@ complete role-based palette, structured visual requirements, slide layouts and t
 render. Do not select themes, composition families or whole-deck variants in the
 main agent, and do not load the complete design catalog into its context.
 
+Invoke native role tools directly from their exposed function schema. In Box-Agent,
+`sub_agent` is a direct local tool and is not a `tool_search` discovery candidate.
+Do not search for or try to activate it through that catalog. A catalog result
+cannot establish whether this already exposed function is callable. Use the
+actual function definition and invocation result when assessing availability.
+If you would fall back because its schema seems missing in Box-Agent, first run
+this read-only check from the presentation directory, using the expanded path:
+
+```bash
+"$BOX_AGENT_NODE" scripts/native_delegation_status.js --invocation <fresh-literal-UUID-v4>
+```
+
+Choose a fresh UUID v4 and put it literally in this standalone Bash command;
+do not reuse it or generate it through shell substitution. The helper binds this
+pending invocation to the host's current request header, not a tool catalog or
+another session. `present` supplies the native schema: invoke that function for
+the required role. `absent` establishes its absence in this request. `unknown`
+means the evidence could not be established; it does not mean the tool is absent.
+Do not inspect or repair session logs to change the result. A direct invocation
+or explicit host restriction remains valid availability evidence.
+
 The designer's instructions are in `references/design-role.md`. They are inputs
 for the isolated role, not another full Skill to preload into the main agent.
 Programs match theme visual traits independently of its original colors; an allowed
@@ -71,6 +92,23 @@ presentation directory; preserve completed artifacts and report a program failur
 
 Read `references/outline.md` when planning a new deck. Keep near-final page copy,
 all required facts, units, counts, relationships and explicit user constraints.
+For product promotion, sales or enterprise-value decks, also read
+`references/business-narrative.md`:
+1. State the primary audience and next decision before research. A broad product
+   promotion brief (including “市场推广PPT”) defaults to prospective users/buyers;
+   channel plans, campaign calendars and marketing KPIs require an internal
+   campaign brief. Keep that audience through the outline; do not reinterpret it
+   after collecting facts just to justify a different story.
+2. Use the research question map to find support for the promised value and
+   adoption decision, including relevant organizational cases and commercial
+   terms when applicable. Evaluate what each source can establish before
+   choosing the central case; research notes alone cannot replace validated
+   evidence. Keep unresolved questions explicit within the selected budget.
+3. Build the argument from the evidence, then review coverage and page
+   contribution using `references/outline.md`. A research dimension, buyer
+   question or product feature does not automatically deserve its own slide.
+   Preserve distinct explanations, cases and comparisons that the audience
+   needs; merge repeated answers. Do not default every deck to a pilot proposal.
 The designer must not invent missing content to fit a visual.
 Keep short source material short: do not repeat the same claim in a card title,
 body and bullet just to fill space. Choose a layout with suitable capacity.
@@ -80,13 +118,21 @@ or clearly labeled growth rates derived from the supplied values.
 - Supplied page content is the source of truth; preserve its intended ordering.
 - Proposed architectures/solutions with sufficient goals and components use
   `source_mode=user_provided`; they do not require research by default.
-- Missing external/current/company/market facts use `research-synthesis` when
-  available. Follow its selected research budget and use only the validated
+- Substantive external/current/company/market research uses `research-synthesis`
+  when available; load it before that research's first public search. Preserve
+  `outline.md`'s targeted official-source check exception for an otherwise
+  complete solution brief. An outline-only request skips design/export, not a
+  research-backed story's evidence handoff. First frame the audience, intended
+  action and claims that need
+  evidence using `references/outline.md`; let missing support guide the research.
+  Follow its selected research budget and use only the validated
   `presentation_handoff.verified_facts[].canonical` as researched facts. Do not
   ask again for permission to use public sources already authorized by the task.
 - Preserve strict/private source boundaries. Omit optional unsupported claims;
-  disclose required public gaps as `暂无可验证公开数据`, and private gaps as
-  `待补充` or `待客户确认`. Assumptions require explicit user authorization.
+  disclose required public gaps as `本轮核验：暂无可验证公开数据`: this run did
+  not obtain or verify supporting public evidence, not that no public information
+  exists. Private gaps use `待补充` or `待客户确认`. Assumptions require explicit
+  user authorization.
 - Ask one focused structural question only when competing audience/scope choices
   materially change the requested result. Do not ask about internal tooling.
 - User-selected page counts are hard; suggested ranges are only planning hints.
@@ -100,7 +146,17 @@ Pillow and claim it came from image generation. Do not convert visual styling
 language into required semantic fields; corner labels are not `--require-field 1:tags`.
 
 Removing numbers or rewriting a claim as qualitative prose does not verify it.
-For framework research pages, the exact unavailable-data placeholder must appear in `message` or `bullets`.
+For framework research pages, keep the literal marker `暂无可验证公开数据` inside
+the scoped wording above in `message` or `bullets`.
+
+For a research-backed outline, put the selected `verified_facts[].id` values in
+each slide's `evidence_ids` and leave `evidence: []`. Preparation resolves IDs
+to exact canonical evidence; legacy handoffs without IDs still use canonical
+strings. Read the facts before selecting IDs. Never implement a substring matcher
+or discard unmatched citations: a missing reference is a handoff error to fix,
+not proof that the source lacks the fact. Keep verified dates, units and conditions.
+Use only entity aliases declared by the research handoff. Complete the narrative
+check in `references/outline.md` before entering design.
 
 Write `outline.json`. Preserve explicit theme selections in
 `design_requirements.theme_id`, and exact palette/style/geometry wording in the
@@ -110,6 +166,156 @@ Do not put your own aesthetic choices there: outline layout/visual are suggestio
 for the designer, and changing only those hints does not reset the design budget.
 These constraints must be updated when the user changes
 them. Do not add unrelated history or synthetic continuation text as user facts.
+
+Before preparation, read the actual outline against the research check. Every
+fact-backed page must name its subject or a declared alias in visible narrative,
+including problem/mechanism pages using entity-bound evidence. Put case attribution
+(vendor report, anonymous customer or pilot) and material conditions in `message`
+or `bullets`; `notes` and `visual` alone do not reach every rendering path. Keep
+the claim and its essential qualifiers together in near-final copy so a layout
+change cannot silently detach the source, time period, unit or limitation. When
+condensing a result, retain who reported or measured it and whether it is an
+individual self-report, organizational observation or other evidence type; a
+publisher or anonymity label alone does not preserve that distinction. Check
+that relevant commercial terms survived into the outline. When an action requires
+an access destination or an owner/channel, put the observed or supplied entry in
+`message` or `bullets`; a link only in `notes` does not reach the audience. Keep
+local research/audit paths in working files or delivery metadata unless the
+requested audience needs those paths. Source appendices should offer usable
+citations, not author-only file locations. If an excerpt and a claim use different
+languages, preserve a faithful claim in the excerpt's language
+and its exact supporting text with entity context in the research ledger; translate
+the page copy afterwards. Do not invent translated quotations, pad excerpts with
+the claim to pass token matching, or discard supported adoption facts because of
+a language mismatch. Revalidate corrected records and bind their returned IDs.
+
+#### Validate the current copy before content review
+
+Run the existing standalone check before the initial review, adding the research
+handoff when applicable:
+
+```bash
+"$BOX_AGENT_NODE" scripts/validate_outline.js outline.json --report qa/outline_check.json
+```
+
+For researched content, add `--research-handoff research/qa/<topic>_research_check.json`.
+Use the presentation directory and expanded script path. This check creates no
+pages and also applies to outline-only tasks. Read `issues`, `repairable` and
+`claim_strength_review`, not just the exit code. The last list locates wording
+for semantic review, not proven errors; do not remove legitimate requirements
+or promises merely to clear it. Correct mechanical gaps together and recheck;
+do not expand this into an open-ended repair loop or reset saved repair limits.
+After any research revision, check every page against the newly generated
+handoff: changed or excluded facts can affect pages outside the intended edit.
+Resolve all unknown IDs from their actual source claim; never type a remembered
+hash, guess a replacement or discard a citation while retaining its claim.
+Complete this same check on reviewer-driven changes before the focused recheck,
+so the review sees the current validated copy. Page production still requires
+design preparation and final QA. Outline-only tasks stop after their applicable
+validation and content review; do not run page preparation or export for them.
+Mechanical success does not establish semantic correctness.
+
+#### Independent content review
+
+Before design or outline-only delivery of a broad research-backed story, obtain
+one initial isolated content review using `references/content-review-role.md`. Direct
+mapping of complete supplied pages and small content edits need no extra role.
+Invoke the host-authorized native `sub_agent` directly using its exposed schema,
+as explained above; do not use `tool_search` for this tool. Use
+`required_tools: ["read_file", "search_files"]`; for permitted public research,
+also include the available `web_search` tool for the role's bounded independent
+verification queries. Never enable external research for a file-only task.
+Use `budget: {"max_steps": 24, "max_tool_calls": 18}`; omit `files` to keep the
+tool-capable loop. This leaves room for Box-Agent's default ten-step wrap-up
+reserve without stopping the review at its third step. The tool-call and external
+verification caps remain unchanged; finish when the material checks are complete.
+Give the exact role path, original request, current outline, `qa/outline_check.json`,
+and validated research check. Its `presentation_handoff.verified_facts` supplies
+the selected IDs, canonical claims, provenance and capture paths. Resolve those
+capture paths against the actual research directory. For facts without a capture,
+retain their source URL/file and the report's actual context-file locators; these
+are optional source locations, not another required inventory. Pass the
+audience/decision and unresolved question-map rows as planning context to check, not an intended
+verdict. Do not append a default inventory of dimension, insight, ledger or
+cross-verification files; they remain available for a specific conflict or gap.
+Include the report's claim-strength items in the existing support audit and save
+their dispositions in `qa/content_review.md`; this adds no review round or repair
+budget.
+Call the native tool named `sub_agent` with an argument object, for example:
+
+```json
+{
+  "task": "Your sole task is to return an independent content audit and a usable/revise verdict. Returning that report, including unresolved findings, completes this delegation; the parent saves it and owns all revisions and deck delivery. Read <absolute role path>. Original user request, for context only: <request>. Planning context to check: <selected audience/decision and unresolved question-map rows>. Review <outline path> using <outline_check report, research check and actual research directory/source-capture paths>.",
+  "required_tools": ["read_file", "search_files"],
+  "budget": {"max_steps": 24, "max_tool_calls": 18}
+}
+```
+
+Replace the placeholders with the actual request and absolute paths. Confirm
+those paths against the current files or validated handoff; do not abbreviate
+topic-prefixed filenames or invent an inventory from naming conventions. Include
+the current page IDs and exact titles as a compact locator beside the outline
+path, not a suggested verdict. Keep this task compact: include the original
+request once and reference source files rather than embedding their bodies or
+repeating the research inventory. Apply the source-bound tool rules above. This
+is the initial review call, not a separate availability probe or a command for
+Bash/execute_code.
+Do not give an intended verdict, your self-review or a previous finished deck.
+The role checks copy and intended diagram meaning, not theme/layout choices.
+It does not write or open web pages;
+when public research is permitted it may run at most two targeted searches to
+find controlling terms or evidence the initial source set missed. Search results
+are leads, not directly verified facts. Keep the research reserve for this stage.
+
+Save the returned review unchanged in `qa/content_review.md`, followed by a
+separate author-resolution section. Check page-specific findings against the
+current copy before adopting them; reject quotations or page mappings that do
+not match it. Verify reviewer-proposed factual corrections against the actual
+source before adopting added dates, scope, units or computed values. Keep deductions explicitly labeled as inference; a review verdict is not
+new evidence. Record the tool-call title/reference and
+child-session ID when exposed; do not invent an unavailable ID. Resolve material
+findings before preparation:
+use the research workflow's reserved verification reads for named gaps, correct
+the ledger/copy, or remove an optional unsupported claim. Include unresolved
+central questions from the coverage map even if the reviewer omitted them. While
+budget and an authorized source remain available, attempt the highest-impact
+missing premise or adoption condition before settling for a partial answer;
+adding a disclaimer alone does not use the available verification opportunity.
+Prefer this over chasing a removable metric's precision. Keep a required missing
+premise explicit; moving a condition into notes does not resolve it. Append
+the author's resolutions with source/fact references, then rerun changed research
+and outline validation. Preserve unresolved findings in delivery; do not rename
+them as an independent pass or restart the whole research/design workflow. If
+only a review summary was saved, label it as a summary and preserve the actual
+tool reference; never label rewritten text as the review's original wording.
+If verification adds material evidence or changes the central argument after that
+review, first finish the updated research and outline checks above, then make one
+focused recheck before design or outline-only delivery. Use the
+same role with no external tools and `budget: {"max_steps": 24, "max_tool_calls": 18}`.
+This is a ceiling for the focused task, not a target; return as soon as its
+material checks are complete. Leave room after the last read to produce the report.
+Keep the same completion boundary: the child returns its review, and the parent
+owns saving and revisions. Give it the original request, prior findings, updated
+outline and outline check, plus only the changed facts, their source-context
+paths, affected research-summary passages and author resolutions. For claim-strength items, recheck unresolved or
+changed entries; do not repeat resolved unchanged ones. Ask it to check whether
+the findings are resolved and whether the revisions introduced a new material
+error or omission; do not ask it to approve an intended verdict. Do not repeat
+broad research or the unchanged source inventory. Save its actual response and
+resolve remaining issues within the existing evidence budget; disclose any that
+cannot be resolved. If the call exhausts its budget without a usable audit,
+preserve that result and complete the remaining checks locally; label them as
+local checks, not an independent pass. Do not restart broad research or discard
+completed work to obtain a preferred verdict. This recheck does not certify later layout rewrites.
+In Box-Agent, use the availability check above before a missing-schema fallback;
+record its actual result, an explicit host restriction, or a direct invocation
+establishing that delegation itself is unavailable. A catalog miss or an
+unverified claim about the tool list is insufficient. With `unknown`, use any
+exposed native schema; if independent review still cannot be performed, report
+that it was not performed and availability was unverified, then check locally.
+On other hosts that genuinely provide no native delegation function, state that
+host limitation and perform the same checks locally. Label local review honestly;
+do not claim independence or ask permission for the authorized review.
 
 ### 2. Prepare the isolated design input
 
@@ -129,7 +335,8 @@ This command runs the outline validator and writes `qa/outline_check.json`. A
 failure returns the named issues for a content correction; do not bypass it.
 An optional `--title` sets the deck title. It writes the complete designer input
 to bounded brief/index files, with theme/layout details available on demand.
-Stdout contains only paths and reuse status. The metadata file is not the designer brief.
+On success, stdout contains paths and reuse status. Failure output carries the
+issues and repair stage. The metadata file is not the designer brief.
 
 If `reusable: true`, reuse `design_plan.json` without another design call. If the
 existing `deck.json` is already scaffolded, continue its content/finalization work;
@@ -141,6 +348,8 @@ never restore a stale sibling JSON over those edits.
 
 ### 3. Delegate and import the independent response
 
+Use the native function itself. A `tool_search` result is neither a designer
+response nor an availability check for an exposed local tool.
 Call `sub_agent` with `required_tools: ["read_file", "search_files"]` and
 `budget: {"max_steps": 24, "max_tool_calls": 48}`. Design is a critical stage;
 do not impose a short whole-task timeout such as 180 seconds on this workflow.
@@ -167,6 +376,11 @@ The role returns a response, not a complete deck plan. Never write or repair
 "$BOX_AGENT_NODE" scripts/design_plan.js accept design_input.json
 ```
 
+Attempt the available native designer before acceptance; do not call `accept`
+with no child response as a tool-availability probe. For uncertain availability,
+use the same request-header check above. Actual unavailability still uses the
+existing neutral recovery path and its disclosure.
+
 The importer finds only completed child sessions that read this exact brief in
 this workspace. It binds version, hashes, ordered page numbers, and content
 mappings, then validates the real choices and generates the canonical plan.
@@ -181,6 +395,8 @@ designer with only the old brief. Bind the original decision and failed pages:
 ```
 
 Send the returned correction_file to the design role, then run accept and apply.
+Complete the affected-page content migration in "Finalize and deliver" before
+finalizing; applying a corrected layout does not finish its copy.
 The program changes only the named pages, preserving palette, subject profile
 and all other pages. The one-correction limit still applies. A second unbound
 response cannot replace an already valid design. Explicit theme-only revisions
@@ -393,6 +609,14 @@ compare each key page with its expression: naming an axis is not a route diagram
 and naming materials is not a material-detail visual. Report any expression that
 could not be implemented; a profile in JSON is not proof of visible subject fit.
 
+Before finalization, apply the claim-and-qualifier comparison in
+`references/outline.md` to the filled visible fields, including table labels,
+metric cards and diagram text. Compare them with the validated outline and its
+bound evidence, not only with the earlier review verdict. Restore meaning lost
+while condensing through the same content patch; notes and a successful binding
+check do not replace visible conditions. This is the author's content check,
+not another delegated review or research round.
+
 Explicit image-rich briefs may activate `creative_image_mode`; at least one real
 generated asset must be referenced for an image-complete result. If all required
 generation fails, deliver structurally usable degraded HTML and accurately report
@@ -420,11 +644,22 @@ finalizer's `blocking_issues` are confirmed visual failures. A local
 overflow warnings; package validity and successful image generation also do
 not clear these failures. Follow the report's `next` action, not a guessed
 explanation for the exit status.
-If finalization returns `correction_required: true`, confirmed unreadable text
-or text overflow is a repair request, not a projection disclaimer. Use
-`render_quality.affected_pages` and its concrete issues with the existing
-`design_plan.js correct` page-bound correction, accept and apply once, then
-finalize again. Preserve the accepted palette, theme and all unaffected pages.
+If finalization returns `correction_required: true`, confirmed unreadable text,
+text overflow or truncated diagram text is a repair request. If the named
+issue can be resolved by wording alone within the existing editable fields, apply
+one content-patch pass without changing meaning, conditions, palette or layout,
+then finalize again. Otherwise use `render_quality.affected_pages` and its concrete
+issues with the existing
+`design_plan.js correct` page-bound correction, accept and apply once.
+Before finalizing this correction, read each changed layout's field contract with
+`"$BOX_AGENT_NODE" scripts/inspect_layout.js LAYOUT_ID` (read-only; do not scaffold
+again). Against the original outline, accepted `content_bindings` and
+`subject_expression`, refill the affected content fields and remove template copy.
+Check all material arguments, relationships and conditions, including nonempty
+migrated fields; a structurally valid mapping does not prove content completeness.
+Apply the content patch with `apply_deck_patch.js`, then finalize once. This
+migration is part of the same correction, not another repair or review round.
+Preserve the accepted palette, theme and all unaffected pages.
 If the correction was already used or the defect persists, retain HTML/PPTX as
 an explicitly degraded editable draft; do not report the deck as fully completed
 or mark visual quality passed. Report execution outcome as `partial`, with the
@@ -449,6 +684,10 @@ It exports and checks the current deck before reporting the PPTX path. Without
 these flags it delivers HTML only. An export failure keeps the HTML, returns a
 nonzero exit status and reports `delivery_status: partial`; it is not a completed
 PPTX delivery, even if a previous `.pptx` exists.
+The CLI exporter carries the current HTML's embedded research facts into the
+first slide's notes as a deck-level source list. This preserves references, not
+per-page support or factual verification; keep attribution and material
+conditions in visible copy.
 
 When the image manifest has a background `layout_contract`, finalization runs
 `scripts/validate_image_layout_contract.js` and includes its result in the delivery
@@ -494,26 +733,30 @@ it displays existing internal presets without requiring main-agent family choice
 ## Research and image evidence boundaries
 
 For a factual public deck without supplied evidence (people, organizations,
-events, products, data), research happens **before** `outline.json`, never after:
-load `research-synthesis` when available; when it is unavailable or hidden in
+events, products, data), initial research happens **before** `outline.json`.
+Later reads are limited to targeted verification within the original research
+budget, as described above.
+
+Load `research-synthesis` when available; when it is unavailable or hidden in
 this session (fast mode), call the search tools yourself — open with general
 queries without `site:`, then `web_extract` the specific pages you will cite.
 Writing `outline.json` for such a deck before any search or page read is a
-process error. Only write `source_mode=public_authoritative_research` when the
-outline's facts come from sources you actually opened in this task, and put the
-exact page URL (not a homepage or a bare site name) plus the exact figure or
-date into that slide's `evidence`: every number or date in a slide's title,
-message or bullets must appear literally in that same slide's evidence text
-(e.g. `2013年加盟巴塞罗那 | FC Barcelona | https://…`), one fact per item. If nothing was searched, do not claim that
-mode: use only supplied facts, omit optional claims and disclose required gaps.
-If `prepare` answers `repair_required: true`, design has not started and the
-outline must be fixed now: work through every `checklist` item in one rewrite of
-`outline.json` — copy the exact figure/date from a page you already opened into
-that slide's evidence next to its URL; otherwise run at most two targeted
-searches for it; otherwise reword the line without the number (or use
-`暂无可验证公开数据`). Then re-run the same `prepare` command. Anything left
-unfixed is cut from the slides before design, leaving them short or empty, so do
-not re-run `prepare` without editing. If a later `prepare` reports
+process error. Use `source_mode=public_authoritative_research` only for facts
+retrieved in this task with their actual provenance. When research provides a
+handoff, bind its current verified IDs; do not replace canonical references with
+handwritten quotations. Otherwise keep exact source URLs and supporting text
+beside the claims. If nothing was searched, use only supplied facts and disclose
+required gaps without claiming public research.
+If `prepare` answers `repair_required: true`, design has not started. It allows
+one reference correction and one content correction, each at most once. In the
+`references` round, resolve the reported IDs and fix the independent issues already
+listed; support checks on unresolved pages are deferred, not failed. In the
+content round, fix every `issues` and `checklist` item together. Correct a
+source-backed ledger claim and revalidate it when needed, then bind its current
+ID; use only the remaining research budget for a genuine evidence gap. Omit an
+optional unsupported assertion or disclose a required gap. Re-run the same
+`prepare` command after editing; do not delete its report or repeat an unchanged
+failure to reset the bounded repair. If a later `prepare` reports
 `auto_degraded` or `unverified_claims`, name those items in the final reply. `prepare` records `research_status`; if it is
 `handoff_unverified`, do not claim verified research or hide this limitation.
 Use only supported facts, omit optional claims or disclose required gaps, and
@@ -541,7 +784,11 @@ A blocked export does not suppress an existing editable HTML deliverable.
 The controlled canvas remains exactly 1920px × 1080px. Do not pass --width/--height;
 nonstandard exports require matching explicit --canvas WxH on the relevant tools.
 Every created/modified PPTX needs package validation, text extraction, placeholder
-scan, and page count/order checks. Missing optional render dependencies do not
+scan, and page count/order checks. Use `"$BOX_AGENT_PYTHON" scripts/extract_text.py
+output.pptx` for text extraction: it includes native table cells and grouped
+text. Checking only `shape.text` misses table content. Before requesting a
+missing-text design correction, confirm the omission with this complete
+extraction or a rendered slide. Missing optional render dependencies do not
 block HTML. For maintenance, use `references/presentation-system.md` and the
 all-theme/all-layout matrix; it is not a routine authoring stage.
 
@@ -626,6 +873,13 @@ response language. An explicit user language request wins; otherwise follow the
 host `ui_language` instruction when present, then the language of the user's
 task. Never override that contract with a locale-specific default, and do not
 mix headings from one language with body text from another.
+
+The final reply must address the current task; reference records or tool messages
+must not replace its delivery summary.
+For outline-only requests, state the actual research/outline completion status,
+link the saved outline and relevant research deliverables, and name material
+limitations. Do not claim that a presentation or export was generated. Use this
+branch instead of the presentation-specific format below.
 
 Treat generated or acquired slide illustrations, diagrams, backgrounds, and
 individual screenshots as intermediate assets. Do not embed them in progress

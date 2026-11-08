@@ -817,7 +817,7 @@
       `<text x="29" y="${compact ? 18 : 28}" fill="${sourceNode.kind === "hub" ? colors.inverse : colors.primary}" font-family="${SVG_PPTX_FONT}" font-size="${profile.kindFontSize}" font-weight="700" letter-spacing="1.15">${escapeXml(kind)}</text>`,
       `<text data-diagram-text="label" x="${(layoutNode.width / 2).toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" fill="${scheme.label}" font-family="${SVG_PPTX_FONT}" font-size="${profile.labelFontSize}" font-weight="700">${labelMarkup}</text>`,
       detail
-        ? `<text x="${(layoutNode.width / 2).toFixed(1)}" y="${(layoutNode.height - 14 - (detailLines.length - 1) * (profile.detailFontSize + 4)).toFixed(1)}" text-anchor="middle" fill="${scheme.detail}" font-family="${SVG_PPTX_FONT}" font-size="${profile.detailFontSize}">${detailLines.map((line, index) => `<tspan x="${(layoutNode.width / 2).toFixed(1)}" dy="${index ? profile.detailFontSize + 4 : 0}">${escapeXml(line)}</tspan>`).join("")}</text>`
+        ? `<text data-diagram-text="detail" x="${(layoutNode.width / 2).toFixed(1)}" y="${(layoutNode.height - 14 - (detailLines.length - 1) * (profile.detailFontSize + 4)).toFixed(1)}" text-anchor="middle" fill="${scheme.detail}" font-family="${SVG_PPTX_FONT}" font-size="${profile.detailFontSize}">${detailLines.map((line, index) => `<tspan x="${(layoutNode.width / 2).toFixed(1)}" dy="${index ? profile.detailFontSize + 4 : 0}">${escapeXml(line)}</tspan>`).join("")}</text>`
         : "",
       "</g>",
     ].join("");

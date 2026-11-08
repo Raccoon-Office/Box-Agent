@@ -272,6 +272,30 @@ async function readEditorState(page, viewport) {
         .map(node => node.getAttribute("data-diagram-node-id"));
       const labelRects = Array.from(root.querySelectorAll("[data-diagram-edge-label-id]"))
         .map(label => label.getBoundingClientRect());
+      const textLosses = [];
+      const normalizeText = value => String(value || "").normalize("NFC").replace(/\s+/g, "");
+      const checkText = (id, field, expected, element) => {
+        if (!expected || !element) return;
+        const rendered = element.textContent || "";
+        if (normalizeText(expected) !== normalizeText(rendered)) {
+          textLosses.push({ id, field, expected, rendered });
+        }
+      };
+      const sourceNodes = new Map((Array.isArray(spec.nodes) ? spec.nodes : []).map(node => [node.id, node]));
+      root.querySelectorAll("[data-diagram-node-id]").forEach(node => {
+        const id = node.getAttribute("data-diagram-node-id");
+        const source = sourceNodes.get(id);
+        if (!source) return;
+        checkText(id, "label", source.label, node.querySelector('[data-diagram-text="label"]'));
+        checkText(id, "detail", source.detail, node.querySelector('[data-diagram-text="detail"]'));
+      });
+      const sourceEdges = new Map((Array.isArray(spec.edges) ? spec.edges : [])
+        .map((edge, index) => [edge.id || `edge-${index + 1}`, edge]));
+      root.querySelectorAll("[data-diagram-edge-label-id]").forEach(edge => {
+        const id = edge.getAttribute("data-diagram-edge-label-id");
+        checkText(id, "edge label", sourceEdges.get(id)?.label, edge.querySelector("text"));
+      });
+
       const overlaps = (left, right) => (
         Math.min(left.right, right.right) - Math.max(left.left, right.left) > 1
         && Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top) > 1
@@ -299,6 +323,8 @@ async function readEditorState(page, viewport) {
         ) / scale,
       } : null;
       return {
+        page: Array.from(document.querySelectorAll("#deck-root > .slide")).indexOf(slide) + 1,
+        textLosses,
         kind: root.getAttribute("data-diagram-kind"),
         state: root.getAttribute("data-diagram-render-state"),
         strategy: root.getAttribute("data-diagram-layout-strategy"),

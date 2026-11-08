@@ -17,6 +17,13 @@ function writeCorrection(file, value) {
   // One field per line retains valid JSON without expanding nested catalogs.
   fs.writeFileSync(file, `{\n${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}:${JSON.stringify(item)}`).join(",\n")}\n}\n`);
 }
+function selectedResearchFacts(outline, checked) {
+  if (checked?.ok !== true || checked.repair_required || !checked.researchHandoff
+    || String(outline.source_mode || "").trim() !== "public_authoritative_research"
+    || core.runtimeSourceBinding().strict) return [];
+  return [...new Set(outline.slides.flatMap(slide => slide.evidence)
+    .filter(value => typeof value === "string" && value.trim()).map(value => value.trim()))];
+}
 function writeInput(file, input, root) {
   const requestDir = path.join(root, "qa", "design", input.input_hash);
   const detailDir = path.join(requestDir, "catalog");
@@ -106,7 +113,31 @@ function writeInput(file, input, root) {
   persist();
 }
 function accept(inputPath, planPath) {
-  const { input, root } = plans.readInput(inputPath);
+  const { input, root, outlineFile } = plans.readInput(inputPath);
+  // readInput may use the saved, hash-bound request when this CLI has no host
+  // source environment. Keep that same boundary for recovery and child checks.
+  if (!core.runtimeSourceBinding().available && input.source_text) {
+    process.env.BOX_AGENT_SOURCE_TEXT_B64 = Buffer.from(input.source_text, "utf8").toString("base64");
+  }
+  // readInput checks the current outline/hash first. Rebuild citations from the
+  // validated outline and its recorded handoff, never from editable metadata.
+  let checked;
+  try { checked = JSON.parse(fs.readFileSync(path.join(root, "qa", "outline_check.json"), "utf8")); } catch (_) {}
+  if (checked?.outline === outlineFile && selectedResearchFacts(input.outline, checked).length) {
+    const result = spawnSync(process.execPath, [path.join(__dirname, "validate_outline.js"),
+      outlineFile, "--research-handoff", checked.researchHandoff], {
+      encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+    });
+    // No --repair-flow or --report: this check cannot rewrite the outline or
+    // spend/reset repair attempts. Changed or unreadable research fails closed.
+    let current;
+    try { current = JSON.parse(result.stdout); } catch (_) {}
+    if (result.status === 0 && current?.ok === true && !current.evidence_resolved) {
+      input.research_facts = selectedResearchFacts(input.outline, current);
+    } else {
+      input.recovery_warnings = ["The saved research handoff no longer validates the unchanged evidence selection; recovery omitted research citations. Inspect the handoff before presenting sourced claims."];
+    }
+  }
   const source = require("./design_response_source.js");
   const responses = source.findResponses(input, root);
   const recovery = require("./design_recovery.js");
@@ -226,6 +257,9 @@ function main() {
   }
   if (action === "prepare") {
     const root = path.dirname(targetPath);
+    const deliveryReport = path.join(root, "qa", "design_delivery.json");
+    let previousDelivery = null;
+    try { previousDelivery = JSON.parse(fs.readFileSync(deliveryReport, "utf8")); } catch (_) {}
     require("./artifact_delivery.js").declareScope(root);
     const outline = JSON.parse(fs.readFileSync(targetPath, "utf8"));
     const baseline = { title: opts.title || outline.deck_goal || "Presentation", outline,
@@ -238,10 +272,12 @@ function main() {
     if (check.status !== 0) {
       let hardReport = {};
       try { hardReport = JSON.parse(fs.readFileSync(report, "utf8")); } catch (_error) { hardReport = {}; }
-      if (hardReport.repair_required && hardReport.repair_round === "hard_issues") {
-        // Non-terminal: one chance to fix structural issues before the neutral fallback.
+      if (hardReport.repair_required && ["hard_issues", "references"].includes(hardReport.repair_round)) {
+        // Non-terminal: one reference correction and one content correction are bounded separately.
         console.log(JSON.stringify({ ok: false, repair_required: true, status: "outline_needs_fixes",
           attempt: hardReport.attempt, instructions: hardReport.repair_instructions,
+          repair_round: hardReport.repair_round, validation_stage: hardReport.validation_stage,
+          deferred_evidence_checks: hardReport.deferred_evidence_checks || [],
           issues: hardReport.repair_hard_issues, how_to_fix: hardReport.repair_how_to_fix,
           checklist: hardReport.repair_checklist, report,
           next: `Edit ${path.basename(targetPath)} for every listed issue (one write_file), then re-run this same prepare command.` }));
@@ -255,6 +291,9 @@ function main() {
       } catch (_error) { /* keep the original outline */ }
       const delivery = require("./design_recovery.js").fallback(baseline, root,
         `Outline validation incomplete; inspect ${report}. Content is not verified.`);
+      delivery.validation_issues = hardReport.issues || [];
+      delivery.validation_stage = hardReport.validation_stage;
+      write(deliveryReport, delivery);
       require("./artifact_delivery.js").publishArtifact(delivery.primary_artifact);
       // Carry the concrete degradation disclosure into the terminal fallback result and report.
       if (hardReport.auto_degraded) {
@@ -273,16 +312,20 @@ function main() {
     let checked = {};
     try { checked = JSON.parse(fs.readFileSync(report, "utf8")); } catch (_error) { checked = {}; }
     if (checked.repair_required) {
-      // Non-terminal: no fallback delivery, no design input yet. The model fixes the
-      // checklist once; the follow-up prepare always proceeds (see validate_outline.js).
+      // Non-terminal: one content correction after references resolve; a reference
+      // correction does not spend this opportunity. Repeated content failure falls back.
       console.log(JSON.stringify({ ok: false, repair_required: true, status: "outline_needs_fixes",
         attempt: checked.attempt, instructions: checked.repair_instructions,
+        repair_round: checked.repair_round, validation_stage: checked.validation_stage,
         how_to_fix: checked.repair_how_to_fix, checklist: checked.repair_checklist, report,
         next: `Edit ${path.basename(targetPath)} for every checklist item (one write_file), then re-run this same prepare command.` }));
       return;
     }
-    const finalOutline = checked.auto_degraded ? JSON.parse(fs.readFileSync(targetPath, "utf8")) : outline;
+    const finalOutline = checked.auto_degraded || checked.evidence_resolved
+      ? JSON.parse(fs.readFileSync(targetPath, "utf8")) : outline;
     const input = plans.makeInput(finalOutline, opts.title || finalOutline.deck_goal, core.runtimeSourceBinding().source_text);
+    const researchFacts = selectedResearchFacts(finalOutline, checked);
+    if (researchFacts.length) input.research_facts = researchFacts;
     const out = core.resolveArtifactPath(opts.out || path.join(root, "design_input.json"));
     input.outline_file = path.relative(path.dirname(out), targetPath);
     writeInput(out, input, root);
@@ -300,6 +343,18 @@ function main() {
     if (reusable && fs.existsSync(html)) {
       const match = fs.readFileSync(html, "utf8").match(/<script[^>]*id="deck-document"[^>]*>([\s\S]*?)<\/script>/);
       if (match) reusable = JSON.parse(match[1]).design_plan?.user_edited !== true;
+    }
+    if (reusable) {
+      // Preparation creates a recovery artifact before validation. Once the
+      // receipt and scaffold pass, that baseline is not the accepted design's
+      // status. Preserve failed-correction history and its retry budget too.
+      const receipt = JSON.parse(fs.readFileSync(path.join(path.dirname(input.request_file), "accepted.json"), "utf8"));
+      const retained = previousDelivery?.plan_hash === receipt.plan_hash
+        && ["design_accepted", "correction_failed"].includes(previousDelivery.status);
+      write(deliveryReport, retained ? previousDelivery : {
+        ok: true, status: "design_accepted", plan_hash: receipt.plan_hash,
+        correction_used: receipt.sources?.length > 1, warnings: [],
+      });
     }
     const researchStatus = outline.source_mode === "public_authoritative_research"
       ? (opts["research-handoff"] ? "handoff_validated" : "handoff_unverified") : "user_material";

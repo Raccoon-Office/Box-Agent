@@ -25,11 +25,13 @@ Search requirements:
   retry a near-equivalent entity/fact query just because a `site:` or authority-
   ranked variant returned no results; use an exact known first-party URL or mark
   the gap unresolved.
-- Count anti-bot, HTTP 403/429, CAPTCHA/challenge, permission, timeout, and
-  empty-body failures by evidence target. After one materially different
-  recovery attempt also fails, stop that target and report the attempted
-  methods, failure signals, usable evidence, and unresolved gap to the main
-  agent; do not keep issuing variants of the same search.
+- Count anti-bot, HTTP 403/429, CAPTCHA/challenge, permission, timeout and
+  unreadable-body failures against the document/access barrier. After one
+  materially different permitted recovery also fails, stop that retrieval path;
+  report methods, failures and the remaining question to the main agent;
+  do not keep issuing variants of the same search. An independently accessible
+  observed source may answer the same question under its own provenance and
+  the main skill's adaptive reading allowance; never bypass access restrictions.
 
 Output path: [output_dir]/research/[topic]_wide[NN].md
 Output format:
@@ -64,19 +66,30 @@ Source rules:
 - Route C: use only supplied file content and cite file name plus section/page.
 - Route D: treat file evidence as primary and external sources as supplement.
 - Search routes: prioritize primary and authoritative sources.
+- Check that the source's date, product/version, locale and population apply to
+  the question; distinguish a current specification from a historical example.
 - Resolve the target entity before accepting a result. Open the source page;
   a URL-bound search-result summary may be medium-confidence evidence when its
   exact returned excerpt is preserved with `evidence_basis=search_summary`.
+- Inspect page-reader output: generated summaries use `page_summary` and medium
+  confidence; literal source text uses `page_body`. If a summarizing reader
+  does not identify raw output, default to `page_summary`. For decisive terms,
+  plan a direct reading channel using the main skill's source-reading procedure.
+  Preserve the returned text
+  and its basis instead of turning a summary into a publisher quotation.
 - For every candidate claim, add or update one row in
   [output_dir]/research/[topic]_evidence.json using the output-contract schema.
-- Mark a row `verified` only when the excerpt names the entity and directly
+- Mark a row `verified` only when the excerpt or separately bound literal
+  source context names the entity and directly
   supports the claim. Mark cross-entity matches, unsupported snippets, and
   unresolved user/source conflicts `conflicting` or `unverified`.
 - For `first_party`, the page hostname must match a declared
   `official_domains` entry for that entity.
-- For one evidence target, stop after two consecutive blocked-source failures.
-  Record the attempted methods and failure signals in `unverified_reason`, and
+- For the same document or access barrier, stop after two consecutive
+  blocked-source failures. Record methods and failures in `unverified_reason`;
   surface the blocked-target note to the main agent so it can notify the user.
+  A separately accessible observed source may still support the same question;
+  do not confuse its evidence with reading the blocked original.
 
 Output path: [output_dir]/research/[topic]_dim[NN].md
 Output format:
@@ -86,7 +99,8 @@ Source: [source name or file name]
 URL: [URL or file reference]
 Source Type: [first_party / government / regulator / filing / standards_body / academic / reputable_media / secondary / user_input]
 Date: [publication date or N/A]
-Excerpt: [short verbatim excerpt]
+Evidence Basis: [page_body / page_summary / search_summary / user_input]
+Excerpt: [short exact excerpt from the returned source text or labeled summary]
 Context: [surrounding context]
 Confidence: [high / medium / low]
 Status: [verified / conflicting / unverified]

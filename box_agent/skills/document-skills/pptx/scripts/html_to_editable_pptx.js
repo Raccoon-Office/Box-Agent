@@ -352,6 +352,35 @@ async function main() {
     : '[data-pptx-chart][data-native-chart="true"]';
   const diagnostics = await page.evaluate(({ slideSelector, width, height }) => {
     const warnings = [];
+    let researchNotes = "";
+    // The current HTML owns its research sources. Planning notes and
+    // private source_facts are not citations, and sibling files may be stale.
+    const metadata = document.getElementById("deck-document");
+    if (metadata) {
+      try {
+        const researchFacts = JSON.parse(metadata.textContent)?.truth_contract?.research_facts;
+        if (researchFacts !== undefined) {
+          if (!Array.isArray(researchFacts)) {
+            warnings.push("Embedded research_facts must be an array; no research notes were exported.");
+          } else {
+            // Keep valid strings verbatim; reject values that cannot be stored
+            // as XML 1.0 text instead of coercing or silently rewriting them.
+            const facts = researchFacts.filter(fact =>
+              typeof fact === "string" && fact.trim() &&
+              !/[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/u.test(fact)
+            );
+            if (facts.length !== researchFacts.length) {
+              warnings.push(`Skipped ${researchFacts.length - facts.length} invalid research_facts entries; only non-empty XML-safe strings can be exported as research sources.`);
+            }
+            if (facts.length) {
+              researchNotes = "整份演示的研究来源清单（非逐页引用）\n\n" + facts.join("\n\n");
+            }
+          }
+        }
+      } catch {
+        warnings.push("Embedded #deck-document has invalid JSON; no research notes were exported.");
+      }
+    }
     let incompleteDiagramCount = 0;
     document.querySelectorAll(slideSelector).forEach((slide, slideIndex) => {
       const bounds = slide.getBoundingClientRect();
@@ -369,7 +398,7 @@ async function main() {
         }
       });
     });
-    return { warnings, incompleteDiagramCount };
+    return { warnings, incompleteDiagramCount, researchNotes };
   }, { slideSelector, width: expectedWidth, height: expectedHeight });
   diagnostics.warnings.forEach(warning => console.warn(warning));
   const diagramCount = await page.locator(diagramSelector).count();
@@ -403,6 +432,48 @@ async function main() {
     previews.push(imagePath);
   }
 
+  // Tight single-line controlled text needs some native font-metric room.
+  // Adjust before background capture so a widened label keeps its backing.
+  await page.evaluate(() => {
+    for (const text of document.querySelectorAll('.slide :is(.open-side-title, .kpi-label)[data-prop-kind="text"]')) {
+      if (text.childElementCount || !text.textContent.trim()) continue;
+      const style = getComputedStyle(text);
+      const box = text.getBoundingClientRect();
+      if (!box.width || style.direction === "rtl" || Math.abs(box.width - text.offsetWidth) > 1) continue;
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      const lines = [...range.getClientRects()].filter(rect => rect.width && rect.height);
+      if (lines.length !== 1) continue;
+      const paddingLeft = parseFloat(style.paddingLeft) || 0;
+      const paddingRight = parseFloat(style.paddingRight) || 0;
+      if (box.width - paddingLeft - paddingRight - lines[0].width >= 32) continue;
+      const previous = text.style.cssText;
+      if (text.matches(".open-side-title")) {
+        if (![14, 18, 20, 24].includes(paddingRight)) continue;
+        text.style.setProperty("box-sizing", "border-box", "important");
+        text.style.setProperty("width", `${box.width}px`, "important");
+        text.style.setProperty("padding-right", "0", "important");
+      } else {
+        const parent = text.parentElement;
+        const parentStyle = getComputedStyle(parent);
+        // A shared grid/row width is not the label's own available track.
+        if (parentStyle.display.endsWith("grid")
+          || (parentStyle.display.endsWith("flex") && !parentStyle.flexDirection.startsWith("column"))) continue;
+        const right = Math.min(text.closest(".slide").getBoundingClientRect().right,
+          parent.getBoundingClientRect().right - (parseFloat(parentStyle.paddingRight) || 0)
+            - (parseFloat(parentStyle.borderRightWidth) || 0));
+        const width = Math.min(box.width + 32, right - box.left);
+        if (width <= box.width) continue;
+        text.style.setProperty("box-sizing", "border-box", "important");
+        text.style.setProperty("width", `${width}px`, "important");
+        text.style.setProperty("padding-right", "0", "important");
+      }
+      const adjusted = text.getBoundingClientRect();
+      if (Math.abs(adjusted.x - box.x) > 1 || Math.abs(adjusted.y - box.y) > 1
+        || Math.abs(adjusted.height - box.height) > 1) text.style.cssText = previous;
+    }
+  });
+
   let bgCaptures = [];
   if (opts.bgCapture === "always") {
     await injectCaptureStyles(page);
@@ -410,6 +481,18 @@ async function main() {
     bgCaptures = await captureSlideBackgrounds({
       page,
       slideHandles,
+    });
+    // Captured decoration may still occupy authored flow space. Hiding its
+    // paint preserves that space; display:none would reflow adjacent text.
+    // The converter skips visibility:hidden subtrees, so it is not drawn twice.
+    await page.evaluate(() => {
+      for (const node of document.querySelectorAll(".slide [data-pptx-decoration]")) {
+        const style = getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "collapse"
+          || ["absolute", "fixed"].includes(style.position)) continue;
+        node.style.setProperty("display", style.display, "important");
+        node.style.setProperty("visibility", "hidden", "important");
+      }
     });
     await applyDecorationFlatten({
       page,
@@ -487,6 +570,25 @@ async function main() {
     if (bundle.split(before).length !== 2) throw new Error("Unsupported dom-to-pptx table exporter; cannot preserve row heights.");
     bundle = bundle.replace(before, after);
   }
+  // These vendor charset hints are constants, not properties of the resolved
+  // browser fonts. Omit them so native viewers can choose Unicode glyphs without
+  // an unrelated legacy charset constraint; keep typeface, size and language.
+  const fontCharsetTemplates = [
+    String.raw`runProps += "<a:latin typeface=\"".concat(opts.fontFace, "\" pitchFamily=\"34\" charset=\"0\"/><a:ea typeface=\"").concat(opts.fontFace, "\" pitchFamily=\"34\" charset=\"-122\"/><a:cs typeface=\"").concat(opts.fontFace, "\" pitchFamily=\"34\" charset=\"-120\"/>");`,
+    ...["latin", "ea", "cs"].map(script => String.raw`strSlideXml += "<a:${script} typeface=\"".concat(opts.fontFace, "\" charset=\"0\"/>");`),
+  ];
+  for (const before of fontCharsetTemplates) {
+    if (bundle.split(before).length !== 2) throw new Error("Unsupported dom-to-pptx font exporter; cannot omit unverified charset hints.");
+    bundle = bundle.replace(before, before.replace(/ charset=\\"(?:0|-122|-120)\\"/g, ""));
+  }
+  if (diagnostics.researchNotes) {
+    // Attach the deck-level list once, without guessing which fact supports
+    // which slide. Patch only in memory; the generated vendor bundle stays intact.
+    const before = "      const slide = pptx.addSlide();\n      await processSlide(root, slide, pptx, extendedOptions);";
+    const after = "      const slide = pptx.addSlide();\n      if (pptx.slides.length === 1 && options._deckResearchNotes) slide.addNotes(options._deckResearchNotes);\n      await processSlide(root, slide, pptx, extendedOptions);";
+    if (bundle.split(before).length !== 2) throw new Error("Unsupported dom-to-pptx notes exporter; cannot preserve research sources.");
+    bundle = bundle.replace(before, after);
+  }
   await page.addScriptTag({ content: bundle });
 
   const exportResult = await page.evaluate(
@@ -496,6 +598,7 @@ async function main() {
       slideSelector,
       diagramSelector,
       nativeChartSelector,
+      researchNotes,
     }) => {
       const api = window.domToPptx;
       if (!api || typeof api.exportToPptx !== "function") {
@@ -511,6 +614,7 @@ async function main() {
         layout: "LAYOUT_WIDE",
         width: 13.333,
         height: 7.5,
+        _deckResearchNotes: researchNotes,
       });
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -533,6 +637,7 @@ async function main() {
       slideSelector,
       diagramSelector,
       nativeChartSelector,
+      researchNotes: diagnostics.researchNotes,
     }
   );
 

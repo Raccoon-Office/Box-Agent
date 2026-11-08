@@ -129,8 +129,8 @@ function recoveryDeck(input, proposedCount = 0) {
   // report unmet geometry instead of attaching it to newly paginated slide IDs.
   const paletteContract = input.user_constraints?.palette ? { version:1, palette:input.user_constraints.palette } : null;
   const contract = colors.frozenPaletteContract(paletteContract, palette, "Registered neutral recovery design", issues);
-  const recoveryWarnings = input.user_constraints?.slides
-    ? ["Requested page geometry is not preserved by neutral recovery layouts; original constraints remain in design_input.json."] : [];
+  const recoveryWarnings = [...(input.recovery_warnings || []), ...(input.user_constraints?.slides
+    ? ["Requested page geometry is not preserved by neutral recovery layouts; original constraints remain in design_input.json."] : [])];
   const pages = [];
   const add = (layout_id, props, source) => pages.push({ id: `slide-${String(pages.length + 1).padStart(2,"0")}`,
     layout_id, props, source_outline_page: source });
@@ -155,9 +155,21 @@ function recoveryDeck(input, proposedCount = 0) {
     else add("closing-next-steps-v1", { eyebrow: "内容要点", title: group.title, subtitle: group.subtitle,
       actions: items.map(item=>({label:item.title,detail:item.body})), contact: "", variant:"next-steps",composition:"open" }, group.source);
   }
+  // Only prepare/accept's validated selection may become research provenance;
+  // the prevalidation baseline deliberately carries no such selection.
+  const researchFacts = String(input.outline.source_mode || "").trim() === "public_authoritative_research"
+    && !core.runtimeSourceBinding().strict && Array.isArray(input.research_facts) ? input.research_facts : [];
   const deck = { schema_version:1, title:chunks(input.title || "演示",120)[0], theme_id:theme.id,
-    design:require("./composition_core.js").createDeckDesign(theme), ...(contract ? {design_contract:contract} : {}), slides:pages };
-  const checked = core.validateAndNormalizeDeck(deck);
+    design:require("./composition_core.js").createDeckDesign(theme), ...(contract ? {design_contract:contract} : {}),
+    ...(researchFacts.length ? { truth_contract: { mode:"source_bound", source_facts:[], research_facts:researchFacts, assumptions:[] } } : {}),
+    slides:pages };
+  let checked = core.validateAndNormalizeDeck(deck);
+  if (!checked.ok && deck.truth_contract
+    && checked.issues.every(issue => issue.startsWith("truth_contract.research_facts"))) {
+    recoveryWarnings.push(`Research citations were omitted because they do not fit the existing deck contract: ${checked.issues.join("; ")}`);
+    delete deck.truth_contract;
+    checked = core.validateAndNormalizeDeck(deck);
+  }
   if (!checked.ok) throw new Error(`Recovery deck validation failed: ${checked.issues.join("; ")}`);
   return { deck:checked.normalized, theme, warnings:[...recoveryWarnings,...issues,...checked.warnings] };
 }

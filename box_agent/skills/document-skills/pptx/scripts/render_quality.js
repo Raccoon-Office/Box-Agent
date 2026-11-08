@@ -8,6 +8,12 @@ function renderQuality(html, runtime) {
     issues.push({ page: failure.slide, kind: "unreadable_text",
       detail: `${failure.element}: contrast ${failure.ratio.toFixed(2)}:1 — ${failure.text}` });
   }
+  for (const diagram of runtime?.editor?.diagrams || []) {
+    for (const loss of diagram.textLosses || []) {
+      issues.push({ page: diagram.page, kind: "truncated_diagram_text",
+        detail: `${loss.id} ${loss.field}: rendered ${JSON.stringify(loss.rendered)} instead of ${JSON.stringify(loss.expected)}` });
+    }
+  }
   for (const warning of new Set([...(html?.issues || []), ...(html?.warnings || [])])) {
     const match = /^slide-(\d+) .*(text\/content overflow detected|visible content extends outside the slide bounds)/.exec(warning);
     if (match) issues.push({ page: Number(match[1]),
@@ -20,7 +26,7 @@ function renderQuality(html, runtime) {
 function correctionNext(quality, correctionUsed = false) {
   return quality.ok ? null
     : correctionUsed ? "The design correction was already used or failed for this plan. Do not retry or manually debug the layout; retain the existing draft and report the affected pages as partial."
-    : `Run design_plan.js correct design_input.json --pages ${quality.affected_pages.join(",")} with these visual defects, then accept, apply and finalize once. If correction is unavailable, already used, or still fails, report partial and retain an explicitly degraded draft. Do not report completed or visual checks passed.`;
+    : `If wording alone can resolve these defects without losing meaning or conditions, apply one content-only patch and finalize again. Otherwise run design_plan.js correct design_input.json --pages ${quality.affected_pages.join(",")} with these visual defects, then accept, apply, refill affected content against the outline and finalize once. If correction is unavailable, already used, or still fails, report partial and retain an explicitly degraded draft. Do not report completed or visual checks passed.`;
 }
 
 module.exports = { renderQuality, correctionNext };

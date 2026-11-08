@@ -47,6 +47,103 @@ Typical cases that benefit from an outline:
 Do not create a second outline, and do not use `plan_write` as a substitute for
 this artifact.
 
+## Research and narrative framing
+
+For a broad sourced deck, state one primary audience, the action the deck should
+enable, and a provisional argument before gathering page material. A product
+promotion/introduction brief normally addresses prospective users or buyers;
+an internal campaign plan addresses the marketing team. Honor an explicit
+audience or purpose. Do not mix channel plans, content calendars or advice on
+how to present the product into a customer-facing story unless requested.
+For product promotion, sales or enterprise-value decks, apply
+`references/business-narrative.md`: business outcomes, relevant customer cases
+and adoption evidence need different research questions from product features.
+
+Use the argument to set research questions. For a persuasive product deck, useful
+questions include: what work is difficult today, why the product's mechanism
+changes that work, what a complete task produces, what evidence supports the
+benefit, and how the audience can adopt it. Adapt these to the topic and brief;
+they are not a mandatory chapter template or a fixed search/page count.
+Pass the selected questions and public-source boundaries to `research-synthesis`.
+Use broad discovery to find relevant facets, then read sources for the missing
+claims. Product features and user totals alone do not answer case or outcome
+questions. Before stopping, check whether the central argument has support and
+record material gaps; do not inflate dimension files or repeat searches to
+reach a count. Keep the research workflow's selected budget and blocked-source
+stopping rules.
+
+Turn facts into a sequence of claims the audience can follow. A useful product
+arc is problem/change → mechanism → task case → evidence and limits → adoption.
+A case should explain the input, important steps, deliverable and supported
+result; a list of occupations or customer names is not a case. If only a proposed
+demonstration is possible, label it as such and omit unverified outcome metrics.
+For each page, connect evidence to its implication for this audience, without
+converting popularity into effectiveness or correlation into causation. Put the
+page's role and transition in `notes`. The visible `message` addresses the
+audience, not the author with advice about making slides or marketing content.
+
+Review the candidate outline before design:
+
+- **Coverage:** Can the audience reach the requested understanding or decision
+  from these pages? Map required topics and the central conclusion to supporting
+  pages. Restore missing evidence, explanations or comparisons; a shorter deck
+  that drops them has not improved. Respect supplied page order and count.
+  For explanations, can the intended reader reconstruct how and why it works,
+  including prerequisite concepts and intermediate causal steps? Topic labels
+  alone do not supply a mechanism. Recheck essential links against the accepted
+  evidence after research validation; a usable subset can still leave a core gap.
+  When recommending adoption or expansion, connect the promised benefit to an
+  observable outcome and the decision criteria. Feasibility and acceptable cost
+  alone do not demonstrate that benefit. State what would support proceeding,
+  keeping the current approach or stopping; do not invent result thresholds.
+- **Contribution:** Read each page's message against every other page. In its
+  existing `notes`, state the question answered and the specific new evidence,
+  explanation or inference; naming a role such as "value" or "summary" is not
+  enough. If a page merely restates an earlier answer, merge its useful detail
+  into that page and remove it. Rewrite overlapping pages around different jobs
+  only when each needs distinct reasoning. A new date, label or citation does
+  not rescue an otherwise repeated explanation; move its isolated useful detail
+  into the relevant page. Apply the edits before validation;
+  a review that only lists repetitions leaves the problem unresolved.
+- **Source fidelity:** Compare central factual claims in titles, messages and
+  bullets with the returned source context, not just matching fact IDs. Keep
+  the actor/object, applicable scope, timing, units and qualifier strength
+  (approximation, bounds and conditions), including translated or summarized
+  wording. Combining two facts must not transfer
+  one system's result or policy to another. Carry known material conditions
+  beside the claim; a generic "confirm later" note does not replace them.
+  If a necessary condition is unknown, qualify or omit the assertion. Record
+  the check briefly in existing notes; correct the ledger and revalidate when
+  the factual claim itself needs repair. Review `visual` as part of this meaning:
+  arrow direction, branching, comparison and qualifiers must express the same
+  supported relationship as the text. Parallel consequences are not a causal
+  sequence; a risk factor is not automatically a necessary or sufficient condition.
+
+A feature list, a generic workflow and a summary often restate one benefit.
+A concrete worked task earns space by showing inputs, choices, handoffs or
+outputs the earlier mechanism did not explain. Likewise, "who it fits", "how to
+try it" and "recommendation" need separate pages only when they contribute
+different criteria or actions. A closing page may briefly recall the decision,
+but should not repeat the feature/cost catalogue. These are contribution tests,
+not mandatory page types. Tutorials, scientific explanations and supplied
+agendas can legitimately revisit a fact while building new reasoning.
+
+Keep headlines at the strength of their support. Preserve source dates, metric
+definitions and material caveats in near-final visible copy, beside the claim
+they qualify, not only in a visual suggestion, optional footer or private notes.
+Use concise attribution; detailed retrieval diagnostics belong in the research
+handoff, not in place of the audience's story. After content filling or a layout
+correction, compare the actual page content with these claims and qualifiers,
+including essential text embedded in figures. For controlled diagrams, use the
+finalizer's rendered-text-loss findings: matching layout dimensions do not prove
+that a label survived. When optional visual inspection runs, also read text in
+images. Use complete shorter labels through the editable content fields, keeping
+the necessary explanation and conditions visible. Check that the explanation
+survived as well as the numbers: a case needs its task and intervention alongside
+the outcome; a mechanism needs its causal steps. Restore a lost link in visible
+copy instead of accepting a page that contains only its metric highlights.
+The structural validator cannot judge narrative quality or factual entailment.
+
 ## When the request is under-specified or under-sourced
 
 A new deck must not start from too little. But "too little" is never answered
@@ -58,6 +155,18 @@ research**. Pick the branch that fits:
    Treat it as the source of truth and build the outline. Do not invent a
    competing storyline over usable input.
 
+   Raw supplied facts plus requested headings are not finished page copy. For
+   that input, map the facts to the distinct question each requested heading
+   answers before drafting. Preserve the requested page count and order; apply
+   the existing contribution check locally so pages do not repeat the same fact
+   set without adding a supported explanation. Reusing a fact to support a
+   different point is valid. Explain only what the supplied material supports,
+   and label derived calculations as derived. If a required section has no
+   supported distinct content, state the specific missing detail instead of
+   copying another section or inventing a workflow. This adds no external
+   research or review role. Do not reorganize finished or verbatim page copy
+   that the user has asked to preserve.
+
 2. **The request is a solution/design brief.** A prompt that names the goal,
    requested system or product components, integrations/processes to cover, and
    approximate page count is sufficient for a proposed architecture or
@@ -68,9 +177,11 @@ research**. Pick the branch that fits:
    branch only if the requested deck becomes evidence-driven.
 
 3. **Only the structure/framing is unclear** (facts are available, but audience,
-   page count, ordering, emphasis, or plan-vs-build is ambiguous). These are
-   finite preferences, not missing facts: never use `request_user_input` for
-   them. Call `request_user_decision` with one focused question and 2-6 options,
+   ordering, emphasis, or plan-vs-build is ambiguous). If the brief supports a
+   conventional, reversible framing, state it and proceed. An unspecified page
+   count alone needs no question. If competing choices would materially change
+   the deliverable, these are finite preferences, not missing facts: never use
+   `request_user_input` for them. Call `request_user_decision` with one focused question and 2-6 options,
    put the recommended option first, and—when it is low-risk, reversible, and
    preserves the request—set it as the default with a 30-second timeout. Examples:
    - "这套面向投资人还是内部评审?大概几页?" (then propose a default count)
@@ -98,8 +209,8 @@ research**. Pick the branch that fits:
    quality goal rather than a delivery gate. The workflow converts a fresh
    report into the generic `presentation_handoff` contract: `full` uses the
    complete verified facts, `partial` uses only its verified subset, and `framework` creates
-   explicit unavailable-data placeholders. Cover, agenda, and section-divider
-   pages are structural and may keep `evidence: []`; framework data pages still
+   explicit unavailable-data placeholders. Cover, agenda, section-divider and
+   nonnumeric call-to-action pages may keep `evidence: []`; framework data pages still
    need an explicit unavailable-data placeholder. Then omit or mark nonessential gaps instead of repeating the same
    queries. If bounded research or its validator is unavailable or incomplete,
    continue with supported findings, omit optional claims, and use explicit
@@ -115,7 +226,8 @@ research**. Pick the branch that fits:
    URL belongs to the named institution, and never treat an unverified URL as
    verified evidence. If a `site:` query returns no matching host, never invent
    the expected URL; successfully read a known exact first-party URL, omit the
-   optional claim, or use `暂无可验证公开数据` when the field itself is required.
+   optional claim, or use `本轮核验：暂无可验证公开数据` for a required field.
+   This describes the current evidence gap, not a claim that no public data exists.
    A normal factual-deck request already permits research
    from public authoritative sources; do not pause later to ask for permission
    to use those sources. Respect a strict/private source boundary, use an
@@ -129,10 +241,11 @@ research**. Pick the branch that fits:
    club/federation domains often return zero results), then `web_extract` the
    pages you will cite, and record each fact with its exact page URL and the
    exact figure/date it supports; every number in the slide's title, message or
-   bullets must appear literally in that slide's evidence text. When `prepare`
-   returns a `checklist`, fix each listed line before re-running it (cite the
-   exact figure from a page already read, search for it, or reword the line
-   without the number); unfixed lines are cut from the slides. If those tools are unavailable or insufficient, omit optional claims
+   bullets must have the same numeric value in that slide's evidence text. When
+   `prepare` returns a `checklist`, fix each listed line before re-running it
+   (bind the matching verified fact ID, correct its source-backed claim and rerun
+   research validation, or source a missing fact); do not remove supported dates
+   or qualifiers to pass a formatting check. If those tools are unavailable or insufficient, omit optional claims
    and use explicit placeholders for required facts — never pause the deck or
    present unsourced content as fact. Keep the boundary clear: this skill turns
    researched/supplied content into a slide plan; it does not itself perform
@@ -207,6 +320,21 @@ not supply it; reserve visible `待补充` for genuinely required missing fields
 
 Keep this as a planning artifact. Do not put CSS, HTML, or PowerPoint object
 details into `outline.json`.
+
+When a research handoff provides IDs, add `evidence_ids` to each factual slide
+with the exact IDs of its supporting `verified_facts`, and keep `evidence: []`.
+`design_plan.js prepare --research-handoff ...` resolves those references and
+writes canonical strings into `evidence` before the design handoff. A standalone
+`validate_outline.js --research-handoff ...` checks the same references without
+rewriting the file. The validator maintains `evidence_from_ids` to identify only
+the canonical entries it generated. Preserve this field during content edits;
+do not write it by hand. After correcting a research fact, update its ID and
+rerun preparation: only the old generated references are replaced. Explicit
+canonical references and older unmarked input still receive strict validation.
+Legacy canonical evidence remains supported. Unknown IDs,
+unverified claims and cross-entity citations remain errors; never repair them by
+dropping a citation while keeping its claim. Do not invent an ID or hand-edit the
+research report. Revalidate changed research and use the resulting IDs.
 
 `design_requirements` is optional, but when the user explicitly names colors,
 palette roles, a visual geometry such as a pyramid, flow direction, or an exact
@@ -285,8 +413,11 @@ preserve any explicit user order or page count. The registry lives in
    `image-feature-v1`. Data/diagram pages, explicit text-only pages, and content
    requiring real or official imagery are not eligible for this automatic
    promotion.
-6. Run `scripts/validate_outline.js outline.json` and fix failures before
-   scaffolding `deck.json`.
+6. Run `scripts/validate_outline.js outline.json` with the research handoff when
+   applicable, and resolve reported issues before independent content review.
+   Recheck changed evidence/copy before its focused review. Preserve the saved
+   repair limits. For page production, design preparation and final QA remain
+   required; outline-only tasks stop after validation and applicable content review.
 
 ## Quality Bar
 
@@ -300,11 +431,13 @@ preserve any explicit user order or page count. The registry lives in
   message, and visual consistent. The scaffold splits overflow into linked
   slides; do not trim or merge items to fit a template. Avoid restating the title.
 - Avoid repetitive slides with the same title, message, layout, or visual.
-- Do not reuse the same evidence as the main support for more than two pages;
-  combine repetitive pages or research another distinct fact.
+- Repeated evidence is a review signal, not a duplicate-page count. Retain it
+  when another page develops a necessary, different inference; combine pages
+  repeating the same answer. Never rotate IDs or reword a fact to evade review.
 - For public-research decks, omit nonessential gaps instead of planning visible
-  placeholders. Use `暂无可验证公开数据` only for a required unavailable public
-  fact; use `待补充` or `待客户确认` for required user/private inputs.
+  placeholders. Use `本轮核验：暂无可验证公开数据` only for a required public fact
+  not established in this investigation, with the specific unanswered condition;
+  use `待补充` or `待客户确认` for required user/private inputs.
 - Avoid sparse content slides that leave the lower half of the canvas empty.
   Divider, cover, quote, and cinematic pause slides may use intentional
   whitespace; normal business/product/demo/training slides should turn spare
@@ -328,11 +461,19 @@ Run:
 ${BOX_AGENT_NODE:-node} scripts/validate_outline.js outline.json --report qa/outline_check.json
 ```
 
-The validator treats structure, required fields, page numbering, and the basic
-storyline contract as the hard gate. Missing evidence on data-heavy slides,
-page-level numeric traceability, public-research source URLs, and similar source
-findings are advisory warnings: they never prevent scaffolding or `index.html`.
-It is not a substitute for human/model narrative judgment.
+The validator checks structure, required fields and page numbering. With a
+research handoff, verified reference identity and entity binding are hard checks;
+source gaps and unsupported numbers enter the bounded repair/degradation flow.
+Fix reference errors before treating a claim as unavailable. In repair flow,
+valid references can be diagnosed while unresolved pages defer dependent support
+checks; a binding error never partially writes the input. The saved report permits
+at most one reference correction and one content correction, and retains
+used budgets after later checks. Keep that report instead of deleting it to retry.
+Correct all reported issues and numeric gaps together; the terminal report still
+lists unresolved errors. Partial research can support a complete deck using its
+verified subset. A generated fallback
+file does not mean content validation passed. The validator is not a substitute
+for human/model narrative judgment.
 
 After validation passes, pass it directly to the scaffold with
 `--outline outline.json`. The scaffold writes `source_outline_page` onto every

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -33,7 +34,7 @@ SOURCE_TYPES = frozenset(
 )
 CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
 EVIDENCE_STATUSES = frozenset({"verified", "conflicting", "unverified"})
-EVIDENCE_BASES = frozenset({"page_body", "search_summary", "user_input"})
+EVIDENCE_BASES = frozenset({"page_body", "page_summary", "search_summary", "user_input"})
 SEARCH_RESULT_HOSTS = frozenset(
     {
         "bing.com",
@@ -176,6 +177,93 @@ def canonical_evidence(record: dict[str, object]) -> str:
     )
 
 
+def number_tokens(value: str) -> set[str]:
+    """Compare numeric values without losing percent units or date components."""
+    result: set[str] = set()
+    for token in NUMBER_RE.findall(value):
+        unit = "%" if token.endswith("%") else ""
+        integer, _, fraction = token.rstrip("%").replace(",", "").partition(".")
+        number = integer.lstrip("0") or "0"
+        fraction = fraction.rstrip("0")
+        result.add(number + (f".{fraction}" if fraction else "") + unit)
+    return result
+
+
+def bound_source_context(
+    ledger_path: Path,
+    record: dict[str, object],
+    label: str,
+    errors: list[str],
+    warnings: list[str],
+) -> tuple[str, dict[str, object]]:
+    """Check optional raw-source binding before using separate quote context."""
+    reference = record.get("source_capture")
+    context = record.get("evidence_context", [])
+    if "source_capture" not in record:
+        if context:
+            errors.append(f"{label}.evidence_context requires source_capture")
+        if record.get("evidence_basis") == "page_body":
+            warnings.append(f"{label}: excerpt not checked against a source capture")
+        return "", {}
+    if not isinstance(reference, str) or not reference.strip():
+        errors.append(f"{label}.source_capture must be a non-empty path")
+        return "", {}
+    research_dir = ledger_path.parent.resolve()
+    try:
+        capture_path = (research_dir / reference).resolve()
+    except (OSError, ValueError, RuntimeError) as exc:
+        errors.append(f"{label}.source_capture path is invalid: {exc}")
+        return "", {}
+    if not capture_path.is_relative_to(research_dir):
+        errors.append(f"{label}.source_capture must stay inside the research directory")
+        return "", {}
+    try:
+        raw_capture = capture_path.read_bytes()
+        capture = json.loads(raw_capture)
+    except (OSError, ValueError) as exc:
+        errors.append(f"{label}.source_capture could not be read: {exc}")
+        return "", {}
+    if not isinstance(capture, dict):
+        errors.append(f"{label}.source_capture must contain a JSON object")
+        return "", {}
+    if (
+        capture.get("reader") != "managed_browser_dom"
+        or capture.get("evidence_basis") != "page_body"
+        or record.get("evidence_basis") != "page_body"
+        or not isinstance(capture.get("text"), str)
+        or not capture["text"].strip()
+        or not isinstance(capture.get("title", ""), str)
+        or type(capture.get("navigation_status")) is not int
+        or not 200 <= capture["navigation_status"] < 400
+    ):
+        errors.append(f"{label}.source_capture is not a successful raw DOM capture")
+        return "", {}
+    if record["source_url"] != capture.get("final_url"):
+        errors.append(f"{label}.source_url must match source_capture final_url")
+
+    def quote_text(value: str) -> str:
+        return re.sub(r"\s+", " ", unicodedata.normalize("NFC", value)).strip()
+
+    source_parts = [quote_text(capture["text"]), quote_text(capture.get("title", ""))]
+    if not any(quote_text(str(record["evidence_excerpt"])) in part for part in source_parts):
+        errors.append(f"{label}.evidence_excerpt must be a verbatim source_capture passage")
+    if not isinstance(context, list) or any(
+        not isinstance(part, str) or not part.strip() for part in context
+    ):
+        errors.append(f"{label}.evidence_context must be an array of non-empty passages")
+        context = []
+    for index, part in enumerate(context):
+        if not any(quote_text(part) in source for source in source_parts):
+            errors.append(f"{label}.evidence_context.{index} must be verbatim source text")
+    metadata: dict[str, object] = {
+        "source_capture": str(capture_path.relative_to(research_dir)),
+        "source_capture_sha256": hashlib.sha256(raw_capture).hexdigest(),
+    }
+    if context:
+        metadata["evidence_context"] = context
+    return "\n".join(context), metadata
+
+
 def validate_evidence_ledger(
     path: Path,
     topic: str,
@@ -183,6 +271,18 @@ def validate_evidence_ledger(
     errors: list[str] = []
     warnings: list[str] = []
     verified_evidence: list[dict[str, object]] = []
+    rejected_evidence_context: list[dict[str, object]] = []
+
+    def record_rejection(label: str, record: object) -> None:
+        values = record if isinstance(record, dict) else {}
+        rejected_evidence_context.append({
+            "record": label,
+            **{
+                field: values.get(field) if isinstance(values.get(field), str) else None
+                for field in ("entity", "claim", "source_url")
+            },
+        })
+
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -247,6 +347,7 @@ def validate_evidence_ledger(
         record_error_start = len(errors)
         if not isinstance(raw_record, dict):
             errors.append(f"{label} must be an object")
+            record_rejection(label, raw_record)
             continue
         missing = [
             field
@@ -264,6 +365,7 @@ def validate_evidence_ledger(
         ]
         if missing:
             errors.append(f"{label} missing non-empty fields: {', '.join(missing)}")
+            record_rejection(label, raw_record)
             continue
         record = {
             key: str(value).strip() if isinstance(value, str) else value
@@ -275,6 +377,7 @@ def validate_evidence_ledger(
             errors.append(
                 f"{label}.entity {record['entity']!r} is not declared in target_entities"
             )
+            record_rejection(label, raw_record)
             continue
         source_type = str(record["source_type"]).casefold()
         confidence = str(record["confidence"]).casefold()
@@ -292,15 +395,16 @@ def validate_evidence_ledger(
             errors.append(
                 f"{label}.status must be one of {', '.join(sorted(EVIDENCE_STATUSES))}"
             )
+            record_rejection(label, raw_record)
             continue
         if evidence_basis and evidence_basis not in EVIDENCE_BASES:
             errors.append(
                 f"{label}.evidence_basis must be one of "
                 f"{', '.join(sorted(EVIDENCE_BASES))}"
             )
-        if evidence_basis == "search_summary" and confidence == "high":
+        if evidence_basis in {"search_summary", "page_summary"} and confidence == "high":
             warnings.append(
-                f"{label}: search_summary evidence should normally use "
+                f"{label}: {evidence_basis} evidence should normally use "
                 "confidence=medium"
             )
         status_counts[status] += 1
@@ -332,7 +436,11 @@ def validate_evidence_ledger(
             for alias in entity_spec["aliases"]
             if normalized_text(alias)
         ]
-        excerpt_normalized = normalized_text(record["evidence_excerpt"])
+        source_context, source_metadata = bound_source_context(
+            path, record, label, errors, warnings
+        )
+        supported_text = str(record["evidence_excerpt"]) + "\n" + source_context
+        excerpt_normalized = normalized_text(supported_text)
         if not any(alias in excerpt_normalized for alias in aliases):
             errors.append(
                 f"{label}.evidence_excerpt does not name entity "
@@ -340,9 +448,9 @@ def validate_evidence_ledger(
             )
 
         claim = str(record["claim"])
-        excerpt = str(record["evidence_excerpt"])
-        claim_numbers = set(NUMBER_RE.findall(claim))
-        excerpt_numbers = set(NUMBER_RE.findall(excerpt))
+        excerpt = supported_text
+        claim_numbers = number_tokens(claim)
+        excerpt_numbers = number_tokens(excerpt)
         missing_numbers = sorted(claim_numbers - excerpt_numbers)
         if missing_numbers:
             errors.append(
@@ -419,10 +527,12 @@ def validate_evidence_ledger(
             continue
         if confidence == "low":
             errors.append(f"{label}: verified evidence cannot use confidence=low")
+            record_rejection(label, raw_record)
             continue
         if len(errors) > record_error_start:
             # A row labelled verified is usable only when every entity, URL,
             # excerpt, number, and source-ownership check above passed.
+            record_rejection(label, raw_record)
             continue
 
         canonical = canonical_evidence(record)
@@ -431,17 +541,21 @@ def validate_evidence_ledger(
                 f"{label}: canonical evidence exceeds 280 characters; shorten the "
                 "claim without removing the entity, source type, or URL"
             )
+            record_rejection(label, raw_record)
             continue
         canonical_key = normalized_text(canonical)
         if canonical_key in seen_canonical:
             errors.append(f"{label}: duplicate verified evidence")
+            record_rejection(label, raw_record)
             continue
         seen_canonical.add(canonical_key)
         verified_by_entity[entity_key] += 1
         if valid_first_party:
             first_party_by_entity[entity_key] += 1
         verified_record = {
+            "id": "fact_" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16],
             "entity": record["entity"],
+            "aliases": list(dict.fromkeys(entity_spec["aliases"])),
             "claim": record["claim"],
             "source_url": record["source_url"],
             "source_type": source_type,
@@ -449,6 +563,7 @@ def validate_evidence_ledger(
             "confidence": confidence,
             "status": status,
             "canonical": canonical,
+            **source_metadata,
         }
         if evidence_basis:
             verified_record["evidence_basis"] = evidence_basis
@@ -482,6 +597,8 @@ def validate_evidence_ledger(
         ),
         "verified_evidence": verified_evidence,
     }
+    if rejected_evidence_context:
+        summary["rejected_evidence_context"] = rejected_evidence_context
     return errors, warnings, summary
 
 
@@ -627,7 +744,9 @@ def main() -> int:
         "delivery_mode": handoff_status,
         "verified_facts": [
             {
+                "id": record["id"],
                 "entity": record["entity"],
+                "aliases": record["aliases"],
                 "claim": record["claim"],
                 "source_type": record["source_type"],
                 "source_url": record["source_url"],
@@ -637,6 +756,11 @@ def main() -> int:
                     if record.get("evidence_basis")
                     else {}
                 ),
+                **{
+                    key: record[key]
+                    for key in ("source_capture", "source_capture_sha256", "evidence_context")
+                    if key in record
+                },
             }
             for record in evidence_summary.get("verified_evidence", [])
         ],
@@ -692,6 +816,9 @@ def main() -> int:
         label = "WARN" if delivery_allowed else "ERROR"
         for error in errors:
             print(f"{label}: {error}", file=sys.stderr)
+
+    for context in evidence_summary.get("rejected_evidence_context", []):
+        print(f"REJECTED_EVIDENCE: {json.dumps(context, ensure_ascii=False)}", file=sys.stderr)
 
     if delivery_allowed:
         status = "full" if handoff_status == "full" else handoff_status

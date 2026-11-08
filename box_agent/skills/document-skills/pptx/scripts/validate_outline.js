@@ -220,6 +220,7 @@ function readPresentationHandoff(handoffPath) {
     );
   }
   const verified = new Map();
+  const byId = new Map();
   verifiedFacts.forEach((item, index) => {
     if (
       !item
@@ -231,9 +232,84 @@ function readPresentationHandoff(handoffPath) {
     ) {
       throw new Error(`Presentation handoff verified_facts.${index} is invalid`);
     }
+    if (item.aliases !== undefined && (!Array.isArray(item.aliases)
+      || !item.aliases.every(alias => text(alias)))) {
+      throw new Error(`Presentation handoff verified_facts.${index}.aliases is invalid`);
+    }
+    if (item.id !== undefined) {
+      if (!text(item.id) || byId.has(text(item.id))) {
+        throw new Error(`Presentation handoff verified_facts.${index}.id is invalid or duplicated`);
+      }
+      byId.set(text(item.id), item);
+    }
     verified.set(text(item.canonical), item);
   });
-  return { resolved, verified, deliveryMode, qualityOk };
+  return { resolved, verified, byId, deliveryMode, qualityOk };
+}
+
+function bindEvidenceReferences(outline, handoff) {
+  const issues = [];
+  const bindings = [];
+  const unresolvedSlides = new Set();
+  for (const [index, slide] of (Array.isArray(outline.slides) ? outline.slides : []).entries()) {
+    if (!slide || slide.evidence_ids === undefined) continue;
+    const label = slideLabel(index);
+    const issue = message => { issues.push(message); unresolvedSlides.add(index); };
+    if (!Array.isArray(slide.evidence_ids) || !slide.evidence_ids.every(id => text(id))) {
+      issue(`${label}: evidence_ids must be an array of verified fact IDs`);
+      continue;
+    }
+    const previousDerived = slide.evidence_from_ids === undefined ? [] : slide.evidence_from_ids;
+    if (!Array.isArray(previousDerived) || !previousDerived.every(item => text(item))) {
+      issue(`${label}: evidence_from_ids must be an array of generated canonical references`);
+      continue;
+    }
+    if (!slide.evidence_ids.length && !previousDerived.length) continue;
+    if (slide.evidence_ids.length && !handoff) {
+      issue(`${label}: evidence_ids requires --research-handoff`);
+      continue;
+    }
+    if (slide.evidence !== undefined && !Array.isArray(slide.evidence)) {
+      issue(`${label}: evidence must be an array`);
+      continue;
+    }
+    // Only replace references this binder previously generated. Unmarked and
+    // hand-written canonical references remain subject to exact validation.
+    const previousSet = new Set(previousDerived.map(text));
+    const evidence = (slide.evidence || []).filter(item => !previousSet.has(text(item)));
+    const authored = new Set(evidence.map(text));
+    const derived = [];
+    for (const id of slide.evidence_ids) {
+      const fact = handoff.byId.get(text(id));
+      if (!fact) issue(`${label}: unknown verified fact ID ${JSON.stringify(id)}; correct the reference, do not discard the claim`);
+      else {
+        const canonical = text(fact.canonical);
+        evidence.push(canonical);
+        if (!authored.has(canonical)) derived.push(canonical);
+      }
+    }
+    bindings.push({ index, slide, evidence: [...new Set(evidence)], derived: [...new Set(derived)] });
+  }
+  // Diagnose independently resolvable facts without partially committing the input.
+  let diagnosticOutline;
+  if (issues.length) {
+    diagnosticOutline = JSON.parse(JSON.stringify(outline));
+    for (const { index, evidence } of bindings) diagnosticOutline.slides[index].evidence = evidence;
+  }
+  // An unresolved ID is a handoff error, not evidence that a fact is unavailable.
+  // Keep the author's input intact until every reference can be resolved.
+  let changed = false;
+  if (!issues.length) {
+    for (const { slide, evidence, derived } of bindings) {
+      if (JSON.stringify(slide.evidence) !== JSON.stringify(evidence)
+        || JSON.stringify(slide.evidence_from_ids) !== JSON.stringify(derived)) {
+        slide.evidence = evidence;
+        slide.evidence_from_ids = derived;
+        changed = true;
+      }
+    }
+  }
+  return { issues, changed, diagnosticOutline, unresolvedSlides: [...unresolvedSlides] };
 }
 
 function text(value) {
@@ -313,6 +389,9 @@ function hasEvidence(slide) {
 function isStructuralEvidenceExemptSlide(slide, index) {
   const role = `${slide && slide.layout || ""} ${slide && slide.visual || ""}`;
   if (index === 0 && includesAny(role, ["cover", "hero", "封面"])) return true;
+  if (isClosingSlide(slide) && !numberTokens([
+    slide.title, slide.message, ...(Array.isArray(slide.bullets) ? slide.bullets : []),
+  ].map(text).join(" ")).length) return true;
   return includesAny(role, [
     "agenda",
     "table of contents",
@@ -339,7 +418,7 @@ const FRAMEWORK_UNAVAILABLE_FACT_PLACEHOLDER = "暂无可验证公开数据";
 const PRIVATE_IDENTITY_FACT_RE = /(?:融资(?:阶段|轮次)|(?:种子|天使|成长)轮|pre[-\s]?a|series\s+[a-z]|[a-f]\s*轮|(?:公司|项目|产品)(?:名称|名为)|成立(?:年份|时间)|创始人|团队(?:成员姓名|姓名|履历|规模|人数|来源)|客户(?:名称|名单)|奖项|获奖|排名)/i;
 
 function validate(outline, opts) {
-  const issues = [];
+  const issues = [...(opts.evidenceBindingIssues || [])];
   const warnings = [];
   // Unsourced public-research claims: fixable once by the model, then degraded.
   const repairable = [];
@@ -467,6 +546,7 @@ function validate(outline, opts) {
 
   slides.forEach((slide, index) => {
     const label = `slide-${String(index + 1).padStart(2, "0")}`;
+    const referencesUnresolved = opts.unresolvedEvidenceSlides?.has(index) || false;
     const expectedPage = index + 1;
 
     if (!slide || typeof slide !== "object" || Array.isArray(slide)) {
@@ -518,7 +598,7 @@ function validate(outline, opts) {
     if (!Array.isArray(slide.evidence)) {
       issues.push(`${label}: evidence must be an array, use [] for non-evidence slides`);
     } else {
-      if ((publicResearch || frameworkDelivery) && slide.evidence.length === 0) {
+      if ((publicResearch || frameworkDelivery) && slide.evidence.length === 0 && !referencesUnresolved) {
         const exactFrameworkGap = [
           slide.message,
           ...(Array.isArray(slide.bullets) ? slide.bullets : []),
@@ -586,7 +666,8 @@ function validate(outline, opts) {
             slide.message,
             ...(Array.isArray(slide.bullets) ? slide.bullets : []),
           ].map(text).join(" ");
-          if (!normalize(slideNarrative).includes(normalize(verifiedItem.entity))) {
+          const entityNames = [verifiedItem.entity, ...(verifiedItem.aliases || [])];
+          if (!entityNames.some(name => normalize(slideNarrative).includes(normalize(name)))) {
             issues.push(
               `${label}: evidence.${evidenceIndex} is bound to entity ` +
               `${JSON.stringify(verifiedItem.entity)}, but the slide narrative does not ` +
@@ -627,7 +708,7 @@ function validate(outline, opts) {
           );
         }
       });
-      if (publicResearch) {
+      if (publicResearch && !referencesUnresolved) {
         const evidenceNumbers = new Set(numberTokens(slide.evidence.join(" ")));
         const claimEntries = [
           { path: "title", value: slide.title },
@@ -680,30 +761,21 @@ function validate(outline, opts) {
       else seenMessages.set(messageKey, label);
     }
 
+    // Presentation requirements follow visible claims, not unshown source
+    // context or author notes. `visual` only declares the intended display below.
     const combined = [
       slide.title,
       slide.message,
-      slide.layout,
-      slide.visual,
-      slide.notes,
       ...(Array.isArray(slide.bullets) ? slide.bullets : []),
-      ...(Array.isArray(slide.evidence) ? slide.evidence : []),
     ].map(value => text(value).replace(/https?:\/\/[^\s|]+/gi, " ")).join(" ");
-    const quantitativeContent = [
-      slide.title,
-      slide.message,
-      ...(Array.isArray(slide.bullets) ? slide.bullets : []),
-      ...(Array.isArray(slide.evidence) ? slide.evidence : []),
-    ].map(text).join(" ");
-    const quantitativeTokenCount = distinctQuantitativeValueTokens(
-      quantitativeContent
-    ).size;
+    const quantitativeTokenCount = distinctQuantitativeValueTokens(combined).size;
     const isDataHeavy = includesAny(combined, dataHeavyTerms);
     const chartWorthy = numberTokens(combined).length > 0
       || includesAny(combined, chartWorthyTerms);
     if (
       isDataHeavy
       && publicResearch
+      && !referencesUnresolved
       && !structuralEvidenceExempt
       && !hasEvidence(slide)
     ) {
@@ -744,13 +816,51 @@ function validate(outline, opts) {
     }
   });
 
-  return { ok: issues.length === 0, issues, warnings, slideCount: slides.length, repairable };
+  return {
+    ok: issues.length === 0, issues, warnings, slideCount: slides.length, repairable,
+    claim_strength_review: buildClaimStrengthReview(slides),
+  };
 }
 
 const UNVERIFIED_PLACEHOLDER = "暂无可验证公开数据";
 
 function slideLabel(index) {
   return `slide-${String(index + 1).padStart(2, "0")}`;
+}
+
+// Attention cues, not entailment tests: valid rules, translations and even negated
+// promises can match. Keep exact copy and page evidence for the existing reviewer;
+// never turn vocabulary mismatch into an error, repair or automatic rewrite.
+function buildClaimStrengthReview(slides) {
+  const signals = [
+    ["necessity_or_exclusivity", /只有|仅当|唯有|必须|必要条件|才(?:能|可|会)|\b(?:only\s+(?:if|when|after)|must|required|prerequisite|necessary\s+condition)\b/i],
+    ["sufficiency", /只要|足以|充分条件|即可|\b(?:sufficient|enough\s+(?:to|for))\b/i],
+    ["certainty_or_unconditional", /保证|确保|必然|必定|一定|无条件|绝对|永远|\b(?:guarantee[sd]?|ensure[sd]?|always|never|inevitable|inevitably|unconditional(?:ly)?)\b/i],
+  ];
+  const review = [];
+  slides.forEach((slide, index) => {
+    if (!slide || typeof slide !== "object" || Array.isArray(slide)) return;
+    const entries = [
+      ...["title", "message", "visual"].map(field => ({ path: field, value: slide[field] })),
+      ...(Array.isArray(slide.bullets)
+        ? slide.bullets.map((value, bulletIndex) => ({ path: `bullets.${bulletIndex}`, value }))
+        : []),
+    ];
+    for (const entry of entries) {
+      if (typeof entry.value !== "string") continue;
+      const found = signals.filter(([, pattern]) => pattern.test(entry.value)).map(([name]) => name);
+      if (!found.length) continue;
+      review.push({
+        page: index + 1,
+        path: `slides.${index}.${entry.path}`,
+        text: entry.value,
+        signals: found,
+        evidence: (Array.isArray(slide.evidence) ? slide.evidence : [])
+          .filter(item => typeof item === "string" && item.trim()),
+      });
+    }
+  });
+  return review;
 }
 
 // Groups repairable findings per slide with the original text and the slide's
@@ -800,7 +910,13 @@ function buildRepairChecklist(outline, repairable) {
   });
 }
 
+const RESEARCH_HANDOFF_REPAIR_HINT =
+  "Research handoff: use verified_facts[].id in evidence_ids (or copy the exact canonical item). " +
+  "Do not substring-match rewritten claims, drop unmatched citations, or remove supported dates to pass. " +
+  "Correct an unknown ID against the handoff; only declared entity aliases are accepted.";
+
 const REPAIR_HOW_TO_FIX = [
+  RESEARCH_HANDOFF_REPAIR_HINT,
   "Page already read: if a page you opened in this task states the figure/date, write that exact " +
     "figure/date into this slide's evidence item next to its page URL, e.g. " +
     "\"2013年加盟巴塞罗那 | FC Barcelona | https://...\". Every number in title/message/bullets must " +
@@ -810,6 +926,9 @@ const REPAIR_HOW_TO_FIX = [
   "Cannot source it: reword the line without the number but keep its point (e.g. \"2009：桑托斯首秀\" -> " +
     `"桑托斯一线队首秀"), or use ${UNVERIFIED_PLACEHOLDER} for a required field. ` +
     "Never invent a URL or a figure.",
+  "Calendar dates: use an unambiguous date form and a verified fact stating the same dated claim. " +
+    "Distinguish event, publication and as-of dates; a publication timestamp alone does not establish " +
+    "an event date. Do not bind unrelated metric facts merely to supply matching digits.",
   "Evidence without URL: replace it with the exact page URL you read (not a homepage), or delete it.",
   "No evidence on a factual slide: add an evidence item with the exact page URL for its key facts, or use " +
     `${UNVERIFIED_PLACEHOLDER} for a required fact it cannot support; qualitative pages that stay without evidence are listed as unverified.`,
@@ -817,6 +936,7 @@ const REPAIR_HOW_TO_FIX = [
 ];
 
 const HARD_ISSUE_HOW_TO_FIX = [
+  RESEARCH_HANDOFF_REPAIR_HINT,
   "\"appears data-heavy but visual does not name a chart/table/KPI/dashboard data display\": rewrite " +
     "that slide's `visual` to name the display, e.g. \"KPI 卡片 + 折线图\", \"对比表格\", \"柱状图\", or " +
     "reduce the slide to fewer than two distinct figures.",
@@ -959,21 +1079,23 @@ function degradeUnsupportedClaims(outline, { mode = "gentle" } = {}) {
   return { degraded, unverifiedClaims };
 }
 
-// Degrades the current outline in place (backup of the first original is kept) and returns the
-// repair state plus the validation result of what is now on disk. Never leaves a claim unchanged:
-// gentle -> strict -> placeholder; if even that does not validate, the placeholder copy is still
-// written and the failed recheck is returned so prepare delivers the terminal fallback.
+// Keep the least destructive reduction that adds no structural failures. Existing
+// hard errors remain visible for fallback; deleting more copy cannot repair them.
+// Preserve the first original as a backup and return the actual remaining failures.
 const dedupe = items => Array.from(new Map(items.map(item => [JSON.stringify(item), item])).values());
 
 function applyDegrade(outline, resolved, opts, attempt, previous) {
   const backup = path.join(path.dirname(resolved), "qa", "outline.before_degrade.json");
+  const originalIssues = new Set(validate(outline, opts).issues);
   let chosen = null;
   for (const mode of ["gentle", "strict", "placeholder"]) {
     const working = JSON.parse(JSON.stringify(outline));
     const { degraded, unverifiedClaims } = degradeUnsupportedClaims(working, { mode });
     const recheck = validate(working, opts);
     chosen = { working, degraded, unverifiedClaims, recheck, mode };
-    if (recheck.ok) break;
+    // Existing entity/reference errors cannot be fixed by deleting more copy.
+    // Escalate only when this reduction introduces a new structural failure.
+    if (recheck.ok || !recheck.issues.some(issue => !originalIssues.has(issue))) break;
   }
   fs.mkdirSync(path.dirname(backup), { recursive: true });
   if (!fs.existsSync(backup)) fs.writeFileSync(backup, `${JSON.stringify(outline, null, 2)}\n`);
@@ -1018,26 +1140,41 @@ function main() {
   }
   opts.verifiedResearch = readPresentationHandoff(opts.researchHandoff);
   const { outline, resolved } = readOutline(opts.outlinePath);
-  let result = validate(outline, opts);
-  // Strict-once, then degrade: the first run asks the model to fix unsourced claims
-  // (non-blocking, ok stays true); a later run on the same report degrades them
-  // automatically so the deck is never stalled by a topic that cannot be sourced.
+  const evidenceBinding = bindEvidenceReferences(outline, opts.verifiedResearch);
+  opts.evidenceBindingIssues = evidenceBinding.issues;
+  opts.unresolvedEvidenceSlides = new Set(evidenceBinding.unresolvedSlides);
+  if (opts.repairFlow && evidenceBinding.changed) {
+    fs.writeFileSync(resolved, `${JSON.stringify(outline, null, 2)}\n`);
+  }
+  const diagnosticOutline = evidenceBinding.diagnosticOutline || outline;
+  let result = validate(diagnosticOutline, opts);
+  // One reference correction and one content correction; persist both budgets
+  // through clean checks and terminal failures so regressions cannot restart them.
   const repairableCount = (result.repairable || []).length;
   const previous = readPreviousReport(opts.report);
   const attempt = previous && previous.repair_required ? (previous.attempt || 1) + 1 : 1;
+  const hasPhaseBudget = previous && typeof previous === "object"
+    && ("reference_repair_used" in previous || "content_repair_used" in previous);
+  const repairBudget = {
+    reference_repair_used: previous?.reference_repair_used === true,
+    content_repair_used: previous?.content_repair_used === true
+      || (!hasPhaseBudget && previous?.repair_required === true),
+  };
   let repairState = {};
   if (!opts.repairFlow && previous && previous.repair_required) {
     // Standalone check: keep the pending repair round intact for the next prepare.
     repairState = {
       repair_required: previous.repair_required,
+      repair_round: previous.repair_round,
       attempt: previous.attempt,
       repair_instructions: previous.repair_instructions,
       repair_how_to_fix: previous.repair_how_to_fix,
       // Reflect the outline as it is now, so a mid-repair check shows what is still open.
-      repair_checklist: buildRepairChecklist(outline, result.repairable),
+      repair_hard_issues: result.issues,
+      repair_checklist: buildRepairChecklist(diagnosticOutline, result.repairable),
     };
   } else if (opts.repairFlow && previous && previous.auto_degraded && repairableCount > 0
-    && strictResearchEnabled(opts)) {
+    && strictResearchEnabled(opts) && !evidenceBinding.issues.length) {
     // Degraded once already, then the outline was edited again: degrade what is new and
     // recompute the disclosure for the current content (merged and deduplicated with the
     // earlier one, so repeated prepares are idempotent); never open another repair round.
@@ -1054,34 +1191,52 @@ function main() {
       unverified_claims: previous.unverified_claims,
       backup: previous.backup,
     };
-  } else if (opts.repairFlow && !result.ok && !(previous && previous.repair_required)) {
-    // First hard-issue round: ask for one fix instead of jumping to the neutral fallback.
-    // The follow-up prepare (attempt 2) falls through to the terminal fallback delivery.
+  } else if (opts.repairFlow && evidenceBinding.issues.length) {
+    if (!repairBudget.reference_repair_used) {
+      repairBudget.reference_repair_used = true;
+      repairState = {
+        repair_required: true,
+        repair_round: "references",
+        attempt,
+        repair_instructions:
+          "Resolve the reported fact IDs against the research handoff. The input has not been rewritten. " +
+          "Independent content issues from valid references are also listed; correct those where possible. " +
+          "Numeric support on unresolved-reference slides is deferred, not evidence that the facts are unavailable.",
+        repair_hard_issues: result.issues,
+        repair_how_to_fix: HARD_ISSUE_HOW_TO_FIX,
+        repair_checklist: buildRepairChecklist(diagnosticOutline, result.repairable || []),
+      };
+    }
+  } else if (opts.repairFlow && !result.ok && !repairBudget.content_repair_used) {
+    repairBudget.content_repair_used = true;
     repairState = {
       repair_required: true,
       repair_round: "hard_issues",
-      attempt: 1,
+      attempt,
       repair_instructions:
         `Outline has ${result.issues.length} structural issue(s) that block the designed layout ` +
         "(see repair_hard_issues). Fix every one in outline.json now, then re-run the same prepare command. " +
-        "Left unfixed, the deck is built from a neutral layout without the designed theme and no PPTX export.",
+        "Left unfixed, content may be omitted and the result is an unverified neutral draft.",
       repair_hard_issues: result.issues,
       repair_how_to_fix: HARD_ISSUE_HOW_TO_FIX,
-      repair_checklist: buildRepairChecklist(outline, result.repairable || []),
+      repair_checklist: buildRepairChecklist(diagnosticOutline, result.repairable || []),
     };
-  } else if (opts.repairFlow && strictResearchEnabled(opts) && !result.ok && repairableCount > 0) {
+  } else if (opts.repairFlow && strictResearchEnabled(opts) && !result.ok && repairableCount > 0
+    && !evidenceBinding.issues.length) {
     // Second hard-issue round: the fallback delivery follows, so never ship unsupported claims.
     const applied = applyDegrade(outline, resolved, opts, attempt, previous);
     result = applied.result;
     repairState = { ...applied.state, degraded_with_hard_issues: true };
   } else if (opts.repairFlow && strictResearchEnabled(opts) && result.ok && repairableCount > 0) {
-    if (attempt === 1) {
-      const checklist = buildRepairChecklist(outline, result.repairable);
+    if (!repairBudget.content_repair_used) {
+      repairBudget.content_repair_used = true;
+      const checklist = buildRepairChecklist(diagnosticOutline, result.repairable);
       const claimCount = checklist.reduce((sum, entry) =>
         sum + (entry.claims || []).length + (entry.evidence_without_url || []).length
         + (entry.missing_evidence ? 1 : 0), 0);
       repairState = {
         repair_required: true,
+        repair_round: "content",
         attempt,
         repair_instructions:
           `Outline is not ready for design: ${claimCount} item(s) on ${checklist.length} slide(s) ` +
@@ -1101,10 +1256,16 @@ function main() {
     }
   }
   const output = {
+    ...repairBudget,
     ...repairState,
     ...result,
+    validation_stage: evidenceBinding.issues.length ? "references" : "content",
+    ...(evidenceBinding.unresolvedSlides.length ? {
+      deferred_evidence_checks: evidenceBinding.unresolvedSlides.map(slideLabel),
+    } : {}),
     outline: resolved,
     researchHandoff: opts.verifiedResearch ? opts.verifiedResearch.resolved : null,
+    ...(evidenceBinding.changed ? { evidence_resolved: true } : {}),
     pageCountContract,
   };
   const outputText = JSON.stringify(output, null, 2);

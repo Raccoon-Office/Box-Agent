@@ -16,34 +16,38 @@ Before analysis:
 
 Apply this protocol across Routes A, B, and D:
 
-1. Count failures by evidence target, not merely by query string. Anti-bot
-   responses, HTTP 403/429, CAPTCHA or challenge pages, robots or permission
-   denials, timeouts, and empty or unreadable bodies all count as blocked-source
-   failures.
-2. After the first blocked-source failure, make at most one recovery attempt.
-   It must use a materially different exact URL, source, or available reading
-   backend; do not just rephrase the query or replay the same URL/backend.
-3. If that recovery also fails, stop searching that evidence target for the
-   current turn. Record the target, attempted methods, observed failure signals,
-   usable evidence, and remaining gap in the evidence ledger and
-   cross-verification artifact.
-4. Send a concise user-visible status update when the stop threshold is reached,
-   then continue any independent dimensions. Do not ask the user to wait, claim
-   that retrieval is still running, or consume the remaining budget on
-   near-equivalent attempts. The final handoff must keep the blocked claim
-   `unverified` and state whether the usable result is `partial` or `framework`.
+1. Count failures by evidence target and exact document/access barrier, not
+   merely by query string. Anti-bot responses, HTTP 403/429, CAPTCHA/challenge,
+   robots or permission denials, timeouts and unreadable bodies are failures.
+2. For the same document or access barrier, make at most one materially different
+   permitted recovery after the first failure. Do not repeat the same URL/backend
+   or bypass a restriction. A new URL behind the same barrier does not reset it.
+3. If recovery also fails, stop that retrieval path for this turn. Record the
+   document/barrier, attempted methods, failure signals, usable evidence and
+   remaining question in the existing ledger and cross-verification artifact.
+   A separately accessible source found through search or supplied links may
+   still answer that question; assess it on its own provenance. Do not label it
+   as a successful read of the blocked original.
+4. Send a concise user-visible status update when this stop threshold is reached.
+   Continue useful work under the main skill's adaptive reading allowance; do not
+   imply that the blocked retrieval is still running or repeat near-equivalent
+   attempts. Keep a claim unverified when no source supports it, and report the
+   actual remaining coverage limits at handoff.
 
 ## Route A: Wide Search
 
 Use for broad, exploratory landscape work.
 
-1. Run a quick landscape scan with 3-5 broad searches.
-2. Identify 5-8 complementary exploration facets.
+1. Start with a landscape scan to identify the questions that could change the
+   answer. Stop scanning once further queries repeat known leads.
+2. Group those questions into complementary facets; explain each facet's
+   contribution rather than targeting a file count.
 3. If subagents are authorized, launch multiple facet agents in bounded rounds,
    with one facet and one output file per agent. Otherwise, process the facets
    sequentially.
 4. Save each facet to `{topic}_wideNN.md`.
-5. Decompose into 10-20 dimensions.
+5. Decompose the remaining substantive questions into distinct dimensions.
+   Reuse evidence across them; do not split one finding into several files.
 6. Deep dive each dimension and save `{topic}_dimNN.md`. If subagents are
    authorized, launch multiple dimension agents in bounded rounds, with one
    dimension and one output file per agent.
@@ -74,16 +78,17 @@ Facet output:
 
 Use for specific but multi-dimensional research questions.
 
-1. Run 5 coarse-to-fine searches:
-   - 1-2 macro overview searches.
-   - 2-3 structure, actors, data, and authority searches.
-   - 1 emerging issue, controversy, or recent-development search.
-   Treat these as five distinct evidence intents. Consume the returned result
-   set before opening another batch. A later query must target a named uncovered
+1. Plan coarse-to-fine searches from the question map. Overview, mechanism,
+   observed use, outcome evidence, and constraints are five distinct evidence intents
+   to consider, not five mandatory searches or sections. Select only those needed
+   by the task, and use one source for several questions when appropriate.
+   Consume the returned result set before opening another batch.
+   A later query must target a named uncovered
    dimension, conflict, or missing first-party source; reordered or lightly
    reworded versions of an already-run entity/fact query do not add depth.
-2. Decompose into distinct slide-relevant dimensions; ten is a quality target
-   for a broad landscape, not a delivery-blocking file quota.
+2. Group the remaining questions into distinct dimensions appropriate to the
+   requested answer. Record the planned scope before deep dives; dimensions
+   are research organization, not automatic slide boundaries.
 3. Deep dive each dimension.
    - If subagents are authorized, launch multiple dimension agents in bounded
      rounds, with one dimension and one output file per agent.
@@ -115,7 +120,8 @@ files.
 Use when files are primary evidence but external sources may supplement them.
 
 1. Perform Route C file intake first.
-2. Use the gap analysis to guide 3-5 targeted searches.
+2. Search only the material gaps identified by file analysis, within the task's
+   evidence budget. Do not add searches just to reach a quota.
 3. Decompose dimensions from both file themes and external evidence.
 4. In each dimension, clearly separate file-sourced evidence from external
    evidence.
@@ -135,8 +141,9 @@ Each dimension should include:
 - Tensions, counter-arguments, or failure modes.
 - Confidence notes.
 
-Target 10-20 dimensions for large topics. Use fewer only when the user's scope
-is deliberately narrow; state the reason.
+The question map determines depth: preserve each material question and combine
+overlapping dimensions. Record unanswered questions and their significance;
+neither a large file count nor a short outline proves adequate coverage.
 
 ## Cross-Verification
 
@@ -144,20 +151,26 @@ Classify findings:
 
 | Tier | Criteria |
 | --- | --- |
-| High confidence | Confirmed by at least two independent sources or dimensions |
-| Medium confidence | One authoritative source or strong file evidence |
-| Low confidence | Weak, old, indirect, or single-source evidence |
+| High confidence | Direct authoritative evidence for the specific claim, or independent corroboration with compatible scope and measurement |
+| Medium confidence | URL-bound summaries, indirect evidence, or a reported outcome whose generality or causal attribution is untested |
+| Low confidence | Insufficient reliable support, unresolved applicability, or outdated evidence that does not cover the claim |
 | Conflict zone | Disagreement, temporal mismatch, metric mismatch, or framing split |
 
 Save all tiers and conflicts to `{topic}_cross_verification.md`. Temporal
 inconsistencies are conflict zones unless the report explicitly explains the
 time periods.
+Count independent origins, not dimensions, URLs or reprints. Reusing the same
+source in several dimensions does not corroborate it. An official specification
+can establish a documented capability; a supplier/customer report establishes
+what was reported, not a general causal benefit. Explain that boundary when
+assigning confidence.
 
 ## Insight Extraction
 
-Save `{topic}_insight.md` with at least 5 insights unless the source corpus is
-too small. Each insight must be a cross-dimension inference, not a repeated
-finding.
+Save the supported synthesis in `{topic}_insight.md`. Each insight must connect
+evidence to a new implication, not repeat a finding or fill a quota. When no
+cross-dimension inference is justified, say so and hand off the verified
+findings and unresolved questions.
 
 For each insight:
 
