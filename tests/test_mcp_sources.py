@@ -163,6 +163,76 @@ def test_loader_registers_runtime_connector_source_without_connector_path(
     assert resolved["mine"].owner == "user"
 
 
+@pytest.mark.parametrize("private_mode", [None, "false", "true"])
+@pytest.mark.parametrize("owner,url,keep_private", [
+    ("system", "https://xiaohuanxiong.com/api/web/mcp/web_search/v1/mcp", False),
+    ("system", "https://code-test.xiaohuanxiong.com/api/web/mcp/web_search/v1/mcp", False),
+    ("system", "http://10.158.136.99/api/web/mcp/web_search/v1/mcp", False),
+    ("system", "https://xiaohuanxiong.com/api/web/mcp/web_search/v1/mcp/?lang=zh", False),
+    ("system", "https://tenant.example/office/mcp/search", True),
+    ("system", "https://xiaohuanxiong.com/customer/search", True),
+    ("user", "https://xiaohuanxiong.com/api/web/mcp/web_search/v1/mcp", True),
+    ("user", "https://tenant.example/office/mcp/search", True),
+    ("user", "https://customer.example/custom-mcp", True),
+    ("connector", "https://xiaohuanxiong.com/api/web/mcp/web_search/v1/mcp", True),
+    ("connector", "https://tenant.example/office/mcp/search", True),
+    ("connector", "https://customer.example/custom-mcp", True),
+])
+def test_private_search_filter_preserves_explicit_service_sources(
+    tmp_path: Path, monkeypatch, private_mode, owner, url, keep_private,
+) -> None:
+    if private_mode is None:
+        monkeypatch.delenv("RACCOON_PRIVATE_DEPLOYMENT", raising=False)
+    else:
+        monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", private_mode)
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CONFIG_PATH", str(tmp_path / "user.json"))
+    monkeypatch.delenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("BOX_AGENT_RESERVED_MCP_SERVER_NAMES", raising=False)
+    monkeypatch.setattr(mcp_loader, "_mcp_source_overrides", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_sources", ())
+    source = tmp_path / f"{owner}.json"
+    if owner != "user":
+        monkeypatch.setenv(f"BOX_AGENT_{owner.upper()}_MCP_CONFIG_PATH", str(source))
+    search = {"url": url, "type": "streamable_http", "headers": {"X-Test": "kept"}}
+    other = {"command": "fixture-mcp"}
+    if owner == "connector":
+        search["_connectorId"] = "customer-search"
+        other["_connectorId"] = "customer-tool"
+    _write(source, {mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME: search, "other": other})
+
+    resolved = mcp_loader._resolve_registered_sources(str(tmp_path / "user.json"))
+
+    assert (mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME in resolved) is (
+        private_mode != "true" or keep_private
+    )
+    assert resolved["other"].config == other
+    if mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME in resolved:
+        entry = resolved[mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME]
+        assert entry.owner == owner
+        assert entry.config == search
+
+
+def test_private_search_with_explicit_official_host_boundary_is_preserved(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    system = tmp_path / "system.json"
+    url = "https://tenant.xiaohuanxiong.com/api/web/mcp/web_search/v1/mcp"
+    _write(system, {mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME: {"url": url}})
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.xiaohuanxiong.com")
+    monkeypatch.setenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", str(system))
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CONFIG_PATH", str(tmp_path / "user.json"))
+    monkeypatch.delenv("BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", raising=False)
+    monkeypatch.setattr(mcp_loader, "_mcp_source_overrides", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_sources", ())
+
+    resolved = mcp_loader._resolve_registered_sources(str(tmp_path / "user.json"))
+
+    assert resolved[mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME].config["url"] == url
+
+
 @pytest.mark.asyncio
 async def test_replace_runtime_connector_source_reconciles_in_memory(
     monkeypatch: pytest.MonkeyPatch,
@@ -215,6 +285,176 @@ def isolated_connector_runtime(monkeypatch, tmp_path):
             "oauth": {"url": "https://oauth.test/mcp", "_connectorId": "qixin"},
         }
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private_mode", [None, "false", "true"])
+@pytest.mark.parametrize("isolated", [False, True])
+@pytest.mark.parametrize("reconnect_first", [False, True])
+@pytest.mark.parametrize("state", ["fresh", "legacy", "migrated", "private", "custom", "disabled"])
+async def test_bootstrapped_search_policy_reaches_registration_and_reconnect(
+    tmp_path, monkeypatch, isolated_connector_runtime, private_mode, isolated, reconnect_first, state,
+):
+    from types import SimpleNamespace
+    from box_agent.tools.mcp_bootstrap import (
+        HOSTED_SEARCH_SERVER, MANAGED_MCP_SCHEMA_KEY, bootstrap_managed_mcp_config,
+    )
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    user = profile / "config/mcp.json"
+    config = profile / "config/mcp.system.json" if isolated else user
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    for key in (
+        "BOX_AGENT_USER_MCP_CONFIG_PATH", "BOX_AGENT_SYSTEM_MCP_CONFIG_PATH",
+        "BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", "BOX_AGENT_RESERVED_MCP_SERVER_NAMES",
+        "BOX_AGENT_HOSTED_SEARCH_URL", "BOX_AGENT_RUNTIME_ROOT", "RACCOON_PRIVATE_DEPLOYMENT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    if private_mode is not None:
+        monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", private_mode)
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    if isolated:
+        monkeypatch.setenv("BOX_AGENT_USER_MCP_CONFIG_PATH", str(user))
+        monkeypatch.setenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", str(config))
+    name = mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME
+    if state in {"legacy", "migrated"}:
+        with monkeypatch.context() as before:
+            before.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
+            bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract")
+    elif state in {"private", "custom", "disabled"}:
+        url = {
+            "private": "https://tenant.example/office/mcp",
+            "custom": "https://customer.example/mcp",
+            "disabled": HOSTED_SEARCH_SERVER["url"],
+        }[state]
+        entry = (
+            {**HOSTED_SEARCH_SERVER, "disabled": True}
+            if state == "disabled" else {"url": url, "disabled": False}
+        )
+        _write(config, {name: entry})
+        payload = json.loads(config.read_text())
+        payload[MANAGED_MCP_SCHEMA_KEY] = 1
+        config.write_text(json.dumps(payload))
+    if state != "legacy":
+        bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract")
+
+    attempts = []
+
+    async def connect(connection):
+        attempts.append(connection.name)
+        connection.tools = [mcp_loader.MCPTool(
+            name=f"fixture_{connection.name}", remote_name="web_search",
+            description="fixture", parameters={}, session=SimpleNamespace(),
+            server_name=connection.name, always_load=connection.always_load,
+        )]
+        return True
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    enabled = state != "disabled" and not (
+        private_mode == "true" and state in {"fresh", "legacy", "migrated"}
+    )
+    tools = await mcp_loader.load_mcp_tools_async(str(user))
+    assert (name in attempts) is enabled
+    assert any(tool.server_name == name for tool in tools) is enabled
+    reconnect = await mcp_loader.reconnect_mcp_server(name)
+    assert reconnect["success"] is enabled
+    await mcp_loader.reconcile_mcp_sources("system" if isolated else "user")
+    assert any(tool.server_name == name for tool in mcp_loader.get_all_mcp_tools()) is enabled
+    if not enabled:
+        assert name not in attempts
+    if state == "disabled":
+        assert json.loads(config.read_text())["mcpServers"][name]["disabled"] is True
+    if private_mode != "true" and state in {"fresh", "legacy", "migrated"}:
+        count = attempts.count(name)
+        monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+        bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract")
+        if reconnect_first:
+            assert not (await mcp_loader.reconnect_mcp_server(name))["success"]
+            assert not any(tool.server_name == name for tool in mcp_loader.get_all_mcp_tools())
+            assert not any(conn.name == name for conn in mcp_loader._mcp_connections)
+            assert not any(entry.server_name == name for entry in mcp_loader.get_mcp_tool_catalog().snapshot())
+        await mcp_loader.reconcile_mcp_sources("system" if isolated else "user")
+        assert not any(tool.server_name == name for tool in mcp_loader.get_all_mcp_tools())
+        assert not (await mcp_loader.reconnect_mcp_server(name))["success"]
+        assert attempts.count(name) == count
+    if private_mode == "true" and state in {"fresh", "legacy", "migrated"}:
+        # 私有过滤不把默认项永久禁用；返回 C 端仍恢复原来的自动配置行为。
+        monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
+        bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract")
+        await mcp_loader.reconcile_mcp_sources("system" if isolated else "user")
+        assert any(tool.server_name == name for tool in mcp_loader.get_all_mcp_tools())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice_type", ["url-only", "full-preset", "legacy-custom"])
+async def test_private_bootstrap_keeps_explicit_public_choice_in_user_file(
+    tmp_path, monkeypatch, isolated_connector_runtime, choice_type,
+):
+    from box_agent.tools.mcp_bootstrap import (
+        HOSTED_SEARCH_SERVER, MANAGED_MCP_SCHEMA_KEY, bootstrap_managed_mcp_config,
+    )
+
+    config = tmp_path / "mcp.json"
+    name = mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME
+    choice = {"url": HOSTED_SEARCH_SERVER["url"]} if choice_type == "url-only" else dict(HOSTED_SEARCH_SERVER)
+    if choice_type == "legacy-custom":
+        choice["headers"] = {"Authorization": "Bearer customer-fixture"}
+    _write(config, {name: choice})
+    if choice_type == "legacy-custom":
+        payload = json.loads(config.read_text())
+        payload[MANAGED_MCP_SCHEMA_KEY] = 1
+        config.write_text(json.dumps(payload))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    monkeypatch.delenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("BOX_AGENT_HOSTED_SEARCH_URL", raising=False)
+    bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract")
+    assert mcp_loader._resolve_registered_sources(str(config))[name].config == choice
+    assert not bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract").changed
+    assert mcp_loader._resolve_registered_sources(str(config))[name].config == choice
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom_settings", [
+    {}, {"headers": {"Authorization": "Bearer customer-fixture"}}, {"alwaysLoad": False},
+])
+async def test_regenerated_search_does_not_inherit_deleted_explicit_choice(
+    tmp_path, monkeypatch, isolated_connector_runtime, custom_settings,
+):
+    from box_agent.tools.mcp_bootstrap import (
+        HOSTED_SEARCH_SERVER, MANAGED_SEARCH_DEFAULT_KEY, bootstrap_managed_mcp_config,
+    )
+
+    config = tmp_path / "mcp.json"
+    name = mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME
+    _write(config, {name: {"url": HOSTED_SEARCH_SERVER["url"]}})
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    monkeypatch.delenv("BOX_AGENT_HOSTED_SEARCH_URL", raising=False)
+    bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract")
+    payload = json.loads(config.read_text())
+    assert payload[MANAGED_SEARCH_DEFAULT_KEY] is False
+    payload["mcpServers"].pop(name)
+    config.write_text(json.dumps(payload))
+
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
+    bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract")
+    assert json.loads(config.read_text())[MANAGED_SEARCH_DEFAULT_KEY] is True
+    assert name in mcp_loader._resolve_registered_sources(str(config))
+    if custom_settings:
+        payload = json.loads(config.read_text())
+        payload["mcpServers"][name].update(custom_settings)
+        config.write_text(json.dumps(payload))
+
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    assert (name in mcp_loader._resolve_registered_sources(str(config))) is bool(custom_settings)
+    bootstrap_managed_mcp_config(config, web_extract_command="fixture-extract")
+    resolved = mcp_loader._resolve_registered_sources(str(config))
+    assert (name in resolved) is bool(custom_settings)
+    if custom_settings:
+        assert all(resolved[name].config[key] == value for key, value in custom_settings.items())
 
 
 @pytest.mark.asyncio

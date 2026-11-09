@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from box_agent.auth import is_private_service_url
 from box_agent.user_paths import PROFILE_ENV, configured_box_agent_home, state_path
 
 
 MANAGED_MCP_SCHEMA_KEY = "boxAgentManagedMcpVersion"
 MANAGED_MCP_SCHEMA_VERSION = 1
 MANAGED_MCP_CONFIG_VERSION = 1
+MANAGED_SEARCH_DEFAULT_KEY = "boxAgentManagedSearchDefault"
 HOSTED_SEARCH_URL_ENV = "BOX_AGENT_HOSTED_SEARCH_URL"
 HOSTED_SEARCH_SERVER_NAME = "mcp-server-askecho-search-infinity"
 HOSTED_SEARCH_SERVER: dict[str, Any] = {
@@ -89,6 +91,43 @@ def _is_official_hosted_search_url(value: str) -> bool:
         hostname == _OFFICIAL_HOST_SUFFIX
         or hostname.endswith(f".{_OFFICIAL_HOST_SUFFIX}")
         or hostname in _OFFICIAL_HOST_IPS
+    )
+
+
+def is_default_hosted_search_url(value: object) -> bool:
+    """Identify the default public search endpoint, including official environments."""
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlsplit(value.strip())
+    except ValueError:
+        return False
+    # 同一官方域名也可能承载其他服务，必须同时匹配默认搜索路径。
+    return (
+        parsed.scheme in {"http", "https"}
+        and _is_official_hosted_search_url(value)
+        and parsed.path.rstrip("/") == urlsplit(HOSTED_SEARCH_SERVER["url"]).path
+    )
+
+
+def is_managed_search_default(
+    config: object, managed_config: bool, recorded_default: object = None,
+) -> bool:
+    """Recognize old generated presets without treating every user-file entry as custom."""
+    if not isinstance(config, dict):
+        return False
+    if recorded_default is False:
+        return False
+    # 旧版只有文件级托管标记；完整默认预设才视为程序生成，带客户配置的不推断。
+    return (
+        (managed_config or recorded_default is True)
+        and is_default_hosted_search_url(config.get("url"))
+        and set(config).issubset(HOSTED_SEARCH_SERVER)
+        and all(
+            config.get(key) == value
+            for key, value in HOSTED_SEARCH_SERVER.items()
+            if key not in {"url", "disabled"}
+        )
     )
 
 
@@ -280,6 +319,7 @@ def bootstrap_managed_mcp_config(
         )
 
     already_migrated = payload.get(MANAGED_MCP_SCHEMA_KEY) == MANAGED_MCP_SCHEMA_VERSION
+    search_default = payload.get(MANAGED_SEARCH_DEFAULT_KEY)
     managed_servers = {HOSTED_SEARCH_SERVER_NAME: hosted_search_server}
     bundled_servers = _bundled_mcp_servers(_runtime_root(runtime_root))
     managed_servers.update(bundled_servers)
@@ -295,6 +335,21 @@ def bootstrap_managed_mcp_config(
                 managed,
                 host_override=host_override,
             )
+            if (
+                os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true"
+                and is_default_hosted_search_url(managed.get("url"))
+                and not is_private_service_url(managed["url"])
+            ):
+                # 私有模式不新增公网默认项；旧默认项由加载器统一过滤，不改用户禁用状态。
+                if isinstance(existing, dict) and not is_managed_search_default(
+                    existing, already_migrated, search_default,
+                ):
+                    # 保留这次初始化前已有的明确选择，避免文件级迁移标记混淆其来源。
+                    search_default = False
+                continue
+            if not isinstance(existing, dict) and isinstance(search_default, bool):
+                # 条目已删除时，新生成项不能继承旧条目的“明确选择”身份。
+                search_default = True
         servers[name] = _merge_managed_entry(
             existing,
             managed,
@@ -312,6 +367,8 @@ def bootstrap_managed_mcp_config(
     updated = dict(payload)
     updated["mcpServers"] = servers
     updated[MANAGED_MCP_SCHEMA_KEY] = MANAGED_MCP_SCHEMA_VERSION
+    if isinstance(search_default, bool):
+        updated[MANAGED_SEARCH_DEFAULT_KEY] = search_default
     changed = updated != payload
     if changed:
         _atomic_write_json(path, updated)
