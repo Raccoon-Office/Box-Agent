@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 
@@ -76,23 +77,48 @@ async def test_shared_mcp_connection_sends_only_trusted_per_call_session_headers
 
 
 @pytest.mark.asyncio
-async def test_redirect_to_third_party_removes_session_header():
-    seen = []
+@pytest.mark.parametrize("status,destination,session_id,forwarded_header", [
+    (302, "https://other.example/mcp", "session-a", None),
+    (307, "https://other.example/mcp", "session-a", None),
+    (308, "https://other.example/mcp", "session-a", None),
+    (307, "/canonical-mcp", "session-a", "session-a"),
+    (308, "https://pre.xiaohuanxiong.com/mcp", "session-a", "session-a"),
+    (307, "https://other.example/mcp", None, None),
+    (308, "https://other.example/mcp", None, None),
+])
+async def test_mcp_redirect_preserves_post_body_and_scopes_session_header(
+    monkeypatch, status, destination, session_id, forwarded_header,
+):
+    requests = []
 
     def handler(request):
-        seen.append(request.headers.get("X-RACCOON-Session-ID"))
-        if request.url.host == "xiaohuanxiong.com":
-            return httpx.Response(302, headers={"location": "https://other.example/mcp"})
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(status, headers={"location": destination})
         return httpx.Response(200)
 
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), follow_redirects=True,
-        event_hooks={"request": [mcp_loader._attach_mcp_session_header]},
-    ) as client:
-        await client.post("https://xiaohuanxiong.com/mcp", json={
-            "method": "tools/call", "params": {"_meta": {"box_agent_session_id": "session-a"}},
-        })
-    assert seen == ["session-a", None]
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    meta = {"progressToken": "search"}
+    if session_id is not None:
+        meta["box_agent_session_id"] = session_id
+    payload = {"method": "tools/call", "params": {"name": "search", "_meta": meta}}
+
+    async with mcp_loader._session_mcp_http_client() as client:
+        response = await client.post("https://xiaohuanxiong.com/mcp", json=payload)
+
+    assert response.status_code == 200
+    assert len(requests) == 2
+    assert requests[0].headers.get("X-RACCOON-Session-ID") == session_id
+    forwarded = requests[1]
+    assert forwarded.url == requests[0].url.join(destination)
+    assert forwarded.headers.get("X-RACCOON-Session-ID") == forwarded_header
+    if status == 302:
+        assert forwarded.method == "GET"
+        assert not forwarded.content
+    else:
+        assert forwarded.method == "POST"
+        assert json.loads(forwarded.content) == payload
 
 
 @pytest.mark.asyncio

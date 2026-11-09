@@ -51,8 +51,11 @@ may override the cached title with `_meta.title`, `_meta.session_title`, or
 `Box-Agent`. Empty session or turn ids are omitted.
 
 Remote MCP tool calls to `xiaohuanxiong.com` and its subdomains also carry
-`X-RACCOON-Session-ID` per request, including calls from sub-agents. Other
-remote domains and IP addresses do not receive automatic session correlation.
+`X-RACCOON-Session-ID` per request, including calls from sub-agents. Direct
+calls to other remote domains and IP addresses omit automatic session correlation.
+When a 307 or 308 redirect preserves the POST body, the redirect target can
+receive the session metadata in that body. The HTTP correlation header remains
+scoped to Raccoon domains.
 The local web-extract MCP receives session correlation through request metadata
 and forwards it to its model requests. These changes require an updated
 Box-Agent runtime and a restarted web-extract MCP process.
