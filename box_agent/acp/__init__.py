@@ -2459,8 +2459,18 @@ class BoxACPAgent:
     async def resume_session(
         self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,
     ) -> ResumeSessionResponse:
-        """Restore context for the next prompt without replaying history."""
+        """Restore context, optionally replaying from an inclusive turn cursor."""
+        replay_requested = "replayFromTurnId" in meta
+        replay_from = meta.pop("replayFromTurnId", None)
+        if replay_requested and (not isinstance(replay_from, str) or not replay_from.strip()):
+            raise RequestError(-32602, "replayFromTurnId must be a non-empty string",
+                               {"code": "INVALID_REPLAY_CURSOR"})
         response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
+        if replay_from is not None:
+            await self._replay_session_history(session_id, replay_from_turn_id=replay_from)
+            return ResumeSessionResponse(field_meta={
+                **(response.field_meta or {}), "replayed": True, "replayFromTurnId": replay_from,
+            })
         return ResumeSessionResponse(field_meta=response.field_meta)
 
     async def load_session(
@@ -2468,9 +2478,30 @@ class BoxACPAgent:
     ) -> LoadSessionResponse:
         """Open and replay existing facts; never create a missing session or run tools."""
         response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
+        await self._replay_session_history(session_id)
+        return LoadSessionResponse(field_meta={**(response.field_meta or {}), "replayed": True})
+
+    async def _replay_session_history(
+        self, session_id: str, *, replay_from_turn_id: str | None = None,
+    ) -> None:
+        """Send retained history using the same wire format for load and resume."""
         state = self._sessions[session_id]
         state._prompt_in_progress = True
         try:
+            history = state.agent.session_log.history_messages()
+            if replay_from_turn_id is not None:
+                # Resolve against effective display history, not physical log records:
+                # revised/reset turns must never become valid replay anchors again.
+                starts = [index for index, (_, message, _) in enumerate(history)
+                          if message.role == "user" and message.source == "user"
+                          and message.input_facts
+                          and message.input_facts.get("kind") != "user_supplement"
+                          and message.input_facts.get("id") == replay_from_turn_id]
+                if len(starts) != 1:
+                    raise RequestError(-32602, "REPLAY_CURSOR_NOT_FOUND", {
+                        "code": "REPLAY_CURSOR_NOT_FOUND", "turnId": replay_from_turn_id,
+                    })
+                history = history[starts[0]:]
             replay_status = {}
             bound_turn = None
             for event in state.agent.session_log._active_events():
@@ -2480,7 +2511,7 @@ class BoxACPAgent:
                     replay_status[bound_turn] = {"completed": "complete", "aborted": "cancelled",
                                                  "error": "error"}.get(event["data"].get("reason", {}).get("kind"), "interrupted")
             replay_turn_id = None
-            for seq, message, saved_data in state.agent.session_log.history_messages():
+            for seq, message, saved_data in history:
                 if message.input_facts and message.input_facts.get("kind") != "user_supplement":
                     replay_turn_id = message.input_facts["id"]
                 updates = []
@@ -2536,7 +2567,6 @@ class BoxACPAgent:
             raise
         finally:
             state._prompt_in_progress = False
-        return LoadSessionResponse(field_meta={**(response.field_meta or {}), "replayed": True})
 
     def _filesystem_access_prompt(self, workspace, policy):
         from box_agent.session_assembly import _filesystem_access_prompt
