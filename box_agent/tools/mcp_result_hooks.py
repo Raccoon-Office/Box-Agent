@@ -11,6 +11,7 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -44,8 +45,45 @@ _CURRENT: ContextVar[tuple[MCPResultAdapter, ...]] = ContextVar(
 )
 
 
+# Scratch work belongs to one result, never to a run or a later observation.
+_RESULT_CACHE: ContextVar[dict[object, dict[Any, Any]] | None] = ContextVar(
+    "mcp_result_cache",
+    default=None,
+)
+
+
+@contextmanager
+def mcp_result_processing_scope() -> Iterator[None]:
+    token = _RESULT_CACHE.set({})
+    try:
+        yield
+    finally:
+        _RESULT_CACHE.reset(token)
+
+
+def mcp_result_processing_cache(owner: object) -> dict[Any, Any] | None:
+    """Private adapter scratch space; absent outside result processing."""
+    cache = _RESULT_CACHE.get()
+    return None if cache is None else cache.setdefault(owner, {})
+
+
 def current_mcp_result_adapters() -> tuple[MCPResultAdapter, ...]:
     return _CURRENT.get()
+
+
+def read_persisted_mcp_image(path: Path) -> bytes | None:
+    """Ask run-scoped owners for immutable image bytes, not directory access.
+
+    A missing capability falls back to ordinary file permissions. An owned
+    image that fails validation must fail closed instead of being reopened.
+    """
+    for adapter in _CURRENT.get():
+        reader = getattr(adapter, "read_persisted_image", None)
+        if callable(reader):
+            raw = reader(path)
+            if raw is not None:
+                return raw
+    return None
 
 
 @contextmanager
@@ -59,7 +97,9 @@ def bind_mcp_result_adapter(adapter: MCPResultAdapter) -> Iterator[None]:
 
 
 def allowed_mcp_result_adapters(
-    *, server_name: str, remote_name: str,
+    *,
+    server_name: str,
+    remote_name: str,
 ) -> tuple[MCPResultAdapter, ...]:
     allowed = []
     for adapter in _CURRENT.get():
@@ -68,11 +108,15 @@ def allowed_mcp_result_adapters(
             # adapter with persistence disabled may still allow a one-shot image.
             image_context = getattr(adapter, "image_context_for_result", None)
             allows_context = getattr(adapter, "allows_image_context", None)
-            if (callable(image_context) and callable(allows_context)
-                    and allows_context(server_name=server_name, remote_name=remote_name)):
+            if (
+                callable(image_context)
+                and callable(allows_context)
+                and allows_context(server_name=server_name, remote_name=remote_name)
+            ):
                 continue
             if adapter.allows_transient_followup(
-                server_name=server_name, remote_name=remote_name,
+                server_name=server_name,
+                remote_name=remote_name,
             ):
                 allowed.append(adapter)
         except Exception:
@@ -81,7 +125,10 @@ def allowed_mcp_result_adapters(
 
 
 def adapt_mcp_inline_images(
-    *, server_name: str, remote_name: str, inline_images: list[dict[str, str]],
+    *,
+    server_name: str,
+    remote_name: str,
+    inline_images: list[dict[str, str]],
     adapters: tuple[MCPResultAdapter, ...] | None = None,
     arguments: dict[str, Any] | None = None,
     structured_content: dict[str, Any] | None = None,
@@ -90,18 +137,25 @@ def adapt_mcp_inline_images(
     if not inline_images:
         return None
     blocks = []
-    for adapter in adapters if adapters is not None else allowed_mcp_result_adapters(
-        server_name=server_name, remote_name=remote_name,
+    for adapter in (
+        adapters
+        if adapters is not None
+        else allowed_mcp_result_adapters(
+            server_name=server_name,
+            remote_name=remote_name,
+        )
     ):
         try:
             method = getattr(adapter, "transient_followup_for_result", None)
             kwargs = dict(
-                server_name=server_name, remote_name=remote_name,
+                server_name=server_name,
+                remote_name=remote_name,
                 inline_images=[dict(item) for item in inline_images],
             )
             if callable(method):
                 adapted = method(
-                    **kwargs, arguments=arguments or {},
+                    **kwargs,
+                    arguments=arguments or {},
                     structured_content=structured_content,
                 )
             else:
@@ -114,8 +168,12 @@ def adapt_mcp_inline_images(
 
 
 def adapt_mcp_image_context(
-    *, server_name: str, remote_name: str, inline_images: list[dict[str, str]],
-    arguments: dict[str, Any], structured_content: dict[str, Any] | None,
+    *,
+    server_name: str,
+    remote_name: str,
+    inline_images: list[dict[str, str]],
+    arguments: dict[str, Any],
+    structured_content: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
     """Collect trusted images without exposing their bytes in public results."""
     if not inline_images:
@@ -131,12 +189,16 @@ def adapt_mcp_image_context(
             if not predicate(server_name=server_name, remote_name=remote_name):
                 continue
             adapter_source = getattr(adapter, "image_source", None)
-            if not isinstance(adapter_source, str) or (source is not None and source != adapter_source):
+            if not isinstance(adapter_source, str) or (
+                source is not None and source != adapter_source
+            ):
                 continue
             adapted = method(
-                server_name=server_name, remote_name=remote_name,
+                server_name=server_name,
+                remote_name=remote_name,
                 inline_images=[dict(item) for item in inline_images],
-                arguments=arguments, structured_content=structured_content,
+                arguments=arguments,
+                structured_content=structured_content,
             )
             if adapted:
                 blocks.extend(adapted)
@@ -147,7 +209,10 @@ def adapt_mcp_image_context(
 
 
 def adapt_mcp_result_context(
-    *, server_name: str, remote_name: str, arguments: dict[str, Any],
+    *,
+    server_name: str,
+    remote_name: str,
+    arguments: dict[str, Any],
     structured_content: dict[str, Any] | None,
 ) -> str | None:
     """Let scoped adapters project structured MCP data into model context."""
@@ -158,8 +223,10 @@ def adapt_mcp_result_context(
             continue
         try:
             context = method(
-                server_name=server_name, remote_name=remote_name,
-                arguments=arguments, structured_content=structured_content,
+                server_name=server_name,
+                remote_name=remote_name,
+                arguments=arguments,
+                structured_content=structured_content,
             )
             if isinstance(context, str) and context:
                 parts.append(context)
@@ -169,7 +236,10 @@ def adapt_mcp_result_context(
 
 
 def persist_mcp_image_references(
-    *, server_name: str, remote_name: str, inline_images: list[dict[str, str]],
+    *,
+    server_name: str,
+    remote_name: str,
+    inline_images: list[dict[str, str]],
     adapters: tuple[MCPResultAdapter, ...] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Collect optional persisted image references from authorized adapters.
@@ -197,7 +267,8 @@ def persist_mcp_image_references(
             else:
                 if legacy_allowed is None:
                     legacy_allowed = allowed_mcp_result_adapters(
-                        server_name=server_name, remote_name=remote_name,
+                        server_name=server_name,
+                        remote_name=remote_name,
                     )
                 allowed = any(item is adapter for item in legacy_allowed)
             if allowed:
@@ -205,7 +276,8 @@ def persist_mcp_image_references(
         except Exception:
             _log.debug("MCP image persistence eligibility failed", exc_info=True)
     candidates = tuple(
-        adapter for adapter in eligible
+        adapter
+        for adapter in eligible
         if callable(getattr(adapter, "persist_image_references", None))
     )
     # Avoid re-running transient-only adapters' eligibility checks. Besides

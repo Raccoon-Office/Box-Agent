@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 _lock = threading.Lock()
 _binary = None
@@ -51,8 +52,10 @@ class PanelReceiverLease:
         if self.process is not None and (self.scope != (pid, host, window) or self.process.poll() is not None):
             self.close()
         if self.process is None:
-            binary = _helper()
-            if binary is None:
+            started = time.monotonic()
+            binary = _helper(timeout=timeout)
+            timeout -= time.monotonic() - started
+            if binary is None or timeout <= 0:
                 return None
             self.token = secrets.randbits(63) or 1
             self.pid = pid
@@ -98,9 +101,10 @@ class PanelFocusSession:
         identity = (host, target, window, host_window)
         if self.identity is not None and (host, host_window) != (self.identity[0], self.identity[3]):
             self.close()
-        if self.host.environment(host, timeout, host, host_window) is None:
+        host_environment = self.host.environment(host, timeout, host, host_window)
+        if host_environment is None:
             return None
-        environment = (self.host.environment(host, timeout, host, host_window) if target == host
+        environment = (host_environment if target == host
                        else self.receiver.environment(target, timeout, host, host_window))
         if environment is None:
             self.close()
@@ -109,9 +113,12 @@ class PanelFocusSession:
         return dict(environment, BOX_CUA_PANEL_PID=str(target), BOX_CUA_PANEL_WINDOW=str(window))
 
 
-def _helper():
+def _helper(*, timeout=30):
     global _binary, _unavailable
-    with _lock:
+    deadline = time.monotonic() + max(0, timeout)
+    if not _lock.acquire(timeout=max(0, timeout)):
+        return None
+    try:
         if _binary is not None or _unavailable is not None:
             return _binary
         source = Path(__file__).with_name('native') / 'panel_keyboard.swift'
@@ -126,15 +133,21 @@ def _helper():
                     built = subprocess.run(
                         ['/usr/bin/xcrun', 'swiftc', str(source), '-o', str(output)],
                         capture_output=True, text=True, check=False,
+                        timeout=max(0.001, deadline - time.monotonic()),
                     )
                     if built.returncode:
                         _unavailable = 'native_helper_build_failed'
                         return None
                     os.replace(output, binary)
             _binary = str(binary)
+        except subprocess.TimeoutExpired:
+            # No input has been sent. A later call may retry the cold build.
+            return None
         except OSError:
             _unavailable = 'native_helper_unavailable'
         return _binary
+    finally:
+        _lock.release()
 
 
 def deliver_panel_key(pid, window_id, key, modifiers, *, timeout, session=None, field_frame=None):
@@ -146,8 +159,7 @@ outcomes, never permission to send the same key again through the Driver.
     if sys.platform != 'darwin':
         return None
     chord = (key, frozenset(modifiers))
-    codes = {('o', frozenset({'cmd'})): 31,
-             ('g', frozenset({'cmd', 'shift'})): 5,
+    codes = {('g', frozenset({'cmd', 'shift'})): 5,
              ('return', frozenset()): 36, ('escape', frozenset()): 53}
     if chord not in codes:
         return None
@@ -157,10 +169,6 @@ outcomes, never permission to send the same key again through the Driver.
             return None
         field_environment['BOX_CUA_PANEL_FIELD_FRAME'] = json.dumps(field_frame)
     arguments = [str(pid), str(window_id), str(codes[chord])]
-    if codes[chord] == 31:
-        if session is not None:
-            session.close()
-        return _invoke(arguments, timeout=timeout)
     # Resolve without sending input, then re-resolve in the delivery process.
     host_environment = session.host.environment(pid, timeout, pid, window_id) if session is not None else None
     if host_environment is None:
@@ -194,17 +202,12 @@ outcomes, never permission to send the same key again through the Driver.
     return result
 
 
-def focus_panel_field(pid, window_id, frame, *, timeout):
-    """Focus one exact AX text field inside the current Open panel sheet."""
-    if sys.platform != 'darwin':
-        return None
-    return _invoke(['focus-field', str(pid), str(window_id), *(str(v) for v in frame)],
-                   timeout=timeout, allowed_effects={'not_sent', 'unverifiable', 'confirmed'})
-
 def _invoke(arguments, *, timeout, allowed_effects=frozenset({'not_sent', 'unverifiable'}), env=None):
-    binary = _helper()
-    if binary is None:
-        return {'effect': 'not_sent', 'code': _unavailable}
+    started = time.monotonic()
+    binary = _helper(timeout=timeout)
+    timeout -= time.monotonic() - started
+    if binary is None or timeout <= 0:
+        return {'effect': 'not_sent', 'code': _unavailable or 'native_helper_build_timeout'}
     try:
         completed = subprocess.run(
             [binary, *arguments],
@@ -225,64 +228,25 @@ def _invoke(arguments, *, timeout, allowed_effects=frozenset({'not_sent', 'unver
     return report
 
 
-def perform_sheet_action(pid, window_id, sheet_frame, element, action, *, value=None, timeout):
-    """Resolve one observed Sheet control; never replay an invoked AX action."""
-    if sys.platform != 'darwin':
-        return {'effect': 'not_sent', 'code': 'sheet_action_platform_unavailable'}
-    frame = element.get('frame', {})
-    request = {'sheet_frame': sheet_frame, 'role': element.get('role'), 'action': action,
-               'frame': [frame.get('x'), frame.get('y'), frame.get('width', frame.get('w')),
-                         frame.get('height', frame.get('h'))]}
-    if isinstance(element.get('value'), str):
-        request['old_value'] = element['value']
-    if element.get('label'):
-        request['label'] = element['label']
-    if element.get('identifier'):
-        request['identifier'] = element['identifier']
-    if value is not None:
-        request['value'] = value
-    return _invoke(['sheet-action', str(pid), str(window_id), json.dumps(request)], timeout=timeout)
-
-
-EDITOR_KEYCODES = {
-    'left': 123, 'right': 124, 'down': 125, 'up': 126,
-    'home': 115, 'end': 119, 'pageup': 116, 'pagedown': 121,
-    'delete': 51, 'forwarddelete': 117, 'return': 36, 'tab': 48,
-    'a': 0, 'b': 11, 'c': 8, 'i': 34, 'u': 32, 'v': 9, 'x': 7, 'z': 6,
-}
-
-
-def supports_focused_editor_key(key, modifiers):
-    return (key in EDITOR_KEYCODES
-            and not (set(modifiers) - {'cmd', 'ctrl', 'shift', 'option', 'fn'})
-            and (len(key) != 1 or set(modifiers) in ({'cmd'}, {'cmd', 'shift'})))
-
-
-def deliver_focused_editor(pid, window_id, *, frame, timeout, text=None,
-                           navigation=None, key=None, modifiers=None):
-    """Send text/editing keys to the focused document selection without activation."""
+def verify_file_panel_front(pid, window_id, *, timeout):
+    """Read-only proof for Driver's layer-0-only bring_to_front rejection."""
     if sys.platform != 'darwin':
         return None
-    request = {'frame': frame}
-    if text is not None:
-        request['text'] = text
-    else:
-        if navigation in {'up', 'down'}:
-            key, modifiers = navigation, ['cmd']
-        modifiers = modifiers or []
-        if not supports_focused_editor_key(key, modifiers):
-            return None
-        request.update(keycode=EDITOR_KEYCODES[key], modifiers=modifiers)
-    return _invoke(['focused-editor', str(pid), str(window_id), json.dumps(request)], timeout=timeout)
+    return _invoke(['verify-panel-front', str(pid), str(window_id)], timeout=timeout,
+                   allowed_effects={'not_sent', 'confirmed'})
 
 
-def deliver_search_escape(pid, window_id, *, frame, timeout):
-    """Escape in a verified focused, editable AXSearchField; never prepare focus."""
+def resolve_panel_geometry(pid, window_id, *, timeout):
+    """Read-only proof of an exact GoTo sheet and its parent capture surface."""
     if sys.platform != 'darwin':
-        return None
-    return _invoke(['search-escape', str(pid), str(window_id), json.dumps(frame)], timeout=timeout)
+        return {'effect': 'not_sent', 'code': 'panel_geometry_platform_unavailable'}
+    return _invoke(['panel-geometry', str(pid), str(window_id)], timeout=timeout,
+                   allowed_effects={'not_sent', 'confirmed'})
 
 
-def activate_application(pid, bundle_id, *, timeout):
-    """Request foreground activation of the exact running application."""
-    return _invoke(['activate-app', str(pid), bundle_id], timeout=timeout)
+def focus_file_panel(pid, window_id, *, timeout):
+    """Explicit foreground AXRaise of an exact system file panel; no input."""
+    if sys.platform != 'darwin':
+        return {'effect': 'not_sent', 'code': 'panel_focus_platform_unavailable'}
+    return _invoke(['focus-file-panel', str(pid), str(window_id)], timeout=timeout,
+                   allowed_effects={'not_sent', 'unverifiable', 'confirmed'})
