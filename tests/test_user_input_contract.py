@@ -17,7 +17,8 @@ def link(path):
 
 
 @pytest.mark.asyncio
-async def test_resource_image_preparation_result_is_durable_and_replayed_without_execution(tmp_path):
+@pytest.mark.parametrize('method', ['load_session', 'resume_session'])
+async def test_resource_image_preparation_result_is_durable_and_replayed_without_execution(tmp_path, method):
     import base64
     picture = tmp_path / "图片.png"
     picture.write_bytes(base64.b64decode(image_block()["data"]))
@@ -41,7 +42,8 @@ async def test_resource_image_preparation_result_is_durable_and_replayed_without
     restored._conn.session_update = update
     calls = len(llm.requests)
     try:
-        await restored.load_session(str(tmp_path), created.session_id)
+        meta = {'replayFromTurnId': 'image-turn'} if method == 'resume_session' else {}
+        await getattr(restored, method)(str(tmp_path), created.session_id, **meta)
         tool = [item for item in updates if item.get("toolCallId") == result["toolCallId"]]
         assert [item["sessionUpdate"] for item in tool] == ["tool_call", "tool_call_update"]
         assert tool[-1]["status"] == "completed"
