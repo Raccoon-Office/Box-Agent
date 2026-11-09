@@ -119,7 +119,9 @@ def _build_player(root: Path, expected: int | None = None, *, font_manifest: dic
         return 1
     base = str(root)
     try:
-        manifest = font_manifest if font_manifest is not None else bundle_workspace(Path(base))
+        manifest = font_manifest
+        if manifest is None or validate_font_bundle(root):
+            manifest = bundle_workspace(root)
     except Exception as exc:
         print(f"字体打包失败: {exc}", file=sys.stderr)
         return 1
@@ -127,6 +129,8 @@ def _build_player(root: Path, expected: int | None = None, *, font_manifest: dic
     if font_errors:
         print("字体交付校验失败: " + "; ".join(font_errors), file=sys.stderr)
         return 1
+    for warning in manifest.get("font_warnings", []):
+        print(f"Font fallback: {warning}", file=sys.stderr)
     freshness_errors = validate_render_freshness(Path(base))
     if freshness_errors:
         print("检测到陈旧 PNG，正使用 Deck 自带字体重新渲染", file=sys.stderr)
@@ -496,7 +500,7 @@ def _resolve_local_reference(root: Path, owner: Path, value: str) -> tuple[Path 
     return candidate, None
 
 
-def _validate_runtime_dependencies(root: Path, expected: int | None = None, *, check_player: bool = True) -> None:
+def _validate_runtime_dependencies(root: Path, expected: int | None = None, *, check_player: bool = True) -> list[str]:
     """Reject non-portable local CSS/JS/media references before delivery."""
     slides = sorted(
         path for path in (root / "slides").glob("slide_*.html")
@@ -505,6 +509,7 @@ def _validate_runtime_dependencies(root: Path, expected: int | None = None, *, c
     if expected is not None and len(slides) != expected:
         raise ValueError(f"expected {expected} slides, found {len(slides)}")
     errors = []
+    font_warnings = []
     owners = list(slides)
     base_css = root / "base.css"
     if base_css.is_file():
@@ -518,7 +523,11 @@ def _validate_runtime_dependencies(root: Path, expected: int | None = None, *, c
             resolved, error = _resolve_local_reference(root, owner, reference)
             if error:
                 shown = resolved.relative_to(root).as_posix() if resolved and root.resolve() in resolved.parents else str(resolved)
-                errors.append(f"{owner.relative_to(root).as_posix()}: {reference} -> {shown} {error}")
+                message = f"{owner.relative_to(root).as_posix()}: {reference} -> {shown} {error}"
+                if error == "is missing or empty" and resolved.suffix.lower() in {".woff", ".woff2", ".ttf", ".otf", ".ttc"}:
+                    font_warnings.append(message + "; using CSS fallback")
+                else:
+                    errors.append(message)
     present = root / "present.html"
     if check_player and present.is_file():
         player = present.read_text(encoding="utf-8", errors="ignore")
@@ -530,6 +539,9 @@ def _validate_runtime_dependencies(root: Path, expected: int | None = None, *, c
             errors.append("present.html does not route: " + ", ".join(missing_in_player))
     if errors:
         raise ValueError("portable runtime dependency audit failed:\n" + "\n".join(errors))
+    for warning in font_warnings:
+        print(f"Font fallback: {warning}", file=sys.stderr)
+    return font_warnings
 
 
 def _validate_player_runtime(root: Path) -> None:
@@ -1218,7 +1230,9 @@ def _validate_deck_font_aliases(root: Path, manifest: dict) -> None:
                 if alias.group() not in current:
                     line = text.count("\n", 0, declaration.start(1) + alias.start()) + 1
                     errors.append(f"{owner.relative_to(root)}:{line}: {alias.group()}")
-    if errors:
+    if errors and manifest.get("font_warnings"):
+        manifest["font_warnings"].extend(f"Unavailable deck font alias: {error}" for error in errors)
+    elif errors:
         raise ValueError("stale Deck font aliases (use the current shared font token):\n" + "\n".join(errors))
 
 
@@ -1289,9 +1303,13 @@ def _review_prep(root: Path, expected: int) -> int:
                 raise ValueError(f"HTML pages must be continuous: expected {wanted}, got {numbers}")
             _plan_files(root, expected)
             _prepare_build_inputs(root, expected)
-            _validate_runtime_dependencies(root, expected, check_player=False)
             stage = "fonts"
             manifest = bundle_workspace(root)
+            stage = "validate"
+            warnings = _validate_runtime_dependencies(root, expected, check_player=False)
+            if warnings:
+                manifest.setdefault("font_warnings", []).extend(warnings)
+            stage = "fonts"
             font_errors = validate_font_bundle(root)
             if font_errors:
                 raise ValueError("; ".join(font_errors))
@@ -1317,6 +1335,7 @@ def _review_prep(root: Path, expected: int) -> int:
                 raise ValueError("review contact does not cover the full deck")
         print(json.dumps({"status": "prepared", "qa": "not-run", "rendered_pages": wanted,
                           "images": images, **paths, "deck_dir": str(root),
+                          "font_warnings": manifest.get("font_warnings", []),
                           "skill_root": str(skill_root),
                           "next_instructions": str(skill_root / "subagents/review.md"),
                           "review_ledger": str(root / "_trace/review-issues.md")}, ensure_ascii=False))

@@ -201,6 +201,31 @@ def test_review_prep_reports_validation_failure_before_browser(isolated_runtime,
     assert "render" not in events
 
 
+@pytest.mark.parametrize("recoverable", [True, False])
+def test_review_prep_checks_font_links_after_rebuild_and_accepts_fallback(
+    isolated_runtime, workspace, capsys, monkeypatch, recoverable,
+):
+    deck, _ = isolated_runtime
+    font = workspace / "assets/local.woff2"
+    css = workspace / "base.css"
+    css.write_text(css.read_text() + '@font-face{font-family: Local;src:url("./assets/local.woff2")}')
+    original = deck["bundle_workspace"]
+
+    def bundle(root):
+        if recoverable:
+            font.write_bytes(b"restored by font rebuild")
+        return original(root)
+
+    monkeypatch.setitem(deck, "bundle_workspace", bundle)
+    assert prepare(deck, workspace) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert Path(result["present_html"]).is_file()
+    if recoverable:
+        assert not result["font_warnings"]
+    else:
+        assert any("local.woff2" in warning and "fallback" in warning for warning in result["font_warnings"])
+
+
 def test_review_prep_preserves_failed_render_screenshot_and_diagnostic(isolated_runtime, workspace, capsys, monkeypatch):
     deck, _ = isolated_runtime
     original = deck["render_all"]

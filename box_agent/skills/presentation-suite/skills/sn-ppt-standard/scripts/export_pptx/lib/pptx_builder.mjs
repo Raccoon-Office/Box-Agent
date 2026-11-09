@@ -2063,12 +2063,15 @@ function pptxFontFace(cssValue) {
 
 function sourceFontFamily(cssValue, mapping) {
   // Browser subset aliases are generated identifiers, without quotes/commas.
-  const primary = cssValue.split(',')[0].trim().replace(/^['"]|['"]$/g, '');
-  if (mapping.has(primary)) return JSON.stringify(mapping.get(primary));
-  if (/^(?:User::|Deck-)/i.test(primary)) {
-    throw new Error('Missing source font mapping; rebuild the font bundle before exporting PPTX.');
+  let remaining = cssValue;
+  while (remaining) {
+    const [head] = remaining.split(',', 1);
+    const primary = head.trim().replace(/^['"]|['"]$/g, '');
+    if (mapping.has(primary)) return JSON.stringify(mapping.get(primary));
+    if (!/^(?:User::|Deck-)/i.test(primary)) return remaining;
+    remaining = remaining.slice(head.length + 1).trim();
   }
-  return cssValue;
+  return 'sans-serif';
 }
 
 function readSourceFontFamilies(deckDir) {
@@ -2080,21 +2083,23 @@ function readSourceFontFamilies(deckDir) {
     manifest = JSON.parse(readFileSync(path, 'utf-8'));
   } catch (error) {
     console.error(`[WARN] 无法读取 PPTX 字体映射: ${error.message}`);
-    throw new Error('Cannot read source font manifest; rebuild the font bundle: ' + error.message);
+    return mapping;
   }
   if (!manifest || !Array.isArray(manifest.faces)) {
-    throw new Error('Invalid source font manifest; rebuild the font bundle before exporting PPTX.');
+    console.error('[WARN] Invalid source font manifest; using CSS font fallbacks');
+    return mapping;
   }
   for (const face of manifest.faces || []) {
     if (!face || typeof face.delivery_family !== 'string' || !face.delivery_family.trim()) {
-      throw new Error('Invalid delivery font family; rebuild the font bundle before exporting PPTX.');
+      console.error('[WARN] Invalid delivery font family; using CSS font fallbacks');
+      continue;
     }
     const family = typeof face.source_family === 'string' ? face.source_family.trim() : '';
     if (!family || /^(?:User::|Deck-)/i.test(family)
         || /[\u0000-\u001f\u007f-\u009f\ufffd]/.test(family)
         || !/[\p{L}\p{N}]/u.test(family)) {
-      throw new Error('Invalid source font family in assets/fonts/manifest.json; '
-        + 'rebuild the font bundle from the original uploaded fonts before exporting PPTX.');
+      console.error('[WARN] Invalid source font family; using CSS font fallbacks');
+      continue;
     }
     mapping.set(face.delivery_family, family);
   }

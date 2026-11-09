@@ -381,7 +381,7 @@ def _font_source_metadata(path: str) -> dict[str, str]:
         font.close()
 
 
-def _load_custom_config(root: Path) -> tuple[dict[str, dict], dict[str, str]]:
+def _load_custom_config(root: Path, *, font_warnings: list[str] | None = None) -> tuple[dict[str, dict], dict[str, str]]:
     path = root / CUSTOM_CONFIG
     if not path.is_file():
         return {}, {}
@@ -402,19 +402,26 @@ def _load_custom_config(root: Path) -> tuple[dict[str, dict], dict[str, str]]:
             source.relative_to(root)
         except ValueError as exc:
             raise ValueError(f"custom font escapes workspace: {source}") from exc
-        if not source.is_file() or not source.stat().st_size:
-            raise FileNotFoundError(f"custom font source is missing: {item['source_path']}")
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        if digest != str(item.get("sha256") or ""):
-            raise ValueError(f"custom font hash mismatch: {item['source_path']}")
-        if not _font_source_readable(str(source)):
-            raise ValueError(f"custom font is unreadable: {item['source_path']}")
+        try:
+            if not source.is_file() or not source.stat().st_size:
+                raise FileNotFoundError(f"custom font source is missing: {item['source_path']}")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            if digest != str(item.get("sha256") or ""):
+                raise ValueError(f"custom font hash mismatch: {item['source_path']}")
+            if not _font_source_readable(str(source)):
+                raise ValueError(f"custom font is unreadable: {item['source_path']}")
+            source_family = _font_source_metadata(str(source))["source_family"]
+        except (OSError, ValueError) as exc:
+            if font_warnings is None:
+                raise
+            font_warnings.append(f"{exc}; using fallback")
+            continue
         family_key = f"User::{font_id}"
         subfamily = str(item.get("subfamily") or "").lower()
         registry[family_key] = {
             **item,
             "source": source,
-            "source_family": _font_source_metadata(str(source))["source_family"],
+            "source_family": source_family,
             "weight": str(int(item.get("weight") or 400)),
             "style": "italic" if "italic" in subfamily else "oblique" if "oblique" in subfamily else "normal",
         }
@@ -430,7 +437,11 @@ def _load_custom_config(root: Path) -> tuple[dict[str, dict], dict[str, str]]:
         elif kind == "custom":
             family = f"User::{selection.get('font_id') or ''}"
             if family not in registry:
-                raise ValueError(f"custom font role {role} references a missing font")
+                message = f"custom font role {role} references a missing font"
+                if font_warnings is None:
+                    raise ValueError(message)
+                font_warnings.append(f"{message}; using fallback")
+                continue
         else:
             continue
         for token in ROLE_TOKENS[role]:
@@ -507,15 +518,7 @@ def _active_tokens(css: str, fragments: list[str]) -> dict[str, str]:
         item.lower()
         for item in re.findall(r"(--font-[a-z0-9-]+)", markup, flags=re.I)
     )
-    source_dirs = _font_source_dirs()
-    fallback = "Noto Sans SC"
-    if not _family_available(fallback, source_dirs):
-        raise FileNotFoundError("Noto Sans SC is required as the portable font fallback")
-    resolved = {token: _resolve_token(token, definitions) for token in sorted(tokens)}
-    return {
-        token: family if _family_available(family, source_dirs) else fallback
-        for token, family in resolved.items()
-    }
+    return {token: _resolve_token(token, definitions) for token in sorted(tokens)}
 
 
 def _visible_characters(fragments: list[str]) -> str:
@@ -631,6 +634,22 @@ def _subset(
         )
 
 
+def _stage_family_faces(tool, family, custom, source_dirs, temporary_dir, characters_file, delivery):
+    """Build all faces before publishing any output for the family."""
+    faces = (
+        (Face((str(custom["source"]),), custom["weight"], custom["style"]),)
+        if custom else FAMILY_FACES[family]
+    )
+    outputs = []
+    for face in faces:
+        source = Path(face.source_names[0]) if custom else _find_source(face, source_dirs)
+        metadata = _font_source_metadata(str(source))
+        provisional = temporary_dir / f"{_slug(family)}-{face.weight.replace(' ', '-')}.woff2"
+        _subset(tool, source, provisional, characters_file, delivery, face.weight, face.style)
+        outputs.append((face, source, metadata, provisional.read_bytes()))
+    return outputs
+
+
 def bundle_fonts(
     root: Path,
     css: str,
@@ -641,13 +660,12 @@ def bundle_fonts(
     _validate_font_allowlist()
     source_css = _without_bundle(css)
     token_families = _active_tokens(source_css, fragments)
-    custom_fonts, role_overrides = _load_custom_config(root)
+    font_warnings: list[str] = []
+    custom_fonts, role_overrides = _load_custom_config(root, font_warnings=font_warnings)
     token_families.update(role_overrides)
     markup = "\n".join(fragments)
     families = set(token_families.values())
-    # A portable CJK/symbol fallback is always bundled, including when a user
-    # font is assigned to body text but does not cover every deck character.
-    families.add("Noto Sans SC")
+    fallback, alternate = "Noto Sans SC", "Noto Serif SC"
     source_dirs = _font_source_dirs()
     if scan_named_families:
         for family in FAMILY_FACES:
@@ -658,17 +676,19 @@ def bundle_fonts(
 
     tool = shutil.which("pyftsubset")
     if not tool:
-        raise FileNotFoundError("pyftsubset is required for portable deck fonts")
+        font_warnings.append("pyftsubset is unavailable; using system fonts")
+    ordered_families = [fallback, alternate, *sorted(families - {fallback, alternate})]
     characters = _visible_characters(fragments)
     deck_id = hashlib.sha256(
         (characters + json.dumps(token_families, sort_keys=True, ensure_ascii=False)).encode("utf-8")
     ).hexdigest()[:10]
     delivery_families = {
-        family: f"Deck-{deck_id}-{_slug(family)}" for family in sorted(families)
+        family: f"Deck-{deck_id}-{_slug(family)}" for family in ordered_families
     }
 
     fonts_dir = root / "assets/fonts"
     fonts_dir.mkdir(parents=True, exist_ok=True)
+    bundled: dict[str, str] = {}
     records: list[dict[str, str]] = []
     rules: list[str] = []
     notices: dict[str, dict[str, object]] = {}
@@ -676,26 +696,26 @@ def bundle_fonts(
         temporary_dir = Path(temporary)
         characters_file = temporary_dir / "characters.txt"
         characters_file.write_text(characters, encoding="utf-8")
-        for family in sorted(families):
+        for family in ordered_families if tool else ():
+            if family == alternate and fallback in bundled and family not in families:
+                continue
             custom = custom_fonts.get(family)
-            faces = (
-                (Face((str(custom["source"]),), custom["weight"], custom["style"]),)
-                if custom else FAMILY_FACES[family]
+            delivery = delivery_families[family]
+            try:
+                outputs = _stage_family_faces(
+                    tool, family, custom, source_dirs, temporary_dir, characters_file, delivery,
+                )
+            except Exception as exc:
+                # Font readers and subsetters can raise format-specific errors.
+                # Publication and its I/O errors stay outside this recovery path.
+                font_warnings.append(f"{family}: could not bundle font ({type(exc).__name__}); using fallback")
+                continue
+            bundled[family] = delivery
+            license_metadata = (
+                {"license": "user-provided", "source": "user upload"}
+                if custom else FONT_LICENSES[family]
             )
-            for face in faces:
-                source = Path(face.source_names[0]) if custom else _find_source(face, source_dirs)
-                source_metadata = _font_source_metadata(str(source))
-                license_metadata = (
-                    {"license": "user-provided", "source": "user upload"}
-                    if custom else FONT_LICENSES[family]
-                )
-                delivery = delivery_families[family]
-                provisional = temporary_dir / f"{_slug(family)}-{face.weight.replace(' ', '-')}.woff2"
-                _subset(
-                    tool, source, provisional, characters_file,
-                    delivery, face.weight, face.style,
-                )
-                data = provisional.read_bytes()
+            for face, source, source_metadata, data in outputs:
                 digest = hashlib.sha256(data).hexdigest()
                 filename = f"{_slug(family)}-{face.weight.replace(' ', '-')}-{digest[:12]}.woff2"
                 target = fonts_dir / filename
@@ -771,22 +791,24 @@ def bundle_fonts(
         for copyright_line in sorted(notice["copyright"]):
             notice_lines.append("Copyright: " + copyright_line)
     _atomic_write(fonts_dir / "LICENSES.txt", "\n".join(notice_lines).rstrip() + "\n")
-    active_font_files = {Path(record["path"]).name for record in records}
-    for stale in fonts_dir.glob("*.woff2"):
-        if stale.name not in active_font_files:
-            stale.unlink()
+    # Older content-hashed subsets can still be referenced by chat.
+    # The current CSS and manifest select the active fonts.
 
-    fallback_delivery = delivery_families["Noto Sans SC"]
-    overrides = "\n".join(
-        f"  {token}: {json.dumps(delivery_families[family])}, "
-        # Latin display / mono / English-handwriting / user subsets carry no CJK
-        # glyphs → append the bundled Noto CJK fallback so stray Chinese never
-        # falls through to a viewer/worker cartoon face (and both authoring and
-        # delivery renders resolve CJK to the same metrics, killing the overflow).
-        + (f"{json.dumps(fallback_delivery)}, " if not _covers_cjk(family) else "")
-        + f"{_generic_for(family)};"
-        for token, family in sorted(token_families.items())
-    )
+    fallback_family = next((family for family in bundled if _covers_cjk(family)), None)
+    fallback_delivery = bundled.get(fallback_family)
+    if tool and not fallback_family:
+        font_warnings.append("No portable CJK fallback is available; using system fonts for missing glyphs")
+    overrides = []
+    for token, requested in sorted(token_families.items()):
+        family = requested if requested in bundled else fallback_family
+        stack = [json.dumps(bundled[family])] if family else []
+        if fallback_delivery and family != fallback_family and not _covers_cjk(family):
+            stack.append(json.dumps(fallback_delivery))
+        generic = _generic_for(family or requested)
+        stack.append(generic)
+        token_families[token] = family or generic
+        overrides.append(f"  {token}: {', '.join(stack)};")
+    overrides = "\n".join(overrides)
     rules.append(":root {\n" + overrides + "\n}")
     bundle = BUNDLE_START + "\n" + "\n\n".join(rules) + "\n" + BUNDLE_END
     manifest = {
@@ -794,7 +816,8 @@ def bundle_fonts(
         "deck_id": deck_id,
         "character_count": len(characters),
         "token_families": token_families,
-        "delivery_families": delivery_families,
+        "delivery_families": bundled,
+        "font_warnings": font_warnings,
         "faces": records,
         "license_files": [
             "assets/fonts/LICENSES.txt", "assets/fonts/OFL-1.1.txt",
@@ -847,10 +870,6 @@ def validate_font_bundle(root: Path) -> list[str]:
                 errors.append(f"user-provided font lacks authorization/provenance metadata: {relative}")
         else:
             errors.append(f"bundled font has unsupported license metadata: {relative}")
-    declared = {Path(str(record.get("path", ""))).name for record in manifest.get("faces", [])}
-    for stale in (root / "assets/fonts").glob("*.woff2"):
-        if stale.name not in declared:
-            errors.append(f"undeclared font file remains in bundle: assets/fonts/{stale.name}")
     return errors
 
 

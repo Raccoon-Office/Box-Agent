@@ -85,6 +85,56 @@ async def test_real_ppt_prepare_preserves_chat_and_atomically_refreshes_speech(t
 
 
 @pytest.mark.asyncio
+async def test_ppt_font_rebuild_keeps_chat_dependencies_and_repairs_current_fonts(tmp_path, monkeypatch):
+    pytest.importorskip("brotli", reason="Standard Skill fonttools[woff] dependency")
+    monkeypatch.setenv("PPT_FONT_SOURCE_DIRS", str(STANDARD.parents[1] / "fonts"))
+    deck = tmp_path / "deck"
+    (deck / "slides").mkdir(parents=True)
+    css = deck / "base.css"
+    css.write_text(':root{--font-title:"IBM Plex Mono";}h1{font:600 64px var(--font-title);}')
+    slide = deck / "slides/slide_01.html"
+    html = '<link rel="stylesheet" href="../base.css"><h1>Yecla{}</h1>'
+    slide.write_text(html.format(""), encoding="utf-8")
+    guard = ChatReferences(tmp_path)
+    tool = BashTool(workspace_dir=str(tmp_path), sandbox_venv_path=sys.prefix)
+    script = STANDARD / "scripts/font_bundle.py"
+
+    async def bundle(*args):
+        return await run_script(tmp_path, guard, script, deck, *args, tool=tool, timeout=60)
+
+    def mono_face():
+        manifest = json.loads((deck / "assets/fonts/manifest.json").read_text())
+        return next(face["path"] for face in manifest["faces"]
+                    if face["source_family"] == "IBM Plex Mono" and face["weight"] == "600")
+
+    initial = await bundle()
+    assert initial.success, initial.error
+    old_font = deck / mono_face()
+    old_bytes = old_font.read_bytes()
+    guard.retain(slide)
+    assert guard.affected(old_font)
+
+    slide.write_text(html.format(" 新"), encoding="utf-8")
+    rebuilt = await bundle()
+    assert rebuilt.success, rebuilt.error
+    active_font = deck / mono_face()
+    assert active_font != old_font
+    assert old_font.read_bytes() == old_bytes
+    assert active_font.name in css.read_text() and old_font.name not in css.read_text()
+
+    active_bytes = active_font.read_bytes()
+    active_font.write_bytes(b"damaged current font")
+    repaired = await bundle()
+    assert repaired.success, repaired.error
+    assert active_font.read_bytes() == active_bytes
+    active_font.unlink()
+    restored = await bundle()
+    assert restored.success, restored.error
+    assert active_font.read_bytes() == active_bytes
+    assert old_font.read_bytes() == old_bytes
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.environ.get("PPT_RENDER_BROWSER_TESTS") != "1", reason="installed Chromium smoke; platform CI opts in")
 @pytest.mark.parametrize("width,height", [(1600, 900), (1920, 1080), (1200, 900)])
 async def test_real_ppt_render_batch_runs_guarded_children_and_preserves_chat(tmp_path, retained, width, height):

@@ -411,7 +411,7 @@
       "source_sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4"
     },
     "skills/sn-ppt-standard/scripts/deck.py": {
-      "sha256": "f32494b4c5638419975e1269cc3de4ea164eeeecf4d747f8999d4aab5e7cf100",
+      "sha256": "2f8fe47b1121755752e65380d379f23058d54cdefed39f451830953c996fce20",
       "source_path": "skills/sn-ppt-standard/scripts/deck.py",
       "source_sha256": "972fa637662ebffc764291f2177510a215fb42874b003a0e233bab918a02a6e0"
     },
@@ -456,7 +456,7 @@
       "source_sha256": "1945ca3bedc1355760f11a73d05767f6f261ff3056249c62a81a5cf2c08bddfd"
     },
     "skills/sn-ppt-standard/scripts/export_pptx/lib/pptx_builder.mjs": {
-      "sha256": "6cc9d7f7b2952ccabcdaaa7f288a5978c382eb43f92084d8638c9ebcf9ec67c0",
+      "sha256": "e80448e781f41bc01d7e84a678ec0ff6ed3583d2aac7343e40560222617335b4",
       "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/pptx_builder.mjs",
       "source_sha256": "0323483cc487a9327573faa164b5d88a7d93ff15d30bf7dc4b39d63456681d73"
     },
@@ -537,7 +537,7 @@
       "source_sha256": "894542a3843a80cf8cba1901a272600d30d3dcc12f3b467cba4783a49df204a1"
     },
     "skills/sn-ppt-standard/scripts/font_bundle.py": {
-      "sha256": "7869aa40580504b7afde5c24aa337309beda04be380a8ab56c5499dd2fb70488",
+      "sha256": "1f1e2c366e2c76791dd2ae538514c33f5971ce86fd9c6e3a1b50ae0e5026ccba",
       "source_path": "skills/sn-ppt-standard/scripts/font_bundle.py",
       "source_sha256": "8e33b716a5430a7b209a6a504e24878bdb739f03755dc5976e76ad0108de2595"
     },
@@ -672,7 +672,9 @@
     "native-windows-rendering",
     "workspace-canvas-dimensions",
     "centralized-artifact-metadata",
-    "host-chromium-preparation"
+    "host-chromium-preparation",
+    "preserve-chat-font-subsets",
+    "presentation-font-fallback"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
   "revision": "e82cdb296b880a79a50711bc2937bf70b2222dc3",

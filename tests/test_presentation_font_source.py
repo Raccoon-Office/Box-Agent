@@ -150,6 +150,34 @@ def test_validation_rejects_legacy_bad_source_family_before_export(font_module, 
     assert any("source font family" in error and "rebuild" in error for error in errors), errors
 
 
+def test_missing_uploaded_font_and_preferred_fallback_use_available_cjk_font(font_module, tmp_path, monkeypatch):
+    upload = _upload(tmp_path)
+    _config(tmp_path, [upload])
+    (tmp_path / upload["source_path"]).unlink()
+    fonts = tmp_path / "available"
+    fonts.mkdir()
+    shutil.copyfile(SUITE / "fonts/NotoSerifSC.ttf", fonts / "NotoSerifSC.ttf")
+    monkeypatch.setitem(font_module["bundle_fonts"].__globals__, "_font_source_dirs", lambda: [fonts])
+
+    css, manifest = _bundle(tmp_path, font_module)
+    assert manifest["token_families"]["--font-title"] == "Noto Serif SC"
+    assert {face["source_family"] for face in manifest["faces"]} == {"Noto Serif SC"}
+    assert manifest["delivery_families"]["Noto Serif SC"] in css
+    assert any("custom font source is missing" in warning for warning in manifest["font_warnings"])
+    assert font_module["validate_font_bundle"](tmp_path) == []
+
+
+def test_unavailable_subsetter_uses_system_fonts_without_broken_css_links(font_module, tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    css = font_module["bundle_fonts"](tmp_path, ':root { --font-title: "Noto Sans SC"; }', ["<h1>Yecla 新</h1>"])
+    (tmp_path / "base.css").write_text(css)
+    manifest = json.loads((tmp_path / "assets/fonts/manifest.json").read_text())
+    assert manifest["faces"] == []
+    assert "--font-title: sans-serif;" in css and "url(" not in css
+    assert any("system fonts" in warning for warning in manifest["font_warnings"])
+    assert font_module["validate_font_bundle"](tmp_path) == []
+
+
 @pytest.fixture
 def node_exporter(tmp_path):
     if not shutil.which("node"):
@@ -168,10 +196,9 @@ def node_exporter(tmp_path):
     runner = exporter / "font-regression.mjs"
     runner.write_text("""
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
 import { buildPptx } from './lib/pptx_builder.mjs';
-const [deck, primary, rejected] = process.argv.slice(2);
-const styles = { color: 'rgb(0, 0, 0)', fontSize: '32px', fontFamily: `"${primary}", sans-serif` };
+const [deck, primary, fallback] = process.argv.slice(2);
+const styles = { color: 'rgb(0, 0, 0)', fontSize: '32px', fontFamily: `"${primary}", ${fallback}` };
 const ir = { canvasWidth: 1600, canvasHeight: 900, ct: {
   tag: 'DIV', bounds: { x: 80, y: 80, w: 900, h: 150 }, styles, text: 'Corporate Growth 2026',
   textRuns: [{ text: 'Corporate Growth ', ...styles },
@@ -179,25 +206,18 @@ const ir = { canvasWidth: 1600, canvasHeight: 900, ct: {
 } };
 const original = JSON.stringify(ir);
 const output = `${deck}/fonts.pptx`;
-if (rejected === 'yes') {
-  await assert.rejects(() => buildPptx([{ path: 'slide_01.html', ir }], deck, output), /font.*rebuild|rebuild.*font/i);
-  assert.equal(existsSync(output), false);
-} else {
-  const result = await buildPptx([{ path: 'slide_01.html', ir }], deck, output);
-  assert.equal(result.successCount, 1);
-  assert.equal(result.failCount, 0);
-}
+const result = await buildPptx([{ path: 'slide_01.html', ir }], deck, output);
+assert.equal(result.successCount, 1);
+assert.equal(result.failCount, 0);
 assert.equal(JSON.stringify(ir), original, 'export must not mutate browser IR');
 """)
     return runner
 
 
-def _export(runner, root, primary, reject=False):
-    result = subprocess.run(["node", str(runner), str(root), primary, "yes" if reject else "no"],
+def _export(runner, root, primary, fallback="sans-serif"):
+    result = subprocess.run(["node", str(runner), str(root), primary, fallback],
                             text=True, capture_output=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
-    if reject:
-        return set()
     with zipfile.ZipFile(root / "fonts.pptx") as pptx:
         for name in pptx.namelist():
             if name.endswith(".xml"):
@@ -218,12 +238,13 @@ def test_real_uploaded_subset_exports_original_family_and_preserves_ir(font_modu
 
 
 @pytest.mark.parametrize("family", ["User::corporate", "Deck-old-subset", " user::corporate ", "", None])
-def test_export_rejects_legacy_invalid_source_family_with_rebuild_error(node_exporter, tmp_path, family):
+def test_export_uses_css_fallback_for_invalid_legacy_source_family(node_exporter, tmp_path, family):
     fonts = tmp_path / "assets/fonts"
     fonts.mkdir(parents=True)
     (fonts / "manifest.json").write_text(json.dumps({"faces": [
         {"delivery_family": "Deck-test-font", "source_family": family}]}))
-    _export(node_exporter, tmp_path, "Deck-test-font", reject=True)
+    families = _export(node_exporter, tmp_path, "Deck-test-font", fallback="serif")
+    assert "Times New Roman" in families and "Deck-test-font" not in families
 
 
 @pytest.mark.parametrize("family", ["Noto Sans SC", "Xiaolai", "Caveat", "Corporate, Inc", 'Corporate "Display"', r"Corporate\Display", "Corporate & Co"])
@@ -239,14 +260,16 @@ def test_export_preserves_valid_source_family_exactly(node_exporter, tmp_path, f
 
 
 @pytest.mark.parametrize("manifest", ["{broken", '{"faces":{}}', '{}'])
-def test_export_rejects_existing_broken_font_manifest(node_exporter, tmp_path, manifest):
+def test_export_uses_css_fallback_when_font_manifest_is_broken(node_exporter, tmp_path, manifest):
     fonts = tmp_path / "assets/fonts"
     fonts.mkdir(parents=True)
     (fonts / "manifest.json").write_text(manifest)
-    _export(node_exporter, tmp_path, "Deck-test-font", reject=True)
+    families = _export(node_exporter, tmp_path, "Deck-test-font", fallback="serif")
+    assert "Times New Roman" in families and "Deck-test-font" not in families
 
 
-def test_export_rejects_unmapped_private_alias_but_keeps_plain_fonts(node_exporter, tmp_path):
+def test_export_skips_unmapped_private_alias_and_keeps_plain_fonts(node_exporter, tmp_path):
     assert "Arial" in _export(node_exporter, tmp_path, "Arial")
     (tmp_path / "fonts.pptx").unlink()
-    _export(node_exporter, tmp_path, "Deck-missing", reject=True)
+    families = _export(node_exporter, tmp_path, "Deck-missing", fallback='"Courier New"')
+    assert "Courier New" in families and "Deck-missing" not in families

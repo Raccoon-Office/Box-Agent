@@ -35,7 +35,8 @@ OVERLAYS = ["metadata.user_visible=false", "metadata.allow_override=false",
             "source-relative-pptx-page-directories", "explicit-delivery-scopes",
             "presentation-progress-without-reconfirmation", "host-playwright-runtime",
             "bounded-image-inspection-recovery", "native-windows-rendering", "workspace-canvas-dimensions",
-            "centralized-artifact-metadata", "host-chromium-preparation"]
+            "centralized-artifact-metadata", "host-chromium-preparation", "preserve-chat-font-subsets",
+            "presentation-font-fallback"]
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "box_agent/skills/presentation-suite"
 LICENSE_INPUT_PATH = "scripts/presentation_suite_licenses/echarts-5.5.0"
 LICENSE_INPUT_DIR = Path(__file__).resolve().parents[1] / LICENSE_INPUT_PATH
@@ -58,6 +59,7 @@ _windows_compat_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "windows_compat
 _canvas_dimensions_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "canvas_dimensions.py"))["apply"]
 _centralized_metadata_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "centralized_artifact_metadata.py"))["apply"]
 _host_chromium_preparation_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "host_chromium_preparation.py"))["apply"]
+_presentation_font_fallback_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "font_fallback.py"))["apply"]
 
 _image_inspection_recovery_overlay = runpy.run_path(
     str(RUNTIME_INPUT_DIR / "image_inspection_recovery.py")
@@ -144,6 +146,28 @@ def _presentation_progress_overlay(relative: str, data: bytes) -> bytes:
     text = _replace_once(text, "- 已识别任务与三个选择；",
                          "- 新识别的重要任务约束（不复述已经确认的模式）；")
     return text.encode("utf-8")
+
+
+def _preserve_chat_font_subsets_overlay(relative: str, data: bytes) -> bytes:
+    if relative != "skills/sn-ppt-standard/scripts/font_bundle.py":
+        return data
+    text = _replace_once(
+        data.decode("utf-8"),
+        '    active_font_files = {Path(record["path"]).name for record in records}\n'
+        '    for stale in fonts_dir.glob("*.woff2"):\n'
+        '        if stale.name not in active_font_files:\n'
+        '            stale.unlink()\n',
+        '    # Older content-hashed subsets can still be referenced by chat.\n'
+        '    # The current CSS and manifest select the active fonts.\n',
+    )
+    return _replace_once(
+        text,
+        '    declared = {Path(str(record.get("path", ""))).name for record in manifest.get("faces", [])}\n'
+        '    for stale in (root / "assets/fonts").glob("*.woff2"):\n'
+        '        if stale.name not in declared:\n'
+        '            errors.append(f"undeclared font file remains in bundle: assets/fonts/{stale.name}")\n',
+        '',
+    ).encode("utf-8")
 
 
 def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
@@ -378,6 +402,8 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
             data = _canvas_dimensions_overlay(str(relative), data)
             data = _centralized_metadata_overlay(str(relative), data)
             data = _host_chromium_preparation_overlay(str(relative), data)
+            data = _preserve_chat_font_subsets_overlay(str(relative), data)
+            data = _presentation_font_fallback_overlay(str(relative), data)
             if relative.name == "SKILL.md":
                 data = _apply_host_metadata(data)
             target = staged / relative
@@ -543,7 +569,9 @@ def refresh_host_overlays(output_dir: Path) -> dict:
                    "bounded-image-inspection-recovery": _image_inspection_recovery_overlay,
                    "workspace-canvas-dimensions": _canvas_dimensions_overlay,
                    "centralized-artifact-metadata": _centralized_metadata_overlay,
-                   "host-chromium-preparation": _host_chromium_preparation_overlay}
+                   "host-chromium-preparation": _host_chromium_preparation_overlay,
+                   "preserve-chat-font-subsets": _preserve_chat_font_subsets_overlay,
+                   "presentation-font-fallback": _presentation_font_fallback_overlay}
     pending = OVERLAYS[len(applied):]
     if (provenance.get("name") != BUNDLE_NAME
             or provenance.get("revision") != PINNED_REVISION
