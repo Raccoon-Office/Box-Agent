@@ -136,6 +136,9 @@ async def test_failed_correction_keeps_valid_accepted_plan_without_neutral_fallb
     assert (root / 'deck.json').read_bytes() == original_deck
     assert run('design_plan.js', 'validate', 'design_plan.json', cwd=root).returncode == 0
     assert json.loads((root / 'qa/design_delivery.json').read_text())['status'] == 'correction_failed'
+    prepared = run('design_plan.js', 'prepare', 'outline.json', cwd=root)
+    assert json.loads(prepared.stdout)['reusable'] is True
+    assert json.loads((root / 'qa/design_delivery.json').read_text()) == report
 
 
 @pytest.mark.parametrize('field,invalid,corrected', [

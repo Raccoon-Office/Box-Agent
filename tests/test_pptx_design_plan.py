@@ -164,8 +164,11 @@ def test_invalid_design_returns_field_error_without_fallback(design_case, mutati
 
 def test_unchanged_input_reuses_design_and_changed_content_invalidates_it(design_case):
     root, outline, _, _ = design_case
+    delivery_path = root / "qa/design_delivery.json"
+    accepted = json.loads(delivery_path.read_text())
     result = run("design_plan.js", "prepare", "outline.json", cwd=root)
     assert json.loads(result.stdout)["reusable"] is True
+    assert json.loads(delivery_path.read_text()) == accepted
     outline["slides"][0]["bullets"].append("必须保留的新增条目")
     write(root / "outline.json", outline)
     stale = scaffold(root)
@@ -173,6 +176,21 @@ def test_unchanged_input_reuses_design_and_changed_content_invalidates_it(design
     assert "stale" in stale.stderr
     refreshed = run("design_plan.js", "prepare", "outline.json", cwd=root)
     assert json.loads(refreshed.stdout)["reusable"] is False
+    assert json.loads(delivery_path.read_text())["status"] == "degraded"
+
+
+def test_reuse_recovers_stale_pending_report_from_verified_design_receipt(design_case):
+    root, _, _, _ = design_case
+    delivery_path = root / "qa/design_delivery.json"
+    accepted_hash = json.loads(delivery_path.read_text())["plan_hash"]
+    write(delivery_path, {"ok": True, "status": "degraded", "reason": "Design pending"})
+    result = run("design_plan.js", "prepare", "outline.json", cwd=root)
+    assert json.loads(result.stdout)["reusable"] is True
+    report = json.loads(delivery_path.read_text())
+    assert report["status"] == "design_accepted"
+    assert report["plan_hash"] == accepted_hash
+    assert report["correction_used"] is False
+    assert "reason" not in report and "primary_artifact" not in report
 
 
 def test_main_cannot_override_designer_with_cli_flags(design_case):

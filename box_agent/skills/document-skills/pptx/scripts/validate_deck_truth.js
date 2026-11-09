@@ -700,7 +700,9 @@ function isDiagramStructuralEntry(entry, slide) {
 function isGenericProjectTitle(text) {
   const compact = String(text || "").trim();
   return /^(?:精选\s*)?项目\s*[一二三四五六七八九十\dA-Da-d]*\s*(?:[·:：—-]\s*)?(?:品牌|产品|空间|文化|案例)?$/i.test(compact)
-    || /^(?:selected\s+)?project\s*\d*\s*(?:[·:：—-]\s*)?(?:brand|product|space|culture|case)?$/i.test(compact);
+    || /^(?:selected\s+)?project\s*\d*\s*(?:[·:：—-]\s*)?(?:brand|product|space|culture|case)?$/i.test(compact)
+    || /^(?:匿名|未具名)(?:客户|企业|机构)?案例$/u.test(compact)
+    || /^(?:anonymous|unnamed)(?:\s+(?:customer|organization))?\s+case(?:\s+study)?$/i.test(compact);
 }
 
 function isProjectCaseContext(slide) {

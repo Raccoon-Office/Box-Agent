@@ -131,6 +131,50 @@ def test_validator_writes_success_report_for_reduced_focused_route(
     )
 
 
+def test_documented_page_evidence_preserves_provenance_in_handoff(
+    tmp_path: Path,
+) -> None:
+    contract = (SKILL_ROOT / "references" / "output_contract.md").read_text(
+        encoding="utf-8"
+    )
+    example = re.search(r"```json\n(.*?)\n```", contract, re.DOTALL)
+    assert example is not None
+    ledger = json.loads(example.group(1))
+    ledger["topic"] = "topic"
+    research = tmp_path / "research"
+    _write_focused_research(research)
+    (research / "topic_evidence.json").write_text(
+        json.dumps(ledger), encoding="utf-8"
+    )
+    report = research / "qa" / "topic_research_check.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--research-dir",
+            str(research),
+            "--topic",
+            "topic",
+            "--route",
+            "B",
+            "--min-dimensions",
+            "3",
+            "--report",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    handoff = json.loads(report.read_text(encoding="utf-8"))["presentation_handoff"]
+    assert handoff["delivery_mode"] == "full"
+    assert len(handoff["verified_facts"]) == 1
+    assert handoff["verified_facts"][0]["evidence_basis"] == "page_body"
+
+
 def test_validator_preserves_search_summary_evidence_basis(tmp_path: Path) -> None:
     research = tmp_path / "research"
     _write_focused_research(
