@@ -942,12 +942,20 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Only register when an endpoint is configured (via config or env): an
     # unconfigured generate_image can only fail on every call and wastes steps.
     image_generation_config = getattr(config, "image_generation", None)
-    if image_generation_service_configured(config):
-        image_endpoint = getattr(image_generation_config, "endpoint", "") or None
-        if getattr(getattr(config, "officev3", None), "use_default_image_generation_preset", False):
-            image_endpoint = align_hosted_image_endpoint(
-                image_endpoint or "", getattr(llm, "api_base", "") or "",
-            )
+    image_configured = image_generation_service_configured(config)
+    image_unavailable_reason = "no image_generation.endpoint configured"
+    image_endpoint = getattr(image_generation_config, "endpoint", "") or None
+    if image_configured and getattr(getattr(config, "officev3", None), "use_default_image_generation_preset", False):
+        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+            image_endpoint = resolve_image_generation_endpoint(image_endpoint)
+        image_endpoint = align_hosted_image_endpoint(
+            image_endpoint or "", getattr(llm, "api_base", "") or "",
+        )
+        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true" and not image_endpoint:
+            # Do not let GenerateImageTool fall back to an old environment endpoint.
+            image_configured = False
+            image_unavailable_reason = "private managed image endpoint is outside the service boundary"
+    if image_configured:
         tools.append(
             GenerateImageTool(
                 workspace_dir=str(workspace_dir),
@@ -967,7 +975,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         _out(f"{Colors.GREEN}✅ Loaded image generation tool (generate_image){Colors.RESET}")
     else:
         _out(
-            f"{Colors.DIM}⏭️  Skipped image generation tool (no image_generation.endpoint configured){Colors.RESET}"
+            f"{Colors.DIM}⏭️  Skipped image generation tool ({image_unavailable_reason}){Colors.RESET}"
         )
 
     # Obsidian tools — host/Vault dependent, so register with workspace tools

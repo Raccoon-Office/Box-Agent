@@ -55,7 +55,12 @@ except ImportError:
 
     create_mcp_http_client = None
 
-from box_agent.auth import request_auth_headers, resolve_auth_token, should_attach_auth_header
+from box_agent.auth import (
+    is_private_service_url,
+    request_auth_headers,
+    resolve_auth_token,
+    should_attach_auth_header,
+)
 from box_agent.config import MCPConfig
 
 from .base import Tool, ToolInvocationContext, ToolResult
@@ -71,6 +76,7 @@ from .browser_tool_names import (
     public_browser_tool_parameters,
     public_browser_tool_text,
 )
+from .mcp_bootstrap import is_default_hosted_search_url
 from .mcp_tool_catalog import get_mcp_tool_catalog
 from .mcp_sources import (
     McpConfigSource,
@@ -1313,6 +1319,27 @@ class MCPTool(Tool):
                 await release_browser_runtime_for_current_turn()
 
 
+def _private_mcp_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """Keep every private MCP request within the configured service boundary."""
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    async def check_url(request: httpx.Request) -> None:
+        # SSE endpoint events can change the POST URL without an HTTP redirect.
+        if not is_private_service_url(str(request.url)):
+            raise httpx.RequestError(
+                "MCP request is outside the private service boundary", request=request
+            )
+
+    client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    client.follow_redirects = False
+    client.event_hooks["request"].append(check_url)
+    return client
+
+
 async def _open_streamable_http(
     exit_stack: AsyncExitStack,
     *,
@@ -1367,6 +1394,8 @@ async def _open_streamable_http(
             auth=transport_auth,
         )
         http_client = await exit_stack.enter_async_context(http_client_context)
+        if is_private_service_url(url or ""):
+            http_client.follow_redirects = False
         streams = await exit_stack.enter_async_context(
             streamable_http_client(url=url, http_client=http_client)
         )
@@ -1380,6 +1409,8 @@ async def _open_streamable_http(
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
                 auth=auth,
+                **({"httpx_client_factory": _private_mcp_http_client}
+                   if is_private_service_url(url or "") else {}),
             )
         )
     read_stream, write_stream = streams[:2]
@@ -1835,10 +1866,20 @@ class MCPServerConnection:
         @playwright/mcp) can create working directories without hitting
         permission errors on protected paths like ``C:\\Program Files\\``.
         """
+        env = self._build_stdio_env()
+        if self.name == "box-agent-web-extract":
+            # MCP 默认环境不继承私有配置；登录后以当前进程的地址为准。
+            env = dict(env or {})
+            for key in ("RACCOON_PRIVATE_DEPLOYMENT", "RACCOON_PRIVATE_OFFICE_URL"):
+                for existing_key in list(env):
+                    if existing_key.upper() == key:
+                        del env[existing_key]
+                if key in os.environ:
+                    env[key] = os.environ[key]
         server_params = StdioServerParameters(
             command=self.command,
             args=self.args,
-            env=self._build_stdio_env(),
+            env=env or None,
             cwd=tempfile.gettempdir(),
         )
         return await self.exit_stack.enter_async_context(stdio_client(server_params))
@@ -1855,6 +1896,8 @@ class MCPServerConnection:
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
                 auth=self.auth,
+                **({"httpx_client_factory": _private_mcp_http_client}
+                   if is_private_service_url(self.url or "") else {}),
             )
         )
 
@@ -2446,6 +2489,20 @@ def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer
     for conflict in resolved.conflicts:
         _warn(f"Skipping conflicting MCP server: {conflict}")
     servers = dict(resolved.servers)
+    if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+        search = servers.get(HOSTED_WEB_SEARCH_SERVER_NAME)
+        # 同名 MCP 可能已换成私有地址或来自客户配置，不能只按名称删除。
+        if (
+            search is not None
+            and (
+                search.owner == "system"
+                or (search.owner == "user" and search.managed_default)
+            )
+            and is_default_hosted_search_url(search.config.get("url"))
+            # 宿主声明的私有服务优先，即使复用官方域名和搜索路径也保留。
+            and not is_private_service_url(search.config["url"])
+        ):
+            servers.pop(HOSTED_WEB_SEARCH_SERVER_NAME)
     if _cua_service is not None:
         name = _cua_service.name
         config = _cua_service.server_config
@@ -2717,6 +2774,11 @@ async def reconnect_mcp_server(name: str) -> dict:
                 if name in current:
                     _mcp_server_definitions[name] = current[name]
                 else:
+                    if name in _mcp_server_definitions or any(c.name == name for c in _mcp_connections):
+                        # 过滤或删除配置后先撤销旧连接/工具，再移除定义，避免先重连时遗留可用工具。
+                        retired = await disconnect_mcp_server(name)
+                        if not retired.get("success"):
+                            return retired
                     _mcp_server_definitions.pop(name, None)
             except Exception as error:
                 return {"success": False, "error": str(error)}
