@@ -6,6 +6,23 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## MCP session correlation and redirect boundary (PR #238)
+
+- MCP tool calls propagate the active session ID in message metadata to Raccoon
+  endpoints and to the bundled web extractor; child runs inherit their parent
+  session ID unless explicitly overridden. SSE and Streamable HTTP attach the
+  session header only to eligible Raccoon `tools/call` POST requests. Private
+  deployment disables automatic remote MCP correlation.
+- Direct third-party MCP calls omit automatic correlation, but a cross-domain
+  307 or 308 redirect can forward the original POST body and its session
+  metadata even though the correlation header is omitted on that hop.
+- Runtime and bundled web-extract process must both be updated and restarted.
+  Reverting the change requires restoring the previous runtime and extractor.
+  Hosted downstream forwarding and installed-runtime behavior require separate
+  verification. See [host progress events](../integration/host-progress-events.md)
+  and `tests/test_mcp_session_header.py`, `tests/test_web_extract_server.py`,
+  and `tests/test_sub_agent_tool.py` for the contract and regression anchors.
+
 ## Structured input and selection ownership (PR #246)
 
 - Agent validates and projects `input_context`, `selection_context`, and `database_context` for normal prompts, history edits, and injections. Source facts are data, not tool authorization; selection guidance distinguishes questions from requested edits.
