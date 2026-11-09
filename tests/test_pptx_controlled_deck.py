@@ -10355,7 +10355,9 @@ def test_pptx_framing_choices_use_recommended_decision_with_countdown() -> None:
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     outline = (SKILL_DIR / "references/outline.md").read_text(encoding="utf-8")
     assert "references/outline.md" in text
-    assert "never use `request_user_input` for\n   them" in outline
+    outline = " ".join(outline.split())
+    assert "never use `request_user_input` for them" in outline
+    assert "Call `request_user_decision` with one focused question and 2-6 options" in outline
     assert "default with a 30-second timeout" in outline
 
 

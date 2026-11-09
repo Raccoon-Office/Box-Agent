@@ -62,9 +62,12 @@ def test_pptx_skill_makes_scaffold_and_framework_fallback_executable() -> None:
         "Removing numbers or rewriting a claim as qualitative prose does not verify it"
         in skill
     )
+    normalized_skill = " ".join(skill.split())
+    assert "required public gaps as `本轮核验：暂无可验证公开数据`" in normalized_skill
     assert (
-        "the exact unavailable-data placeholder must appear in `message` or `bullets`"
-        in skill
+        "For framework research pages, keep the literal marker `暂无可验证公开数据` "
+        "inside the scoped wording above in `message` or `bullets`."
+        in normalized_skill
     )
     assert "every included series must contain a real numeric value" in skill
     assert "Never pad a gap with" in skill
