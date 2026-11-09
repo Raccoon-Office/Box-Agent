@@ -107,8 +107,15 @@ class AnthropicClient(LLMClientBase):
             params["system"] = system_message
         if tools:
             params["tools"] = self._convert_tools(tools)
-        if thinking_enabled:
-            params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
+        effort = getattr(self, "reasoning_effort", None)
+        if thinking_enabled and effort != "fast":
+            budget = {
+                "medium": 4000, "high": 8000, "xhigh": 16000, "max": 32000,
+            }.get(effort, _THINKING_BUDGET)
+            budget = min(budget, self.max_output_tokens - 1)
+            if budget < 1024:
+                raise ValueError("thinking requires max_output_tokens greater than 1024")
+            params["thinking"] = {"type": "enabled", "budget_tokens": budget}
         return params
 
     def preflight_image_request(

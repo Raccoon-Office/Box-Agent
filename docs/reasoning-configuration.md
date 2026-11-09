@@ -10,7 +10,46 @@ Utility calls, including image inspection, long-page summaries and the
 continuation judge, continue to request `thinking_enabled=False`. They use the
 same provider adapter, so endpoint compatibility applies to them too.
 
-## Enabled thinking effort
+## Five-level host selection
+
+ACP `session/new` and `session/load` accept optional `_meta.reasoning_effort`:
+`fast`, `medium`, `high`, `xhigh`, or `max`. Invalid values fail validation.
+When present, this field takes precedence over `deep_think`; omission keeps the
+legacy boolean behavior. It is independent of the three-level `execution_profile`.
+Hosts must recreate/load the ACP session to change effort between turns.
+
+The session owns an isolated provider view. Model rebinding and child model
+clones preserve the choice without modifying process defaults. Calls that
+explicitly disable thinking (such as summaries) retain their existing policy.
+
+| Provider dialect | Translation |
+| --- | --- |
+| OpenAI-compatible, including SenseNova | Forward the selected effort exactly; `fast` uses the existing disabled-thinking policy. GPT-6 Astra / GPT-6.1 Sol/Terra fast calls use `low`. |
+| Kimi K3, GLM-5.2/5.3 | Medium/high use `high`; xhigh/max use `max`; fast keeps the existing dialect. |
+| DeepSeek V4 family | Medium/high/xhigh use `high`; max uses `max`; fast disables native thinking. |
+| Gemini | Medium uses `medium`; higher settings use `high`; fast retains its model-specific policy. |
+| Qwen, Doubao, older DeepSeek | Retain their native on/off controls. |
+| Anthropic | Native thinking budgets: 4,000 / 8,000 / 16,000 / 32,000 tokens, capped below `max_output_tokens`; fast omits thinking. |
+
+Five host choices do not imply five distinct native levels on every model.
+OpenAI-compatible gateways that reject an explicit effort return the provider
+error; there is no hidden retry at another level. On 2026-11-09, a rebuilt
+1.0.0 darwin-arm64 runtime installed in the raccoon-lab development client
+completed live requests at all five levels using `sn-sensenova-6-8-flash-lite-p`.
+Switching the same conversation to `sn-sensenova-6-8-flash-p` at `max` also
+completed, with the runtime reporting the new actual model. A separate local
+HTTP fixture verified the packaged runtime's exact outbound effort values.
+These checks establish request acceptance, not distinct server-side compute
+budgets or task-quality differences. Other model gateways were not live-tested.
+Existing GPT-6 Sol/Luna Chat Completions function-tool restrictions remain in place.
+
+References: [OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning),
+[Kimi K3](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart),
+[GLM thinking](https://docs.z.ai/guides/capabilities/thinking),
+[DeepSeek thinking](https://api-docs.deepseek.com/guides/thinking_mode/).
+
+## Legacy enabled thinking effort
+
 
 For OpenAI-compatible requests, enabling thinking selects `reasoning_effort: "max"`
 only for these documented model families:

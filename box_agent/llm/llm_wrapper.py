@@ -18,6 +18,7 @@ from ..session_trace import emit_session_trace
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase, closing_llm_stream
 from .openai_client import OpenAIClient
+from .reasoning import ReasoningEffort, parse_reasoning_effort
 from .think_tag_splitter import split_inline_think, unwrap_think_tags
 from .token_meter import record_usage
 
@@ -264,6 +265,17 @@ class LLMClient:
         margin than the legacy byte/3 rule without charging every byte as a token.
         """
         return (len(text.encode("utf-8")) + 1) // 2
+
+    def for_reasoning_effort(self, effort: ReasoningEffort) -> "LLMClient":
+        """Isolate session policy while sharing the owned SDK transport."""
+        validated = parse_reasoning_effort(effort)
+        client = copy(self)
+        client._client = copy(self._client)
+        client.reasoning_effort = validated
+        client._client.reasoning_effort = validated
+        if hasattr(client._client, "_ephemeral_max_output_tokens"):
+            client._client._ephemeral_max_output_tokens = None
+        return client
 
     def for_model(self, model: str, *, max_output_tokens: int | None = None) -> "LLMClient":
         """Return a client with the same endpoint/auth settings for ``model``.
@@ -551,8 +563,11 @@ class LLMClient:
 class SessionBoundLLM:
     """Stable per-session LLM reference with inherited request correlation."""
 
-    def __init__(self, client: LLMClient):
-        self._delegate = client
+    def __init__(
+        self, client: LLMClient, *, reasoning_effort: ReasoningEffort | None = None,
+    ):
+        self._reasoning_effort = parse_reasoning_effort(reasoning_effort)
+        self.bind(client)
         self._session_id = ""
         self._turn_id = ""
         self._title = "Box-Agent"
@@ -561,7 +576,10 @@ class SessionBoundLLM:
         self._auto_model_candidates: tuple[dict[str, Any], ...] = ()
 
     def bind(self, client: LLMClient) -> None:
-        self._delegate = client
+        self._delegate = (
+            client.for_reasoning_effort(self._reasoning_effort)
+            if self._reasoning_effort is not None else client
+        )
 
     @property
     def auto_model_candidates(self) -> tuple[dict[str, Any], ...]:
@@ -582,7 +600,8 @@ class SessionBoundLLM:
         if not callable(clone_for_model):
             raise ValueError("configured LLM client does not support child model binding")
         child = SessionBoundLLM(
-            clone_for_model(model, max_output_tokens=max_output_tokens)
+            clone_for_model(model, max_output_tokens=max_output_tokens),
+            reasoning_effort=self._reasoning_effort,
         )
         if model.strip() == self.model:
             child.context_window = getattr(self, "context_window", None)
