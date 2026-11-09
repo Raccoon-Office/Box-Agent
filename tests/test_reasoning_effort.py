@@ -96,10 +96,51 @@ def test_anthropic_uses_native_budget(effort, budget):
     ("kimi-k3", "medium", "high"), ("kimi-k3", "xhigh", "max"),
     ("deepseek-v4-pro", "medium", "high"), ("deepseek-v4-pro", "xhigh", "high"),
     ("glm-5.3", "medium", "high"), ("glm-5.3", "xhigh", "max"),
-    ("kimi-k3.1-pro", "fast", "low"), ("glm-5.2", "fast", "none"),
+    ("kimi-k3.1-pro", "fast", "low"),
     ("gemini-2.5-pro", "xhigh", "high"), ("gpt-6-astra", "fast", "low"),
 ])
 def test_known_dialects_keep_supported_values(model, effort, expected):
     body = {}
     _apply_thinking_params(body, model=model, thinking_enabled=effort != "fast", reasoning_effort=effort)
     assert body["reasoning_effort"] == expected
+
+
+@pytest.mark.parametrize("effort", [None, "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("limit,max_thinking", [
+    (2048, 1024), (4096, 3072), (8192, 6144), (8193, 6144), (12288, 9216),
+])
+def test_anthropic_thinking_leaves_room_for_response(effort, limit, max_thinking):
+    client = AnthropicClient.__new__(AnthropicClient)
+    client.model = "claude-sonnet-4"
+    client.max_output_tokens = limit
+    client.reasoning_effort = effort
+    body = client._request_body_params(None, [], None, thinking_enabled=True)
+    assert body["max_tokens"] == limit
+    budget = body["thinking"]["budget_tokens"]
+    assert 1024 <= budget <= max_thinking
+    if effort in ("xhigh", "max"):
+        assert budget == max_thinking
+
+
+@pytest.mark.parametrize("effort", [None, "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("limit", [128, 1024, 1025, 2047])
+def test_anthropic_rejects_insufficient_thinking_and_response_space(effort, limit):
+    client = AnthropicClient.__new__(AnthropicClient)
+    client.model = "claude-sonnet-4"
+    client.max_output_tokens = limit
+    client.reasoning_effort = effort
+    with pytest.raises(ValueError, match="at least 2048"):
+        client._request_body_params(None, [], None, thinking_enabled=True)
+
+
+@pytest.mark.parametrize("effort,enabled", [
+    ("fast", True), *[(effort, False) for effort in (None, *EFFORTS)],
+])
+def test_anthropic_fast_and_utilities_do_not_reserve_thinking_budget(effort, enabled):
+    client = AnthropicClient.__new__(AnthropicClient)
+    client.model = "claude-sonnet-4"
+    client.max_output_tokens = 128
+    client.reasoning_effort = effort
+    body = client._request_body_params(None, [], None, thinking_enabled=enabled)
+    assert body["max_tokens"] == 128
+    assert "thinking" not in body

@@ -29,7 +29,21 @@ explicitly disable thinking (such as summaries) retain their existing policy.
 | DeepSeek V4 family | Medium/high/xhigh use `high`; max uses `max`; fast disables native thinking. |
 | Gemini | Medium uses `medium`; higher settings use `high`; fast retains its model-specific policy. |
 | Qwen, Doubao, older DeepSeek | Retain their native on/off controls. |
-| Anthropic | Native thinking budgets: 4,000 / 8,000 / 16,000 / 32,000 tokens, capped below `max_output_tokens`; fast omits thinking. |
+| Anthropic | Native thinking budgets: 4,000 / 8,000 / 16,000 / 32,000 tokens, capped to leave at least 25% of `max_output_tokens` (minimum 1,024 tokens) for the response; fast omits thinking. |
+
+Anthropic thinking requires `max_output_tokens >= 2048` so both thinking and
+the response have at least 1,024 tokens available. Smaller caps fail locally
+when thinking is requested; fast and utility calls retain the full output cap
+without a thinking budget. At an 8,192-token cap, xhigh/max request 6,144 thinking
+tokens; at 12,288, they request 9,216. The default 64,000-token cap retains all
+four native budgets. This headroom reduces truncation risk, but cannot guarantee
+a complete response for every task. See the [Anthropic budget rules](https://platform.claude.com/docs/en/build-with-claude/extended-thinking#budget-rules-and-tuning).
+
+GLM-5.2 fast and utility requests retain the legacy disabled-thinking dialect:
+no effort field by default, or the existing SenseNova policy when the model is
+explicitly opted into that dialect through `BOX_AGENT_SENSENOVA_MODEL_PREFIXES`.
+In the latter case, `reasoning_effort_when_disabled: low` remains effective even
+when the session has an explicit effort.
 
 Five host choices do not imply five distinct native levels on every model.
 OpenAI-compatible gateways that reject an explicit effort return the provider

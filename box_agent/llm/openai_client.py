@@ -210,8 +210,6 @@ def _apply_thinking_params(
         # These models cannot disable reasoning, even for a fast request.
         if "kimi-k3" in name or re.search(r"(?:^|/)gpt-(?:6-astra|6\.1-(?:sol|terra))(?:$|[-/:])", name):
             params["reasoning_effort"] = "low"
-        elif "glm-5.2" in name or "glm-5-2" in name:
-            params["reasoning_effort"] = "none"
         return
     if "qwen" in name or "doubao" in name:
         return  # These existing dialects expose an on/off switch only.

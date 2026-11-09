@@ -112,9 +112,16 @@ class AnthropicClient(LLMClientBase):
             budget = {
                 "medium": 4000, "high": 8000, "xhigh": 16000, "max": 32000,
             }.get(effort, _THINKING_BUDGET)
-            budget = min(budget, self.max_output_tokens - 1)
+            # Thinking and the final response share max_tokens. Reserve a
+            # quarter (at least 1024 tokens) for text or tool arguments rather
+            # than allowing high efforts to consume almost the entire cap.
+            response_reserve = max(1024, (self.max_output_tokens + 3) // 4)
+            budget = min(budget, self.max_output_tokens - response_reserve)
             if budget < 1024:
-                raise ValueError("thinking requires max_output_tokens greater than 1024")
+                raise ValueError(
+                    "thinking requires max_output_tokens of at least 2048 "
+                    "to leave room for the final response"
+                )
             params["thinking"] = {"type": "enabled", "budget_tokens": budget}
         return params
 
