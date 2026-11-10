@@ -43,6 +43,7 @@ else:
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import get_default_environment, stdio_client
+from mcp.shared.exceptions import McpError
 
 try:
     from mcp.client.streamable_http import (
@@ -1171,6 +1172,8 @@ class MCPTool(Tool):
                             arguments=call_arguments,
                             **call_options,
                         )
+                elif self._is_hosted_web_search and self._server_url:
+                    result = await self._call_hosted_search(call_arguments, call_options)
                 else:
                     result = await self._session.call_tool(
                         self._remote_name,
@@ -1332,6 +1335,50 @@ class MCPTool(Tool):
                 self._concurrency_limiter.release()
             if browser_runtime_acquired and release_browser_runtime_after_call:
                 await release_browser_runtime_for_current_turn()
+
+    def _current_search_session(self) -> ClientSession:
+        # Agent registries may still hold a tool from before a hot reconnect.
+        for tool in get_mcp_tools_for_server(self._server_name):
+            if tool.mcp_tool_id == self.mcp_tool_id and tool._session is not None:
+                return tool._session
+        if self._mcp_generation or self._session is None:
+            raise RuntimeError("WebSearch MCP connection is unavailable")
+        return self._session
+
+    async def _call_hosted_search(self, arguments: dict[str, Any], options: dict[str, Any]):
+        lock = _mcp_reconnect_locks.setdefault(self._server_name, asyncio.Lock())
+        # Only read-only hosted search is replayed, once, within execute's
+        # original timeout. Concurrent callers reuse the replacement.
+        for attempt in range(2):
+            async with lock:
+                session = self._current_search_session()
+                connection = next((conn for conn in _mcp_connections if conn.session is session), None)
+                if connection is not None:
+                    connection._active_search_calls += 1
+                    connection._search_calls_drained.clear()
+            try:
+                try:
+                    return await session.call_tool(self._remote_name, arguments=arguments, **options)
+                finally:
+                    if connection is not None:
+                        connection._active_search_calls -= 1
+                        if connection._active_search_calls == 0:
+                            connection._search_calls_drained.set()
+            except McpError as error:
+                expired = (
+                    error.error.code in (32600, -32000)
+                    and error.error.message == "Session terminated"
+                )
+                if attempt or not expired:
+                    raise
+                _warn(f"[mcp] search session expired; reconnecting server={self._server_name!r}")
+                outcome = await reconnect_mcp_server(
+                    self._server_name, expected_session=session,
+                )
+                if not outcome.get("success"):
+                    raise RuntimeError(
+                        f"WebSearch MCP session recovery failed: {outcome.get('error', 'connection superseded')}"
+                    ) from error
 
 
 def _private_mcp_http_client(
@@ -1519,6 +1566,9 @@ class MCPServerConnection:
         self.connector_id = connector_id
         self.connector_name = connector_name
         self._web_search_concurrency_limiter: asyncio.Semaphore | None = None
+        self._active_search_calls = 0
+        self._search_calls_drained = asyncio.Event()
+        self._search_calls_drained.set()
         # Connection state
         self.last_error: str | None = None
         self.last_auth_status: int | None = None
@@ -2819,11 +2869,24 @@ async def cleanup_mcp_connections():
     get_mcp_tool_catalog().clear()
 
 
-async def reconnect_mcp_server(name: str) -> dict:
+async def reconnect_mcp_server(
+    name: str, *, expected_session: ClientSession | None = None,
+) -> dict:
     """Serialize hot reconnects for one server name."""
     global _mcp_server_definitions
     lock = _mcp_reconnect_locks.setdefault(name, asyncio.Lock())
     async with lock:
+        if expected_session is not None:
+            current = next((conn for conn in _mcp_connections if conn.name == name), None)
+            if current is None:
+                return {"success": False, "error": "MCP server is no longer connected"}
+            if current.session is not expected_session:
+                return {"success": current.session is not None}
+            # Let every in-flight search receive its response before closing
+            # the SDK streams. New calls wait on this same reconnect lock.
+            await current._search_calls_drained.wait()
+            if current not in _mcp_connections:
+                return {"success": False, "error": "MCP connection was removed during recovery"}
         if _mcp_config_path:
             try:
                 # Reading another server's new credential version does not mean
@@ -3118,7 +3181,13 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
         _record_status(name, "connecting", transport=transport_label)
         try:
             conn = _build_connection(definition)
+            if old_conn is not None:
+                conn._web_search_concurrency_limiter = getattr(old_conn, "_web_search_concurrency_limiter", None)
             success = await conn.connect()
+        except asyncio.CancelledError:
+            if not obsolete():
+                _record_status(name, "failed", transport=transport_label, error="MCP reconnection cancelled")
+            raise
         except Exception as e:
             if obsolete():
                 if conn is not None:
