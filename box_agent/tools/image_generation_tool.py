@@ -25,12 +25,15 @@ from box_agent.auth import (
     request_auth_headers,
     should_attach_auth_header,
 )
+from box_agent.client_info import should_attach_client_headers
 from box_agent.artifact_publication import delivery_scope, write_metadata
 from box_agent.llm.debug_logging import (
     log_image_generation_error_meta,
     log_image_generation_request,
     log_image_generation_response_meta,
 )
+from box_agent.llm.request_context import current_request_headers
+from box_agent.tools.billing import confirm_billing, confirmation
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.file_change_receipts import before_write, destination_lock, file_change_result
 from box_agent.tools.base import check_tool_cancellation
@@ -444,6 +447,10 @@ class GenerateImageTool(Tool):
         self.max_dimension = _resolve_max_image_dimension(max_dimension)
 
     @property
+    def may_require_user_input(self) -> bool:
+        return confirmation.get() is not None and should_attach_auth_header(self.endpoint) and not self.api_key
+
+    @property
     def name(self) -> str:
         return "generate_image"
 
@@ -458,7 +465,9 @@ class GenerateImageTool(Tool):
             "for one of those editable/rendered formats. Use text-to-image when the user "
             "asks for a new image. Use image-to-image with reference_images when the user asks to modify, "
             "redraw, restyle, or preserve a supplied image/logo/sketch. Use for PPT image_plan items marked "
-            "`generate`. If the user forbids fallback and this tool fails, report the request as blocked. "
+            "`generate`. Once the image request is clear, including an explicit request to continue, "
+            "call this tool directly; the runtime handles billing confirmation. Do not ask separately for authorization. "
+            "If the user forbids fallback and this tool fails, report the request as blocked. "
             "If the service is not configured, report the blocked image generation instead of "
             "pretending an asset exists. Configuration: image_generation.endpoint in config.yaml; optional "
             "image_generation.api_key for a dedicated bearer token. Environment overrides are also supported."
@@ -632,6 +641,22 @@ class GenerateImageTool(Tool):
                     reference_paths = [self._resolve_readable_path(path) for path in reference_images]
                 except ValueError as exc:
                     return ToolResult(success=False, error=str(exc))
+            if should_attach_auth_header(self.endpoint) and not self.api_key:
+                approved = await confirm_billing("image_generation")
+                if not approved:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            "Image generation did not receive runtime authorization; no image request was sent. "
+                            "Continue other feasible work. Do not retry or ask for authorization through "
+                            "request_user_decision, request_user_input, or a separate chat question in this turn. "
+                            "If the user later explicitly asks to continue generating or editing the image, "
+                            "call generate_image directly again; the runtime will check and collect any required "
+                            "billing consent. A chat answer or generic decision is not a runtime approval."
+                        ),
+                    )
+            check_tool_cancellation()
+            if edit_requested:
                 image_bytes, mime_type = await self._request_image_edit(
                     prompt=prompt,
                     size=size,
@@ -652,7 +677,11 @@ class GenerateImageTool(Tool):
                 publish_artifact = delivery_scope(target, self.workspace_dir) is None
             permission_error = self._check_write_permission(target)
             if permission_error:
-                return permission_error
+                return ToolResult(
+                    success=False,
+                    error="Image generated, but saving requires file permission. "
+                    + (permission_error.error or "Access denied."),
+                )
 
             image_bytes, watermark_status = apply_text_watermark(
                 image_bytes, mime_type, watermark_text,
@@ -671,7 +700,11 @@ class GenerateImageTool(Tool):
                 target = target.resolve()
                 permission_error = self._check_write_permission(target)
                 if permission_error:
-                    return permission_error
+                    return ToolResult(
+                        success=False,
+                        error="Image generated, but saving requires file permission. "
+                        + (permission_error.error or "Access denied."),
+                    )
                 check_tool_cancellation()
                 target.parent.mkdir(parents=True, exist_ok=True)
                 # Persist before the image becomes discoverable. The digest survives
@@ -804,14 +837,24 @@ class GenerateImageTool(Tool):
             raise ValueError(f"Reference image is not a file: {self._display_path(path)}")
         return path
 
-    async def _request_headers(self, endpoint: str | None = None) -> dict[str, str]:
+    async def _request_headers(self, endpoint: str | None = None) -> dict[str, str | bytes]:
         endpoint = endpoint or self.endpoint
-        headers = {"Accept": "application/json, image/*"}
+        headers = {
+            "Accept": "application/json, image/*",
+            **current_request_headers(endpoint or ""),
+        }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             return headers
         await ensure_hosted_auth_ready(endpoint, self.auth_file)
         return request_auth_headers(auth_file=self.auth_file, existing=headers, url=endpoint)
+
+    @staticmethod
+    async def _protect_context_headers(request: httpx.Request) -> None:
+        # Redirects may lead to an image CDN outside the hosted service.
+        if not should_attach_client_headers(str(request.url)):
+            for name in ("X-RACCOON-Session-ID", "X-RACCOON-Turn-ID", "X-RACCOON-Title"):
+                request.headers.pop(name, None)
 
     async def _send_with_hosted_auth_retry(
         self, client: httpx.AsyncClient, request: httpx.Request,
@@ -947,7 +990,10 @@ class GenerateImageTool(Tool):
         }
 
         timeout = self.timeout if self.timeout is not None else float(os.environ.get(_TIMEOUT_ENV, _DEFAULT_TIMEOUT))
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True,
+            event_hooks={"request": [self._protect_context_headers]},
+        ) as client:
             request = client.build_request(
                 "POST",
                 self.endpoint,
@@ -989,6 +1035,8 @@ class GenerateImageTool(Tool):
         files: list[tuple[str, tuple[str, bytes, str]]] = []
         file_log_entries: list[dict[str, Any]] = []
         for path in reference_paths:
+            # Billing approval may have yielded since the initial permission check.
+            path = self._resolve_readable_path(str(path))
             image_bytes = path.read_bytes()
             mime_type = mimetypes.guess_type(str(path))[0] or _guess_mime_from_bytes(image_bytes)
             if not mime_type.startswith("image/"):
@@ -1002,7 +1050,10 @@ class GenerateImageTool(Tool):
         }
         timeout = self.timeout if self.timeout is not None else float(os.environ.get(_TIMEOUT_ENV, _DEFAULT_TIMEOUT))
         endpoint = _derive_edit_endpoint(self.endpoint or "")
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True,
+            event_hooks={"request": [self._protect_context_headers]},
+        ) as client:
             request = client.build_request(
                 "POST",
                 endpoint,

@@ -11,6 +11,7 @@ import pytest
 
 from box_agent.config import Config, ImageGenerationConfig, Officev3Config, ToolsConfig
 from box_agent.llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
+from box_agent.llm.request_context import scoped_request_context
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.setup import (
     add_workspace_tools,
@@ -1144,6 +1145,12 @@ def test_image_generation_service_is_box_agent_configured_for_cli_and_acp() -> N
     assert "CLI 与 ACP 共用" in prompt
     assert "不由宿主 `env_context` 控制" in prompt
     assert "优先调用 `generate_image`" in prompt
+    assert "文生图、图生图、改图" in prompt
+    assert "HTML/PPT" in prompt
+    description = GenerateImageTool().description
+    assert "call this tool directly" in description
+    assert "runtime handles billing" in description
+    assert "explicit request to continue" in description
 
 
 def test_image_generation_service_accepts_cli_environment_override() -> None:
@@ -1815,6 +1822,12 @@ async def test_image_requests_handle_hosted_auth(
             calls.append("download")
             return httpx.Response(401)
         calls.append("image")
+        if scenario == "custom_host":
+            assert "X-RACCOON-Session-ID" not in request.headers
+        else:
+            assert request.headers["X-RACCOON-Session-ID"] == "billing-session"
+            assert request.headers["X-RACCOON-Turn-ID"] == "billing-turn"
+            assert dict(request.headers.raw)[b"X-RACCOON-Title"] == "生成测试图片".encode("utf-8")
         assert request.url.path.endswith("/images/edits" if edit else "/images/generations")
         bodies.append(request.content)
         authorizations.append(request.headers.get("Authorization", ""))
@@ -1835,11 +1848,14 @@ async def test_image_requests_handle_hosted_auth(
         auth_file=str(auth_file), api_key="dedicated-key" if scenario == "explicit_key" else "",
     )
     (tmp_path / "reference.png").write_bytes(PNG_BYTES)
-    result = await tool.execute(
-        prompt="draw a tree", output_path="result.png", watermark=False,
-        reference_images=["reference.png"] if edit else None,
-        image_mode="image_to_image" if edit else "text_to_image",
-    )
+    with scoped_request_context(
+        session_id="billing-session", turn_id="billing-turn", title="生成测试图片",
+    ):
+        result = await tool.execute(
+            prompt="draw a tree", output_path="result.png", watermark=False,
+            reference_images=["reference.png"] if edit else None,
+            image_mode="image_to_image" if edit else "text_to_image",
+        )
     success = scenario in {"expired", "near_expiry", "401", "200003", "200003_string"}
     assert result.success == success, result.error
     if scenario in {"expired", "near_expiry"}:

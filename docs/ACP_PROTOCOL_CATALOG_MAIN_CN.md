@@ -392,6 +392,12 @@ plan包含id/title/objective/scope/status/steps[{id,title,details}]/verification
 
 可选项取决于权限请求：approve=allow_once；approve_session=allow_always（显示名可由persistent_label指定）；reject=reject_once。临时/持久授权是否支持由请求决定。120秒超时按拒绝；未知选项不能当批准。保留当前协议，不把“同意”prompt代替此回包。
 
+生图费用确认使用同轮权限请求：`rawInput.scope=billing`、`requested_scope=image_generation`，并携带 `turn_id` 与唯一 `invocation_id`。托管图片服务（未配置独立 API Key）的生图和改图在发送 HTTP 请求前等待宿主回复；文件系统的 full_access 不绕过费用确认。宿主决定是否需要确认，并校验账号、会话、轮次和远程发送者；桌面确认卡或远程文本回复均解析到原来的 `session/request_permission`，不会创建新的 prompt 或保存待重放的图片操作。
+
+只有 `approve` / `approve_session` 且原轮次仍有效才继续本次调用；会话授权由宿主管理。拒绝、取消、超时或 RPC 错误均不发送图片请求，本次工具调用返回失败。Agent 等待上限为 120 秒，当前桌面宿主在 115 秒结束未决请求。自定义图片服务和独立 API Key 保留自身计费策略。费用授权等待保留在当前工具调用内，不产生 `waiting_for_user` 结束状态；普通用户输入/决策工具的等待行为保持不变。
+
+跨轮图片恢复扩展已移除：不再处理 `_meta.billing_resume` 或 `billing_deferred`，不再发送保存操作的 `operation` 参数、参考图摘要或 `billing_confirmation_required` 结果；宿主应直接回复当前权限请求。
+
 ### 8.2 宿主私有反向RPC
 
 | 方向 / 方法 | 功能 | 当前协议参数 | 请求 / 响应示例 | 应使用参数 |

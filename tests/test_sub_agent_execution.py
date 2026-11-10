@@ -428,3 +428,195 @@ async def test_frozen_child_reports_missing_isolated_runtime_without_starting_ke
     assert not result.success
     assert "ISOLATED_KERNEL_UNAVAILABLE" in result.error
     assert child._sessions == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("required_tools", [None, [], ["read_file"]])
+@pytest.mark.parametrize("with_hook", [False, True])
+async def test_read_only_children_still_overlap_with_hosted_image_billing(tmp_path, required_tools, with_hook):
+    from box_agent.core import run_agent_loop
+    from box_agent.events import ToolCallResult
+    from box_agent.tools.billing import confirmation
+    from box_agent.tools.file_tools import ReadTool
+    from box_agent.tools.image_generation_tool import GenerateImageTool
+
+    from box_agent.hooks import BaseHook
+
+    class TitleHook(BaseHook):
+        async def on_tool_start(self, *, tool_call_id, tool_name, arguments):
+            return {**arguments, "title": "Analysis"} if tool_name == "sub_agent" else arguments
+
+    both_started = asyncio.Event()
+    started = 0
+    class ChildLLM:
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            nonlocal started
+            assert "generate_image" not in {tool.name for tool in tools}
+            started += 1
+            if started == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), 1)
+            yield StreamEvent(type="text", delta="Read-only analysis complete.")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    class ParentLLM:
+        calls = 0
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                    ToolCall(id=f"child-{index}", type="function", function=FunctionCall(
+                        name="sub_agent", arguments={
+                            "task": f"Analyze independent topic {index}",
+                            **({"required_tools": required_tools} if required_tools is not None else {}),
+                        },
+                    )) for index in range(2)
+                ])
+            else:
+                yield StreamEvent(type="text", delta="Done.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    image = GenerateImageTool(workspace_dir=str(tmp_path), endpoint="https://xiaohuanxiong.com/images/gen")
+    registry = {"generate_image": image, "read_file": ReadTool(workspace_dir=str(tmp_path))}
+    child = SubAgentTool(llm=ChildLLM(), parent_tools=registry, workspace_dir=str(tmp_path))
+    registry[child.name] = child
+    callback = AsyncMock(return_value=False)
+    token = confirmation.set(callback)
+    try:
+        events = [event async for event in run_agent_loop(
+            llm=ParentLLM(), tools=registry,
+            messages=[Message(role="user", content="Analyze these independent topics in parallel")],
+            max_steps=3, workspace_dir=str(tmp_path), hooks=[TitleHook()] if with_hook else [],
+        )]
+    finally:
+        confirmation.reset(token)
+    results = [event for event in events if isinstance(event, ToolCallResult) and event.tool_name == "sub_agent"]
+    assert len(results) == 2
+    assert all(result.success for result in results), [result.error for result in results]
+    assert both_started.is_set()
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rewrite_at,hook_route", [(None, "legacy"), (0, "legacy"), (1, "legacy"), (0, "plugin"), (1, "plugin")])
+@pytest.mark.parametrize("approved", [True, False])
+async def test_image_child_waits_in_current_turn_without_parallel_batch_timeout(tmp_path, monkeypatch, rewrite_at, hook_route, approved):
+    from box_agent.core import run_agent_loop
+    from box_agent.tools.billing import confirmation
+    from box_agent.tools.image_generation_tool import GenerateImageTool
+
+    from box_agent.hooks import BaseHook
+
+    hook_calls = []
+    class AddImageHook(BaseHook):
+        async def on_tool_start(self, *, tool_call_id, tool_name, arguments):
+            if tool_name == "sub_agent":
+                hook_calls.append(tool_call_id)
+                if int(tool_call_id.removeprefix("child-")) >= rewrite_at:
+                    return {**arguments, "required_tools": ["generate_image"]}
+            return arguments
+
+    hook_options = {}
+    if rewrite_at is not None:
+        hook = AddImageHook()
+        if hook_route == "legacy":
+            hook_options["hooks"] = [hook]
+        else:
+            from box_agent.kernel.hook_types import BeforeToolDecision, copy_data
+            from box_agent.plugins.hooks import HookSpec
+            from tests.test_hook_plugins import plugin
+
+            async def before(ctx):
+                arguments = await hook.on_tool_start(
+                    tool_call_id=ctx.tool_call_id, tool_name=ctx.payload["tool_name"],
+                    arguments=copy_data(ctx.payload["arguments"]),
+                )
+                return BeforeToolDecision.modify(arguments)
+            hook_options["plugins"] = (plugin([
+                HookSpec("add-image", ("tool.before_execution",), "before_tool", before),
+            ]),)
+
+    child_starts = []
+    class ImageLLM:
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if any(message.role == "tool" for message in messages):
+                yield StreamEvent(type="text", delta="Image attempt finished.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            child_starts.append(True)
+            if "generate_image" not in {tool.name for tool in tools}:
+                yield StreamEvent(type="text", delta="Analysis complete.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[ToolCall(
+                id="image", type="function", function=FunctionCall(
+                    name="generate_image", arguments={"prompt": "cat", "output_path": "cat.png"},
+                ),
+            )])
+
+    class ParentLLM:
+        calls = 0
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                yield StreamEvent(type="text", delta="Done.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                ToolCall(id=f"child-{index}", type="function", function=FunctionCall(
+                    name="sub_agent", arguments={
+                        "task": f"Analyze topic {index}",
+                        "required_tools": ["generate_image"] if rewrite_at is None else [],
+                    },
+                )) for index in range(3)
+            ])
+
+    image = GenerateImageTool(workspace_dir=str(tmp_path), endpoint="https://xiaohuanxiong.com/images/gen")
+    from tests.test_image_generation_tool import PNG_BYTES
+    network = AsyncMock(return_value=(PNG_BYTES, "image/png"))
+    monkeypatch.setattr(image, "_request_image", network)
+    monkeypatch.setattr("box_agent.tools.image_generation_tool.apply_text_watermark", lambda data, *a, **k: (data, {}))
+    registry = {"generate_image": image}
+    child = SubAgentTool(llm=ImageLLM(), parent_tools=registry, workspace_dir=str(tmp_path))
+    registry[child.name] = child
+    waiting = asyncio.Event()
+    reply = asyncio.Event()
+    async def approve(capability):
+        waiting.set()
+        await reply.wait()
+        return approved
+
+    async def run():
+        return [event async for event in run_agent_loop(
+            llm=ParentLLM(), tools=registry,
+            messages=[Message(role="user", content="Complete the delegated work")],
+            max_steps=3, workspace_dir=str(tmp_path), parallel_tool_timeout_seconds=0.01,
+            **hook_options,
+        )]
+
+    callback = AsyncMock(side_effect=approve)
+    token = confirmation.set(callback)
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(waiting.wait(), 2)
+        # Human approval waits on the current invocation, beyond the ordinary
+        # parallel batch deadline. Later children must not start while waiting.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), 0.2)
+        assert len(child_starts) == (rewrite_at or 0) + 1
+        assert callback.await_count == 1
+        network.assert_not_awaited()
+        reply.set()
+        events = await asyncio.wait_for(task, 3)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        confirmation.reset(token)
+    assert len(child_starts) == 3
+    if rewrite_at is not None:
+        assert hook_calls == [f"child-{index}" for index in range(3)]
+    assert callback.await_count == 3 - (rewrite_at or 0)
+    assert network.await_count == (callback.await_count if approved else 0)
+    done = [event for event in events if isinstance(event, DoneEvent)]
+    assert done[-1].stop_reason is StopReason.END_TURN

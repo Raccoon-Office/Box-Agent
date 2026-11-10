@@ -193,3 +193,21 @@ def test_system_prompt_checks_explicit_requirements_before_completion():
     assert "须在交付中明确写出缺口与降级说明，不得宣称已完成" in prompt
     assert "**产物降级**" in prompt
     assert "明确标记未完成和证据缺口" in prompt
+
+
+def test_runtime_confirmation_is_explicit_and_not_duplicated_in_image_guidance():
+    from types import SimpleNamespace
+    from box_agent.tools.setup import build_image_generation_prompt
+    from box_agent.tools.bash_tool import BashTool
+
+    for tools in (None, {"bash", "request_user_decision"}, {"generate_image", "request_user_decision"}, {"bash"}):
+        prompt = resolve_capability_placeholders(_raw_prompt(), tools)
+        assert prompt.count("命令执行及图片生成/编辑：") == 1
+        assert "含用户明确要求继续" in prompt
+        assert "不要用决策卡或普通文字重复询问授权" in prompt
+        assert "必要的内容、对象和范围仍可澄清" in prompt
+        assert "拒绝后本轮不得重试或绕过" in prompt
+    assert "命令执行及图片生成/编辑：" not in resolve_capability_placeholders(_raw_prompt(), set())
+    assert "request_user_decision" not in build_image_generation_prompt(SimpleNamespace(image_generation=None), {})
+    assert "explicit request to continue" in BashTool().description
+    assert "runtime handles permission and dangerous-command confirmation" in BashTool().description
