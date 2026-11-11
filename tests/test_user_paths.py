@@ -49,7 +49,7 @@ def test_profile_browser_cache_is_stable_across_working_directories(tmp_path, mo
     if override is not None:
         env["PLAYWRIGHT_BROWSERS_PATH"] = override
     expected = "0" if override == "0" else str(
-        root / (override if override is not None else "browsers")
+        (root / (override if override is not None else "browsers")).resolve()
     )
     assert browser_cache_path(env=env) == expected
     monkeypatch.chdir(tmp_path)
@@ -88,12 +88,29 @@ def test_relative_browser_cache_retains_link_parent_semantics(tmp_path):
         env = {"BOX_AGENT_HOME": str(root), "PLAYWRIGHT_BROWSERS_PATH": "link/../browsers"}
         expected = state_path("browsers", "link/../browsers", env=env)
         result = browser_cache_path(env=env)
-        assert Path(result) == root / "link" / ".." / "browsers"
+        assert Path(result) == expected
         assert Path(result).resolve() == expected
+        # Equivalent to Playwright's Node path.join(cache, browser-version).
+        assert Path(os.path.normpath(os.path.join(result, "chromium-1234"))) == expected / "chromium-1234"
         if os.name != "nt":
             assert expected == root / "nested" / "browsers"
     finally:
         link.rmdir() if os.name == "nt" else link.unlink()
+
+
+def test_browser_parent_resolution_failure_falls_back_without_aborting(tmp_path, monkeypatch):
+    root = tmp_path / "profile"
+    candidate = root / "link" / ".." / "browsers"
+    original = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        if path == candidate:
+            raise OSError("unavailable browser cache")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    assert browser_cache_path(env={"BOX_AGENT_HOME": str(root),
+                                   "PLAYWRIGHT_BROWSERS_PATH": "link/../browsers"}) == str(root / "browsers")
 
 
 @pytest.mark.parametrize("value", ["", " ", "relative/profile", "~/profile", "C:relative", "/"])
