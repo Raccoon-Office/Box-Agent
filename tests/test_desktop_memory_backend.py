@@ -201,6 +201,33 @@ async def test_utility_or_disabled_session_removes_borrowed_memory_tools(tmp_pat
         await process.aclose()
 
 
+async def test_acp_utility_generates_text_without_restoring_process_memory(tmp_path, host):
+    from box_agent.acp import BoxACPAgent
+    from tests.test_acp import DummyConn, DoneLLM
+
+    config = session_config(tmp_path)
+    config.agent.memory_promotion_proposal_enabled = True
+    process = backend(host)
+    adapter = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "BASE", memory_manager=process)
+    try:
+        result = await adapter.new_session(**acp_params(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={"utility": True},
+        )))
+        state = adapter._sessions[result.sessionId]
+        assert state.memory_manager is None
+        for request in ("Draft a project", "Revise the draft"):
+            response = await adapter.prompt(**acp_params(SimpleNamespace(
+                sessionId=result.sessionId, prompt=[{"text": request}], field_meta={},
+            )))
+            assert response.stopReason == "end_turn"
+        assert any(message.role == "assistant" and message.content for message in state.agent.messages)
+        assert state.agent.tools == {}
+        assert host.calls == []
+    finally:
+        await adapter.aclose()
+        await process.aclose()
+
+
 async def test_all_prompt_sections_are_bounded_and_legacy_excludes_cloud_experience(host):
     manager = backend(host)
     try:

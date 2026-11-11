@@ -108,7 +108,14 @@ class AnthropicClient(LLMClientBase):
         if tools:
             params["tools"] = self._convert_tools(tools)
         effort = getattr(self, "reasoning_effort", None)
-        if thinking_enabled and effort != "fast":
+        import re
+        adaptive = re.search(r"(?:^|[/.])claude-opus-4[.-][78](?:$|[-:])", self.model or "")
+        if adaptive and thinking_enabled and effort != "fast":
+            params["thinking"] = {"type": "adaptive"}
+            if effort is not None:
+                # The bundled SDK predates output_config; extra_body merges at HTTP top level.
+                params["extra_body"] = {"output_config": {"effort": effort}}
+        elif thinking_enabled and effort != "fast":
             budget = {
                 "medium": 4000, "high": 8000, "xhigh": 16000, "max": 32000,
             }.get(effort, _THINKING_BUDGET)

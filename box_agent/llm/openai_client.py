@@ -198,7 +198,10 @@ def _apply_thinking_params(
         params, model=model, thinking_enabled=thinking_enabled and effort != "fast",
         reasoning_effort_when_disabled=reasoning_effort_when_disabled,
     )
-    if effort is None:
+    if re.search(r"(?:^|/)gpt-(?:4(?:\.1|o)?|3\.5)(?:$|[-/:])", (model or "").casefold()):
+        params.pop("reasoning_effort", None)
+        return
+    if effort is None or not thinking_enabled:
         return
     name = (model or "").strip().casefold()
     # Chat Completions cannot reason with function tools on these models.
@@ -685,11 +688,21 @@ class OpenAIClient(LLMClientBase):
             params.update(stream=True, stream_options={"include_usage": True})
         if tools:
             params["tools"] = self._convert_tools(tools)
-        _apply_thinking_params(
-            params, model=self.model, thinking_enabled=thinking_enabled,
-            reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
-            reasoning_effort=getattr(self, "reasoning_effort", None),
-        )
+        from .reasoning import unified_thinking_params
+        unified = unified_thinking_params(self, thinking_enabled)
+        if unified is not None:
+            if unified:
+                # SDK merges this into the HTTP top level (no nested extra_body).
+                params["extra_body"] = unified
+        else:
+            _apply_thinking_params(
+                params, model=self.model,
+                # A unified preference never becomes native thinking when an
+                # auto/child model has no catalog capability (e.g. a special route).
+                thinking_enabled=thinking_enabled and getattr(self, "raccoon_thinking_level", None) is None,
+                reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
+                reasoning_effort=getattr(self, "reasoning_effort", None),
+            )
         if (self.api_base, params.get("model", "")) in getattr(self, "_max_completion_token_bindings", set()):
             params["max_completion_tokens"] = params.pop("max_tokens")
         return params

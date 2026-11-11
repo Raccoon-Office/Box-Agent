@@ -19,6 +19,7 @@ from typing import Any
 from box_agent.schema import LLMProvider
 
 from .llm_wrapper import LLMClient
+from .reasoning import normalize_raccoon_thinking
 
 from box_agent.user_paths import state_path
 
@@ -126,6 +127,10 @@ def _validate_model_profile(revision: str, profile: Mapping[str, Any]) -> dict[s
         raise ModelProfileUnavailable("model profile imageInput is invalid")
 
     return {
+        "raccoonThinkingModels": {
+            model: cap for model, raw in (profile.get("raccoonThinkingModels") or {}).items()
+            if isinstance(model, str) and (cap := normalize_raccoon_thinking(raw)) is not None
+        } if isinstance(profile.get("raccoonThinkingModels"), dict) else {},
         "profileId": profile_id,
         "profileRevision": revision,
         "provider": provider,
@@ -186,7 +191,7 @@ def client_for_model_profile(
     max_tokens = binding.get("maxTokens", profile["maxTokens"])
     max_output_tokens = _positive_int(max_tokens, field="maxTokens")
     provider = LLMProvider(profile["provider"])
-    return LLMClient(
+    client = LLMClient(
         api_key=profile["apiKey"],
         provider=provider,
         api_base=profile["apiBase"],
@@ -204,6 +209,12 @@ def client_for_model_profile(
             else {}
         ),
     )
+
+    # The native host freezes catalog metadata in the credential profile. Never
+    # trust a renderer/ACP flag or infer hosted routing from the model's name.
+    if provider == LLMProvider.OPENAI and profile["authFile"]:
+        client._client.raccoon_thinking_models = profile["raccoonThinkingModels"]
+    return client
 
 
 __all__ = [

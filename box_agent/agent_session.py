@@ -60,6 +60,7 @@ class AgentSession:
     turn_active: bool = False
     memory_block: str | None = None
     reasoning_effort: str | None = None
+    raccoon_thinking_level: str | None = None
     thinking_enabled: bool = False
     execution_profile: ExecutionProfile = "standard"
     explicitly_allowed_skill_names: set[str] = field(default_factory=set)

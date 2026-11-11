@@ -18,7 +18,7 @@ from ..session_trace import emit_session_trace
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase, closing_llm_stream
 from .openai_client import OpenAIClient
-from .reasoning import ReasoningEffort, parse_reasoning_effort
+from .reasoning import ReasoningEffort, parse_reasoning_effort, parse_raccoon_thinking_level
 from .think_tag_splitter import split_inline_think, unwrap_think_tags
 from .token_meter import record_usage
 
@@ -273,6 +273,17 @@ class LLMClient:
         client._client = copy(self._client)
         client.reasoning_effort = validated
         client._client.reasoning_effort = validated
+        if hasattr(client._client, "_ephemeral_max_output_tokens"):
+            client._client._ephemeral_max_output_tokens = None
+        return client
+
+    def for_raccoon_thinking_level(self, level: str) -> "LLMClient":
+        """Bind unified preference without mutating defaults or transient caps."""
+        validated = parse_raccoon_thinking_level(level)
+        client = copy(self)
+        client._client = copy(self._client)
+        client.raccoon_thinking_level = validated
+        client._client.raccoon_thinking_level = validated
         if hasattr(client._client, "_ephemeral_max_output_tokens"):
             client._client._ephemeral_max_output_tokens = None
         return client
@@ -565,7 +576,9 @@ class SessionBoundLLM:
 
     def __init__(
         self, client: LLMClient, *, reasoning_effort: ReasoningEffort | None = None,
+        raccoon_thinking_level: str | None = None,
     ):
+        self._raccoon_thinking_level = raccoon_thinking_level
         self._reasoning_effort = parse_reasoning_effort(reasoning_effort)
         self.bind(client)
         self._session_id = ""
@@ -580,6 +593,11 @@ class SessionBoundLLM:
             client.for_reasoning_effort(self._reasoning_effort)
             if self._reasoning_effort is not None else client
         )
+
+        if self._raccoon_thinking_level is not None:
+            self._delegate = self._delegate.for_raccoon_thinking_level(
+                self._raccoon_thinking_level,
+            )
 
     @property
     def auto_model_candidates(self) -> tuple[dict[str, Any], ...]:
@@ -602,6 +620,7 @@ class SessionBoundLLM:
         child = SessionBoundLLM(
             clone_for_model(model, max_output_tokens=max_output_tokens),
             reasoning_effort=self._reasoning_effort,
+            raccoon_thinking_level=self._raccoon_thinking_level,
         )
         if model.strip() == self.model:
             child.context_window = getattr(self, "context_window", None)

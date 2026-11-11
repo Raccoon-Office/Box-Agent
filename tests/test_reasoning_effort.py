@@ -44,7 +44,8 @@ async def test_acp_choice_reaches_sdk_http_body_without_mutating_default(tmp_pat
         result = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"reasoning_effort": effort, "deep_think": effort == "fast"})))
         state = adapter._sessions[result.sessionId]
         assert state.reasoning_effort == effort
-        assert state.agent.thinking_enabled == (effort != "fast")
+        # Explicit effort is handled by the adapter; False is reserved for auxiliary calls.
+        assert state.agent.thinking_enabled is True
         provider = state.session_llm._delegate._client
         await provider._make_api_request(api_messages=[{"role": "user", "content": "go"}], tools=None, thinking_enabled=state.agent.thinking_enabled)
         assert captured[-1]["reasoning_effort"] == ("none" if effort == "fast" else effort)
@@ -101,7 +102,7 @@ def test_anthropic_uses_native_budget(effort, budget):
 ])
 def test_known_dialects_keep_supported_values(model, effort, expected):
     body = {}
-    _apply_thinking_params(body, model=model, thinking_enabled=effort != "fast", reasoning_effort=effort)
+    _apply_thinking_params(body, model=model, thinking_enabled=True, reasoning_effort=effort)
     assert body["reasoning_effort"] == expected
 
 
