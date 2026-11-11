@@ -123,10 +123,8 @@ def build_skill_execution_env(
         inherited.get("PLAYWRIGHT_BROWSERS_PATH")
         or box_agent_home(home_dir, env=inherited) / "browsers"
     )
-    if profile_root is not None:
-        browser_root = state_path(
-            "browsers", inherited.get("PLAYWRIGHT_BROWSERS_PATH") or None, env=inherited
-        )
+    # Browser binaries may be host-managed or relocated through a directory
+    # junction. They do not carry the profile's configuration/session authority.
     browser_executable = _resolve_skill_browser_executable(
         inherited,
         browser_root=browser_root,

@@ -120,7 +120,7 @@ from box_agent.project_context import (
 from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryError
 from box_agent.session_log import SessionLog, default_session_root
 
-from box_agent.user_paths import state_path
+from box_agent.user_paths import box_agent_home, state_path
 
 
 _CLI_PROBE_MAX_OUTPUT_TOKENS = SMALL_TASK_MAX_OUTPUT_TOKENS
@@ -1704,7 +1704,7 @@ async def cmd_doctor(json_output: bool = False) -> int:
 
 def _default_browsers_path() -> Path:
     """Default Chromium cache directory shared by CLI install and ACP runtime."""
-    return state_path('browsers')
+    return box_agent_home() / "browsers"
 
 
 def _playwright_env() -> dict[str, str]:

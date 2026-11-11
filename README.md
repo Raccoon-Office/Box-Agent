@@ -430,7 +430,7 @@ box-agent install-browser   # downloads Chromium and flips the entry to enabled
 
 Requires Node.js ≥ 18 on `PATH`. Chromium lands in `~/.box-agent/browsers/` (shared by CLI and ACP runtime) and `mcpServers.playwright.disabled` in `~/.box-agent/config/mcp.json` is set to `false`.
 
-**ACP embedders**: no env-var plumbing required — `box-agent-acp` defaults `PLAYWRIGHT_BROWSERS_PATH` to the same `~/.box-agent/browsers/` path. To point at a different cache, export `PLAYWRIGHT_BROWSERS_PATH=<your path>` before spawning `box-agent-acp` (our setdefault won't override it).
+**ACP embedders**: no env-var plumbing required — `box-agent-acp` defaults `PLAYWRIGHT_BROWSERS_PATH` to `BOX_AGENT_HOME/browsers` when an explicit profile is configured, or `~/.box-agent/browsers/` otherwise. To point at a different cache, export `PLAYWRIGHT_BROWSERS_PATH=<your path>` before spawning `box-agent-acp`. Browser caches may live outside the profile, including through Windows directory junctions; this does not relax the path checks for configuration, sessions, or memory. ACP startup does not require the browser cache to exist or download a browser.
 
 **Web access routing** is shared by CLI, ACP and child agents through the
 capability-gated `Web Access Routing` prompt. Explicit browser/tab/reader choices
