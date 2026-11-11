@@ -20,6 +20,7 @@ from box_agent.auth import (
     _xiaohuanxiong_refresh_url,
     ensure_hosted_auth_ready,
     is_private_service_url,
+    read_auth_org_code,
     read_auth_token_file,
     refresh_hosted_auth_token_if_needed,
     request_auth_headers,
@@ -847,13 +848,17 @@ class GenerateImageTool(Tool):
             headers["Authorization"] = f"Bearer {self.api_key}"
             return headers
         await ensure_hosted_auth_ready(endpoint, self.auth_file)
+        if should_attach_client_headers(endpoint):
+            org_code = read_auth_org_code(self.auth_file)
+            if org_code:
+                headers["X-Org-Code"] = org_code
         return request_auth_headers(auth_file=self.auth_file, existing=headers, url=endpoint)
 
     @staticmethod
     async def _protect_context_headers(request: httpx.Request) -> None:
         # Redirects may lead to an image CDN outside the hosted service.
         if not should_attach_client_headers(str(request.url)):
-            for name in ("X-RACCOON-Session-ID", "X-RACCOON-Turn-ID", "X-RACCOON-Title"):
+            for name in ("X-RACCOON-Session-ID", "X-RACCOON-Turn-ID", "X-RACCOON-Title", "X-Org-Code"):
                 request.headers.pop(name, None)
 
     async def _send_with_hosted_auth_retry(

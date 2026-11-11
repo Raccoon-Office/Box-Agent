@@ -1797,7 +1797,7 @@ async def test_image_requests_handle_hosted_auth(
     now = int(time.time())
     old_token = jwt(now - 60 if scenario == "expired" else now + 60 if scenario == "near_expiry" else now + 3600)
     new_token = jwt(now + 7200)
-    state = {"access_token": old_token, "refresh_token": "refresh-secret"}
+    state = {"access_token": old_token, "refresh_token": "refresh-secret", "office_identity": "team-one"}
     if scenario == "missing_refresh":
         state.pop("refresh_token")
     if scenario in {"missing_login", "environment"}:
@@ -1822,6 +1822,8 @@ async def test_image_requests_handle_hosted_auth(
             calls.append("download")
             return httpx.Response(401)
         calls.append("image")
+        expected_org = None if scenario in {"explicit_key", "custom_host", "environment"} else "team-one"
+        assert request.headers.get("X-Org-Code") == expected_org
         if scenario == "custom_host":
             assert "X-RACCOON-Session-ID" not in request.headers
         else:
