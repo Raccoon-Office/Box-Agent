@@ -242,6 +242,29 @@ def test_cli_node_execution_env_preserves_user_environment(monkeypatch, tmp_path
     assert "npm_config_cache" not in env
 
 
+@pytest.mark.parametrize("collision", [False, True])
+async def test_install_browser_zero_cache_never_creates_a_zero_directory(tmp_path, monkeypatch, collision):
+    monkeypatch.chdir(tmp_path)
+    if collision:
+        (tmp_path / "0").write_text("preserve")
+    monkeypatch.setattr(cli, "_cli_node_execution_env", lambda: ("fixture-npx", {"PLAYWRIGHT_BROWSERS_PATH": "0"}))
+    calls = []
+
+    def install(*args, **kwargs):
+        calls.append((args, kwargs))
+        return cli.subprocess.CompletedProcess(args[0], 0)
+
+    monkeypatch.setattr(cli.subprocess, "run", install)
+    monkeypatch.setattr(cli, "_ensure_user_mcp_config", lambda: tmp_path / "mcp.json")
+    monkeypatch.setattr(cli, "_enable_playwright_in_mcp", lambda path: None)
+    await cli.cmd_install_browser()
+    assert len(calls) == 1
+    assert calls[0][1]["env"]["PLAYWRIGHT_BROWSERS_PATH"] == "0"
+    assert not (tmp_path / "0").is_dir()
+    if collision:
+        assert (tmp_path / "0").read_text() == "preserve"
+
+
 class _CaptureStreamLLM:
     instances: list["_CaptureStreamLLM"] = []
 

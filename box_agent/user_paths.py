@@ -64,13 +64,13 @@ def browser_cache_path(
     source = os.environ if env is None else env
     configured = configured_box_agent_home(source)
     override = source.get("PLAYWRIGHT_BROWSERS_PATH")
-    if override is not None:
+    if override:
         if override == "0" or configured is None:
             return override
         candidate = Path(override).expanduser()
         # Anchor relative overrides before tools change cwd, without resolving
         # browser-cache symlinks/junctions or applying owned-data containment.
-        return os.path.abspath(configured / candidate)
+        return str(configured / candidate)
     return str((configured or box_agent_home(home_dir, env=source)) / "browsers")
 
 

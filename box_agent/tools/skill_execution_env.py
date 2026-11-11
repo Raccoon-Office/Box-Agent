@@ -120,7 +120,7 @@ def build_skill_execution_env(
     )
 
     browser_cache = browser_cache_path(env=inherited, home_dir=home_dir)
-    browser_root = Path(browser_cache)
+    browser_root = None if browser_cache == "0" else Path(browser_cache)
     # Browser binaries may be host-managed or relocated through a directory
     # junction. They do not carry the profile's configuration/session authority.
     browser_executable = _resolve_skill_browser_executable(
@@ -197,14 +197,14 @@ def _dedupe_paths(entries: list[str], *, is_windows: bool) -> list[str]:
 def _resolve_skill_browser_executable(
     env: dict[str, str],
     *,
-    browser_root: Path,
+    browser_root: Path | None,
     platform_name: str,
 ) -> str | None:
     for name in ("BOX_AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_EXECUTABLE_PATH"):
         candidate = env.get(name)
         if candidate and Path(candidate).is_file():
             return candidate
-    if not browser_root.is_dir():
+    if browser_root is None or not browser_root.is_dir():
         return None
     browser_dirs = sorted(
         browser_root.glob("chromium-*"),

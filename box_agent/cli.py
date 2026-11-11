@@ -1789,8 +1789,9 @@ async def cmd_install_browser() -> None:
         print(f"{Colors.DIM}Install Node.js ≥ 18 first: https://nodejs.org/{Colors.RESET}")
         sys.exit(1)
 
-    browsers_path = Path(execution_env["PLAYWRIGHT_BROWSERS_PATH"])
-    browsers_path.mkdir(parents=True, exist_ok=True)
+    browsers_path = execution_env["PLAYWRIGHT_BROWSERS_PATH"]
+    if browsers_path != "0":
+        Path(browsers_path).mkdir(parents=True, exist_ok=True)
 
     print(f"{Colors.DIM}Target: {browsers_path}{Colors.RESET}")
     print(f"{Colors.DIM}Running: npx -y playwright install chromium (~200MB){Colors.RESET}\n")

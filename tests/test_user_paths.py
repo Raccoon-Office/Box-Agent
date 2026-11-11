@@ -49,7 +49,7 @@ def test_profile_browser_cache_is_stable_across_working_directories(tmp_path, mo
     if override is not None:
         env["PLAYWRIGHT_BROWSERS_PATH"] = override
     expected = "0" if override == "0" else str(
-        (root / (override if override is not None else "browsers")).resolve()
+        root / (override if override is not None else "browsers")
     )
     assert browser_cache_path(env=env) == expected
     monkeypatch.chdir(tmp_path)
@@ -60,6 +60,40 @@ def test_profile_browser_cache_is_stable_across_working_directories(tmp_path, mo
 def test_browser_cache_without_profile_preserves_host_relative_override(tmp_path):
     assert browser_cache_path(env={"PLAYWRIGHT_BROWSERS_PATH": "browser-cache"}) == "browser-cache"
     assert browser_cache_path(env={}, home_dir=tmp_path) == str(tmp_path / ".box-agent/browsers")
+
+
+@pytest.mark.parametrize("profile", [False, True])
+def test_empty_browser_cache_override_uses_default(tmp_path, profile):
+    env = {"PLAYWRIGHT_BROWSERS_PATH": ""}
+    if profile:
+        env["BOX_AGENT_HOME"] = str(tmp_path / "profile")
+    expected = tmp_path / ("profile" if profile else ".box-agent") / "browsers"
+    assert browser_cache_path(env=env, home_dir=tmp_path) == str(expected)
+
+
+def test_relative_browser_cache_retains_link_parent_semantics(tmp_path):
+    import os
+    import subprocess
+
+    root = tmp_path / "profile"
+    nested = root / "nested" / "subdir"
+    nested.mkdir(parents=True)
+    link = root / "link"
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(nested)],
+                       check=True, capture_output=True)
+    else:
+        link.symlink_to(nested, target_is_directory=True)
+    try:
+        env = {"BOX_AGENT_HOME": str(root), "PLAYWRIGHT_BROWSERS_PATH": "link/../browsers"}
+        expected = state_path("browsers", "link/../browsers", env=env)
+        result = browser_cache_path(env=env)
+        assert Path(result) == root / "link" / ".." / "browsers"
+        assert Path(result).resolve() == expected
+        if os.name != "nt":
+            assert expected == root / "nested" / "browsers"
+    finally:
+        link.rmdir() if os.name == "nt" else link.unlink()
 
 
 @pytest.mark.parametrize("value", ["", " ", "relative/profile", "~/profile", "C:relative", "/"])
