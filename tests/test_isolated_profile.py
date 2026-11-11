@@ -97,12 +97,19 @@ async def streams(**kwargs):
 acp.stdio_streams_largebuf = streams
 asyncio.run(acp.run_acp_server(config))
 assert initialized == [1]
-assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == (override if override is not None else str(link))
+expected = str(root / override) if cache == "relative" else (override if override is not None else str(link))
+assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == expected
 from box_agent.tools.runtime import SkillRuntimeContext
 from box_agent.tools.skill_execution_env import build_skill_execution_env
 from box_agent.cli import _default_browsers_path
-execution_env = build_skill_execution_env(SkillRuntimeContext(runtimes={}))
-assert execution_env["PLAYWRIGHT_BROWSERS_PATH"] == (override if override is not None else str(link))
+base_env = dict(os.environ)
+if override is not None:
+    base_env["PLAYWRIGHT_BROWSERS_PATH"] = override
+workspace = root.parent / "different-session-cwd"
+workspace.mkdir()
+os.chdir(workspace)
+execution_env = build_skill_execution_env(SkillRuntimeContext(runtimes={}), base_env=base_env)
+assert execution_env["PLAYWRIGHT_BROWSERS_PATH"] == expected
 assert _default_browsers_path() == link
 assert marker.read_text() == "browser-cache-fixture"
 if cache == "missing":

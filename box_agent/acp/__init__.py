@@ -258,7 +258,7 @@ from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryErr
 
 from .debug_logger import acp_logger as log
 
-from box_agent.user_paths import box_agent_home, configured_box_agent_home, state_path
+from box_agent.user_paths import browser_cache_path, configured_box_agent_home, state_path
 
 # Keep stdlib logger for backward compat with existing log calls
 logger = logging.getLogger(__name__)
@@ -6274,8 +6274,7 @@ async def run_acp_server(config: Config | None = None) -> None:
     # In particular, a Windows junction to another drive must not prevent ACP
     # startup. Keep host overrides (including Playwright's special "0" value)
     # and leave browser availability/preparation to the browser tooling.
-    if "PLAYWRIGHT_BROWSERS_PATH" not in _os.environ:
-        _os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(box_agent_home() / "browsers")
+    _os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_cache_path()
 
     # ── Stdout guard ────────────────────────────────────────
     # ACP protocol owns stdout exclusively.  Redirect sys.stdout to

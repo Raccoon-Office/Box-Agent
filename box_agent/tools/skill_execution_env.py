@@ -12,7 +12,7 @@ from pathlib import Path
 from box_agent.tools.runtime import SkillRuntimeContext
 from box_agent.user_paths import (
     PROFILE_ENV,
-    box_agent_home,
+    browser_cache_path,
     configured_box_agent_home,
     state_path,
 )
@@ -119,10 +119,8 @@ def build_skill_execution_env(
         is_windows=is_windows,
     )
 
-    browser_root = Path(
-        inherited.get("PLAYWRIGHT_BROWSERS_PATH")
-        or box_agent_home(home_dir, env=inherited) / "browsers"
-    )
+    browser_cache = browser_cache_path(env=inherited, home_dir=home_dir)
+    browser_root = Path(browser_cache)
     # Browser binaries may be host-managed or relocated through a directory
     # junction. They do not carry the profile's configuration/session authority.
     browser_executable = _resolve_skill_browser_executable(
@@ -141,7 +139,7 @@ def build_skill_execution_env(
         "NPM_CONFIG_CACHE": str(skill_tools_root / "npm-cache"),
         "PYTHONUSERBASE": str(python_user_base),
         "PYTHONPATH": separator.join(python_path),
-        "PLAYWRIGHT_BROWSERS_PATH": str(browser_root),
+        "PLAYWRIGHT_BROWSERS_PATH": browser_cache,
     }
     if is_windows:
         # BashTool decodes subprocess streams as UTF-8. Force Python-based

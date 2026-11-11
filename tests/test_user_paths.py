@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from box_agent.config import AgentConfig, Config
-from box_agent.user_paths import box_agent_home, configured_box_agent_home, state_path
+from box_agent.user_paths import browser_cache_path, box_agent_home, configured_box_agent_home, state_path
 
 
 def write_config(path: Path, **extra) -> None:
@@ -40,6 +40,26 @@ def test_explicit_root_is_authoritative_without_creating_directories(tmp_path, m
     assert not root.exists()
     assert AgentConfig().memory_dir == str(root / "memory")
     assert AgentConfig().workspace_dir == str(root / "workspace")
+
+
+@pytest.mark.parametrize("override", [None, "browser-cache", "../external-cache", "0"])
+def test_profile_browser_cache_is_stable_across_working_directories(tmp_path, monkeypatch, override):
+    root = tmp_path / "profile"
+    env = {"BOX_AGENT_HOME": str(root)}
+    if override is not None:
+        env["PLAYWRIGHT_BROWSERS_PATH"] = override
+    expected = "0" if override == "0" else str(
+        (root / (override if override is not None else "browsers")).resolve()
+    )
+    assert browser_cache_path(env=env) == expected
+    monkeypatch.chdir(tmp_path)
+    assert browser_cache_path(env=env) == expected
+    assert not root.exists()
+
+
+def test_browser_cache_without_profile_preserves_host_relative_override(tmp_path):
+    assert browser_cache_path(env={"PLAYWRIGHT_BROWSERS_PATH": "browser-cache"}) == "browser-cache"
+    assert browser_cache_path(env={}, home_dir=tmp_path) == str(tmp_path / ".box-agent/browsers")
 
 
 @pytest.mark.parametrize("value", ["", " ", "relative/profile", "~/profile", "C:relative", "/"])
