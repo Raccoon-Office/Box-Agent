@@ -159,7 +159,7 @@ class RequestUserDecisionTool(Tool):
         risk_level: str | None = None,
         reversible: bool | None = None,
         preserves_user_intent: bool | None = None,
-        allow_freeform: bool = False,
+        allow_freeform: bool = True,
         reason: str = "",
     ) -> ToolResult:
         normalized_question = str(question).strip()

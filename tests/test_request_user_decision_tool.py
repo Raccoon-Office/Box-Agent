@@ -38,6 +38,7 @@ async def test_manual_decision_waits_for_user_without_default_or_timeout():
     result = await tool.invoke(arguments)
 
     assert result.success is True
+    assert result.raw_output["allowFreeform"] is True
     assert "defaultOptionId" not in result.raw_output
     assert result.raw_output["autoSubmit"] == {
         "allowed": False,
@@ -72,7 +73,7 @@ async def test_request_user_decision_returns_public_structured_payload():
         "decisionKind": "delivery_scope",
         "options": OPTIONS,
         "defaultOptionId": "keep_full",
-        "allowFreeform": False,
+        "allowFreeform": True,
         "reason": "两个选项会改变最终交付范围。",
         "autoSubmit": {
             "allowed": True,
@@ -189,3 +190,17 @@ async def test_timeout_requires_default_but_no_timeout_remains_manual():
     assert "default_option_id is required" in (missing_default.error or "")
     assert missing_timeout.success is True
     assert missing_timeout.raw_output["autoSubmit"]["allowed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow_freeform", [True, False])
+async def test_explicit_freeform_preference_is_preserved(allow_freeform):
+    result = await RequestUserDecisionTool().invoke({
+        "question": "请选择交付范围。",
+        "decision_kind": "delivery_scope",
+        "options": OPTIONS,
+        "allow_freeform": allow_freeform,
+    })
+
+    assert result.success is True
+    assert result.raw_output["allowFreeform"] is allow_freeform

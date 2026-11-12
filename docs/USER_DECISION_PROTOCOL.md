@@ -11,6 +11,8 @@ implementation and recovery details itself. Missing facts use
 `request_user_input`; post-turn input suggestions remain
 `follow_up_suggestions`.
 
+The optional `allow_freeform` argument defaults to `true`. When omitted, the request carries `allowFreeform: true`, allowing the host to show a custom text input. Explicit `false` still disables freeform responses. This default applies only to new requests; persisted requests are unchanged.
+
 ## Request event
 
 The successful tool result is sent through `update_tool_call.rawOutput`:
@@ -27,6 +29,7 @@ The successful tool result is sent through `update_tool_call.rawOutput`:
     { "id": "keep_full", "label": "Keep the full version" },
     { "id": "prototype", "label": "Deliver a prototype first" }
   ],
+  "allowFreeform": true,
   "defaultOptionId": "keep_full",
   "autoSubmit": {
     "allowed": true,
