@@ -59,15 +59,21 @@ class CapabilityPolicy(BaseModel):
     allowed_directories: tuple[str, ...] = ()
     openclaw_import_enabled: bool = True
     session_workspace_root: str = ""
+    # Internal source identity, derived from tools.skills_dir, never a host permission override.
+    builtin_skills_dir: Path | None = None
 
     @classmethod
     def from_config(cls, config: Config) -> CapabilityPolicy:
+        from box_agent.skill_paths import managed_builtin_skills_dir
+
         o = config.officev3
+        builtin = managed_builtin_skills_dir(config)
         return cls(
             filesystem_scope=o.permissions.filesystem.scope,
             allowed_directories=tuple(o.permissions.filesystem.allowed_directories),
             openclaw_import_enabled=o.permissions.memory.openclaw_import,
             session_workspace_root=o.paths.session_workspace_root,
+            builtin_skills_dir=builtin,
         )
 
     def with_overrides(self, overrides: dict) -> CapabilityPolicy:
@@ -181,16 +187,17 @@ class PermissionEngine:
         except (OSError, RuntimeError):
             self._box_agent_dir = None
 
-        # Built-in skills are trusted, engine-owned code. Packaged runtimes
-        # place them beside this module (for example under an application
-        # bundle), which is intentionally outside the user's filesystem
+        # Built-in skills are trusted code. Managed hosts provide their own
+        # read-only source; legacy hosts retain the package directory.
+        # Either location may be outside the user's filesystem
         # scope. Allow Bash to read that exact tree so bundled skill scripts
         # can run, while keeping writes and unrelated application paths
         # blocked. Resolving both the root and requested path preserves the
         # existing symlink-escape protection.
         try:
             self._builtin_skills_dir: Path | None = (
-                Path(__file__).resolve().parent.parent / "skills"
+                Path(policy.builtin_skills_dir) if policy.builtin_skills_dir
+                else Path(__file__).resolve().parent.parent / "skills"
             ).resolve()
         except (OSError, RuntimeError):
             self._builtin_skills_dir = None

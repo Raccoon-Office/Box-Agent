@@ -168,6 +168,7 @@ class ReadTool(Tool):
         allow_full_access: bool = True,
         permission_engine: PermissionEngine | None = None,
         relative_root_dir: str | None = None,
+        builtin_skills_dir: Path | None = None,
     ):
         """Initialize ReadTool with workspace directory.
 
@@ -183,6 +184,7 @@ class ReadTool(Tool):
         )
         self.allow_full_access = allow_full_access
         self._perm = permission_engine
+        self._builtin_skills_dir = builtin_skills_dir
 
     def _resolve_file_path(self, path: str) -> Path:
         file_path = _resolve_from_active_root(

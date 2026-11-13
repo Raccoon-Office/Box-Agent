@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, List, Mapping, Optional
 from uuid import uuid4
 
 from box_agent.config import Config, ToolLimitsConfig
+from box_agent.skill_paths import managed_builtin_skills_dir, resolve_builtin_skills_dir
 from box_agent.llm.capabilities import image_input_support, model_candidate_has_tag
 from box_agent.llm.model_routing import ModelRoutingError, resolve_model_client
 from box_agent.llm.task_budgets import LONG_TASK_MAX_OUTPUT_TOKENS
@@ -402,33 +403,7 @@ async def initialize_base_tools(
     if config.tools.enable_skills:
         _out(f"{Colors.BRIGHT_CYAN}Loading Claude Skills...{Colors.RESET}")
         try:
-            # Resolve builtin skills directory with priority search
-            skills_path = Path(config.tools.skills_dir).expanduser()
-            if skills_path.is_absolute():
-                builtin_dir = skills_path
-            else:
-                # Search in priority order:
-                # 1. Current directory (dev mode: ./skills or ./box_agent/skills)
-                # 2. Package directory (installed: site-packages/box_agent/skills)
-                search_paths = [
-                    skills_path,  # ./skills for backward compatibility
-                    Path("box_agent") / skills_path,  # ./box_agent/skills
-                    Config.get_package_dir() / skills_path,  # site-packages/box_agent/skills
-                ]
-                if configured_box_agent_home() is not None:
-                    # Explicit profiles never auto-discover a cwd's legacy skills directory.
-                    search_paths = [Config.get_package_dir() / skills_path]
-
-                builtin_dir = search_paths[0] if configured_box_agent_home() is not None else skills_path
-                for path in search_paths:
-                    if path.exists():
-                        builtin_dir = path.resolve()
-                        break
-
-            if configured_box_agent_home() is not None:
-                resolved_builtin = builtin_dir.resolve()
-                if not resolved_builtin.is_relative_to(Config.get_package_dir().resolve()):
-                    builtin_dir = state_path("skills", resolved_builtin)
+            builtin_dir = resolve_builtin_skills_dir(config)
 
             # User skills directory: ~/.box-agent/skills/
             # Auto-created so officev3 can drop new skills in and we pick them up on mtime change.
@@ -731,7 +706,15 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
     relative_root = workspace_dir
-    tools.append(PublishArtifactTool(workspace_dir, permission_engine=permission_engine))
+    # A managed source adds protection only; existing user directories are never moved.
+    builtin_skills_dir = managed_builtin_skills_dir(config)
+    skill_resource = (
+        skill_loader.get_trusted_skill_resource if builtin_skills_dir is not None
+        else skill_loader.get_bound_expert_resource
+    ) if skill_loader is not None else None
+    tools.append(PublishArtifactTool(
+        workspace_dir, permission_engine=permission_engine, builtin_skills_dir=builtin_skills_dir,
+    ))
 
     # Relative tool paths always use the stable session cwd.
     runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
@@ -755,11 +738,12 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             sandbox_venv_path=sandbox_venv_path,
             permission_engine=permission_engine,
             runtime_env=runtime_env,
+            builtin_skills_dir=builtin_skills_dir,
             pptx_sync_script_provider=(
-                lambda: skill_loader.get_bound_expert_resource(
+                lambda: skill_resource(
                     "pptx", "scripts/sync_image_manifest_status.js"
                 )
-            ) if skill_loader is not None else None,
+            ) if skill_resource is not None else None,
             process_owner_id=process_owner_id,
             bypass_dangerous_command_approval=bypass_dangerous_command_approval,
             default_timeout_seconds=config.tools.bash_default_timeout_seconds,
@@ -780,6 +764,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                 workspace_dir=str(workspace_dir),
                 allow_full_access=allow_full_access,
                 permission_engine=permission_engine,
+                builtin_skills_dir=builtin_skills_dir,
                 relative_root_dir=str(relative_root),
             ),
             ReadEmailTool(
@@ -816,18 +801,21 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                 workspace_dir=str(workspace_dir),
                 allow_full_access=allow_full_access,
                 permission_engine=permission_engine,
+                builtin_skills_dir=builtin_skills_dir,
                 relative_root_dir=str(relative_root),
             ),
             AppendTool(
                 workspace_dir=str(workspace_dir),
                 allow_full_access=allow_full_access,
                 permission_engine=permission_engine,
+                builtin_skills_dir=builtin_skills_dir,
                 relative_root_dir=str(relative_root),
             ),
             EditTool(
                 workspace_dir=str(workspace_dir),
                 allow_full_access=allow_full_access,
                 permission_engine=permission_engine,
+                builtin_skills_dir=builtin_skills_dir,
                 relative_root_dir=str(relative_root),
             ),
         ]

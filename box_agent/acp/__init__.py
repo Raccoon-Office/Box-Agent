@@ -243,6 +243,7 @@ from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.retry import StreamInterrupted
 from box_agent.schema import LLMProvider, Message
 from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
+from box_agent.skill_paths import managed_builtin_skills_dir
 from box_agent.tools.mcp_loader import get_mcp_connector_server_names, get_mcp_status
 from box_agent.tools.runtime import (
     SkillRuntimeContext,
@@ -2080,6 +2081,7 @@ class BoxACPAgent:
                 # Use a restrictive fallback engine (session_workspace scope, no openclaw)
                 fallback_policy = CapabilityPolicy(
                     session_workspace_root=str(workspace),
+                    builtin_skills_dir=managed_builtin_skills_dir(self._config),
                 )
                 effective_policy = fallback_policy
                 perm_engine = build_permission_engine(

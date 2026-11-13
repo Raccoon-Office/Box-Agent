@@ -33,7 +33,7 @@ def is_model_instruction_source_path(value: Any) -> bool:
         return False
     path = Path(value)
     parts = tuple(part.casefold() for part in path.parts)
-    if "skills" not in parts:
+    if not any(part in {"skills", "builtin-skills"} for part in parts):
         return False
     return (
         path.name.casefold() == "skill.md"

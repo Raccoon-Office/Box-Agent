@@ -83,6 +83,21 @@ def test_shell_guard_keeps_bundled_read_and_execute_available(tmp_path, bundled,
     assert safety.builtin_skill_command_write_error(command.format(target=target), tmp_path) is None
 
 
+@pytest.mark.parametrize("operation", ["mv", "cp -r", "cp -a"])
+def test_managed_guard_allows_delivery_to_parent_container_but_blocks_source_move(tmp_path, operation):
+    home = tmp_path / "home"
+    managed = home / ".box-agent" / "builtin-skills" / "service"
+    managed.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes"
+    source.mkdir()
+    command = f"{operation} '{source}' '{home}'"
+    assert safety.builtin_skill_command_write_error(command, workspace, managed) is None
+    move_managed_parent = f"mv '{managed.parent}' '{workspace}'"
+    assert safety.builtin_skill_command_write_error(move_managed_parent, workspace, managed)
+
+
 @pytest.mark.asyncio
 async def test_bash_blocks_bundled_mutation_but_writes_workspace_output(tmp_path, bundled):
     from box_agent.tools.bash_tool import BashTool

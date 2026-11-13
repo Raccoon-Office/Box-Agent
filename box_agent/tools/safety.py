@@ -25,10 +25,20 @@ TRASH_DIR = state_path('trash')
 BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 
-def builtin_skill_write_error(path: Path, skills_root: Path | None = None) -> str | None:
-    """Bundled skills are executable runtime resources, never task output."""
-    root = skills_root or BUILTIN_SKILLS_ROOT
-    if path.resolve().is_relative_to(root.resolve()):
+def builtin_skill_write_error(
+    path: Path, skills_root: Path | None = None, *, include_ancestors: bool = False,
+) -> str | None:
+    """Packaged and host-managed Skills are runtime resources, never task output."""
+    resolved = path.resolve()
+    bundled_root = BUILTIN_SKILLS_ROOT.resolve()
+    managed_root = skills_root.resolve() if skills_root is not None else None
+    contains_managed_source = (
+        include_ancestors and managed_root is not None
+        and managed_root != bundled_root and managed_root.is_relative_to(resolved)
+    )
+    if (resolved.is_relative_to(bundled_root)
+            or (managed_root is not None and resolved.is_relative_to(managed_root))
+            or contains_managed_source):
         return (
             "BUILTIN_SKILL_READ_ONLY: bundled Skill files cannot be changed by task tools. "
             "Write presentation artifacts in the task workspace. If a bundled script fails, "
@@ -37,7 +47,9 @@ def builtin_skill_write_error(path: Path, skills_root: Path | None = None) -> st
     return None
 
 
-def builtin_skill_command_write_error(command: str, workspace: Path | None) -> str | None:
+def builtin_skill_command_write_error(
+    command: str, workspace: Path | None, skills_root: Path | None = None,
+) -> str | None:
     """Reject direct shell/inline-code mutations of bundled Skill resources.
 
     This is a command guard, not an OS sandbox for arbitrary external programs.
@@ -53,9 +65,60 @@ def builtin_skill_command_write_error(command: str, workspace: Path | None) -> s
             cwd = candidate if candidate.is_absolute() else cwd / candidate
             continue
         targets: tuple[str, ...] = ()
-        if name in {"cp", "install"} and args:
+        # Removing/moving a parent also changes its protected descendants.
+        # Keep ordinary writes/copies outside the managed tree available.
+        recursive = any(arg.lower() in {"--recursive", "--archive", "-recurse"} or
+                        (arg.startswith("-") and not arg.startswith("--")
+                         and any(flag in arg[1:] for flag in "rRa"))
+                        for arg in args)
+        ancestors = name in {"mv", "rm", "rmdir", "move-item", "remove-item"} or (
+            name in {"cp", "copy-item"} and recursive
+        )
+        if name in {"cp", "copy-item", "mv", "move-item"}:
+            # A destination directory is a container, not the path being replaced.
+            destination_index = next((i + 1 for i, arg in enumerate(args[:-1])
+                                      if arg.lower() in {"-t", "--target-directory", "-destination"}), None)
+            operands = [arg for i, arg in enumerate(args)
+                        if not arg.startswith("-") and i != destination_index]
+            inline_destination = next((arg.split("=", 1)[1] for arg in args
+                                       if arg.startswith("--target-directory=")), None)
+            if inline_destination is not None:
+                destination_word, sources = inline_destination, operands
+            elif destination_index is not None:
+                destination_word = args[destination_index]
+                sources = operands
+            elif len(operands) >= 2:
+                sources, destination_word = operands[:-1], operands[-1]
+            else:
+                continue
+            destination = Path(destination_word).expanduser()
+            if not destination.is_absolute():
+                destination = cwd / destination
+            container = destination.is_dir() and not any(
+                arg in {"-T", "--no-target-directory"} for arg in args
+            )
+            for source in sources:
+                source_path = Path(source).expanduser()
+                if not source_path.is_absolute():
+                    source_path = cwd / source_path
+                if name in {"mv", "move-item"}:
+                    if error := builtin_skill_write_error(source_path, skills_root, include_ancestors=True):
+                        return error
+                copy_contents = name in {"cp", "copy-item"} and (
+                    source.rstrip("/\\") in {".", ".."} or source.endswith(("/.", "\\."))
+                    or (sys.platform == "darwin" and recursive and source.endswith("/"))
+                )
+                if copy_contents and container and source_path.is_dir():
+                    mapped_targets = (destination / child.name for child in source_path.iterdir())
+                else:
+                    mapped_targets = (destination / source_path.name if container else destination,)
+                for target in mapped_targets:
+                    if error := builtin_skill_write_error(target, skills_root, include_ancestors=ancestors):
+                        return error
+            continue
+        elif name == "install" and args:
             targets = args[-1:]
-        elif name in {"mv", "rm", "rmdir", "tee", "chmod", "chown", "touch"}:
+        elif name in {"rm", "rmdir", "remove-item", "tee", "chmod", "chown", "touch"}:
             targets = args
         elif name == "sed" and any(arg.startswith("-i") for arg in args):
             targets = args
@@ -63,6 +126,7 @@ def builtin_skill_command_write_error(command: str, workspace: Path | None) -> s
             # Quoted paths inside Python/JS are not shell words of their own.
             # Inspect path arguments, not arbitrary quoted file contents.
             code = " ".join(args)
+            ancestors = True  # Inline recursive removals must not evade the parent check.
             literal = r"['\"]([^'\"\n]+)['\"]"
             targets = tuple(
                 match
@@ -77,12 +141,14 @@ def builtin_skill_command_write_error(command: str, workspace: Path | None) -> s
             if target.startswith("-"):
                 continue
             path = Path(target).expanduser()
-            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
+            if error := builtin_skill_write_error(
+                path if path.is_absolute() else cwd / path, skills_root, include_ancestors=ancestors,
+            ):
                 return error
     for redirect in inspection.redirections:
         if ">" in redirect.operator and not redirect.target.isdigit():
             path = Path(redirect.target).expanduser()
-            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
+            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path, skills_root):
                 return error
     return None
 

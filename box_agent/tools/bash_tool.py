@@ -978,6 +978,7 @@ class BashTool(Tool):
         ),
         max_timeout_seconds: int = _DEFAULT_TOOLS_CONFIG.bash_max_timeout_seconds,
         pptx_sync_script_provider: Callable[[], Path | None] | None = None,
+        builtin_skills_dir: Path | None = None,
     ):
         """Initialize BashTool with OS-specific shell detection.
 
@@ -1006,6 +1007,7 @@ class BashTool(Tool):
                 "max_timeout_seconds cannot be lower than default_timeout_seconds"
             )
         self._pptx_sync_script_provider = pptx_sync_script_provider
+        self._builtin_skills_dir = builtin_skills_dir
         self.default_timeout_seconds = default_timeout_seconds
         self.max_timeout_seconds = max_timeout_seconds
         self.is_windows = platform.system() == "Windows"
@@ -1674,7 +1676,9 @@ Examples:
                     exit_code=1,
                 )
             # --- Safety checks ---
-            if source_error := builtin_skill_command_write_error(command, self.workspace_dir):
+            if source_error := builtin_skill_command_write_error(
+                command, self.workspace_dir, self._builtin_skills_dir,
+            ):
                 return BashOutputResult(
                     success=False, error=source_error, stdout="", stderr=source_error,
                     exit_code=1,
@@ -1699,6 +1703,7 @@ Examples:
                 workspace_dir=self.workspace_dir,
                 runtime_env=self._subprocess_env,
                 expert_sync_script=expert_sync_script,
+                builtin_skills_dir=self._builtin_skills_dir,
                 shell_style=(
                     "powershell"
                     if self.is_windows and self._bundled_win_bash is None

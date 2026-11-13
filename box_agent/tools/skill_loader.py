@@ -618,6 +618,33 @@ class SkillLoader:
                 continue
         return None
 
+    def get_trusted_skill_resource(self, name: str, relative_path: str) -> Optional[Path]:
+        """Resolve the current official or explicitly bound expert resource.
+
+        Resolve on every use so a host manifest update cannot leave a trusted
+        command pointing at an earlier snapshot. User Skills never grant this trust.
+        """
+        self.maybe_reload()
+        skill = self.get_skill(name)
+        if skill is None or skill.broken or skill.skill_path is None:
+            return None
+        if skill.source == "expert":
+            return self.get_bound_expert_resource(name, relative_path)
+        if skill.source != "builtin":
+            return None
+        for entry in self._sources:
+            if entry.source != "builtin":
+                continue
+            try:
+                root = skill.skill_path.parent.resolve(strict=True)
+                resource = (root / relative_path).resolve(strict=True)
+                if (root.is_relative_to(entry.directory.resolve())
+                        and resource.is_relative_to(root) and resource.is_file()):
+                    return resource
+            except (OSError, RuntimeError):
+                continue
+        return None
+
     def with_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
