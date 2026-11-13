@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Iterable
 
 from .model_history import is_model_instruction_source_path
@@ -104,9 +105,10 @@ def classify_read_resource(
     path: str,
     *,
     requested_path: str | None = None,
+    builtin_skills_dir: Path | None = None,
 ) -> ResourceClass:
     """Classify a successfully read path conservatively."""
-    if is_model_instruction_source_path(path) or is_model_instruction_source_path(
+    if is_model_instruction_source_path(path, builtin_skills_dir=builtin_skills_dir) or is_model_instruction_source_path(
         requested_path
     ):
         return ResourceClass.INSTRUCTION_PINNED

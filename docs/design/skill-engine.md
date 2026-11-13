@@ -60,6 +60,41 @@ flowchart LR
 
 读取时共用 Loader 的来源优先级、全局禁用、损坏、平台与 required 依赖检查。循环、缺失或不可用的 required 依赖返回诊断，不先交付 parent 正文。主会话返回 required/related 名称，由模型继续读取；不会递归塞入全部依赖正文。脚本、模板及其他资源继续使用原有 `read_file`、执行工具和权限机制。
 
+### 2.1 Desktop-managed builtin Skill sources
+
+桌面宿主通过 Agent 子进程环境 `BOX_AGENT_BUILTIN_SKILLS_DIR` 指定生效的内置
+Skill 根目录。`skill_paths.resolve_builtin_skills_dir` 是共享解析入口：未设置时
+继续使用 `tools.skills_dir` 和既有开发/包路径查找；设置时要求非空，且在展开
+`~` 后为绝对路径，不会因非法值静默回退。启用 `BOX_AGENT_HOME` 时，包目录外的
+来源还必须在该独立 profile 内；目录或符号链接解析后逃出 profile 会被拒绝。
+宿主不要为这个过程改写共享 `config.yaml`，也不要搬迁或删除旧用户 Skill 目录。
+
+目录中的普通 `_manifest.json` 文件必须显式带 `"desktopManaged": true`，才会
+通过 `managed_builtin_skills_dir` 启用额外只读保护；`skills` 列表及路径字段继续
+遵循 Loader 的 manifest 格式。关闭 Skills、缺失/损坏/符号链接 manifest 或
+用户 Skill 目录本身及其祖先不启用这层保护。未标记的自定义来源保留旧行为，
+随包 Skill 的原有保护仍然生效。这个标记是宿主管理约定，不是来源认证机制。
+
+共享 Tool 权限与写入检查保护受管来源，`mv`/`Move-Item` 同时校验源与目标，
+两侧的相对路径都按前序 `cd`/`Set-Location` 后可能的工作目录解析，即使目标
+是绝对路径也不能跳过源路径检查。Bash 检查是有界命令检查，不是任意程序的
+操作系统沙箱。受管来源中的 `SKILL.md`、`references` 和 `workflows` 读取正文
+按解析后的真实根目录标为 `instruction_pinned`，不要求目录名含 `skills`；普通
+脚本和来源外文件不因此固定。旧来源的路径识别规则保留。
+
+受管宿主的 PPT 图片状态同步脚本通过当前 Loader 的官方或显式 expert 绑定
+查找，每次使用前刷新并校验资源位于 Skill 根内；用户来源不能获得这种信任。
+旧宿主保留随包脚本路径。
+
+配套 runtime 必须声明 `manifest.json` 的 `builtin_skills_env_version: 1`。
+`raccoon-lab` 负责下载、校验、快照发布和向子进程传入目录；此处不实现后台
+同步。发布时需分别验证源码、runtime 构建/安装、进程重启和真实新任务，Python
+sdist/wheel 或单元测试不能证明已安装客户端生效。回滚需恢复旧 runtime，并让
+配套宿主停止依赖新能力、恢复旧来源选择；已有配置和用户文件无需迁移。
+
+回归入口：`tests/test_builtin_skill_read_only.py`、`tests/test_read_file_bytes.py`、
+`tests/test_tools.py`、`tests/test_skill_loader.py` 和 `tests/test_isolated_profile.py`。
+
 ## 3. 正文进入普通上下文
 
 真实 `get_skill` 的正文保留在对应的 tool 消息中，`ToolResult.model_context` 明确提供模型应看到的有界正文或页面。它不再经由 `skill_result_adapter.py` 升为 system；不再使用的适配器已删除。通用结果存储不能把这份已经分配预算的 Skill 正文再次替换成短预览。

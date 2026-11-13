@@ -1022,6 +1022,29 @@ def test_workspace_tools_register_search_files(tmp_path):
     assert "report_execution_result" in tool_names
 
 
+async def test_workspace_reader_uses_the_env_managed_source_for_instruction_retention(tmp_path, monkeypatch):
+    root = tmp_path / "downloaded-methods"
+    root.mkdir()
+    (root / "_manifest.json").write_text(json.dumps({"desktopManaged": True, "skills": []}))
+    target = root / "method" / "SKILL.md"
+    target.parent.mkdir()
+    target.write_text("method instructions")
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("BOX_AGENT_BUILTIN_SKILLS_DIR", str(root))
+    config = Config(
+        llm=LLMConfig(api_key="test"), agent=AgentConfig(),
+        tools=ToolsConfig(enable_skills=True, skills_dir="legacy-skills", enable_bash=False,
+                          enable_todo=False, enable_plan=False, enable_sub_agent=False, enable_mcp=False),
+    )
+    tools = []
+    add_workspace_tools(tools, config, tmp_path / "workspace", output=lambda *_: None)
+    reader = next(tool for tool in tools if tool.name == "read_file")
+    result = await reader.execute(str(target))
+    assert result.success, result.error
+    assert result.raw_output["context_resource"]["resource_class"] == "instruction_pinned"
+    assert config.tools.skills_dir == "legacy-skills"
+
+
 def test_code_workspace_registers_ripgrep_tools_without_removing_search_files(
     tmp_path,
     monkeypatch,

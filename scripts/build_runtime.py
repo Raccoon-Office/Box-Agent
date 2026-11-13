@@ -432,6 +432,7 @@ def build_runtime_manifest(
         "managed_mcp_config_version": MANAGED_MCP_CONFIG_VERSION,
         "connector_skill_sources_version": 1,
         "mcp_multi_source_version": 1,
+        "builtin_skills_env_version": 1,
         "external_python_sandbox": external_python_sandbox,
         "bundled_stable_runtimes": list(bundled_components),
         "mcp_servers": {

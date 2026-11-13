@@ -131,3 +131,9 @@ def test_requested_skill_workflow_path_stays_pinned_after_resolution() -> None:
         )
         is ResourceClass.INSTRUCTION_PINNED
     )
+
+
+def test_managed_builtin_skill_instructions_stay_pinned() -> None:
+    root = "/profile/builtin-skills/service/snapshots/version/pptx"
+    for relative in ("SKILL.md", "references/contract.md", "workflows/export.md"):
+        assert classify_read_resource(f"{root}/{relative}") is ResourceClass.INSTRUCTION_PINNED

@@ -42,6 +42,7 @@ class StagedFileWriteTool(Tool):
         allow_full_access: bool = True,
         permission_engine: PermissionEngine | None = None,
         relative_root_dir: str | None = None,
+        builtin_skills_dir: Path | None = None,
     ) -> None:
         self.workspace_dir = Path(workspace_dir).absolute()
         self.relative_root_dir = (
@@ -49,6 +50,7 @@ class StagedFileWriteTool(Tool):
         )
         self.allow_full_access = allow_full_access
         self._perm = permission_engine
+        self._builtin_skills_dir = builtin_skills_dir
         self._writes: dict[str, _StagedWrite] = {}
         self._staging_dir = self.relative_root_dir / ".box-agent-staging"
         self._cleanup_stale_files()
@@ -158,7 +160,7 @@ class StagedFileWriteTool(Tool):
         )
 
     def _permission_error(self, path: Path, capability: str) -> ToolResult | None:
-        if capability == "filesystem.write" and (error := builtin_skill_write_error(path)):
+        if capability == "filesystem.write" and (error := builtin_skill_write_error(path, self._builtin_skills_dir)):
             return ToolResult(success=False, error=error)
         if self._perm:
             decision = self._perm.check(

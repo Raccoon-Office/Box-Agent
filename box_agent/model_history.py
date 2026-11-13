@@ -20,7 +20,7 @@ def is_model_history_placeholder(value: Any) -> bool:
     )
 
 
-def is_model_instruction_source_path(value: Any) -> bool:
+def is_model_instruction_source_path(value: Any, *, builtin_skills_dir: Path | None = None) -> bool:
     """Return true for skill instructions that must survive the next LLM turn.
 
     Generated artifacts are intentionally compacted, but a skill's ``SKILL.md``
@@ -33,7 +33,16 @@ def is_model_instruction_source_path(value: Any) -> bool:
         return False
     path = Path(value)
     parts = tuple(part.casefold() for part in path.parts)
-    if "skills" not in parts:
+    managed = False
+    if builtin_skills_dir is not None:
+        try:
+            relative = path.resolve().relative_to(builtin_skills_dir.resolve())
+        except (OSError, RuntimeError, ValueError):
+            pass
+        else:
+            parts = tuple(part.casefold() for part in relative.parts)
+            managed = True
+    if not managed and not any(part in {"skills", "builtin-skills"} for part in parts):
         return False
     return (
         path.name.casefold() == "skill.md"

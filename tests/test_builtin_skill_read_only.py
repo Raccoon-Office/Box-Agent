@@ -182,6 +182,87 @@ async def test_bash_literal_wildcard_outputs_remain_writable(tmp_path, bundled, 
     assert target.read_text() == "original"
 
 
+@pytest.mark.parametrize("operation", ["mv", "cp -r", "cp -a"])
+def test_managed_guard_allows_delivery_to_parent_container_but_blocks_source_move(tmp_path, operation):
+    home = tmp_path / "home"
+    managed = home / ".box-agent" / "builtin-skills" / "service"
+    managed.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes"
+    source.mkdir()
+    command = f"{operation} '{source}' '{home}'"
+    assert safety.builtin_skill_command_write_error(command, workspace, managed) is None
+    move_managed_parent = f"mv '{managed.parent}' '{workspace}'"
+    assert safety.builtin_skill_command_write_error(move_managed_parent, workspace, managed)
+
+
+@pytest.mark.parametrize("posix", [True, False], ids=["posix", "powershell"])
+@pytest.mark.parametrize("absolute_destination", [True, False], ids=["absolute-target", "relative-target"])
+@pytest.mark.parametrize("source_form", ["literal", "absolute", "glob", "known-variable"])
+def test_managed_move_checks_sources_after_cd(tmp_path, monkeypatch, posix, absolute_destination, source_form):
+    from box_agent.tools.shell_inspection import inspect_shell_command
+
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    target = managed / "SKILL.md"
+    target.write_text("original")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    destination = str(workspace / "moved.md") if absolute_destination else "../workspace/moved.md"
+    source = {
+        "literal": "SKILL.md", "absolute": f'"{target}"',
+        "glob": "*.md", "known-variable": '"$SOURCE"',
+    }[source_form]
+    command = (
+        f'cd ../managed && mv {source} "{destination}"' if posix else
+        f'Set-Location ../managed; Move-Item -Path {source} -Destination "{destination}"'
+    )
+    monkeypatch.setattr(
+        safety, "inspect_shell_command",
+        lambda command, **kwargs: inspect_shell_command(command, posix=posix, **kwargs),
+    )
+    error = safety.builtin_skill_command_write_error(command, workspace, managed, environment={"SOURCE": "SKILL.md"})
+    assert error is not None
+    assert "BUILTIN_SKILL_READ_ONLY" in error
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX move and variable syntax")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("absolute_destination", [True, False], ids=["absolute-target", "relative-target"])
+@pytest.mark.parametrize("source_form", ["literal", "glob", "variable"])
+async def test_bash_managed_move_after_cd_preserves_source(tmp_path, absolute_destination, source_form):
+    from box_agent.tools.bash_tool import BashTool
+
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    target = managed / "SKILL.md"
+    target.write_text("original")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = workspace / "moved.md"
+    destination = str(output) if absolute_destination else "../workspace/moved.md"
+    source = {"literal": "SKILL.md", "glob": "*.md", "variable": '"$SOURCE"'}[source_form]
+    engine = PermissionEngine(CapabilityPolicy(filesystem_scope="full_access", builtin_skills_dir=managed), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine, builtin_skills_dir=managed)
+    command = f'SOURCE=SKILL.md; cd ../managed && mv {source} "{destination}"'
+    denied = await tool.execute(command=command)
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert denied.permission_request is None
+    assert target.read_text() == "original"
+    assert not output.exists()
+
+    # The same cwd change must still allow a move of ordinary workspace output.
+    ordinary = workspace / "notes.txt"
+    ordinary.write_text("notes")
+    allowed = await tool.execute(command=f'cd ../managed && mv ../workspace/notes.txt "{output}"')
+    assert allowed.success, allowed.error
+    assert output.read_text() == "notes"
+    assert not ordinary.exists()
+    assert target.read_text() == "original"
+
+
 @pytest.mark.asyncio
 async def test_bash_blocks_bundled_mutation_but_writes_workspace_output(tmp_path, bundled):
     from box_agent.tools.bash_tool import BashTool
