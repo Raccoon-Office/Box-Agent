@@ -6,7 +6,7 @@ import httpx
 from openai import AsyncOpenAI
 import pytest
 
-from box_agent.events import DoneEvent, StopReason, ToolCallResult
+from box_agent.events import DoneEvent, ErrorEvent, StopReason, ToolCallResult
 from box_agent.llm.openai_client import OpenAIClient
 from box_agent.retry import RetryConfig
 from box_agent.runtime import run_agent_loop
@@ -123,6 +123,46 @@ async def test_empty_text_with_tool_call_keeps_content_and_tool_pair(wire_client
         {"role": "tool", "content": "42", "tool_call_id": "lookup-1"},
     ]
     assert messages == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_ids", [(None, "second"), ("same", "same"), (" ", "second")])
+@pytest.mark.parametrize("recovers", [True, False])
+async def test_invalid_tool_ids_are_rejected_before_execution(wire_client, tmp_path, invalid_ids, recovers):
+    client, requests, stream_replies = wire_client
+    path = tmp_path / "answer.txt"
+    path.write_text("42", encoding="utf-8")
+
+    def reply(ids):
+        calls = []
+        for index, call_id in enumerate(ids):
+            call = {"index": index, "type": "function", "function": {
+                "name": "read_file", "arguments": json.dumps({"path": str(path)}),
+            }}
+            if call_id is not None:
+                call["id"] = call_id
+            calls.append(call)
+        return {"tool_calls": calls}, "tool_calls"
+
+    stream_replies.extend([reply(invalid_ids), reply(("recovered",) if recovers else invalid_ids)])
+    messages = [Message(role="user", content="Read answer.txt.")]
+    tool = ReadTool(workspace_dir=str(tmp_path))
+    events = [event async for event in run_agent_loop(
+        llm=client, messages=messages, tools={tool.name: tool}, max_steps=5,
+        workspace_dir=str(tmp_path), artifact_detection_enabled=False, max_truncated_tool_call_retries=1,
+    )]
+    retry_messages = requests[1]["messages"]
+    assert all(message["role"] != "tool" and not message.get("tool_calls") for message in retry_messages)
+    assert "missing or repeated tool call IDs" in retry_messages[-1]["content"]
+    results = [event.tool_call_id for event in events if isinstance(event, ToolCallResult)]
+    if recovers:
+        assert results == ["recovered"]
+        assert any(isinstance(event, DoneEvent) and event.stop_reason is StopReason.END_TURN for event in events)
+    else:
+        assert results == []
+        assert len(requests) == 2
+        assert any(isinstance(event, ErrorEvent) and event.error_code == "LLM_INVALID_TOOL_CALL_IDS"
+                   for event in events)
 
 
 @pytest.mark.asyncio

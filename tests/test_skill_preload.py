@@ -4,7 +4,7 @@ import pytest
 
 from box_agent.config import ToolLimitsConfig
 from box_agent.core import _maybe_summarize
-from box_agent.schema import LLMResponse, Message
+from box_agent.schema import FunctionCall, LLMResponse, Message, ToolCall
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.skill_preload import (
     ACTIVE_SKILLS_HEADING,
@@ -355,7 +355,9 @@ async def test_layer_two_summary_preserves_active_skills_in_system_prompt() -> N
     messages = [
         Message(role="system", content=active_system),
         Message(role="user", content="build a deck"),
-        Message(role="assistant", content="working"),
+        Message(role="assistant", content="working", tool_calls=[
+            ToolCall(id="tool-1", type="function", function=FunctionCall(name="bash", arguments={"command": "pwd"})),
+        ]),
         Message(
             role="tool",
             name="bash",

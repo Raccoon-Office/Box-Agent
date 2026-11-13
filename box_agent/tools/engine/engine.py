@@ -457,6 +457,8 @@ class DefaultToolEngine:
             hook_text_modified=hook_text_modified,
             correction_observer=context.correction_observer, executed=call.executed,
         ))
+        if outcome.correction_notice is not None:
+            summary.correction_notices.append(outcome.correction_notice)
         if (call.name == "tool_search" and call.requested_name == "tool_search"
                 and result.success and self._tool_exposure is not None
                 and getattr(self._tool_exposure, "stable_prefix", False)):

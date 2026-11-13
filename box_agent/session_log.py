@@ -787,6 +787,11 @@ class SessionLog:
             self.append("input/contract", {"schemaVersion": 1})
         if pending is not None:
             data.update(deepcopy(pending[1]))
+        if event_type == "tool/result" and "result" not in data:
+            from .kernel.tool_messages import is_interrupted_tool_reply
+
+            if is_interrupted_tool_reply(message):
+                data["error"] = {"name": "ToolOutcomeUnknownError", "code": TOOL_OUTCOME_UNKNOWN}
         context_usage = _context_usage_metadata(message)
         if context_usage is not None:
             data["contextUsage"] = context_usage

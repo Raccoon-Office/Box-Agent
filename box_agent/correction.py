@@ -24,6 +24,7 @@ SubjectKind = Literal["skill", "tool", "path_pattern", "env", "workflow"]
 CorrectionSource = Literal["auto", "explicit", "tool", "extractor", "user"]
 
 _SUBJECT_KINDS = frozenset({"skill", "tool", "path_pattern", "env", "workflow"})
+CORRECTION_NOTICE_PREFIX = "A matching tool operation succeeded after a recorded change and repeated failures."
 
 # Paths / timestamps / hex ids that make fingerprints noisy across runs.
 _ABS_PATH_RE = re.compile(
@@ -118,6 +119,21 @@ class CorrectionNotice:
     verification_id: str = ""
     error_fingerprint: str = ""
 
+    def prompt(self) -> str:
+        evidence = json.dumps({
+            "verification_id": self.verification_id,
+            "subject_kind": self.subject_kind,
+            "subject_name": self.subject_name,
+            "error_fingerprint": self.error_fingerprint,
+        }, ensure_ascii=False)
+        return (
+            f"{CORRECTION_NOTICE_PREFIX} This is candidate evidence, not proof of a general remedy. "
+            "If the repair is reusable, propose its specific steps and applicability "
+            "with memory_write_correction and this verification_id. Do not invent a fix, "
+            "store secrets, or save one-time setup repairs. The memory tool validates this "
+            "evidence before activation; no user draft approval is needed. Evidence data: " + evidence
+        )
+
 
 def normalize_error_fingerprint(raw: str) -> str:
     """Normalize noisy error strings into a stable fingerprint.
@@ -154,9 +170,23 @@ def _operation_key(subject: CorrectionSubject, arguments: dict, workspace: str =
         return os.path.normpath(path if os.path.isabs(path) else os.path.join(root, path))
 
     targets = {key: arguments[key] for key in
-               ("path", "file_path", "url", "name", "skill_name", "script", "cwd", "action")
+               ("path", "file_path", "url", "name", "skill_name", "script", "cwd", "action", "query")
                if key in arguments}
     anchors = {normalize(str(arguments[key])) for key in ("path", "file_path", "script") if arguments.get(key)}
+    if subject.name == "inspect_images":
+        paths = arguments.get("image_paths")
+        if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths):
+            return None
+        targets["image_paths"] = tuple(normalize(path) for path in paths)
+        targets["instruction"] = arguments.get("instruction", "")
+    if subject.name == "search_files":
+        pattern = arguments.get("pattern")
+        if not isinstance(pattern, str) or not pattern:
+            return None
+        targets.update(
+            pattern=pattern, target=arguments.get("target", "content"),
+            file_glob=arguments.get("file_glob"), offset=arguments.get("offset", 0),
+        )
     command = arguments.get("command")
     if isinstance(command, str):
         try:
@@ -258,10 +288,10 @@ class CorrectionCurator:
             fingerprint = normalize_error_fingerprint(error or content)
             if not fingerprint:
                 return None
-            key = (scope, subject.key(), fingerprint)
+            key = (scope, subject.key(), fingerprint, operation)
             rows = self._failures.setdefault(key, [])
             if not any(row[1] == call_id for row in rows):
-                rows.append((now, call_id, digest, operation))
+                rows.append((now, call_id, digest))
                 del rows[:-self.repeat_count]
             while len(self._failures) > 128:
                 del self._failures[next(iter(self._failures))]
@@ -269,7 +299,7 @@ class CorrectionCurator:
         eligible = [(key, rows) for key, rows in self._failures.items()
                     if key[:2] == (scope, subject.key()) and len(rows) >= self.repeat_count
                     and all(row[1] != call_id for row in rows)
-                    and all(row[3] == operation for row in rows)
+                    and key[3] == operation
                     and (rows[-1][2] != digest or any(
                         self._repairs.get((scope, path), cutoff) > rows[-1][0]
                         for path in operation[1]))]

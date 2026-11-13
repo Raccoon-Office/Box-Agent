@@ -1,5 +1,6 @@
 """Agent integration tests for durable Session Log checkpoints."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -12,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from box_agent.agent import Agent
-from box_agent.events import DoneEvent, StopReason, SummarizationEvent
+from box_agent.events import DoneEvent, StopReason, SummarizationEvent, ToolCallResult
 from box_agent.hooks import BaseHook
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall, TokenUsage
 from box_agent.session_log import (
@@ -113,6 +114,60 @@ async def test_agent_persists_request_before_provider_and_restores_messages(tmp_
         "turn/end",
     ]
     restored.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_batch_reopens_with_completed_tool_result_and_missing_reply(tmp_path):
+    from box_agent.kernel.tool_messages import validate_tool_history
+
+    class FixtureLLM:
+        model = "test-model"
+        max_output_tokens = 1024
+
+        async def generate_stream(self, **kwargs):
+            yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
+                ToolCall(id=name, type="function",
+                         function=FunctionCall(name="fixture_write", arguments={"filename": name}))
+                for name in ("completed.txt", "cancelled.txt")
+            ])
+
+    class FixtureTool(Tool):
+        name = "fixture_write"
+        description = "Write a fixture file"
+        parameters = {"type": "object", "properties": {"filename": {"type": "string"}}}
+
+        async def execute(self, filename):
+            (tmp_path / filename).write_text("written", encoding="utf-8")
+            return ToolResult(success=True, content="file written")
+
+    sessions = tmp_path / "sessions"
+    log = SessionLog.create(sessions, session_id="cancelled-batch", cwd=tmp_path)
+    agent = Agent(llm_client=FixtureLLM(), system_prompt="system", tools=[FixtureTool()],
+                  workspace_dir=str(tmp_path), session_log=log, deferred_mcp_loading_enabled=False)
+    cancel_event = asyncio.Event()
+    agent.add_user_message("Write both fixture files.")
+    try:
+        async for event in agent.run_events(cancel_event=cancel_event, artifact_detection_enabled=False):
+            if isinstance(event, ToolCallResult):
+                assert event.success
+                cancel_event.set()
+        assert (tmp_path / "completed.txt").read_text(encoding="utf-8") == "written"
+        assert not (tmp_path / "cancelled.txt").exists()
+    finally:
+        log.close()
+
+    restored = SessionLog.open(sessions, session_id="cancelled-batch", cwd=tmp_path)
+    try:
+        messages = restored.replay().messages
+        validate_tool_history(messages)
+        assert [(m.tool_call_id, m.content) for m in messages if m.role == "tool"][0] == (
+            "completed.txt", "file written",
+        )
+        assert messages[-1].tool_call_id == "cancelled.txt"
+        assert "no result recorded" in messages[-1].content
+        assert restored.history_messages()[-1][2]["error"]["code"] == "TOOL_OUTCOME_UNKNOWN"
+    finally:
+        restored.close()
 
 
 def test_agent_clear_history_persists_surface_reset(tmp_path):
