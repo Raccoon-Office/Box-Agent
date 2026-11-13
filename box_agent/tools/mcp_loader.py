@@ -22,23 +22,54 @@ from typing import Any, Literal
 import httpx
 
 
-# Python 3.10 compatibility: asyncio.timeout was added in 3.11
-if sys.version_info >= (3, 11):
-    _timeout = asyncio.timeout
-else:
+class _MCPDeadline:
+    """Identify a timeout's own cancellation across nested MCP deadlines."""
 
-    @asynccontextmanager
-    async def _timeout(delay: float):  # type: ignore[misc]
-        """Minimal asyncio.timeout shim for Python 3.10."""
-        task = asyncio.current_task()
-        loop = asyncio.get_running_loop()
-        handle = loop.call_later(delay, task.cancel)  # type: ignore[union-attr]
-        try:
-            yield
-        except asyncio.CancelledError:
-            raise TimeoutError(f"Timed out after {delay}s")
-        finally:
-            handle.cancel()
+
+@asynccontextmanager
+async def _timeout_compat(delay: float) -> AsyncIterator[None]:
+    """Apply a Python 3.10 deadline in the task that owns the MCP contexts."""
+    task = asyncio.current_task()
+    assert task is not None
+    deadline = _MCPDeadline()
+    caller_cancelled = False
+    original_cancel = task.cancel
+    default_cancel = original_cancel == type(task).cancel.__get__(task)
+
+    def track_cancel(msg: object = None) -> bool:
+        nonlocal caller_cancelled
+        # Python 3.10 lacks Task.cancelling() and can drop cancellation messages
+        # while forwarding through Task or gather. Track caller requests at the
+        # task boundary for the lifetime of this deadline.
+        if not isinstance(msg, _MCPDeadline):
+            caller_cancelled = True
+        return original_cancel(msg)
+
+    task.cancel = track_cancel  # type: ignore[method-assign]
+    handle = asyncio.get_running_loop().call_later(delay, original_cancel, deadline)
+    try:
+        yield
+    except asyncio.CancelledError as error:
+        if not caller_cancelled:
+            current: BaseException | None = error
+            seen: set[BaseException] = set()
+            while isinstance(current, asyncio.CancelledError) and current not in seen:
+                if current.args == (deadline,):
+                    raise TimeoutError(f"Timed out after {delay}s") from error
+                if current.args:
+                    break
+                seen.add(current)
+                current = current.__context__
+        raise
+    finally:
+        handle.cancel()
+        if default_cancel:
+            del task.cancel
+        else:
+            task.cancel = original_cancel  # type: ignore[method-assign]
+
+
+_timeout = asyncio.timeout if sys.version_info >= (3, 11) else _timeout_compat
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
