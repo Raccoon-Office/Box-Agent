@@ -8,6 +8,8 @@ Skill 不能通过该协议注入自定义 UI。
 内部实现与恢复细节由模型自行决定；缺少必要事实使用 `request_user_input`；任务结束
 后的输入框推荐继续使用 `follow_up_suggestions`。
 
+工具参数 `allow_freeform` 默认为 `true`：省略时，请求中的 `allowFreeform` 为 `true`，宿主可展示自定义输入框。显式传入 `false` 仍会关闭自由输入。此默认值仅影响新请求，不修改已有会话中保存的请求。
+
 ## 请求事件
 
 工具成功后通过 `update_tool_call.rawOutput` 发送：
@@ -24,6 +26,7 @@ Skill 不能通过该协议注入自定义 UI。
     { "id": "keep_full", "label": "保持完整版本" },
     { "id": "prototype", "label": "先交付原型" }
   ],
+  "allowFreeform": true,
   "defaultOptionId": "keep_full",
   "autoSubmit": {
     "allowed": true,
