@@ -921,6 +921,8 @@ def build_session_permission_policy(config, workspace, permission_mode, filesyst
         policy = policy.with_filesystem_overrides(
             **filesystem_policy, replace_allowed_directories=permission_mode == "default",
         )
+    if not policy.session_workspace_root:
+        policy = policy.model_copy(update={"session_workspace_root": str(workspace)})
     return policy
 
 
