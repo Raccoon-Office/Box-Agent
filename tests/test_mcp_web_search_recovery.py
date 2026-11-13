@@ -12,6 +12,81 @@ from box_agent.tools.mcp_sources import ResolvedMcpServer
 from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
 
 
+@pytest.mark.parametrize("wait", [asyncio.create_task, asyncio.gather])
+async def test_deadline_reports_timeout_through_nested_awaitables(wait):
+    async def blocked():
+        await asyncio.Future()
+
+    with pytest.raises(TimeoutError):
+        async with mcp_loader._timeout_compat(0):
+            await wait(blocked())
+
+
+async def test_caller_cancellation_during_deadline_cleanup_stays_cancelled():
+    cleaning_up = asyncio.Event()
+
+    async def operation():
+        async with mcp_loader._timeout_compat(0):
+            try:
+                await asyncio.Future()
+            finally:
+                cleaning_up.set()
+                await asyncio.Future()
+
+    call = asyncio.create_task(operation())
+    await asyncio.wait_for(cleaning_up.wait(), 2)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+
+async def test_deadline_during_caller_cancellation_cleanup_stays_cancelled():
+    entered = asyncio.Event()
+
+    async def operation():
+        async with mcp_loader._timeout_compat(0.05):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                await asyncio.Future()
+
+    call = asyncio.create_task(operation())
+    await asyncio.wait_for(entered.wait(), 2)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(call, 2)
+
+
+@pytest.mark.parametrize("message", [None, "caller"])
+async def test_caller_cancellation_in_deadline_callback_cycle_stays_cancelled(message):
+    async def operation():
+        task = asyncio.current_task()
+        async with mcp_loader._timeout_compat(0):
+            asyncio.get_running_loop().call_later(0, task.cancel, message)
+            await asyncio.Future()
+
+    call = asyncio.create_task(operation())
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(call, 2)
+
+
+async def test_outer_deadline_expires_across_nested_deadlines():
+    with pytest.raises(TimeoutError, match="after 0s"):
+        async with mcp_loader._timeout_compat(0):
+            async with mcp_loader._timeout_compat(60):
+                await asyncio.Future()
+
+
+async def test_completed_deadline_restores_task_cancellation_and_disarms_timer():
+    task = asyncio.current_task()
+    original_cancel = task.cancel
+    async with mcp_loader._timeout_compat(0):
+        pass
+    assert task.cancel == original_cancel
+    await asyncio.sleep(0.01)
+
+
 @pytest.fixture
 async def search_server(monkeypatch):
     state = SimpleNamespace(
