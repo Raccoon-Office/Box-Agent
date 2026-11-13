@@ -233,6 +233,7 @@ from box_agent.run_observer import (
     cleanup_turn_resources,
 )
 from box_agent.experts import ExpertSessionContext
+from box_agent.llm.reasoning import parse_reasoning_effort
 from box_agent.execution_profile import (
     FAST_OPTIONAL_SKILLS,
     ExecutionProfile,
@@ -1826,6 +1827,7 @@ class BoxACPAgent:
         # Pydantic aliases _meta to field_meta
         session_mode = None
         deep_think = False
+        reasoning_effort = None
         execution_profile = normalize_execution_profile(None)
         env_context: EnvContext | None = None
         expert_context: ExpertSessionContext | None = None
@@ -1850,7 +1852,11 @@ class BoxACPAgent:
         if isinstance(meta, dict):
             client_info = ClientInfo.from_meta(meta.get("host_client_info")) or client_info
             session_mode = meta.get("session_mode")
-            deep_think = bool(meta.get("deep_think", False))
+            reasoning_effort = parse_reasoning_effort(meta.get("reasoning_effort"))
+            deep_think = (
+                reasoning_effort != "fast" if reasoning_effort is not None
+                else bool(meta.get("deep_think", False))
+            )
             execution_profile = normalize_execution_profile(
                 meta.get("execution_profile")
             )
@@ -1928,7 +1934,9 @@ class BoxACPAgent:
                 session_mode = "code_agent"
 
         llm_binding = _normalize_llm_binding(meta) or self._default_llm_binding
-        session_llm = SessionBoundLLM(self._llm_for_binding(llm_binding))
+        session_llm = SessionBoundLLM(
+            self._llm_for_binding(llm_binding), reasoning_effort=reasoning_effort,
+        )
         session_context_window, session_max_output_tokens = (
             self._context_capabilities_for_binding(llm_binding, llm=session_llm)
         )
@@ -2286,6 +2294,7 @@ class BoxACPAgent:
                 llm_binding=llm_binding,
                 permission_engine=perm_engine, grant_store=grant_store,
                 thinking_enabled=deep_think,
+                reasoning_effort=reasoning_effort,
                 execution_profile=execution_profile,
                 env_context=env_context,
                 expert_context=expert_context,
@@ -2956,7 +2965,9 @@ class BoxACPAgent:
                 )
 
             if requested_token_limit < state.agent.token_limit:
-                pending_llm = SessionBoundLLM(requested_llm)
+                pending_llm = SessionBoundLLM(
+                    requested_llm, reasoning_effort=state.reasoning_effort,
+                )
                 pending_llm.context_window = requested_context_window
                 pending_llm.max_output_tokens = requested_max_output_tokens
                 pending_llm.set_auto_model_candidates(candidates)

@@ -134,7 +134,7 @@ def _is_sensenova_model(model: str | None) -> bool:
     )
 
 
-def _apply_thinking_params(
+def _apply_legacy_thinking_params(
     params: dict[str, Any],
     *,
     model: str | None,
@@ -184,6 +184,50 @@ def _apply_thinking_params(
     if _is_sensenova_model(model):
         default_effort = "low" if normalized_model in _SENSENOVA_LOW_DEFAULT_MODELS else "none"
         params["reasoning_effort"] = reasoning_effort_when_disabled or default_effort
+
+
+def _apply_thinking_params(
+    params: dict[str, Any], *, model: str | None, thinking_enabled: bool,
+    reasoning_effort_when_disabled: str | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
+    """Keep legacy and utility behavior; translate an explicit session effort."""
+    from .reasoning import parse_reasoning_effort
+
+    effort = parse_reasoning_effort(reasoning_effort)
+    _apply_legacy_thinking_params(
+        params, model=model, thinking_enabled=thinking_enabled and effort != "fast",
+        reasoning_effort_when_disabled=reasoning_effort_when_disabled,
+    )
+    if effort is None:
+        return
+    name = (model or "").strip().casefold()
+    # Chat Completions cannot reason with function tools on these models.
+    if re.search(r"(?:^|/)gpt-6-(?:sol|luna)(?:$|[-/:])", name) and any(
+        tool.get("type") == "function" for tool in params.get("tools", [])
+    ):
+        return
+    if not thinking_enabled or effort == "fast":
+        # These models cannot disable reasoning, even for a fast request.
+        if "kimi-k3" in name or re.search(r"(?:^|/)gpt-(?:6-astra|6\.1-(?:sol|terra))(?:$|[-/:])", name):
+            params["reasoning_effort"] = "low"
+        return
+    if "qwen" in name or "doubao" in name:
+        return  # These existing dialects expose an on/off switch only.
+    if "kimi-k3" in name:
+        params["reasoning_effort"] = "max" if effort in ("xhigh", "max") else "high"
+    elif "deepseek" in name and _MAX_REASONING_EFFORT_MODELS.search(name):
+        params["reasoning_effort"] = "max" if effort == "max" else "high"
+    elif any(marker in name for marker in ("glm-5.2", "glm-5-2", "glm-5.3", "glm-5-3")):
+        params["reasoning_effort"] = "max" if effort in ("xhigh", "max") else "high"
+    elif "deepseek" in name:
+        return
+    elif "gemini" in name:
+        params["reasoning_effort"] = "medium" if effort == "medium" else "high"
+    else:
+        # OpenAI-compatible endpoints receive the exact choice. Unsupported
+        # values remain visible provider errors; never retry at a hidden tier.
+        params["reasoning_effort"] = effort
 
 
 def _tool_parameter_types(
@@ -651,6 +695,7 @@ class OpenAIClient(LLMClientBase):
         _apply_thinking_params(
             params, model=self.model, thinking_enabled=thinking_enabled,
             reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
+            reasoning_effort=getattr(self, "reasoning_effort", None),
         )
         if (self.api_base, params.get("model", "")) in getattr(self, "_max_completion_token_bindings", set()):
             params["max_completion_tokens"] = params.pop("max_tokens")
