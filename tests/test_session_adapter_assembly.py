@@ -409,3 +409,38 @@ async def test_owned_client_cleanup_preserves_primary_error_without_python311_ap
             await assembly.close_owned_clients([client, client])
     assert closed == [client]
     assert isinstance(caught.value.__cause__, RuntimeError)
+
+
+@pytest.mark.parametrize("source", ["implicit", "configured-empty", "configured-root", "host-root"])
+def test_session_permission_policy_fills_only_missing_workspace_root(tmp_path, source):
+    from box_agent.config import FilesystemPermissions, Officev3Config, Officev3Paths, Officev3Permissions
+
+    workspace = tmp_path / "workspace"
+    declared = tmp_path / "declared-root"
+    allowed = tmp_path / "allowed"
+    config = Config(llm=LLMConfig(api_key="test"), agent=AgentConfig(), tools=ToolsConfig())
+    expected_root = str(workspace)
+    expected_scope = "session_workspace"
+    expected_allowed = ()
+    filesystem_policy = None
+    if source.startswith("configured"):
+        officev3 = Officev3Config(
+            permissions=Officev3Permissions(filesystem=FilesystemPermissions(
+                scope="custom", allowed_directories=[str(allowed)],
+            )),
+            paths=Officev3Paths(session_workspace_root=str(declared) if source == "configured-root" else ""),
+        )
+        officev3._present = True
+        config.officev3 = officev3
+        expected_scope = "custom"
+        expected_allowed = (str(allowed),)
+        if source == "configured-root":
+            expected_root = str(declared)
+    elif source == "host-root":
+        filesystem_policy = {"session_workspace_root": str(declared), "allowed_directories": [str(allowed)]}
+        expected_root = str(declared)
+        expected_allowed = (str(allowed),)
+    policy = assembly.build_session_permission_policy(config, workspace, None, filesystem_policy)
+    assert policy.session_workspace_root == expected_root
+    assert policy.filesystem_scope == expected_scope
+    assert policy.allowed_directories == expected_allowed
