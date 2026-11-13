@@ -5212,16 +5212,35 @@ class BoxACPAgent:
             set_session_trace_writer(observer.trace_writer, turn_id=turn_id)
             if observer.trace_writer is not None else None
         )
+        from box_agent.tools.billing import confirmation
+        from box_agent.acp.billing import BillingConfirmation
+        from box_agent.llm.request_context import scoped_request_context
+        from box_agent.run_control import RunControl
+
+        control = RunControl()
+        billing_turn_id = turn_id or state.current_turn_id
+        billing_token = confirmation.set(BillingConfirmation(
+            self._conn, session_id, billing_turn_id,
+            lambda: not state.cancelled and state.current_turn_id == billing_turn_id,
+            control=control,
+        ))
         try:
-            protocol_handle = await AgentService().start(
-                RunRequest(
-                    run_id=turn_id or state.current_turn_id or f"acp-run-{uuid4().hex}",
-                    session_id=session_id,
-                ),
-                session=state,
-                options=run_options,
-            )
+            with scoped_request_context(
+                session_id=billing_session_id or state.upstream_session_id or session_id,
+                turn_id=billing_turn_id,
+                title=state.upstream_title,
+            ):
+                protocol_handle = await AgentService().start(
+                    RunRequest(
+                        run_id=turn_id or state.current_turn_id or f"acp-run-{uuid4().hex}",
+                        session_id=session_id,
+                    ),
+                    session=state,
+                    options=run_options,
+                    control=control,
+                )
         finally:
+            confirmation.reset(billing_token)
             if trace_token is not None:
                 reset_session_trace_writer(trace_token)
         run_handle = protocol_handle

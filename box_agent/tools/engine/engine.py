@@ -284,6 +284,10 @@ class DefaultToolEngine:
                 if final_error:
                     call.allowed, call.rejection = False, final_error
         if call.allowed and call.target is not None:
+            # Hooks can add interactive capabilities to an otherwise parallel call.
+            # Reclassify before dispatch using the final, validated arguments.
+            if call.parallel and call.target.invocation_may_require_user_input(call.arguments):
+                call.parallel = False
             context.record_call(call, control.step)
         call.started_at = perf_counter()
         trace = {
@@ -295,9 +299,6 @@ class DefaultToolEngine:
             trace["parallel"] = True
         emit_session_trace("tool.request", turn_id=context.turn_id, step=control.step,
                            tool_call_id=call.call_id, data=trace)
-        if (not call.parallel and self._options.artifact_detection_enabled
-                and call.allowed and call.user_visible and context.workspace_dir):
-            call.before_files = _snapshot_workspace_signatures(context.workspace_dir)
 
     def _hook_context(self, call: ToolCallRecord, step: int, event: str, **payload: Any) -> HookContext:
         """由装配层的运行身份创建本次工具调用快照。"""
@@ -578,7 +579,11 @@ class DefaultToolEngine:
                 unique.append(call)
         if duplicates:
             _log.info("tool/dedupe skipped=%d unique=%d", len(duplicates), len(unique))
-        turn_boundary = any(getattr(call.target, "ends_turn_on_success", False) for call in unique)
+        turn_boundary = any(
+            getattr(call.target, "ends_turn_on_success", False)
+            or (call.target is not None and call.target.invocation_may_require_user_input(call.arguments))
+            for call in unique
+        )
         search_batch = self._options.web_search_concurrency > 1 and all(call.name == "web_search" for call in unique)
         serial, parallel = [], []
         for call in unique:
@@ -589,9 +594,13 @@ class DefaultToolEngine:
             )
             (parallel if call.parallel else serial).append(call)
         outcomes: dict[str, bool] = {}
-        for call in serial:
-            async for event in self._start_call(call, prepared, control, summary, search):
-                yield event
+
+        async def finish_serial(call: ToolCallRecord) -> AsyncIterator[AgentEvent]:
+            # A reclassified call can wait for a preceding parallel batch. Take
+            # its artifact snapshot only once that batch has actually finished.
+            if (self._options.artifact_detection_enabled and call.allowed
+                    and call.user_visible and context.workspace_dir):
+                call.before_files = _snapshot_workspace_signatures(context.workspace_dir)
             result = ToolResult(success=False, content="", error="Tool execution interrupted — no result returned.")
             async with aclosing(self._scheduler.invoke_serial(self._request(call, prepared))) as records:
                 async for record in records:
@@ -604,14 +613,29 @@ class DefaultToolEngine:
                     if isinstance(event, ToolCallResult):
                         outcomes[call.call_id] = event.success
                     yield event
+
+        for call in serial:
+            async for event in self._start_call(call, prepared, control, summary, search):
+                yield event
+            async with aclosing(finish_serial(call)) as events:
+                async for event in events:
+                    yield event
             if context.is_cancelled():
                 return
+        serial_after_hooks = []
         if parallel:
             before = (_snapshot_workspace_signatures(context.workspace_dir)
                       if self._options.artifact_detection_enabled and context.workspace_dir else None)
-            for call in parallel:
+            for index, call in enumerate(parallel):
                 async for event in self._start_call(call, prepared, control, summary, search):
                     yield event
+                if not call.parallel:
+                    # Keep the prepared prefix parallel. This call has already
+                    # run its Hook; leave later calls unstarted until it finishes.
+                    serial_after_hooks = parallel[index:]
+                    parallel = parallel[:index]
+                    break
+        if parallel:
             context.flush_calls()
             results = {}
             async with aclosing(self._scheduler.invoke_parallel([self._request(call, prepared) for call in parallel])) as records:
@@ -666,6 +690,16 @@ class DefaultToolEngine:
                             emitted.add(artifact.abs_path)
                             self._retain_displayed_file(artifact)
                             yield artifact
+            if context.is_cancelled():
+                return
+        for index, call in enumerate(serial_after_hooks):
+            call.parallel = False
+            if index:
+                async for event in self._start_call(call, prepared, control, summary, search):
+                    yield event
+            async with aclosing(finish_serial(call)) as events:
+                async for event in events:
+                    yield event
             if context.is_cancelled():
                 return
         for duplicate, source in duplicates:

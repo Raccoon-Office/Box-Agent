@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -11,6 +12,9 @@ import pytest
 
 from box_agent.config import Config, ImageGenerationConfig, Officev3Config, ToolsConfig
 from box_agent.llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
+from box_agent.llm.request_context import scoped_request_context
+from box_agent.tools.base import bind_tool_cancellation
+from box_agent.tools.billing import confirmation
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.setup import (
     add_workspace_tools,
@@ -1144,6 +1148,12 @@ def test_image_generation_service_is_box_agent_configured_for_cli_and_acp() -> N
     assert "CLI 与 ACP 共用" in prompt
     assert "不由宿主 `env_context` 控制" in prompt
     assert "优先调用 `generate_image`" in prompt
+    assert "文生图、图生图、改图" in prompt
+    assert "HTML/PPT" in prompt
+    description = GenerateImageTool().description
+    assert "call this tool directly" in description
+    assert "runtime handles billing" in description
+    assert "explicit request to continue" in description
 
 
 def test_image_generation_service_accepts_cli_environment_override() -> None:
@@ -1777,7 +1787,8 @@ async def test_intermediate_image_failure_does_not_publish_artifact(
 @pytest.mark.parametrize("scenario", [
     "expired", "near_expiry", "401", "200003", "200003_string", "rejected_twice",
     "refresh_401", "refresh_503", "missing_refresh", "missing_login",
-    "explicit_key", "custom_host", "environment", "server_error", "download_401",
+    "explicit_key", "custom_host", "environment", "environment_ip", "isolated_ip",
+    "server_error", "download_401",
 ])
 async def test_image_requests_handle_hosted_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit: bool, scenario: str,
@@ -1787,16 +1798,18 @@ async def test_image_requests_handle_hosted_auth(
         return f"header.{payload}.signature"
 
     monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
     now = int(time.time())
     old_token = jwt(now - 60 if scenario == "expired" else now + 60 if scenario == "near_expiry" else now + 3600)
     new_token = jwt(now + 7200)
-    state = {"access_token": old_token, "refresh_token": "refresh-secret"}
+    state = {"access_token": old_token, "refresh_token": "refresh-secret", "office_identity": "team-one"}
     if scenario == "missing_refresh":
         state.pop("refresh_token")
-    if scenario in {"missing_login", "environment"}:
+    if scenario in {"missing_login", "environment", "environment_ip", "isolated_ip"}:
         state = {}
-    if scenario == "environment":
+    if scenario in {"environment", "environment_ip"}:
         monkeypatch.delenv("BOX_AGENT_HOME")
+    if scenario in {"environment", "environment_ip", "isolated_ip"}:
         monkeypatch.setenv("BOX_AGENT_AUTH_TOKEN", "environment-token")
     auth_file = tmp_path / "auth.json"
     auth_file.write_text(json.dumps(state))
@@ -1815,6 +1828,11 @@ async def test_image_requests_handle_hosted_auth(
             calls.append("download")
             return httpx.Response(401)
         calls.append("image")
+        expected_org = None if scenario == "explicit_key" else state.get("office_identity")
+        assert request.headers.get("X-Org-Code") == expected_org
+        assert request.headers["X-RACCOON-Session-ID"] == "billing-session"
+        assert request.headers["X-RACCOON-Turn-ID"] == "billing-turn"
+        assert dict(request.headers.raw)[b"X-RACCOON-Title"] == "生成测试图片".encode("utf-8")
         assert request.url.path.endswith("/images/edits" if edit else "/images/generations")
         bodies.append(request.content)
         authorizations.append(request.headers.get("Authorization", ""))
@@ -1829,17 +1847,25 @@ async def test_image_requests_handle_hosted_auth(
         return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
 
     patch_async_client(monkeypatch, handler)
+    origin = {
+        "custom_host": "https://image.example.test",
+        "environment_ip": "http://10.158.136.99:9000",
+        "isolated_ip": "http://10.158.136.99:9000",
+    }.get(scenario, "https://image.xiaohuanxiong.com")
     tool = GenerateImageTool(
         workspace_dir=str(tmp_path), allow_full_access=False,
-        endpoint="https://image.example.test/v1/images/generations" if scenario == "custom_host" else "https://image.xiaohuanxiong.com/v1/images/generations",
+        endpoint=f"{origin}/v1/images/generations",
         auth_file=str(auth_file), api_key="dedicated-key" if scenario == "explicit_key" else "",
     )
     (tmp_path / "reference.png").write_bytes(PNG_BYTES)
-    result = await tool.execute(
-        prompt="draw a tree", output_path="result.png", watermark=False,
-        reference_images=["reference.png"] if edit else None,
-        image_mode="image_to_image" if edit else "text_to_image",
-    )
+    with scoped_request_context(
+        session_id="billing-session", turn_id="billing-turn", title="生成测试图片",
+    ):
+        result = await tool.execute(
+            prompt="draw a tree", output_path="result.png", watermark=False,
+            reference_images=["reference.png"] if edit else None,
+            image_mode="image_to_image" if edit else "text_to_image",
+        )
     success = scenario in {"expired", "near_expiry", "401", "200003", "200003_string"}
     assert result.success == success, result.error
     if scenario in {"expired", "near_expiry"}:
@@ -1864,11 +1890,73 @@ async def test_image_requests_handle_hosted_auth(
         assert "重新登录" in result.error
     if scenario == "explicit_key":
         assert authorizations == ["Bearer dedicated-key"]
-    if scenario == "custom_host":
+    if scenario in {"custom_host", "isolated_ip"}:
         assert authorizations == [""]
-    if scenario == "environment":
+    if scenario in {"environment", "environment_ip"}:
         assert authorizations == ["Bearer environment-token"]
     assert (tmp_path / "result.png").exists() == success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("phase", ["before_first_post", "before_retry"])
+async def test_cancel_during_auth_refresh_prevents_next_image_post(tmp_path, monkeypatch, edit, phase):
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
+    expiry = int(time.time()) + (10 if phase == "before_first_post" else 3600)
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({
+        "access_token": f"header.{claims}.signature", "refresh_token": "refresh", "office_identity": "team",
+    }))
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    cancelled = asyncio.Event()
+    image_posts = []
+
+    async def handler(request):
+        if request.url.path.endswith("/auth/v1/refresh"):
+            refresh_started.set()
+            await release_refresh.wait()
+            new_claims = base64.urlsafe_b64encode(
+                json.dumps({"exp": int(time.time()) + 7200}).encode(),
+            ).decode().rstrip("=")
+            return httpx.Response(200, json={"data": {"access_token": f"header.{new_claims}.signature"}})
+        image_posts.append(request)
+        return httpx.Response(401)
+
+    async def approve(_capability):
+        return True
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), endpoint="https://image.xiaohuanxiong.com/v1/images/generations",
+        auth_file=str(auth_file), api_key="",
+    )
+    reference = tmp_path / "ref.png"
+    reference.write_bytes(PNG_BYTES)
+    billing = confirmation.set(approve)
+    try:
+        with bind_tool_cancellation(cancelled.is_set):
+            task = asyncio.create_task(tool.execute(
+                prompt="draw", output_path="result.png",
+                reference_images=[str(reference)] if edit else None,
+            ))
+            try:
+                await asyncio.wait_for(refresh_started.wait(), 2)
+                cancelled.set()
+                release_refresh.set()
+                result = await asyncio.wait_for(task, 2)
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    finally:
+        confirmation.reset(billing)
+    assert not result.success
+    assert "cancelled" in result.error
+    assert len(image_posts) == (0 if phase == "before_first_post" else 1)
+    assert not (tmp_path / "result.png").exists()
 
 
 @pytest.mark.asyncio
@@ -2022,12 +2110,21 @@ async def test_private_image_edit_auth_uses_actual_endpoint(
         return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
 
     patch_async_client(monkeypatch, handler)
-    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint=endpoint, auth_file=str(auth_file))
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint=endpoint, auth_file=str(auth_file), api_key="")
     (tmp_path / "reference.png").write_bytes(PNG_BYTES)
-    result = await tool.execute(
-        prompt="edit", reference_images=["reference.png"], image_mode="image_to_image",
-        output_path="result.png", watermark=False,
-    )
+
+    async def reject(_capability):
+        pytest.fail("A custom edit endpoint does not request hosted billing")
+
+    billing = confirmation.set(reject)
+    try:
+        assert tool.invocation_may_require_user_input({"image_mode": "image_to_image"}) is False
+        result = await tool.execute(
+            prompt="edit", reference_images=["reference.png"], image_mode="image_to_image",
+            output_path="result.png", watermark=False,
+        )
+    finally:
+        confirmation.reset(billing)
     assert result.success, result.error
     assert len(calls) == 1
 

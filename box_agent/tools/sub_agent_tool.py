@@ -338,6 +338,35 @@ class SubAgentTool(EventEmittingTool):
                 return {n: t for n, t in live.items() if n != self.name}
         return dict(self._child_tools_snapshot)
 
+    def invocation_may_require_user_input(self, arguments: dict[str, Any]) -> bool:
+        live_tools = self._resolve_child_tools()
+        parsed = self._parse_delegation(arguments, live_tools)
+        if isinstance(parsed, CapabilityFailure):
+            return False
+        return any(
+            getattr(live_tools.get(name), "may_require_user_input", False)
+            for name in parsed.required_tools
+        )
+
+    def _parse_delegation(
+        self, arguments: dict[str, Any], live_tools: dict[str, Tool],
+    ) -> DelegationSpec | CapabilityFailure:
+        return parse_delegation_spec(
+            task=arguments.get("task"),
+            title=arguments.get("title", ""),
+            skills=arguments.get("skills"),
+            required_tools=arguments.get("required_tools"),
+            files=arguments.get("files"),
+            write_scope=arguments.get("write_scope"),
+            budget=arguments.get("budget"),
+            default_required_tools=tuple(sorted(
+                (DEFAULT_READ_TOOL_NAMES | SKILL_READ_TOOL_NAMES | PATH_SCOPED_WRITE_TOOLS)
+                & set(live_tools)
+            )),
+            general_max_steps=self._tool_limits.sub_agent.general_max_steps,
+            general_max_tool_calls=self._tool_limits.sub_agent.general_max_tool_calls,
+        )
+
     def _resolve_skill_loader(self) -> Any | None:
         if self._skill_provider is None:
             return None
@@ -1444,25 +1473,10 @@ class SubAgentTool(EventEmittingTool):
         sub_agent_id = f"subagent-{uuid4().hex}"
 
         live_tools = self._resolve_child_tools()
-        parsed = parse_delegation_spec(
-            task=task,
-            title=title,
-            skills=skills,
-            required_tools=required_tools,
-            files=files,
-            write_scope=write_scope,
-            budget=budget,
-            default_required_tools=tuple(
-                sorted(
-                    (DEFAULT_READ_TOOL_NAMES | SKILL_READ_TOOL_NAMES | PATH_SCOPED_WRITE_TOOLS)
-                    & set(live_tools)
-                )
-            ),
-            general_max_steps=self._tool_limits.sub_agent.general_max_steps,
-            general_max_tool_calls=(
-                self._tool_limits.sub_agent.general_max_tool_calls
-            ),
-        )
+        parsed = self._parse_delegation({
+            "task": task, "title": title, "skills": skills, "required_tools": required_tools,
+            "files": files, "write_scope": write_scope, "budget": budget,
+        }, live_tools)
         if isinstance(parsed, CapabilityFailure):
             return self._failure_result(parsed)
 

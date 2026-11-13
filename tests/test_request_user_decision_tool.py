@@ -24,6 +24,9 @@ def test_request_user_decision_contract_prefers_safe_progress():
     assert "Prefer progress over waiting" in tool.description
     assert "safely continues the user's explicit request" in tool.description
     assert "do not call this tool" in tool.description
+    assert "command-execution or image-generation/editing authorization" in tool.description
+    assert "let its runtime handle approval" in tool.description
+    assert "Clarify unresolved content, targets, or scope only" in tool.description
     assert "Request 30 seconds" in tool.parameters["properties"][
         "requested_auto_submit_seconds"
     ]["description"]

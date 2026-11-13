@@ -618,6 +618,32 @@ def _assert_schema_contract(tools, profile):
                 )
                 body = body.replace("# only if truly missing", "# only if missing and installation is permitted")
             entry["schema"]["description"] = f"{header}\n\n{guidance}\n\n{body}"
+        if tool.name == "request_user_decision":
+            anchor = "yourself. Do not use it for missing facts; use request_user_input instead. "
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor, anchor +
+                "Do not use this tool for command-execution or image-generation/editing authorization; "
+                "call the operation tool and let its runtime handle approval. "
+                "Clarify unresolved content, targets, or scope only. ",
+            )
+        if tool.name == "generate_image":
+            anchor = "`generate`. "
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor, anchor +
+                "Once the image request is clear, including an explicit request to continue, "
+                "call this tool directly; the runtime handles billing confirmation. Do not ask separately for authorization. ",
+            )
+        if tool.name == "bash":
+            anchor = "\n\nUse only application-managed Python, Node and Git."
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor,
+                "\n\nOnce the command and target are clear, including an explicit request to continue, "
+                "call this tool directly. The runtime handles permission and dangerous-command confirmation; "
+                "do not ask separately for authorization." + anchor,
+            )
         assert list(tool.aliases) == entry["aliases"], tool.name
         assert _normalized_schema(tool.to_schema(), profile) == entry["schema"], tool.name
         schema = entry["schema"]

@@ -9,6 +9,7 @@ import os
 import time
 import weakref
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote_to_bytes, urlparse, urlsplit
@@ -195,18 +196,55 @@ def read_auth_token_file(auth_file: str | Path | None) -> str:
     return _auth_token_from_state(data)
 
 
+@dataclass(frozen=True)
+class HostedAuthSnapshot:
+    """Office identity and credentials available for the same request."""
+
+    token: str = field(repr=False)
+    refresh_token: str = field(repr=False)
+    office_identity: str
+    fallback_token: str = field(default="", repr=False)
+
+    @property
+    def request_token(self) -> str:
+        return self.token or self.fallback_token
+
+    @property
+    def org_code(self) -> str:
+        identity = self.office_identity
+        if (
+            not identity
+            or identity == "personal"
+            or not identity.isascii()
+            or any(ord(char) < 32 or ord(char) == 127 for char in identity)
+        ):
+            return ""
+        return identity
+
+    def require_unchanged(self, current: HostedAuthSnapshot) -> None:
+        if self != current:
+            raise HostedAuthRequiredError("登录账号或组织已变更，请重新发起操作")
+
+
+def _hosted_auth_snapshot(data: Mapping[str, Any]) -> HostedAuthSnapshot:
+    token = _auth_token_from_state(data)
+    return HostedAuthSnapshot(
+        token,
+        _coerce_token(data.get("refresh_token")),
+        _coerce_token(data.get("office_identity")),
+        fallback_token="" if token else _environment_auth_token(),
+    )
+
+
+def read_hosted_auth_snapshot(auth_file: str | Path | None) -> HostedAuthSnapshot:
+    """Read the token, refresh credential, and organization together."""
+    _, data = _read_auth_state(auth_file)
+    return _hosted_auth_snapshot(data)
+
+
 def read_auth_org_code(auth_file: str | Path | None) -> str:
     """Read the current desktop team identity; personal sessions have no org."""
-    _, data = _read_auth_state(auth_file)
-    identity = _coerce_token(data.get("office_identity"))
-    if (
-        not identity
-        or identity == "personal"
-        or not identity.isascii()
-        or any(ord(char) < 32 or ord(char) == 127 for char in identity)
-    ):
-        return ""
-    return identity
+    return read_hosted_auth_snapshot(auth_file).org_code
 
 
 async def ensure_hosted_auth_ready(
@@ -216,6 +254,7 @@ async def ensure_hosted_auth_ready(
     explicit_token: str = "",
     now: int | None = None,
     http_client: httpx.AsyncClient | None = None,
+    expected_auth: HostedAuthSnapshot | None = None,
 ) -> str:
     """Fail fast when a hosted xiaohuanxiong request has nothing to authenticate with.
 
@@ -223,6 +262,7 @@ async def ensure_hosted_auth_ready(
     accepted as-is. When auth.json has neither a readable access token nor a
     refresh_token, preserve the profile-aware environment fallback or raise
     ``HostedAuthRequiredError`` so callers never send a bare upstream request.
+    An expected snapshot keeps a previously approved operation tied to its login.
     Otherwise delegate to
     ``refresh_hosted_auth_token_if_needed`` (including refresh-401「登录态已过期…」).
     """
@@ -230,23 +270,22 @@ async def ensure_hosted_auth_ready(
     if token:
         return token
 
+    current = read_hosted_auth_snapshot(auth_file)
+    if expected_auth is not None:
+        expected_auth.require_unchanged(current)
+
     if is_private_service_url(api_base):
-        token = resolve_auth_token(auth_file=auth_file)
+        token = current.request_token
         if not token:
             raise HostedAuthRequiredError("未登录，请通过客户端登录后再试")
         return token
 
     if not _xiaohuanxiong_refresh_url(api_base):
-        _, state = _read_auth_state(auth_file)
-        return _auth_token_from_state(state)
+        return current.token if expected_auth is None else current.request_token
 
-    _, state = _read_auth_state(auth_file)
-    current_token = _auth_token_from_state(state)
-    refresh_token = _coerce_token(state.get("refresh_token"))
-    if not current_token and not refresh_token:
-        token = resolve_auth_token(auth_file=auth_file)
-        if token:
-            return token
+    if not current.token and not current.refresh_token:
+        if current.request_token:
+            return current.request_token
         raise HostedAuthRequiredError("未登录，请通过客户端登录后再试")
 
     return await refresh_hosted_auth_token_if_needed(
@@ -254,6 +293,7 @@ async def ensure_hosted_auth_ready(
         auth_file,
         now=now,
         http_client=http_client,
+        expected_auth=expected_auth,
     )
 
 
@@ -265,6 +305,7 @@ async def refresh_hosted_auth_token_if_needed(
     http_client: httpx.AsyncClient | None = None,
     force: bool = False,
     rejected_token: str | None = None,
+    expected_auth: HostedAuthSnapshot | None = None,
 ) -> str:
     """Refresh a near-expiry xiaohuanxiong.com login token and return it.
 
@@ -272,9 +313,13 @@ async def refresh_hosted_auth_token_if_needed(
     an ``exp`` inside the five-minute refresh window activates the refresh flow.
     Pass ``force=True`` to refresh even when the local JWT has not expired yet
     (e.g. after the provider rejected the token with 401 / 200003).
+    With an expected snapshot, reject credentials replaced while waiting for
+    the lock or while the refresh request is in flight.
     """
     refresh_url = _xiaohuanxiong_refresh_url(api_base)
     path, state = _read_auth_state(auth_file)
+    if expected_auth is not None:
+        expected_auth.require_unchanged(_hosted_auth_snapshot(state))
     current_token = _auth_token_from_state(state)
     if not refresh_url or path is None:
         return current_token
@@ -292,6 +337,8 @@ async def refresh_hosted_auth_token_if_needed(
     async with _refresh_lock(path):
         # Another request may have refreshed the shared auth file while waiting.
         _, state = _read_auth_state(path)
+        if expected_auth is not None:
+            expected_auth.require_unchanged(_hosted_auth_snapshot(state))
         current_token = _auth_token_from_state(state)
         if force and current_token and current_token != rejected_token:
             return current_token
@@ -360,6 +407,8 @@ async def refresh_hosted_auth_token_if_needed(
         next_state["access_token"] = next_access_token
         if next_refresh_token:
             next_state["refresh_token"] = next_refresh_token
+        if expected_auth is not None:
+            expected_auth.require_unchanged(read_hosted_auth_snapshot(path))
         _write_auth_state(path, next_state)
         return next_access_token
 
@@ -372,10 +421,10 @@ def resolve_auth_token(
     if explicit is not None and explicit.strip():
         return explicit.strip()
 
-    file_token = read_auth_token_file(auth_file)
-    if file_token:
-        return file_token
+    return read_auth_token_file(auth_file) or _environment_auth_token()
 
+
+def _environment_auth_token() -> str:
     if configured_box_agent_home() is not None:
         return ""  # An isolated profile must not inherit the desktop user's login token.
 

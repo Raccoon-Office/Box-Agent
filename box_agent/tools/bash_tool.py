@@ -1479,6 +1479,8 @@ class BashTool(Tool):
 
 If the user forbids installation, do not install dependencies or provision environments, including automatic downloads by npx/uvx. Use existing compatible capabilities or report the blocker; do not switch tools to bypass the restriction. Read-only version/import/location probes remain allowed. Installation guidance below applies only when consistent with the user's constraints.
 
+Once the command and target are clear, including an explicit request to continue, call this tool directly. The runtime handles permission and dangerous-command confirmation; do not ask separately for authorization.
+
 Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") for that capability when available; join any active installation. Do not use or install alternate runtimes or ask the user to switch environments. On failure, report the returned cause or retry the managed installer.
 
 Do NOT use Get-Content/type to read files; use read_file instead.
@@ -1507,6 +1509,8 @@ Examples:
             "Unix": f"""Execute bash commands in foreground or background.
 
 If the user forbids installation, do not install dependencies or provision environments, including automatic downloads by npx/uvx. Use existing compatible capabilities or report the blocker; do not switch tools to bypass the restriction. Read-only version/import/location probes remain allowed. Installation guidance below applies only when consistent with the user's constraints.
+
+Once the command and target are clear, including an explicit request to continue, call this tool directly. The runtime handles permission and dangerous-command confirmation; do not ask separately for authorization.
 
 Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") for that capability when available; join any active installation. Do not use or install alternate runtimes or ask the user to switch environments. On failure, report the returned cause or retry the managed installer.
 

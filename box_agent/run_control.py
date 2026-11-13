@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from typing import Any, TypeVar
 from uuid import uuid4
 
 from .api import ControlCommand
 from .events import PermissionRequestEvent
 from .tools.permissions import GrantStore
+
+_T = TypeVar("_T")
 
 
 class RunControl:
@@ -49,6 +51,23 @@ class RunControl:
     async def wait_cancelled(self) -> None:
         await self._cancel_gate.wait()
 
+    async def run_until_cancelled(
+        self, operation: Callable[[], Coroutine[Any, Any, _T]], *, cancelled_result: _T,
+    ) -> _T:
+        """Cancel and drain an outstanding host operation when the run stops."""
+        if self.cancelled:
+            return cancelled_result
+        pending = asyncio.create_task(operation())
+        cancelled = asyncio.create_task(self.wait_cancelled())
+        try:
+            await asyncio.wait((pending, cancelled), return_when=asyncio.FIRST_COMPLETED)
+            return cancelled_result if self.cancelled else await pending
+        finally:
+            for task in (pending, cancelled):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(pending, cancelled, return_exceptions=True)
+
     async def checkpoint(self) -> bool:
         """Wait until this run may make its next externally visible action."""
 
@@ -71,18 +90,9 @@ class CancellablePermissionNegotiator:
         self._control = control
 
     async def negotiate(self, request: Mapping[str, object]) -> bool:
-        if self._control.cancelled:
-            return False
-        pending = asyncio.create_task(self._delegate.negotiate(request))
-        cancelled = asyncio.create_task(self._control.wait_cancelled())
-        try:
-            await asyncio.wait((pending, cancelled), return_when=asyncio.FIRST_COMPLETED)
-            return False if self._control.cancelled else await pending
-        finally:
-            for task in (pending, cancelled):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(pending, cancelled, return_exceptions=True)
+        return await self._control.run_until_cancelled(
+            lambda: self._delegate.negotiate(request), cancelled_result=False,
+        )
 
 
 class PermissionBroker:

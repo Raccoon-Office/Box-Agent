@@ -302,6 +302,7 @@ def build_image_generation_prompt(
         f"- 当前生图服务：{status}\n"
         "- 用户明确要求生图、生成新图片、插画、海报或位图信息图，且没有要求可编辑 HTML 时，"
         "优先调用 `generate_image`。\n"
+        "- 文生图、图生图、改图及 HTML/PPT 配图均适用。\n"
         "- 用户明确禁止 HTML/CSS/SVG、PIL 或截图回退时，`generate_image` 失败后必须如实报告阻塞，"
         "不得擅自改用这些路径。"
     )

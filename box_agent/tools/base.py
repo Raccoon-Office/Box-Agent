@@ -124,6 +124,8 @@ class Tool:
     # Trusted interactive tools may stop the current Agent turn after a
     # successful invocation. Dynamic/MCP and ordinary tools inherit False.
     ends_turn_on_success: bool = False
+    # In-call host approval waits must stay outside timed parallel batches.
+    may_require_user_input: bool = False
     # Explicit opt-in for the transient Tool -> next-model-request seam. MCP and
     # ordinary tools remain unable to inject request-only user content.
     transient_followup_allowed: bool = False
@@ -133,6 +135,10 @@ class Tool:
     # recoverable text to the persistence seam through
     # ``ToolResult.persistence_content``.
     max_result_size_chars: float | None = None
+
+    def invocation_may_require_user_input(self, arguments: dict[str, Any]) -> bool:
+        """Classify an invocation before scheduling a potentially interactive batch."""
+        return self.may_require_user_input
 
     def compaction_state(self) -> tuple[str, str] | None:
         """Return trusted read-only runtime state for history compaction."""

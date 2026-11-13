@@ -15,22 +15,25 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from box_agent.artifact_publication import delivery_scope, write_metadata
 from box_agent.auth import (
     HostedAuthRequiredError,
+    HostedAuthSnapshot,
     _xiaohuanxiong_refresh_url,
+    bearer_auth_headers,
     ensure_hosted_auth_ready,
     is_private_service_url,
-    read_auth_token_file,
+    read_hosted_auth_snapshot,
     refresh_hosted_auth_token_if_needed,
-    request_auth_headers,
     should_attach_auth_header,
 )
-from box_agent.artifact_publication import delivery_scope, write_metadata
 from box_agent.llm.debug_logging import (
     log_image_generation_error_meta,
     log_image_generation_request,
     log_image_generation_response_meta,
 )
+from box_agent.llm.request_context import current_request_headers
+from box_agent.tools.billing import confirm_billing, confirmation
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.file_change_receipts import before_write, destination_lock, file_change_result
 from box_agent.tools.base import check_tool_cancellation
@@ -444,6 +447,24 @@ class GenerateImageTool(Tool):
         self.max_dimension = _resolve_max_image_dimension(max_dimension)
 
     @property
+    def may_require_user_input(self) -> bool:
+        return confirmation.get() is not None and (
+            self._requires_billing(self.endpoint)
+            or self._requires_billing(_derive_edit_endpoint(self.endpoint))
+        )
+
+    def _requires_billing(self, endpoint: str) -> bool:
+        return not self.api_key and should_attach_auth_header(endpoint)
+
+    def invocation_may_require_user_input(self, arguments: dict[str, Any]) -> bool:
+        mode = arguments.get("image_mode")
+        editing = bool(arguments.get("reference_images")) or (
+            isinstance(mode, str) and mode.strip().lower() in _IMAGE_EDIT_MODES
+        )
+        endpoint = _derive_edit_endpoint(self.endpoint) if editing else self.endpoint
+        return confirmation.get() is not None and self._requires_billing(endpoint)
+
+    @property
     def name(self) -> str:
         return "generate_image"
 
@@ -458,7 +479,9 @@ class GenerateImageTool(Tool):
             "for one of those editable/rendered formats. Use text-to-image when the user "
             "asks for a new image. Use image-to-image with reference_images when the user asks to modify, "
             "redraw, restyle, or preserve a supplied image/logo/sketch. Use for PPT image_plan items marked "
-            "`generate`. If the user forbids fallback and this tool fails, report the request as blocked. "
+            "`generate`. Once the image request is clear, including an explicit request to continue, "
+            "call this tool directly; the runtime handles billing confirmation. Do not ask separately for authorization. "
+            "If the user forbids fallback and this tool fails, report the request as blocked. "
             "If the service is not configured, report the blocked image generation instead of "
             "pretending an asset exists. Configuration: image_generation.endpoint in config.yaml; optional "
             "image_generation.api_key for a dedicated bearer token. Environment overrides are also supported."
@@ -632,12 +655,32 @@ class GenerateImageTool(Tool):
                     reference_paths = [self._resolve_readable_path(path) for path in reference_images]
                 except ValueError as exc:
                     return ToolResult(success=False, error=str(exc))
+            endpoint = _derive_edit_endpoint(self.endpoint) if edit_requested else self.endpoint
+            approved_auth = None
+            if self._requires_billing(endpoint):
+                approved_auth = read_hosted_auth_snapshot(self.auth_file)
+                approved = await confirm_billing("image_generation")
+                if not approved:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            "Image generation did not receive runtime authorization; no image request was sent. "
+                            "Continue other feasible work. Do not retry or ask for authorization through "
+                            "request_user_decision, request_user_input, or a separate chat question in this turn. "
+                            "If the user later explicitly asks to continue generating or editing the image, "
+                            "call generate_image directly again; the runtime will check and collect any required "
+                            "billing consent. A chat answer or generic decision is not a runtime approval."
+                        ),
+                    )
+            check_tool_cancellation()
+            if edit_requested:
                 image_bytes, mime_type = await self._request_image_edit(
                     prompt=prompt,
                     size=size,
                     style=style,
                     negative_prompt=negative_prompt,
                     reference_paths=reference_paths,
+                    approved_auth=approved_auth,
                 )
             else:
                 image_bytes, mime_type = await self._request_image(
@@ -645,6 +688,7 @@ class GenerateImageTool(Tool):
                     size=size,
                     style=style,
                     negative_prompt=negative_prompt,
+                    approved_auth=approved_auth,
                 )
 
             target = self._ensure_extension(target, mime_type)
@@ -652,7 +696,11 @@ class GenerateImageTool(Tool):
                 publish_artifact = delivery_scope(target, self.workspace_dir) is None
             permission_error = self._check_write_permission(target)
             if permission_error:
-                return permission_error
+                return ToolResult(
+                    success=False,
+                    error="Image generated, but saving requires file permission. "
+                    + (permission_error.error or "Access denied."),
+                )
 
             image_bytes, watermark_status = apply_text_watermark(
                 image_bytes, mime_type, watermark_text,
@@ -671,7 +719,11 @@ class GenerateImageTool(Tool):
                 target = target.resolve()
                 permission_error = self._check_write_permission(target)
                 if permission_error:
-                    return permission_error
+                    return ToolResult(
+                        success=False,
+                        error="Image generated, but saving requires file permission. "
+                        + (permission_error.error or "Access denied."),
+                    )
                 check_tool_cancellation()
                 target.parent.mkdir(parents=True, exist_ok=True)
                 # Persist before the image becomes discoverable. The digest survives
@@ -804,33 +856,58 @@ class GenerateImageTool(Tool):
             raise ValueError(f"Reference image is not a file: {self._display_path(path)}")
         return path
 
-    async def _request_headers(self, endpoint: str | None = None) -> dict[str, str]:
+    async def _request_headers(
+        self, endpoint: str | None = None, *, approved_auth: HostedAuthSnapshot | None = None,
+    ) -> tuple[dict[str, str | bytes], HostedAuthSnapshot | None]:
         endpoint = endpoint or self.endpoint
-        headers = {"Accept": "application/json, image/*"}
+        headers = {
+            "Accept": "application/json, image/*",
+            **current_request_headers(),
+        }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-            return headers
-        await ensure_hosted_auth_ready(endpoint, self.auth_file)
-        return request_auth_headers(auth_file=self.auth_file, existing=headers, url=endpoint)
+            return headers, None
+        hosted = should_attach_auth_header(endpoint)
+        if hosted:
+            if approved_auth is None:
+                approved_auth = read_hosted_auth_snapshot(self.auth_file)
+            token = await ensure_hosted_auth_ready(endpoint, self.auth_file, expected_auth=approved_auth)
+        else:
+            token = ""
+        current = read_hosted_auth_snapshot(self.auth_file)
+        if approved_auth is not None and (
+            current.office_identity != approved_auth.office_identity
+            or current.request_token != token
+        ):
+            raise HostedAuthRequiredError("登录账号或组织已变更，请重新发起操作")
+        org_code = current.org_code
+        if org_code:
+            headers["X-Org-Code"] = org_code
+        headers = bearer_auth_headers(token, headers, url=endpoint)
+        return headers, current if hosted else None
+
+    @staticmethod
+    async def _check_request_cancellation(_request: httpx.Request) -> None:
+        check_tool_cancellation()
 
     async def _send_with_hosted_auth_retry(
         self, client: httpx.AsyncClient, request: httpx.Request,
+        auth: HostedAuthSnapshot | None,
     ) -> httpx.Response:
-        uses_file = (
-            not self.api_key
-            and bool(self.auth_file)
-            and bool(_xiaohuanxiong_refresh_url(str(request.url)))
-            and bool(read_auth_token_file(self.auth_file))
-        )
-        if uses_file:
+        url = str(request.url)
+        can_retry = auth is not None and bool(auth.token) and bool(_xiaohuanxiong_refresh_url(url))
+        if can_retry:
             # Buffer multipart bodies so an edit can be replayed exactly once.
             await request.aread()
         for attempt in range(2):
+            check_tool_cancellation()
+            if auth is not None:
+                auth.require_unchanged(read_hosted_auth_snapshot(self.auth_file))
             # 私有请求不能通过重定向把令牌或图片内容发送到信任范围之外。
             response = await client.send(
-                request, follow_redirects=not is_private_service_url(str(request.url)),
+                request, follow_redirects=not is_private_service_url(url),
             )
-            if not uses_file:
+            if not can_retry or auth is None:
                 return response
             rejected = response.status_code == 401
             if not rejected:
@@ -843,15 +920,20 @@ class GenerateImageTool(Tool):
                 return response
             self._log_error_meta(
                 "image_to_image" if request.headers.get("content-type", "").startswith("multipart/") else "text_to_image",
-                str(request.url), response=response,
+                url, response=response,
             )
             await response.aclose()
             if attempt:
                 raise HostedAuthRequiredError("登录态已过期，请重新登录")
+            check_tool_cancellation()
             token = await refresh_hosted_auth_token_if_needed(
-                str(request.url), self.auth_file, force=True,
-                rejected_token=request.headers.get("Authorization", "").removeprefix("Bearer "),
+                url, self.auth_file, force=True,
+                rejected_token=auth.token, expected_auth=auth,
             )
+            current = read_hosted_auth_snapshot(self.auth_file)
+            if current.token != token or current.office_identity != auth.office_identity:
+                raise HostedAuthRequiredError("登录账号或组织已变更，请重新发起操作")
+            auth = current
             request.headers["Authorization"] = f"Bearer {token}"
         raise AssertionError("unreachable")
 
@@ -939,6 +1021,7 @@ class GenerateImageTool(Tool):
         size: str,
         style: str | None,
         negative_prompt: str | None,
+        approved_auth: HostedAuthSnapshot | None = None,
     ) -> tuple[bytes, str]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -947,12 +1030,16 @@ class GenerateImageTool(Tool):
         }
 
         timeout = self.timeout if self.timeout is not None else float(os.environ.get(_TIMEOUT_ENV, _DEFAULT_TIMEOUT))
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True,
+            event_hooks={"request": [self._check_request_cancellation]},
+        ) as client:
+            headers, auth = await self._request_headers(approved_auth=approved_auth)
             request = client.build_request(
                 "POST",
                 self.endpoint,
                 json=payload,
-                headers=await self._request_headers(),
+                headers=headers,
             )
             log_image_generation_request(
                 mode="text_to_image",
@@ -965,7 +1052,7 @@ class GenerateImageTool(Tool):
             )
             response: httpx.Response | None = None
             try:
-                response = await self._send_with_hosted_auth_retry(client, request)
+                response = await self._send_with_hosted_auth_retry(client, request, auth)
                 self._log_response_meta("text_to_image", str(request.url), response)
                 return await self._image_from_response(client, response)
             except Exception as exc:
@@ -985,10 +1072,13 @@ class GenerateImageTool(Tool):
         style: str | None,
         negative_prompt: str | None,
         reference_paths: list[Path],
+        approved_auth: HostedAuthSnapshot | None = None,
     ) -> tuple[bytes, str]:
         files: list[tuple[str, tuple[str, bytes, str]]] = []
         file_log_entries: list[dict[str, Any]] = []
         for path in reference_paths:
+            # Billing approval may have yielded since the initial permission check.
+            path = self._resolve_readable_path(str(path))
             image_bytes = path.read_bytes()
             mime_type = mimetypes.guess_type(str(path))[0] or _guess_mime_from_bytes(image_bytes)
             if not mime_type.startswith("image/"):
@@ -1002,13 +1092,17 @@ class GenerateImageTool(Tool):
         }
         timeout = self.timeout if self.timeout is not None else float(os.environ.get(_TIMEOUT_ENV, _DEFAULT_TIMEOUT))
         endpoint = _derive_edit_endpoint(self.endpoint or "")
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True,
+            event_hooks={"request": [self._check_request_cancellation]},
+        ) as client:
+            headers, auth = await self._request_headers(endpoint, approved_auth=approved_auth)
             request = client.build_request(
                 "POST",
                 endpoint,
                 data=data,
                 files=files,
-                headers=await self._request_headers(endpoint),
+                headers=headers,
             )
             log_image_generation_request(
                 mode="image_to_image",
@@ -1022,7 +1116,7 @@ class GenerateImageTool(Tool):
             )
             response: httpx.Response | None = None
             try:
-                response = await self._send_with_hosted_auth_retry(client, request)
+                response = await self._send_with_hosted_auth_retry(client, request, auth)
                 self._log_response_meta("image_to_image", str(request.url), response)
                 return await self._image_from_response(client, response)
             except Exception as exc:
