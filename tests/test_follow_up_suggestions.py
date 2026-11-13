@@ -29,6 +29,8 @@ class _RecordingConn:
 
 
 class _FollowUpLLM:
+    fenced = True
+
     async def generate(self, messages, tools=None):
         return LLMResponse(content="完成。", finish_reason="stop")
 
@@ -36,7 +38,7 @@ class _FollowUpLLM:
         yield StreamEvent(
             type="text",
             delta=(
-                "已完成方案。\n```follow_up_suggestions\n"
+                "已完成方案。\n" + ("```" if self.fenced else "") + "follow_up_suggestions\n"
                 '{"suggestions":["把方案拆成'
             ),
         )
@@ -46,7 +48,7 @@ class _FollowUpLLM:
         )
         yield StreamEvent(
             type="text",
-            delta='今日待办", "给我一份风险清单"]}\n```',
+            delta='今日待办", "给我一份风险清单"]}' + ("\n```" if self.fenced else ""),
         )
         yield StreamEvent(type="finish", finish_reason="stop")
 
@@ -162,6 +164,65 @@ def test_extractor_drops_invalid_or_unfinished_metadata() -> None:
     assert extractor.finish() == []
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_extractor_hides_bare_metadata_at_every_split(newline) -> None:
+    prefix = "小鸟图片已生成完成。" + newline
+    metadata = 'follow_up_suggestions' + newline * 2 + '{"suggestions":["换个风格", "生成空中的小鸟"]}'
+    text = prefix + metadata + newline + "后续正文"
+    for split in range(len(text) + 1):
+        extractor = FollowUpSuggestionsStreamExtractor()
+        chunks = extractor.push(text[:split]) + extractor.push(text[split:]) + extractor.finish()
+        assert "".join(chunks) == prefix + newline + "后续正文", split
+        assert extractor.suggestions == ["换个风格", "生成空中的小鸟"], split
+    extractor = FollowUpSuggestionsStreamExtractor()
+    visible = []
+    for char in text:
+        visible.extend(extractor.push(char))
+    visible.extend(extractor.finish())
+    assert "".join(visible) == prefix + newline + "后续正文"
+    assert extractor.suggestions == ["换个风格", "生成空中的小鸟"]
+
+
+@pytest.mark.parametrize("text", [
+    '正文提到 follow_up_suggestions\n{"suggestions":["继续"]}',
+    'follow_up_suggestions 是协议名称。',
+    'follow_up_suggestions_extra\n{"suggestions":["继续"]}',
+    'follow_up_suggestions\n普通正文',
+    'follow_up_suggestions\n{"other":["继续"]}',
+    'follow_up_suggestions\n{"suggestions":"继续"}',
+    'follow_up_suggestions\n{bad json}',
+    'follow_up_suggestions\n{"suggestions":["未完成',
+    'follow_up_sugg',
+])
+def test_extractor_preserves_non_metadata_bare_text(text) -> None:
+    extractor = FollowUpSuggestionsStreamExtractor()
+    visible = []
+    for char in text:
+        visible.extend(extractor.push(char))
+    visible.extend(extractor.finish())
+    assert "".join(visible) == text
+    assert extractor.suggestions == []
+
+
+def test_extractor_releases_oversized_unconfirmed_bare_text() -> None:
+    for suffix in [" " * 17_000, '\n{"unfinished":"' + "x" * 17_000]:
+        text = "follow_up_suggestions" + suffix
+        extractor = FollowUpSuggestionsStreamExtractor()
+        assert "".join(extractor.push(text)) == text
+        assert extractor.finish() == []
+        assert extractor.suggestions == []
+
+
+def test_extractor_bare_json_handles_escaped_quotes_braces_and_empty_suggestions() -> None:
+    extractor = FollowUpSuggestionsStreamExtractor()
+    text = 'follow_up_suggestions\n{"suggestions":["解释 } 和 \\"引号\\"", "次へ", "Continue"]}'
+    assert extractor.push(text) + extractor.finish() == []
+    assert extractor.suggestions == ['解释 } 和 "引号"', '次へ', 'Continue']
+    extractor = FollowUpSuggestionsStreamExtractor()
+    assert extractor.push('follow_up_suggestions\n{"suggestions":[]}') + extractor.finish() == []
+    assert extractor.suggestions == []
+
+
 def test_normalize_follow_up_suggestions_limits_and_deduplicates() -> None:
     assert normalize_follow_up_suggestions(
         ["  整理成待办  ", "整理成待办", "再生成风险清单", "补充负责人", "第四条"]
@@ -185,11 +246,13 @@ def test_prompt_requires_a_structured_follow_up_block_only_after_completion() ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("judge_enabled", [False, True])
+@pytest.mark.parametrize("fenced", [False, True])
 async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(
-    tmp_path, judge_enabled,
+    tmp_path, judge_enabled, fenced,
 ) -> None:
     conn = _RecordingConn()
     llm = _JudgedFollowUpLLM() if judge_enabled else _FollowUpLLM()
+    llm.fenced = fenced
     agent = BoxACPAgent(
         conn,
         Config(
