@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -12,6 +13,8 @@ import pytest
 from box_agent.config import Config, ImageGenerationConfig, Officev3Config, ToolsConfig
 from box_agent.llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from box_agent.llm.request_context import scoped_request_context
+from box_agent.tools.base import bind_tool_cancellation
+from box_agent.tools.billing import confirmation
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.setup import (
     add_workspace_tools,
@@ -1822,14 +1825,11 @@ async def test_image_requests_handle_hosted_auth(
             calls.append("download")
             return httpx.Response(401)
         calls.append("image")
-        expected_org = None if scenario in {"explicit_key", "custom_host", "environment"} else "team-one"
+        expected_org = None if scenario in {"explicit_key", "environment"} else "team-one"
         assert request.headers.get("X-Org-Code") == expected_org
-        if scenario == "custom_host":
-            assert "X-RACCOON-Session-ID" not in request.headers
-        else:
-            assert request.headers["X-RACCOON-Session-ID"] == "billing-session"
-            assert request.headers["X-RACCOON-Turn-ID"] == "billing-turn"
-            assert dict(request.headers.raw)[b"X-RACCOON-Title"] == "生成测试图片".encode("utf-8")
+        assert request.headers["X-RACCOON-Session-ID"] == "billing-session"
+        assert request.headers["X-RACCOON-Turn-ID"] == "billing-turn"
+        assert dict(request.headers.raw)[b"X-RACCOON-Title"] == "生成测试图片".encode("utf-8")
         assert request.url.path.endswith("/images/edits" if edit else "/images/generations")
         bodies.append(request.content)
         authorizations.append(request.headers.get("Authorization", ""))
@@ -1887,6 +1887,68 @@ async def test_image_requests_handle_hosted_auth(
     if scenario == "environment":
         assert authorizations == ["Bearer environment-token"]
     assert (tmp_path / "result.png").exists() == success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("phase", ["before_first_post", "before_retry"])
+async def test_cancel_during_auth_refresh_prevents_next_image_post(tmp_path, monkeypatch, edit, phase):
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
+    expiry = int(time.time()) + (10 if phase == "before_first_post" else 3600)
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({
+        "access_token": f"header.{claims}.signature", "refresh_token": "refresh", "office_identity": "team",
+    }))
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    cancelled = asyncio.Event()
+    image_posts = []
+
+    async def handler(request):
+        if request.url.path.endswith("/auth/v1/refresh"):
+            refresh_started.set()
+            await release_refresh.wait()
+            new_claims = base64.urlsafe_b64encode(
+                json.dumps({"exp": int(time.time()) + 7200}).encode(),
+            ).decode().rstrip("=")
+            return httpx.Response(200, json={"data": {"access_token": f"header.{new_claims}.signature"}})
+        image_posts.append(request)
+        return httpx.Response(401)
+
+    async def approve(_capability):
+        return True
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), endpoint="https://image.xiaohuanxiong.com/v1/images/generations",
+        auth_file=str(auth_file), api_key="",
+    )
+    reference = tmp_path / "ref.png"
+    reference.write_bytes(PNG_BYTES)
+    billing = confirmation.set(approve)
+    try:
+        with bind_tool_cancellation(cancelled.is_set):
+            task = asyncio.create_task(tool.execute(
+                prompt="draw", output_path="result.png",
+                reference_images=[str(reference)] if edit else None,
+            ))
+            try:
+                await asyncio.wait_for(refresh_started.wait(), 2)
+                cancelled.set()
+                release_refresh.set()
+                result = await asyncio.wait_for(task, 2)
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    finally:
+        confirmation.reset(billing)
+    assert not result.success
+    assert "cancelled" in result.error
+    assert len(image_posts) == (0 if phase == "before_first_post" else 1)
+    assert not (tmp_path / "result.png").exists()
 
 
 @pytest.mark.asyncio
@@ -2040,12 +2102,21 @@ async def test_private_image_edit_auth_uses_actual_endpoint(
         return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
 
     patch_async_client(monkeypatch, handler)
-    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint=endpoint, auth_file=str(auth_file))
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint=endpoint, auth_file=str(auth_file), api_key="")
     (tmp_path / "reference.png").write_bytes(PNG_BYTES)
-    result = await tool.execute(
-        prompt="edit", reference_images=["reference.png"], image_mode="image_to_image",
-        output_path="result.png", watermark=False,
-    )
+
+    async def reject(_capability):
+        pytest.fail("A custom edit endpoint does not request hosted billing")
+
+    billing = confirmation.set(reject)
+    try:
+        assert tool.invocation_may_require_user_input({"image_mode": "image_to_image"}) is False
+        result = await tool.execute(
+            prompt="edit", reference_images=["reference.png"], image_mode="image_to_image",
+            output_path="result.png", watermark=False,
+        )
+    finally:
+        confirmation.reset(billing)
     assert result.success, result.error
     assert len(calls) == 1
 

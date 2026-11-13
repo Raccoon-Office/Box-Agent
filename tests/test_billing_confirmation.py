@@ -6,6 +6,7 @@ import pytest
 from acp.schema import RequestPermissionResponse
 
 from box_agent.acp.billing import BillingConfirmation
+from box_agent.run_control import RunControl
 from box_agent.tools.billing import confirmation
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.base import ToolResult
@@ -41,7 +42,7 @@ async def test_image_waits_for_host_decision_before_request(tmp_path, monkeypatc
     monkeypatch.setattr('box_agent.tools.image_generation_tool.apply_text_watermark', lambda data, *a, **k: (data, {}))
     reference = tmp_path / 'reference.png'
     reference.write_bytes(b'png')
-    token = confirmation.set(BillingConfirmation(conn, 'acp-session', 'turn-1', lambda: True))
+    token = confirmation.set(BillingConfirmation(conn, 'acp-session', 'turn-1', lambda: True, control=RunControl()))
     try:
         task = asyncio.create_task(tool.execute(
             prompt='draw', output_path='out.png',
@@ -71,13 +72,17 @@ async def test_cancelled_and_inactive_confirmation_do_not_allow_execution(tmp_pa
     async def request_permission(**kwargs):
         called.set()
         await asyncio.Future()
-    callback = BillingConfirmation(SimpleNamespace(request_permission=request_permission), 's', 't', lambda: True)
+    callback = BillingConfirmation(
+        SimpleNamespace(request_permission=request_permission), 's', 't', lambda: True, control=RunControl(),
+    )
     task = asyncio.create_task(callback('image_generation'))
     await called.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    inactive = BillingConfirmation(SimpleNamespace(request_permission=AsyncMock()), 's', 't', lambda: False)
+    inactive = BillingConfirmation(
+        SimpleNamespace(request_permission=AsyncMock()), 's', 't', lambda: False, control=RunControl(),
+    )
     assert not await inactive('image_generation')
     inactive.connection.request_permission.assert_not_awaited()
 
@@ -85,7 +90,7 @@ async def test_cancelled_and_inactive_confirmation_do_not_allow_execution(tmp_pa
 @pytest.mark.asyncio
 async def test_billing_errors_fail_closed_and_calls_are_not_coalesced():
     conn = SimpleNamespace(request_permission=AsyncMock(side_effect=TimeoutError))
-    callback = BillingConfirmation(conn, 's', 't', lambda: True)
+    callback = BillingConfirmation(conn, 's', 't', lambda: True, control=RunControl())
     assert await asyncio.gather(callback('image_generation'), callback('image_generation')) == [False, False]
     assert conn.request_permission.await_count == 2
     calls = conn.request_permission.call_args_list
@@ -106,7 +111,7 @@ async def test_post_generation_permission_failure_does_not_offer_automatic_regen
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("decision", ["approve", "reject"])
+@pytest.mark.parametrize("decision", ["approve", "reject", "cancel_without_host_reply"])
 async def test_acp_image_permission_waits_and_finishes_in_same_turn_with_full_access(tmp_path, monkeypatch, decision):
     from tests.test_acp import (
         BoxACPAgent, DummyConn, DoneLLM, Config, AgentConfig, ToolsConfig,
@@ -133,9 +138,14 @@ async def test_acp_image_permission_waits_and_finishes_in_same_turn_with_full_ac
 
     waiting = asyncio.Event()
     reply = asyncio.Event()
+    permission_cancelled = asyncio.Event()
     async def permission(**kwargs):
         waiting.set()
-        await reply.wait()
+        try:
+            await reply.wait()
+        except asyncio.CancelledError:
+            permission_cancelled.set()
+            raise
         return RequestPermissionResponse.model_validate({
             "outcome": {"outcome": "selected", "optionId": decision},
         })
@@ -169,10 +179,18 @@ async def test_acp_image_permission_waits_and_finishes_in_same_turn_with_full_ac
         assert set(raw) == {'scope', 'requested_scope', 'turn_id', 'invocation_id'}
         assert raw['scope'] == 'billing'
         assert raw['turn_id'] == 'test-turn'
-        reply.set()
+        if decision == "cancel_without_host_reply":
+            await agent.cancel(session.sessionId)
+        else:
+            reply.set()
         result = await asyncio.wait_for(task, 3)
-        assert result.stopReason == 'end_turn'
-        assert result.field_meta['runStatus'] == 'completed'
+        if decision == "cancel_without_host_reply":
+            assert result.stopReason == "cancelled"
+            assert permission_cancelled.is_set()
+            assert not reply.is_set()
+        else:
+            assert result.stopReason == 'end_turn'
+            assert result.field_meta['runStatus'] == 'completed'
         assert network.await_count == int(decision == 'approve')
         assert (tmp_path / 'image.png').exists() == (decision == 'approve')
         assert confirmation.get() is None
@@ -260,7 +278,7 @@ async def test_image_edit_rechecks_reference_permission_after_billing_approval(
         permission_engine=engine,
         endpoint="https://xiaohuanxiong.com/api/web/llm/v2/images/gen", api_key="",
     )
-    headers = AsyncMock(return_value={})
+    headers = AsyncMock(return_value=({}, None))
     network = AsyncMock(side_effect=AssertionError("Unexpected image request"))
     monkeypatch.setattr(tool, "_request_headers", headers)
     monkeypatch.setattr(tool, "_send_with_hosted_auth_retry", network)

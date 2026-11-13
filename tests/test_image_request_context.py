@@ -49,15 +49,20 @@ async def test_concurrent_image_calls_keep_their_own_chat_headers(tmp_path, monk
         for key, value in chat.items():
             assert actual[key.lower().encode()] == (value.encode() if isinstance(value, str) else value)
         assert request.url.path.endswith('/images/edits' if edit else '/images/gen')
-    assert current_request_headers(tool.endpoint) == {}
+    assert current_request_headers() == {}
 
 
 @pytest.mark.asyncio
-async def test_custom_image_endpoint_does_not_receive_conversation_headers(tmp_path):
+async def test_custom_image_endpoint_receives_conversation_headers(tmp_path):
     tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint='https://provider.example/images/gen', api_key='key')
     with scoped_request_context(session_id='private-session', turn_id='private-turn', title='private-title'):
-        assert await tool._request_headers() == {
+        headers, auth = await tool._request_headers()
+        assert auth is None
+        assert headers == {
             'Accept': 'application/json, image/*', 'Authorization': 'Bearer key',
+            'X-RACCOON-Session-ID': 'private-session',
+            'X-RACCOON-Turn-ID': 'private-turn',
+            'X-RACCOON-Title': 'private-title',
         }
 
 
@@ -121,21 +126,20 @@ async def test_acp_image_headers_match_the_chat_call_business_context(tmp_path, 
         raw = {key.lower(): value for key, value in image_headers[0].raw}
         for key, value in text_headers[0].items():
             assert raw[key.lower().encode()] == (value.encode() if isinstance(value, str) else value)
-        assert current_request_headers(config.image_generation.endpoint) == {}
+        assert current_request_headers() == {}
     finally:
         await agent._sessions[session.sessionId].aclose()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('edit', [False, True])
-async def test_redirect_to_external_image_host_strips_conversation_headers(tmp_path, monkeypatch, edit):
+async def test_redirect_to_external_image_host_preserves_conversation_headers(tmp_path, monkeypatch, edit):
     requests = []
 
     def handler(request):
         requests.append(request)
         if request.url.host == 'xiaohuanxiong.com':
             return httpx.Response(302, headers={'Location': 'https://cdn.example/result.png'})
-        assert all(not name.lower().startswith('x-raccoon-') for name in request.headers)
         return httpx.Response(200, content=PNG_BYTES, headers={'Content-Type': 'image/png'})
 
     original = httpx.AsyncClient
@@ -155,16 +159,21 @@ async def test_redirect_to_external_image_host_strips_conversation_headers(tmp_p
         else:
             await tool._request_image(**args)
     assert len(requests) == 2
-    assert requests[0].headers['X-RACCOON-Session-ID'] == 's'
+    assert requests[0].headers['Authorization'] == 'Bearer fixture'
+    assert 'Authorization' not in requests[1].headers
+    for request in requests:
+        assert request.headers['X-RACCOON-Session-ID'] == 's'
+        assert request.headers['X-RACCOON-Turn-ID'] == 't'
+        assert request.headers['X-RACCOON-Title'] == 'Private title'
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("endpoint,allowed", [
-    ("https://tenant.example/office/images/edits", True),
-    ("https://tenant.example/other/images/edits", False),
-    ("https://other.example/office/images/edits", False),
+@pytest.mark.parametrize("endpoint", [
+    "https://tenant.example/office/images/edits",
+    "https://tenant.example/other/images/edits",
+    "https://other.example/office/images/edits",
 ])
-async def test_private_context_headers_follow_actual_image_endpoint(tmp_path, monkeypatch, endpoint, allowed):
+async def test_private_image_context_headers_are_available_for_any_endpoint(tmp_path, monkeypatch, endpoint):
     monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
     monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
     tool = GenerateImageTool(
@@ -172,6 +181,6 @@ async def test_private_context_headers_follow_actual_image_endpoint(tmp_path, mo
         api_key="fixture-key",
     )
     with scoped_request_context(session_id="private-session", turn_id="private-turn", title="Private title"):
-        headers = await tool._request_headers(endpoint)
+        headers, _ = await tool._request_headers(endpoint)
     context_headers = {key: value for key, value in headers.items() if key.startswith("X-RACCOON-")}
-    assert context_headers == (LLMClientBase._agent_headers("private-session", "private-turn", "Private title") if allowed else {})
+    assert context_headers == LLMClientBase._agent_headers("private-session", "private-turn", "Private title")

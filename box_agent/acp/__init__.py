@@ -5215,11 +5215,14 @@ class BoxACPAgent:
         from box_agent.tools.billing import confirmation
         from box_agent.acp.billing import BillingConfirmation
         from box_agent.llm.request_context import scoped_request_context
+        from box_agent.run_control import RunControl
 
+        control = RunControl()
         billing_turn_id = turn_id or state.current_turn_id
         billing_token = confirmation.set(BillingConfirmation(
             self._conn, session_id, billing_turn_id,
             lambda: not state.cancelled and state.current_turn_id == billing_turn_id,
+            control=control,
         ))
         try:
             with scoped_request_context(
@@ -5234,6 +5237,7 @@ class BoxACPAgent:
                     ),
                     session=state,
                     options=run_options,
+                    control=control,
                 )
         finally:
             confirmation.reset(billing_token)

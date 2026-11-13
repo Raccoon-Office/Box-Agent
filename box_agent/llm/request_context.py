@@ -1,4 +1,4 @@
-"""Task-local correlation headers shared with hosted tool requests."""
+"""Task-local correlation headers for tool requests."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Iterator
 
-from box_agent.client_info import should_attach_client_headers
 from box_agent.llm.base import LLMClientBase
 
 _REQUEST_HEADERS: ContextVar[dict[str, str | bytes] | None] = ContextVar(
@@ -25,7 +24,5 @@ def scoped_request_context(
         _REQUEST_HEADERS.reset(token)
 
 
-def current_request_headers(url: str) -> dict[str, str | bytes]:
-    if not should_attach_client_headers(url):
-        return {}
+def current_request_headers() -> dict[str, str | bytes]:
     return dict(_REQUEST_HEADERS.get() or {})
