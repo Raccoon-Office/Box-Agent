@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from box_agent import auth
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.billing import confirmation
 
@@ -148,3 +149,50 @@ async def test_identity_change_never_reuses_image_billing_approval(tmp_path, mon
     if requests:
         assert requests[0].headers["Authorization"] == "Bearer original"
         assert requests[0].headers["X-Org-Code"] == "team-one"
+
+
+@pytest.mark.asyncio
+async def test_private_image_rejects_account_switch_between_auth_reads(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "approved-account", "office_identity": "personal"}))
+    new_auth = {"access_token": "other-account", "office_identity": "personal"}
+    original_read = auth._read_auth_state
+    approved = False
+    switched = False
+
+    async def approve(_capability):
+        nonlocal approved
+        approved = True
+        return True
+
+    def read_and_switch(path):
+        nonlocal switched
+        state = original_read(path)
+        if approved and not switched:
+            auth_file.write_text(json.dumps(new_auth))
+            switched = True
+        return state
+
+    def unexpected_request(request):
+        pytest.fail(f"Image request sent after an account switch: {request.url}")
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(auth, "_read_auth_state", read_and_switch)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(
+        transport=httpx.MockTransport(unexpected_request), **kwargs,
+    ))
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), endpoint="https://tenant.example/office/v1/images/generations",
+        api_key="", auth_file=str(auth_file),
+    )
+    token = confirmation.set(approve)
+    try:
+        result = await tool.execute(prompt="draw", output_path="result.png")
+    finally:
+        confirmation.reset(token)
+    assert switched
+    assert not result.success
+    assert "登录账号或组织已变更" in result.error

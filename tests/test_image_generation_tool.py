@@ -1787,7 +1787,8 @@ async def test_intermediate_image_failure_does_not_publish_artifact(
 @pytest.mark.parametrize("scenario", [
     "expired", "near_expiry", "401", "200003", "200003_string", "rejected_twice",
     "refresh_401", "refresh_503", "missing_refresh", "missing_login",
-    "explicit_key", "custom_host", "environment", "server_error", "download_401",
+    "explicit_key", "custom_host", "environment", "environment_ip", "isolated_ip",
+    "server_error", "download_401",
 ])
 async def test_image_requests_handle_hosted_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit: bool, scenario: str,
@@ -1797,16 +1798,18 @@ async def test_image_requests_handle_hosted_auth(
         return f"header.{payload}.signature"
 
     monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
     now = int(time.time())
     old_token = jwt(now - 60 if scenario == "expired" else now + 60 if scenario == "near_expiry" else now + 3600)
     new_token = jwt(now + 7200)
     state = {"access_token": old_token, "refresh_token": "refresh-secret", "office_identity": "team-one"}
     if scenario == "missing_refresh":
         state.pop("refresh_token")
-    if scenario in {"missing_login", "environment"}:
+    if scenario in {"missing_login", "environment", "environment_ip", "isolated_ip"}:
         state = {}
-    if scenario == "environment":
+    if scenario in {"environment", "environment_ip"}:
         monkeypatch.delenv("BOX_AGENT_HOME")
+    if scenario in {"environment", "environment_ip", "isolated_ip"}:
         monkeypatch.setenv("BOX_AGENT_AUTH_TOKEN", "environment-token")
     auth_file = tmp_path / "auth.json"
     auth_file.write_text(json.dumps(state))
@@ -1825,7 +1828,7 @@ async def test_image_requests_handle_hosted_auth(
             calls.append("download")
             return httpx.Response(401)
         calls.append("image")
-        expected_org = None if scenario in {"explicit_key", "environment"} else "team-one"
+        expected_org = None if scenario == "explicit_key" else state.get("office_identity")
         assert request.headers.get("X-Org-Code") == expected_org
         assert request.headers["X-RACCOON-Session-ID"] == "billing-session"
         assert request.headers["X-RACCOON-Turn-ID"] == "billing-turn"
@@ -1844,9 +1847,14 @@ async def test_image_requests_handle_hosted_auth(
         return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
 
     patch_async_client(monkeypatch, handler)
+    origin = {
+        "custom_host": "https://image.example.test",
+        "environment_ip": "http://10.158.136.99:9000",
+        "isolated_ip": "http://10.158.136.99:9000",
+    }.get(scenario, "https://image.xiaohuanxiong.com")
     tool = GenerateImageTool(
         workspace_dir=str(tmp_path), allow_full_access=False,
-        endpoint="https://image.example.test/v1/images/generations" if scenario == "custom_host" else "https://image.xiaohuanxiong.com/v1/images/generations",
+        endpoint=f"{origin}/v1/images/generations",
         auth_file=str(auth_file), api_key="dedicated-key" if scenario == "explicit_key" else "",
     )
     (tmp_path / "reference.png").write_bytes(PNG_BYTES)
@@ -1882,9 +1890,9 @@ async def test_image_requests_handle_hosted_auth(
         assert "重新登录" in result.error
     if scenario == "explicit_key":
         assert authorizations == ["Bearer dedicated-key"]
-    if scenario == "custom_host":
+    if scenario in {"custom_host", "isolated_ip"}:
         assert authorizations == [""]
-    if scenario == "environment":
+    if scenario in {"environment", "environment_ip"}:
         assert authorizations == ["Bearer environment-token"]
     assert (tmp_path / "result.png").exists() == success
 

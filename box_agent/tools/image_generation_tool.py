@@ -869,14 +869,15 @@ class GenerateImageTool(Tool):
             return headers, None
         hosted = should_attach_auth_header(endpoint)
         if hosted:
+            if approved_auth is None:
+                approved_auth = read_hosted_auth_snapshot(self.auth_file)
             token = await ensure_hosted_auth_ready(endpoint, self.auth_file, expected_auth=approved_auth)
         else:
             token = ""
         current = read_hosted_auth_snapshot(self.auth_file)
         if approved_auth is not None and (
             current.office_identity != approved_auth.office_identity
-            or ((approved_auth.token or approved_auth.refresh_token or current.token)
-                and current.token != token)
+            or current.request_token != token
         ):
             raise HostedAuthRequiredError("登录账号或组织已变更，请重新发起操作")
         org_code = current.org_code

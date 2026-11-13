@@ -198,11 +198,16 @@ def read_auth_token_file(auth_file: str | Path | None) -> str:
 
 @dataclass(frozen=True)
 class HostedAuthSnapshot:
-    """Credentials and office identity read from one version of auth.json."""
+    """Office identity and credentials available for the same request."""
 
     token: str = field(repr=False)
     refresh_token: str = field(repr=False)
     office_identity: str
+    fallback_token: str = field(default="", repr=False)
+
+    @property
+    def request_token(self) -> str:
+        return self.token or self.fallback_token
 
     @property
     def org_code(self) -> str:
@@ -222,10 +227,12 @@ class HostedAuthSnapshot:
 
 
 def _hosted_auth_snapshot(data: Mapping[str, Any]) -> HostedAuthSnapshot:
+    token = _auth_token_from_state(data)
     return HostedAuthSnapshot(
-        _auth_token_from_state(data),
+        token,
         _coerce_token(data.get("refresh_token")),
         _coerce_token(data.get("office_identity")),
+        fallback_token="" if token else _environment_auth_token(),
     )
 
 
@@ -263,29 +270,22 @@ async def ensure_hosted_auth_ready(
     if token:
         return token
 
+    current = read_hosted_auth_snapshot(auth_file)
+    if expected_auth is not None:
+        expected_auth.require_unchanged(current)
+
     if is_private_service_url(api_base):
-        if expected_auth is not None:
-            expected_auth.require_unchanged(read_hosted_auth_snapshot(auth_file))
-        token = resolve_auth_token(auth_file=auth_file)
+        token = current.request_token
         if not token:
             raise HostedAuthRequiredError("未登录，请通过客户端登录后再试")
         return token
 
     if not _xiaohuanxiong_refresh_url(api_base):
-        _, state = _read_auth_state(auth_file)
-        if expected_auth is not None:
-            expected_auth.require_unchanged(_hosted_auth_snapshot(state))
-        return _auth_token_from_state(state)
+        return current.token if expected_auth is None else current.request_token
 
-    _, state = _read_auth_state(auth_file)
-    if expected_auth is not None:
-        expected_auth.require_unchanged(_hosted_auth_snapshot(state))
-    current_token = _auth_token_from_state(state)
-    refresh_token = _coerce_token(state.get("refresh_token"))
-    if not current_token and not refresh_token:
-        token = resolve_auth_token(auth_file=auth_file)
-        if token:
-            return token
+    if not current.token and not current.refresh_token:
+        if current.request_token:
+            return current.request_token
         raise HostedAuthRequiredError("未登录，请通过客户端登录后再试")
 
     return await refresh_hosted_auth_token_if_needed(
@@ -421,10 +421,10 @@ def resolve_auth_token(
     if explicit is not None and explicit.strip():
         return explicit.strip()
 
-    file_token = read_auth_token_file(auth_file)
-    if file_token:
-        return file_token
+    return read_auth_token_file(auth_file) or _environment_auth_token()
 
+
+def _environment_auth_token() -> str:
     if configured_box_agent_home() is not None:
         return ""  # An isolated profile must not inherit the desktop user's login token.
 
