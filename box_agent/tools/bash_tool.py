@@ -37,7 +37,7 @@ from .pptx_safety import (
     detect_pptx_self_check_bypass,
 )
 from .runtime import bundled_win_bash
-from .shell_inspection import find_command_actions, inspect_shell_command
+from .shell_inspection import find_command_actions, inspect_shell_command, link_following_operands
 from .owned_file_cleanup import OwnedFileCleanup
 from .safety import (
     backup_file,
@@ -1870,6 +1870,14 @@ Examples:
                                     success=False, error=error, stderr=error, stdout="", exit_code=1,
                                 )
                     directory_targets = []
+                    for operand in link_following_operands(invocation):
+                        target = Path(self.workspace_dir) / Path(operand).expanduser()
+                        if not self._perm.check(FILESYSTEM_READ, {"path": str(target)}, tool_name="bash").allowed:
+                            directory_targets.append(str(target))
+                            continue
+                        for actual_path in _shell_permission_paths(str(target)) or [str(target)]:
+                            if Path(actual_path).is_dir():
+                                directory_targets.append(actual_path)
                     if name in {
                         "cd", "chdir", "set-location", "sl", "pushd", "push-location", "pushl",
                     } and invocation.arguments:

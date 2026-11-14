@@ -2,7 +2,7 @@
 
 import pytest
 
-from box_agent.tools.shell_inspection import inspect_shell_command
+from box_agent.tools.shell_inspection import inspect_shell_command, link_following_operands
 
 
 def _executables(command: str) -> list[str]:
@@ -24,6 +24,35 @@ def test_builtin_wrapper_preserves_the_actual_command(command, executable):
 def test_find_predicate_values_are_not_executed_commands(literal):
     assert _executables(f"find /client -name '{literal}' -print") == ["find"]
     assert _executables(f"find /client -exec printf '%s\\n' '{literal}' \\;") == ["find", "printf"]
+
+
+@pytest.mark.parametrize("command, operands", [
+    ("tar -h -cf /ws/out.tar /client", ("/client",)),
+    ("tar chf /ws/out.tar /client", ("/client",)),
+    ("tar -cf /ws/out.tar --exclude --dereference /client", ()),
+    ("tar -h -cf /ws/out.tar --exclude /other /client", ("/client",)),
+    ("cp -RL /client /ws/copied", ("/client",)),
+    ("cp --dereference -R -t /client /ws/source", ("/ws/source",)),
+    ("cp -L -P /client /ws/copied", ()),
+    ("rg --follow pattern /client", ("/client",)),
+    ("rg -L -e pattern -- /client", ("/client",)),
+    ("rg --follow --no-follow pattern /client", ()),
+    ("rg --no-follow --follow pattern /client", ("/client",)),
+    ("rg --glob --follow pattern /client", ()),
+    ("grep -R pattern /client", ("/client",)),
+    ("grep -Rr pattern /client", ()),
+    ("grep -rR pattern /client", ("/client",)),
+    ("grep --exclude --dereference-recursive pattern /client", ()),
+    ("rsync -aL /client/ /ws/copy/", ("/client/",)),
+    ("rsync --copy-unsafe-links /client/ /ws/copy/", ("/client/",)),
+    ("rsync -aK /ws/source/ /client/", ("/ws/source/", "/client/")),
+    ("rsync -aL --no-copy-links /client/ /ws/copy/", ()),
+    ("rsync -aLK --no-keep-dirlinks /client/ /ws/copy/", ("/client/",)),
+    ("rsync -a --exclude -L /client/ /ws/copy/", ()),
+])
+def test_link_following_inputs_exclude_option_values_and_outputs(command, operands):
+    invocation = inspect_shell_command(command, posix=True).invocations[0]
+    assert link_following_operands(invocation) == operands
 
 
 def test_heredoc_body_is_not_parsed_as_shell_commands():
