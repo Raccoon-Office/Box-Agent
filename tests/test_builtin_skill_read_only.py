@@ -464,3 +464,58 @@ async def test_failed_cd_does_not_hide_a_write_in_the_current_bundled_directory(
     assert allowed.success, allowed.error
     assert (workspace / "validator.js").read_text() == "ordinary"
     assert target.read_text() == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mkdir, cd and redirection")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("writer", ["redirect", "copy"])
+async def test_directory_created_before_cd_cannot_hide_bundled_write(tmp_path, bundled, monkeypatch, writer):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "patch.js"
+    source.write_text("changed")
+    created = tmp_path / "created"
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    write = 'printf changed > ../bundled/validator.js' if writer == "redirect" else f'cp "{source}" ../bundled/validator.js'
+    denied = await tool.execute(command=f'mkdir "{created}"; cd "{created}"; {write}')
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert target.read_text() == "original"
+    assert not created.exists()
+
+    ordinary = workspace / "ordinary.txt"
+    allowed = await tool.execute(command=f'mkdir "{created}"; cd "{created}"; printf ordinary > ordinary.txt; printf ordinary > "{ordinary}"')
+    assert allowed.success, allowed.error
+    assert (created / "ordinary.txt").read_text() == "ordinary"
+    assert ordinary.read_text() == "ordinary"
+    assert target.read_text() == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cd syntax")
+@pytest.mark.asyncio
+async def test_many_uncertain_directories_do_not_block_absolute_workspace_output(tmp_path, bundled, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    changes = "; ".join(f"cd missing{index}" for index in range(9))
+    denied = await tool.execute(command=f'cd "{root}"; {changes}; printf changed > validator.js')
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert target.read_text() == "original"
+    output = workspace / "ordinary.txt"
+    allowed = await tool.execute(command=f'cd "{root}"; {changes}; printf ordinary > "{output}"')
+    assert allowed.success, allowed.error
+    assert output.read_text() == "ordinary"
+    assert target.read_text() == "original"

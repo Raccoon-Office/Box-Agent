@@ -46,18 +46,32 @@ def builtin_skill_command_write_error(
     File-tool writes are checked separately against their resolved target.
     """
     inspection = inspect_shell_command(command, environment=os.environ if environment is None else environment)
-    def working_directory(changes: tuple[str, ...]) -> Path:
-        cwd = workspace or Path.cwd()
+    initial_cwd = workspace or Path.cwd()
+    directory_error = (
+        "BUILTIN_SKILL_READ_ONLY: too many uncertain directory changes to verify a relative write. "
+        "Use an absolute output path or a separate Bash call."
+    )
+
+    def working_directories(changes: tuple[str, ...]) -> tuple[Path, ...] | None:
+        directories = (initial_cwd,)
         for change in changes:
-            candidate = Path(change).expanduser()
-            candidate = Path(os.path.abspath(candidate if candidate.is_absolute() else cwd / candidate))
-            try:
-                if candidate.is_dir() and os.access(candidate, os.X_OK):
-                    cwd = candidate
-            except (OSError, RuntimeError):
-                # A failed cd keeps the shell's current directory unchanged.
-                continue
-        return cwd
+            possible: dict[Path, None] = {}
+            for cwd in directories:
+                candidate = Path(change).expanduser()
+                candidate = Path(os.path.abspath(candidate if candidate.is_absolute() else cwd / candidate))
+                possible[candidate] = None
+                try:
+                    available = candidate.is_dir() and os.access(candidate, os.X_OK)
+                except (OSError, RuntimeError):
+                    available = False
+                if not available:
+                    # A preceding command may create the directory. Both a
+                    # successful cd and a failed cd remain possible.
+                    possible[cwd] = None
+                if len(possible) > 128:
+                    return None
+            directories = tuple(possible)
+        return directories
 
     skills_root = BUILTIN_SKILLS_ROOT.resolve()
     redirections_by_invocation: dict[int, list[ShellRedirection]] = {}
@@ -71,18 +85,21 @@ def builtin_skill_command_write_error(
             if redirect.operator.endswith("&") and (target.isdigit() or target == "-"):
                 continue
             path = Path(target).expanduser()
-            cwd = working_directory(redirect.directory_changes)
-            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
-                return error
+            directories = (initial_cwd,) if path.is_absolute() else working_directories(redirect.directory_changes)
+            if directories is None:
+                return directory_error
+            for cwd in directories:
+                if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
+                    return error
         if invocation_index == len(inspection.invocations):
             break
         invocation = inspection.invocations[invocation_index]
-        cwd = working_directory(invocation.directory_changes)
         name = Path(invocation.executable).name.lower().removesuffix(".exe")
         args = invocation.arguments
         if name in {"cd", "set-location"} and args:
             continue
         targets: tuple[str, ...] = ()
+        copy_sources: list[str] = []
         protect_ancestors = True
         if name in {"cp", "install"} and args:
             operands: list[str] = []
@@ -133,21 +150,7 @@ def builtin_skill_command_write_error(
                                 explicit_target = value
                             break
             targets = (explicit_target,) if explicit_target is not None else tuple(operands[-1:])
-            if targets and not no_target_directory:
-                destination = Path(invocation.expand_known_parameters(targets[0])).expanduser()
-                destination = destination if destination.is_absolute() else cwd / destination
-                if destination.is_dir():
-                    sources = operands if explicit_target is not None else operands[:-1]
-                    for source in sources:
-                        source_path = Path(invocation.expand_known_parameters(source)).expanduser()
-                        source_path = source_path if source_path.is_absolute() else cwd / source_path
-                        matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
-                        targets += tuple(str(destination / Path(match).name) for match in matches)
-                        targets += (str(destination / source_path.name),)
-                        if glob.has_magic(source_path.name):
-                            # A preceding command may create source files after
-                            # inspection; protect matching existing targets too.
-                            targets += tuple(str(match) for match in destination.glob(source_path.name))
+            copy_sources = operands if explicit_target is not None else operands[:-1]
         elif name == "rsync":
             value_options = {
                 "--rsh", "--filter", "--exclude", "--exclude-from", "--include", "--include-from",
@@ -199,16 +202,40 @@ def builtin_skill_command_write_error(
                 )
                 for match in re.findall(pattern, code)
             )
-        for target in targets:
-            target = invocation.expand_known_parameters(target)
-            if target.startswith("-") and name not in {"cp", "install", "rsync"}:
-                continue
-            path = Path(target).expanduser()
-            path = path if path.is_absolute() else cwd / path
-            if protect_ancestors and skills_root.is_relative_to(path.resolve()):
-                path = skills_root
-            if error := builtin_skill_write_error(path, skills_root):
-                return error
+        if not targets:
+            continue
+        expanded_targets = tuple(invocation.expand_known_parameters(target) for target in targets)
+        directories = (
+            (initial_cwd,) if all(Path(target).expanduser().is_absolute() for target in expanded_targets)
+            else working_directories(invocation.directory_changes)
+        )
+        if directories is None:
+            return directory_error
+        for cwd in directories:
+            candidates = expanded_targets
+            if name in {"cp", "install"} and not no_target_directory:
+                destination = Path(expanded_targets[0]).expanduser()
+                destination = destination if destination.is_absolute() else cwd / destination
+                destination = destination.resolve(strict=False)
+                for source in copy_sources:
+                    source_path = Path(invocation.expand_known_parameters(source)).expanduser()
+                    source_path = source_path if source_path.is_absolute() else cwd / source_path
+                    matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
+                    candidates += tuple(str(destination / Path(match).name) for match in matches)
+                    candidates += (str(destination / source_path.name),)
+                    if glob.has_magic(source_path.name):
+                        # The source or destination directory may be created
+                        # before the copy; inspect existing target entries too.
+                        candidates += tuple(str(match) for match in destination.glob(source_path.name))
+            for target in candidates:
+                if target.startswith("-") and name not in {"cp", "install", "rsync"}:
+                    continue
+                path = Path(target).expanduser()
+                path = path if path.is_absolute() else cwd / path
+                if protect_ancestors and skills_root.is_relative_to(path.resolve()):
+                    path = skills_root
+                if error := builtin_skill_write_error(path, skills_root):
+                    return error
     return None
 
 _DANGEROUS_EXECUTABLE_REASONS = {
