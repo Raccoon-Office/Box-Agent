@@ -1543,6 +1543,62 @@ async def test_bash_client_directory_grant_cannot_escape_via_relative_redirect(w
         assert not (tmp_path / "outside.txt").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX env and tar directory options")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["env-read", "env-write", "tar-read", "tar-write"])
+@pytest.mark.parametrize("option_style", ["separate", "attached", "long"])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_bash_product_directory_options_require_session_scope(
+    workspace, tmp_path, monkeypatch, operation, option_style, nested,
+):
+    import shlex
+    import shutil
+
+    from box_agent.tools.bash_tool import BashTool
+
+    executable = operation.split("-")[0]
+    if shutil.which(executable) is None:
+        pytest.skip(f"{executable} is not installed")
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / "fixture.txt").write_text("product fixture")
+    (workspace / "fixture.txt").write_text("workspace fixture")
+    (tmp_path / "private.txt").write_text("outside fixture content")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+
+    def command_for(directory):
+        quoted = shlex.quote(str(directory))
+        directory_option = {
+            "separate": f"-C {quoted}",
+            "attached": f"-C{quoted}",
+            "long": f"{'--chdir' if executable == 'env' else '--directory'}={quoted}",
+        }[option_style]
+        arguments = {
+            "env-read": "cat ../private.txt",
+            "env-write": "sh -c 'echo escaped > ../outside-write.txt'",
+            "tar-read": "-cf - ../private.txt",
+            "tar-write": "-cf ../outside-write.txt fixture.txt",
+        }[operation]
+        command = f"{executable} {directory_option} {arguments}"
+        return "bash -c " + shlex.quote(command) if nested else command
+
+    result = await tool.execute(command=command_for(client))
+    assert not result.success
+    assert "outside fixture content" not in result.stdout
+    assert not (tmp_path / "outside-write.txt").exists()
+    assert "Access denied" in result.error
+
+    safe_command = (
+        f'env -C "{workspace}" cat fixture.txt'
+        if executable == "env"
+        else f'tar -C "{workspace}" -cf "{workspace / "fixture.tar"}" fixture.txt'
+    )
+    result = await tool.execute(command=safe_command)
+    assert result.success, result.error
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ln syntax")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shell", ["direct", "nested", "two-shells"])
