@@ -433,3 +433,34 @@ async def test_bash_execution_contexts_preserve_bundled_write_protection(tmp_pat
     assert allowed.success, allowed.error
     assert (workspace / target.name).read_text() == "ordinary"
     assert target.read_text() == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cd and redirection syntax")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "file", "broken-link"])
+async def test_failed_cd_does_not_hide_a_write_in_the_current_bundled_directory(tmp_path, bundled, monkeypatch, failure):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    destination = workspace / "unavailable"
+    if failure == "file":
+        destination.write_text("not a directory")
+    elif failure == "broken-link":
+        destination.symlink_to(workspace / "missing-directory")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    command = f'cd "{root}"; cd "{destination}"; printf changed > validator.js; cd "{root}"'
+    denied = await tool.execute(command=command)
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert denied.permission_request is None
+    assert target.read_text() == "original"
+
+    allowed = await tool.execute(command=f'cd "{root}"; cd "{workspace}"; printf ordinary > validator.js')
+    assert allowed.success, allowed.error
+    assert (workspace / "validator.js").read_text() == "ordinary"
+    assert target.read_text() == "original"

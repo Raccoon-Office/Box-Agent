@@ -50,7 +50,13 @@ def builtin_skill_command_write_error(
         cwd = workspace or Path.cwd()
         for change in changes:
             candidate = Path(change).expanduser()
-            cwd = Path(os.path.abspath(candidate if candidate.is_absolute() else cwd / candidate))
+            candidate = Path(os.path.abspath(candidate if candidate.is_absolute() else cwd / candidate))
+            try:
+                if candidate.is_dir() and os.access(candidate, os.X_OK):
+                    cwd = candidate
+            except (OSError, RuntimeError):
+                # A failed cd keeps the shell's current directory unchanged.
+                continue
         return cwd
 
     skills_root = BUILTIN_SKILLS_ROOT.resolve()
