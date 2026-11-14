@@ -45,16 +45,48 @@ def builtin_skill_command_write_error(command: str, workspace: Path | None) -> s
     """
     inspection = inspect_shell_command(command)
     cwd = workspace or Path.cwd()
+    skills_root = BUILTIN_SKILLS_ROOT.resolve()
     for invocation in inspection.invocations:
-        name = Path(invocation.executable).name.lower()
+        name = Path(invocation.executable).name.lower().removesuffix(".exe")
         args = invocation.arguments
         if name in {"cd", "set-location"} and args:
             candidate = Path(args[-1]).expanduser()
             cwd = candidate if candidate.is_absolute() else cwd / candidate
             continue
         targets: tuple[str, ...] = ()
+        protect_ancestors = True
         if name in {"cp", "install"} and args:
             targets = args[-1:]
+            protect_ancestors = False
+            options = iter(args)
+            for option in options:
+                if option == "--":
+                    break
+                long_option, has_value, value = option.partition("=")
+                is_long_option = long_option.startswith("--") and len(long_option) > 2
+                if name == "cp" and is_long_option and any(
+                    mode.startswith(long_option) for mode in ("--recursive", "--archive", "--parents")
+                ):
+                    protect_ancestors = True
+                    continue
+                if option == "-t":
+                    targets = (next(options, ""),)
+                    continue
+                if is_long_option and "--target-directory".startswith(long_option):
+                    targets = (value if has_value else next(options, ""),)
+                    continue
+                if is_long_option and "--suffix".startswith(long_option):
+                    if not has_value:
+                        next(options, None)
+                elif option.startswith("-") and not option.startswith("--"):
+                    for index, letter in enumerate(option[1:], start=1):
+                        if name == "cp" and letter in {"R", "r", "a"}:
+                            protect_ancestors = True
+                        if letter in {"S", "t"}:
+                            value = option[index + 1:] or next(options, "")
+                            if letter == "t":
+                                targets = (value,)
+                            break
         elif name in {"mv", "rm", "rmdir", "tee", "chmod", "chown", "touch"}:
             targets = args
         elif name == "sed" and any(arg.startswith("-i") for arg in args):
@@ -77,7 +109,10 @@ def builtin_skill_command_write_error(command: str, workspace: Path | None) -> s
             if target.startswith("-"):
                 continue
             path = Path(target).expanduser()
-            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
+            path = path if path.is_absolute() else cwd / path
+            if protect_ancestors and skills_root.is_relative_to(path.resolve()):
+                path = skills_root
+            if error := builtin_skill_write_error(path, skills_root):
                 return error
     for redirect in inspection.redirections:
         if ">" in redirect.operator and not redirect.target.isdigit():
