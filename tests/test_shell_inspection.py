@@ -12,6 +12,29 @@ def _executables(command: str) -> list[str]:
     ]
 
 
+def test_command_parameter_bindings_follow_assignment_order():
+    inspection = inspect_shell_command(
+        'DEST=/first; cp input "$DEST"; DEST=/second; cp input "${DEST}/file"',
+        posix=True,
+    )
+    first, second = inspection.invocations
+    assert first.expand_known_parameters(first.arguments[-1]) == "/first"
+    assert second.expand_known_parameters(second.arguments[-1]) == "/second/file"
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_environment_parameter_bindings_are_not_in_inspection_repr(nested):
+    command = 'cp input "$DEST"'
+    if nested:
+        command = "bash -c '" + command + "'"
+    inspection = inspect_shell_command(
+        command, posix=True, environment={"DEST": "/private-environment-marker"},
+    )
+    invocation = inspection.invocations[-1]
+    assert invocation.expand_known_parameters(invocation.arguments[-1]) == "/private-environment-marker"
+    assert "/private-environment-marker" not in repr(inspection)
+
+
 def test_heredoc_body_is_not_parsed_as_shell_commands():
     command = """python3 << 'PY'\n# Let's discuss Q1'24 values.\ndd = 12\nformat = 'wide'\nPY"""
 
@@ -240,3 +263,172 @@ def test_execution_wrappers_expose_dispatched_commands(command: str, expected: l
     inspection = inspect_shell_command(command, posix=True)
 
     assert [invocation.executable for invocation in inspection.invocations] == expected
+
+
+def test_redirections_keep_command_variable_snapshots_and_literal_quotes():
+    inspection = inspect_shell_command(
+        "TARGET=first; printf x > \"$TARGET\"; TARGET=second; printf y > \"$TARGET\"; printf z > '$TARGET'",
+        posix=True,
+        environment={"PRIVATE_VALUE": "host-private-value"},
+    )
+    assert [redirect.expand_target() for redirect in inspection.redirections] == ["first", "second", "$TARGET"]
+    assert [redirect.invocation_index for redirect in inspection.redirections] == [0, 1, 2]
+    assert "host-private-value" not in repr(inspection)
+
+
+@pytest.mark.parametrize("command, expected", [
+    ('TARGET=before; TARGET=after > "$TARGET"', "after"),
+    ('TARGET=before; TARGET=after printf x > "$TARGET"', "before"),
+])
+def test_redirection_expansion_respects_assignment_only_and_command_prefixes(command, expected):
+    inspection = inspect_shell_command(command, posix=True)
+    assert inspection.redirections[0].expand_target() == expected
+
+
+def test_nested_redirections_retain_parent_invocation_offsets_and_shell_depth():
+    inspection = inspect_shell_command(
+        "printf top; bash -c 'TARGET=child; printf x > \"$TARGET\"'; printf after > top.txt",
+        posix=True,
+    )
+    assert [(redirect.invocation_index, redirect.shell_depth, redirect.expand_target())
+            for redirect in inspection.redirections] == [(2, 1, "child"), (3, 0, "top.txt")]
+
+
+def test_binding_snapshots_resolve_chained_assignments_before_later_reassignment():
+    inspection = inspect_shell_command(
+        'ROOT=skills; TARGET="$ROOT/validator.js"; ROOT=ordinary; printf x > "$TARGET"; cp patch.js "$TARGET"',
+        posix=True,
+    )
+    assert inspection.redirections[0].expand_target() == "skills/validator.js"
+    assert inspection.invocations[-1].expand_known_parameters("$TARGET") == "skills/validator.js"
+
+
+def test_binding_snapshots_resolve_host_and_declared_variables_without_exposing_environment():
+    inspection = inspect_shell_command(
+        'export ROOT="$HOST_PATH"; TARGET="$ROOT/validator.js"; printf x > "$TARGET"',
+        posix=True,
+        environment={"HOST_PATH": "/host-private-path"},
+    )
+    assert inspection.redirections[0].expand_target() == "/host-private-path/validator.js"
+    assert "/host-private-path" not in repr(inspection)
+
+
+@pytest.mark.parametrize("command, expected", [
+    ('TARGET=parent; bash -c "TARGET=child; printf x > $TARGET"', "parent"),
+    ('''TARGET=parent; bash -c 'TARGET=child; printf x > "$TARGET"' ''', "child"),
+    (r'TARGET=parent; bash -c "TARGET=child; printf x > \$TARGET"', "child"),
+    ('''TARGET=parent; bash -c 'printf x > '"$TARGET"'/output' ''', "parent/output"),
+    ('TARGET=parent; TARGET=child bash -c "printf x > $TARGET"', "parent"),
+    ('TARGET=parent; env -i TARGET=child bash -c "printf x > $TARGET"', "parent"),
+    ('''SCRIPT='printf x > output'; bash -c "$SCRIPT"''', "output"),
+])
+def test_nested_script_expansion_respects_outer_quotes_and_binding_stage(command, expected):
+    inspection = inspect_shell_command(command, posix=True)
+    assert inspection.redirections[-1].expand_target() == expected
+
+
+@pytest.mark.parametrize("body", [
+    'TARGET=child; printf x > $TARGET',
+    'printf x > $TARGET; echo \\"unterminated',
+])
+def test_outer_environment_expansion_is_frozen_and_not_exposed_in_repr(body):
+    inspection = inspect_shell_command(
+        'bash -c "' + body + '"', posix=True,
+        environment={"TARGET": "/host-private-path"},
+    )
+    if inspection.redirections:
+        assert inspection.redirections[0].expand_target() == "/host-private-path"
+    assert "/host-private-path" not in repr(inspection)
+
+
+def test_expanding_a_host_executable_retains_its_dynamic_approval_fact():
+    inspection = inspect_shell_command(
+        'bash -c "$TOOL --version"', posix=True,
+        environment={"TOOL": "/private-environment-marker"},
+    )
+    assert any(item.dynamic_executable_sources == ("$TOOL",) for item in inspection.invocations)
+    assert "/private-environment-marker" not in repr(inspection)
+
+
+def test_env_wrapper_binds_child_environment_and_directory_without_changing_outer_redirection():
+    inspection = inspect_shell_command(
+        "env -C product DEST=product bash -c 'cp -R input/. \"$DEST\"' > parent.log",
+        posix=True,
+    )
+    child = next(invocation for invocation in inspection.invocations if invocation.executable == "cp")
+    assert child.expand_known_parameters("$DEST") == "product"
+    assert child.directory_changes == ("product",)
+    assert inspection.redirections[0].directory_changes == ()
+
+
+def test_env_clear_and_unset_are_retained_in_nested_snapshots():
+    for prefix in ('env -i', 'env -u HOST_PATH'):
+        inspection = inspect_shell_command(
+            prefix + " bash -c 'printf x > \"$HOST_PATH\"'", posix=True,
+            environment={"HOST_PATH": "/host-private-path"},
+        )
+        assert inspection.redirections[0].expand_target() == "$HOST_PATH"
+        assert "/host-private-path" not in repr(inspection)
+
+
+def test_substitution_retains_owning_command_directory_and_bindings():
+    inspection = inspect_shell_command(
+        'cd product; TARGET=protected; printf "%s" "$(printf changed > "$TARGET")"; cd workspace; TARGET=ordinary',
+        posix=True,
+    )
+    redirect = inspection.redirections[0]
+    assert redirect.directory_changes == ("product",)
+    assert redirect.expand_target() == "protected"
+
+
+def test_env_option_values_are_not_reinterpreted_as_nested_wrappers():
+    inspection = inspect_shell_command("env --argv0 env -C product bash -c 'printf x > output'", posix=True)
+    assert inspection.redirections[0].directory_changes == ("product",)
+
+
+@pytest.mark.parametrize("form", ["subshell", "pipeline", "background"])
+def test_child_shell_bindings_and_directories_do_not_change_parent_facts(form):
+    operators = {"subshell": '(cd child; TARGET=ordinary)', "pipeline": 'cd child | cat', "background": 'cd child & wait'}
+    inspection = inspect_shell_command(
+        f'cd product; TARGET=protected; {operators[form]}; printf changed > "$TARGET"', posix=True,
+    )
+    redirect = inspection.redirections[-1]
+    assert redirect.directory_changes == ("product",)
+    assert redirect.expand_target() == "protected"
+
+
+@pytest.mark.parametrize("body", ["cd child && true", "cd child || false", "(cd child) && true", "cd child | cat && true"])
+def test_async_and_or_lists_do_not_change_parent_directory_or_bindings(body):
+    inspection = inspect_shell_command(
+        f'cd product; TARGET=protected; {body} & wait; printf x > "$TARGET"', posix=True,
+    )
+    assert inspection.redirections[-1].directory_changes == ("product",)
+    assert inspection.redirections[-1].expand_target() == "protected"
+
+
+def test_commands_in_one_async_list_share_a_child_scope():
+    inspection = inspect_shell_command(
+        'cd product; cd child && printf x > output & wait; printf x > parent', posix=True,
+    )
+    assert [redirect.directory_changes for redirect in inspection.redirections] == [
+        ("product", "child"), ("product",),
+    ]
+
+
+@pytest.mark.parametrize("operator", ["&>", "&>>"])
+def test_combined_output_redirection_does_not_background_the_command(operator):
+    inspection = inspect_shell_command(f'cd product {operator} output; printf x > target', posix=True)
+    assert [redirect.operator for redirect in inspection.redirections] == [operator, ">"]
+    assert inspection.redirections[-1].directory_changes == ("product",)
+    numeric_argument = inspect_shell_command(f'printf 2{operator} output', posix=True)
+    assert numeric_argument.invocations[0].arguments == ("2",)
+    assert numeric_argument.redirections[0].operator == operator
+
+
+def test_execution_sequence_keeps_substitution_effects_before_following_commands():
+    inspection = inspect_shell_command('printf "%s" "$(mv before after)"; cd before; printf x > output', posix=True)
+    # Public enumeration remains top-level-first, but execution facts retain
+    # when substitution effects actually occur.
+    assert [invocation.executable for invocation in inspection.invocations] == ["printf", "cd", "printf", "mv"]
+    ordered = sorted(inspection.invocations, key=lambda invocation: invocation.sequence_index)
+    assert [invocation.executable for invocation in ordered] == ["mv", "printf", "cd", "printf"]

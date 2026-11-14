@@ -16,7 +16,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 
-from .shell_inspection import ShellInspection, ShellInvocation, inspect_shell_command
+from .shell_inspection import ShellInspection, ShellInvocation, ShellRedirection, inspect_shell_command
 
 from box_agent.user_paths import state_path
 
@@ -37,28 +37,194 @@ def builtin_skill_write_error(path: Path, skills_root: Path | None = None) -> st
     return None
 
 
-def builtin_skill_command_write_error(command: str, workspace: Path | None) -> str | None:
+def builtin_skill_command_write_error(
+    command: str, workspace: Path | None, *, environment: Mapping[str, str] | None = None,
+) -> str | None:
     """Reject direct shell/inline-code mutations of bundled Skill resources.
 
     This is a command guard, not an OS sandbox for arbitrary external programs.
     File-tool writes are checked separately against their resolved target.
     """
-    inspection = inspect_shell_command(command)
-    cwd = workspace or Path.cwd()
-    for invocation in inspection.invocations:
-        name = Path(invocation.executable).name.lower()
+    inspection = inspect_shell_command(command, environment=os.environ if environment is None else environment)
+    initial_cwd = workspace or Path.cwd()
+    invalidated_directories: set[Path] = set()
+
+    def directory_may_change(path: Path) -> bool:
+        resolved = path.resolve(strict=False)
+        return any(
+            path.is_relative_to(changed) or resolved.is_relative_to(changed)
+            for changed in invalidated_directories
+        )
+
+    directory_error = (
+        "BUILTIN_SKILL_READ_ONLY: too many uncertain directory changes to verify a relative write. "
+        "Use an absolute output path or a separate Bash call."
+    )
+
+    def working_directories(changes: tuple[str, ...]) -> tuple[Path, ...] | None:
+        directories = (initial_cwd,)
+        for change in changes:
+            possible: dict[Path, None] = {}
+            for cwd in directories:
+                candidate = Path(change).expanduser()
+                candidate = Path(os.path.abspath(candidate if candidate.is_absolute() else cwd / candidate))
+                possible[candidate] = None
+                try:
+                    available = (
+                        candidate.is_dir() and os.access(candidate, os.X_OK)
+                        and not directory_may_change(candidate)
+                    )
+                except (OSError, RuntimeError):
+                    available = False
+                if not available:
+                    # A preceding command may create the directory. Both a
+                    # successful cd and a failed cd remain possible.
+                    possible[cwd] = None
+                if len(possible) > 128:
+                    return None
+            directories = tuple(possible)
+        return directories
+
+    skills_root = BUILTIN_SKILLS_ROOT.resolve()
+    events = sorted(
+        (*inspection.invocations, *inspection.redirections),
+        key=lambda event: event.sequence_index,
+    )
+    for event in events:
+        if isinstance(event, ShellRedirection):
+            if ">" not in event.operator:
+                continue
+            target = event.expand_target()
+            if event.operator.endswith("&") and (target.isdigit() or target == "-"):
+                continue
+            path = Path(target).expanduser()
+            directories = (initial_cwd,) if path.is_absolute() else working_directories(event.directory_changes)
+            if directories is None:
+                return directory_error
+            for cwd in directories:
+                destination = path if path.is_absolute() else cwd / path
+                pattern = Path(event.target_glob_pattern()).expanduser()
+                pattern = pattern if pattern.is_absolute() else cwd / pattern
+                targets = glob.glob(str(pattern)) if event.glob_target else []
+                for target in targets or [str(destination)]:
+                    if error := builtin_skill_write_error(Path(target)):
+                        return error
+            continue
+        invocation = event
+        name = Path(invocation.executable).name.lower().removesuffix(".exe")
         args = invocation.arguments
         if name in {"cd", "set-location"} and args:
-            candidate = Path(args[-1]).expanduser()
-            cwd = candidate if candidate.is_absolute() else cwd / candidate
             continue
         targets: tuple[str, ...] = ()
+        target_indices: tuple[int, ...] = ()
+        copy_sources: list[str] = []
+        copy_source_indices: list[int] = []
+        protect_ancestors = True
         if name in {"cp", "install"} and args:
-            targets = args[-1:]
+            operands: list[str] = []
+            operand_indices: list[int] = []
+            explicit_target: str | None = None
+            explicit_target_index = 0
+            no_target_directory = False
+            protect_ancestors = False
+            options = iter(enumerate(args))
+            for option_index, option in options:
+                if option == "--":
+                    for index, value in options:
+                        operands.append(value)
+                        operand_indices.append(index)
+                    break
+                if not option.startswith("-") or option == "-":
+                    operands.append(option)
+                    operand_indices.append(option_index)
+                    continue
+                long_option, has_value, value = option.partition("=")
+                is_long_option = long_option.startswith("--") and len(long_option) > 2
+                if name == "cp" and is_long_option and any(
+                    mode.startswith(long_option) for mode in ("--recursive", "--archive", "--parents")
+                ):
+                    protect_ancestors = True
+                    continue
+                if option == "--no-target-directory":
+                    no_target_directory = True
+                    continue
+                if option == "-t":
+                    explicit_target_index, explicit_target = next(options, (option_index, ""))
+                    continue
+                if is_long_option and "--target-directory".startswith(long_option):
+                    if has_value:
+                        explicit_target_index, explicit_target = option_index, value
+                    else:
+                        explicit_target_index, explicit_target = next(options, (option_index, ""))
+                    continue
+                value_options = {"--suffix"}
+                if name == "install":
+                    value_options.update({"--mode", "--owner", "--group", "--strip-program"})
+                if is_long_option and any(value_option.startswith(long_option) for value_option in value_options):
+                    if not has_value:
+                        next(options, None)
+                elif option.startswith("-") and not option.startswith("--"):
+                    for index, letter in enumerate(option[1:], start=1):
+                        if letter == "T":
+                            no_target_directory = True
+                        if letter == "Z":
+                            break
+                        if name == "cp" and letter in {"R", "r", "a"}:
+                            protect_ancestors = True
+                        if letter in ({"S", "t", "m", "o", "g"} if name == "install" else {"S", "t"}):
+                            value_index, value = (option_index, option[index + 1:]) if option[index + 1:] else next(options, (option_index, ""))
+                            if letter == "t":
+                                explicit_target = value
+                                explicit_target_index = value_index
+                            break
+            targets = (explicit_target,) if explicit_target is not None else tuple(operands[-1:])
+            target_indices = (explicit_target_index,) if explicit_target is not None else tuple(operand_indices[-1:])
+            copy_sources = operands if explicit_target is not None else operands[:-1]
+            copy_source_indices = operand_indices if explicit_target is not None else operand_indices[:-1]
+        elif name == "rsync":
+            value_options = {
+                "--rsh", "--filter", "--exclude", "--exclude-from", "--include", "--include-from",
+                "--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--rsync-path",
+                "--backup-dir", "--temp-dir", "--partial-dir", "--out-format", "--log-file",
+                "--password-file", "--bwlimit", "--port", "--timeout", "--contimeout",
+                "--modify-window", "--max-size", "--min-size", "--block-size", "--chmod",
+                "--suffix", "--chown", "--usermap", "--groupmap", "--max-delete",
+                "--remote-option", "--compress-level", "--compress-choice", "--checksum-seed",
+                "--address", "--sockopts", "--protocol", "--iconv", "--skip-compress",
+                "--write-batch", "--only-write-batch", "--read-batch", "--info", "--debug",
+            }
+            operands = []
+            operand_indices = []
+            options = iter(enumerate(args))
+            for option_index, option in options:
+                if option == "--":
+                    for index, value in options:
+                        operands.append(value)
+                        operand_indices.append(index)
+                    break
+                if not option.startswith("-") or option == "-":
+                    operands.append(option)
+                    operand_indices.append(option_index)
+                    continue
+                long_option, has_value, _ = option.partition("=")
+                if long_option.startswith("--") and len(long_option) > 2 and not has_value and any(
+                    value_option.startswith(long_option) for value_option in value_options
+                ):
+                    next(options, None)
+                elif not option.startswith("--"):
+                    for index, letter in enumerate(option[1:], start=1):
+                        if letter in {"e", "f", "B", "T", "M"}:
+                            if index == len(option) - 1:
+                                next(options, None)
+                            break
+            targets = tuple(operands[-1:])
+            target_indices = tuple(operand_indices[-1:])
         elif name in {"mv", "rm", "rmdir", "tee", "chmod", "chown", "touch"}:
             targets = args
+            target_indices = tuple(range(len(args)))
         elif name == "sed" and any(arg.startswith("-i") for arg in args):
             targets = args
+            target_indices = tuple(range(len(args)))
         else:
             # Quoted paths inside Python/JS are not shell words of their own.
             # Inspect path arguments, not arbitrary quoted file contents.
@@ -73,17 +239,82 @@ def builtin_skill_command_write_error(command: str, workspace: Path | None) -> s
                 )
                 for match in re.findall(pattern, code)
             )
-        for target in targets:
-            if target.startswith("-"):
-                continue
-            path = Path(target).expanduser()
-            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
-                return error
-    for redirect in inspection.redirections:
-        if ">" in redirect.operator and not redirect.target.isdigit():
-            path = Path(redirect.target).expanduser()
-            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
-                return error
+        if not targets:
+            continue
+        expanded_targets = (
+            tuple(invocation.expand_argument(index, target) for index, target in zip(target_indices, targets))
+            if target_indices else tuple(invocation.expand_known_parameters(target) for target in targets)
+        )
+        directories = (
+            (initial_cwd,) if all(Path(target).expanduser().is_absolute() for target in expanded_targets)
+            else working_directories(invocation.directory_changes)
+        )
+        if directories is None:
+            return directory_error
+        changed_directories: set[Path] = set()
+        for cwd in directories:
+            candidates = expanded_targets
+            stable_copy_directory: Path | None = None
+            if name in {"cp", "install", "rsync", "mv", "rm", "rmdir", "tee", "chmod", "chown", "touch", "sed"}:
+                # Shell destination patterns can themselves name a protected
+                # file/link. Check every match, including directory-form copies.
+                target_matches: list[str] = []
+                for target, index, value in zip(expanded_targets, target_indices, targets):
+                    path = Path(target).expanduser()
+                    literal = str(path if path.is_absolute() else cwd / path)
+                    pattern = Path(invocation.expand_argument(index, value, glob_pattern=True)).expanduser()
+                    pattern = pattern if pattern.is_absolute() else cwd / pattern
+                    target_matches.extend(glob.glob(str(pattern)) or [literal])
+                candidates = tuple(target_matches)
+            if name in {"cp", "install"} and not no_target_directory:
+                destinations = candidates
+                for destination_value in destinations:
+                    destination = Path(destination_value).expanduser()
+                    destination = destination if destination.is_absolute() else cwd / destination
+                    destination = destination.resolve(strict=False)
+                    if len(destinations) == 1 and destination.is_dir() and copy_sources:
+                        stable_copy_directory = destination
+                    for source, source_index in zip(copy_sources, copy_source_indices):
+                        source_path = Path(invocation.expand_argument(source_index, source)).expanduser()
+                        source_path = source_path if source_path.is_absolute() else cwd / source_path
+                        source_pattern = Path(invocation.expand_argument(source_index, source, glob_pattern=True)).expanduser()
+                        source_pattern = source_pattern if source_pattern.is_absolute() else cwd / source_pattern
+                        matches = glob.glob(str(source_pattern)) or [str(source_path)]
+                        candidates += tuple(str(destination / Path(match).name) for match in matches)
+                        candidates += (str(destination / source_path.name),)
+                        if source in {".", ".."} or source.rstrip("/").endswith("/."):
+                            stable_copy_directory = None
+                        if glob.has_magic(source_pattern.name):
+                            # The source or destination directory may be created
+                            # before the copy; inspect existing target entries too.
+                            candidates += tuple(str(match) for match in destination.glob(source_pattern.name))
+            for candidate_index, target in enumerate(candidates):
+                if target.startswith("-") and name not in {"cp", "install", "rsync"}:
+                    continue
+                path = Path(target).expanduser()
+                path = path if path.is_absolute() else cwd / path
+                if protect_ancestors and skills_root.is_relative_to(path.resolve()):
+                    path = skills_root
+                if error := builtin_skill_write_error(path, skills_root):
+                    return error
+                if (
+                    candidate_index < len(expanded_targets)
+                    and stable_copy_directory is not None
+                    and path.resolve(strict=False) == stable_copy_directory
+                ):
+                    # A copy into an existing directory changes its entries,
+                    # not the availability of the directory itself.
+                    continue
+                try:
+                    if path.is_dir():
+                        changed_directories.add(Path(os.path.abspath(path)))
+                        if name in {"mv", "rm", "rmdir"}:
+                            changed_directories.add(path.parent.resolve(strict=False) / path.name)
+                        else:
+                            changed_directories.add(path.resolve(strict=False))
+                except (OSError, RuntimeError):
+                    pass
+        invalidated_directories.update(changed_directories)
     return None
 
 _DANGEROUS_EXECUTABLE_REASONS = {
@@ -505,18 +736,19 @@ def _dangerous_invocation_reason(invocation: ShellInvocation) -> str | None:
         return "sudo: runs command as root"
 
     executable = _normalized_executable(invocation.executable)
+    arguments = tuple(invocation.expand_argument(index, value) for index, value in enumerate(invocation.arguments))
     if executable == "sudo":
         return "sudo: runs command as root"
     if executable == "mkfs" or executable.startswith("mkfs."):
         return "mkfs: formats filesystem"
     if executable == "mv" and any(
         argument.rstrip("/") == "/dev/null"
-        for argument in invocation.arguments
+        for argument in arguments
     ):
         return "mv to /dev/null: destroys file"
     if executable == "diskutil" and any(
         argument.casefold() in {"erase", "erasedisk", "erasevolume", "secureerase"}
-        for argument in invocation.arguments
+        for argument in arguments
     ):
         return "diskutil erase: erases disk"
     return _DANGEROUS_EXECUTABLE_REASONS.get(executable)

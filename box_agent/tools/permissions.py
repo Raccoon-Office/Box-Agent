@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -173,25 +174,28 @@ class PermissionEngine:
                 log.warning("permission/bad_allowed_dir", extra={"path": d, "error": str(exc)})
         self._allowed_dirs: tuple[Path, ...] = tuple(resolved_dirs)
 
-        # Box-Agent owns ~/.box-agent (skills, runtime-packages, browsers,
-        # trash, log, ...). It is engine-internal data, not user business
-        # data — never prompt for it, regardless of scope or config.
+        # Product directories belong to this process and its launching host.
+        package_root = Path(__file__).resolve().parents[1]
+        product_roots = [package_root]
         try:
-            self._box_agent_dir: Path | None = state_path("", home_dir=self._home_dir).resolve()
+            product_roots.append(state_path("", home_dir=self._home_dir).resolve())
         except (OSError, RuntimeError):
-            self._box_agent_dir = None
+            pass
+        if getattr(sys, "frozen", False):
+            entry_dir = Path(sys.executable).resolve().parent
+            runtime_root = entry_dir.parent
+            if entry_dir.name == "bin" and (runtime_root / "manifest.json").is_file():
+                product_roots.append(runtime_root)
+        for name in ("BOX_AGENT_RUNTIME_ROOT", "BOX_AGENT_CLIENT_ROOT", "BOX_AGENT_CLIENT_DATA_ROOT"):
+            raw = os.environ.get(name)
+            if raw and Path(raw).is_absolute():
+                product_roots.append(Path(raw))
+        self._product_dirs = self._resolve_product_dirs(product_roots)
 
-        # Built-in skills are trusted, engine-owned code. Packaged runtimes
-        # place them beside this module (for example under an application
-        # bundle), which is intentionally outside the user's filesystem
-        # scope. Allow Bash to read that exact tree so bundled skill scripts
-        # can run, while keeping writes and unrelated application paths
-        # blocked. Resolving both the root and requested path preserves the
-        # existing symlink-escape protection.
+        # Built-in Skill write protection takes precedence over product
+        # directory grants, using the canonical root and requested target.
         try:
-            self._builtin_skills_dir: Path | None = (
-                Path(__file__).resolve().parent.parent / "skills"
-            ).resolve()
+            self._builtin_skills_dir: Path | None = (package_root / "skills").resolve()
         except (OSError, RuntimeError):
             self._builtin_skills_dir = None
 
@@ -215,6 +219,33 @@ class PermissionEngine:
             if resolved not in resolved_app_dirs:
                 resolved_app_dirs.append(resolved)
         self._app_read_dirs: tuple[Path, ...] = tuple(resolved_app_dirs)
+
+    def _resolve_product_dirs(self, roots: list[Path]) -> tuple[Path, ...]:
+        resolved_dirs = []
+        for path in roots:
+            try:
+                root = path.resolve()
+                if self._home_dir.is_relative_to(root) or root == root.parent:
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if root not in resolved_dirs:
+                resolved_dirs.append(root)
+        return tuple(resolved_dirs)
+
+    def _is_bash_product_path(self, path: Path) -> bool:
+        # Normalize lexical traversal before identifying the trusted product
+        # root. Resolve ancestors to support a symlinked runtime/client entry,
+        # while allowing links below that entry to lead outside its real tree.
+        candidate = Path(os.path.abspath(path.expanduser()))
+        for ancestor in (candidate, *candidate.parents):
+            try:
+                resolved = ancestor.resolve(strict=False)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if any(self._is_inside(resolved, root) for root in self._product_dirs):
+                return True
+        return False
 
     @property
     def policy(self) -> CapabilityPolicy:
@@ -251,11 +282,19 @@ class PermissionEngine:
     def _check_filesystem(
         self, path: Path, scope: str, operation: str, tool_name: str | None = None
     ) -> PermissionDecision:
-        resolved = self._resolve_for_check(path)
+        try:
+            # Resolve through missing targets as well, including dangling links
+            # and ".." after a directory the command has yet to create.
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return PermissionDecision(allowed=False, reason=f"Access denied: cannot resolve {path}")
 
         if operation == "write" and self._builtin_skills_dir:
             if error := builtin_skill_write_error(resolved, self._builtin_skills_dir):
                 return PermissionDecision(allowed=False, reason=error)
+
+        if tool_name == "bash" and self._is_bash_product_path(path):
+            return PermissionDecision(allowed=True)
 
         # Directory-level grants take precedence over scope checks. These are
         # recorded by the negotiator after the user approves a permission
@@ -350,28 +389,6 @@ class PermissionEngine:
     def _is_under_home(self, resolved: Path) -> bool:
         return self._is_inside(resolved, self._home_dir)
 
-    def _resolve_for_check(self, path: Path) -> Path:
-        """Resolve a path for permission checking.
-
-        For existing paths: full resolve (follows symlinks).
-        For non-existing paths: resolve the existing parent, then append
-        remaining components.
-        """
-        if path.exists():
-            return path.resolve()
-        parts_below: list[str] = []
-        cursor = path
-        while not cursor.exists():
-            parts_below.append(cursor.name)
-            parent = cursor.parent
-            if parent == cursor:
-                break
-            cursor = parent
-        resolved_parent = cursor.resolve()
-        for part in reversed(parts_below):
-            resolved_parent = resolved_parent / part
-        return resolved_parent
-
     def _path_allowed_by_scope(
         self, resolved: Path, scope: str, operation: str, tool_name: str | None = None
     ) -> bool:
@@ -379,8 +396,7 @@ class PermissionEngine:
         if self._is_inside(resolved, self._workspace_dir):
             return True
 
-        # ~/.box-agent is engine-owned data — always allowed.
-        if self._box_agent_dir is not None and self._is_inside(resolved, self._box_agent_dir):
+        if any(self._is_inside(resolved, root) for root in self._product_dirs):
             return True
 
         # Packaged built-in skills are executable product resources rather
@@ -503,7 +519,7 @@ class GrantStore:
         """True if any granted dir equals or contains *target*.
 
         ``target`` should already be resolved by the caller (the engine does
-        this via ``_resolve_for_check``).
+        this before querying the grant store).
         """
         for d in self._session_dirs:
             if target == d:

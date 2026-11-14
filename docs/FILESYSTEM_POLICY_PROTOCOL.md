@@ -66,6 +66,8 @@ Box-Agent 的权限引擎是**能力（capability）模型**：每个文件读/�
 
 宿主显式传入的三个档位就是当前 session 的权限 authority，不再由全局 `tools.allow_full_access` 二次覆盖。只有旧客户端不传 `permission_mode` 时，才继续使用该全局配置保持兼容。非字符串或未知值按 `default` 处理。`full_access` 仍保留硬编码产品阻断和删除前恢复保护。
 
+未传 `permission_mode` 且 `tools.allow_full_access=false` 时，即使没有显式 `officev3` 配置，也会创建 `PermissionEngine`；无显式策略时使用默认的 `session_workspace` 范围，没有指定 `session_workspace_root` 时以当前 workspace 补齐。缺省模式不会被改写成显式 `default`，因此原有 `officev3` 范围和额外允许目录仍然保留。已配置的旧策略、全局全访问及两个显式全访问档位保持既有行为。
+
 ### 本会话临时文件清理
 
 危险命令审批与文件访问权限分开判断。宿主注入的
@@ -221,7 +223,17 @@ def _path_allowed_by_scope(self, resolved: Path, scope: str) -> bool:
 
 主 Agent 与其子 Agent 共用同一个父会话权限协商器。子 Agent 不会自行扩权；批准后只重试触发请求的工具调用。相同的并发文件权限请求会合并，不同请求会串行弹出，避免多个子 Agent 同时展示重复审批框；危险命令的一次性安全审批不会合并。
 
-**0.8.29 起：`~/.box-agent/` 在所有 scope 下都被引擎硬编码放行，不需要进入 `allowed_directories`。**这是 Box-Agent 自有的运行数据目录（skills 内嵌资源、runtime-packages、browsers cache、log、trash 等），属于框架内部，不是用户业务数据。宿主无需为这个目录单独申请权限或在 `_meta.filesystem_policy` 里追加它。
+**权限引擎会放行实际的 Box-Agent 自有目录：设置了 `BOX_AGENT_HOME` 时使用该目录，否则使用 `~/.box-agent/`。**无需再把它加入 `allowed_directories`。因此，workspace 外、实际 `BOX_AGENT_HOME/skills/cloud/<skill>/references/` 内的普通参考文件可以被 `read_file` 读取。文件工具按解析后的真实位置检查；相似名称的邻接目录，或指向未授权外部路径的软链接，不会因此被放行。
+
+显式 `default` 和缺省受限会话都允许读写当前 Box-Agent 包目录、数据目录以及实际运行包。桌面主进程在启动 ACP 时用 `BOX_AGENT_RUNTIME_ROOT`、`BOX_AGENT_CLIENT_ROOT` 和 `BOX_AGENT_CLIENT_DATA_ROOT` 提供实际运行包、客户端安装目录和应用数据目录的绝对路径。未由宿主传入的客户端目录需要已有路径授权。根目录解析后才用于权限判断，不接受系统根、用户主目录及其祖先作为默认产品目录。
+
+`read_file`、`write_file` 等文件工具按目标真实路径判断产品目录范围。Bash 对产品目录内的逻辑路径默认读写放行，包括产品根的软链接入口和目录内软链接通向外部的路径。路径中的 `..` 先按逻辑位置规范化，规范化后离开产品目录的路径由已有会话权限判定。
+
+Bash 可在产品目录中切换工作目录、展开通配符、创建和跟随链接，以及执行 `find`、`zip`、`tar`、`cp`、`rg`、`rsync` 等目录操作。工具进程可因目录切换、子命令或链接访问产品目录物理范围外的文件，操作可能读取或修改外部数据。维护者已明确接受这一风险。产品授权还覆盖应用代码及应用数据，包括配置、凭据和其他会话文件。
+
+包内置 Skill 的文件修改保护在权限引擎放行前检查。Bash 识别到递归复制、目录同步等操作会写入内置 Skill 子树或其祖先目录时，会拒绝该命令，覆盖 `cp`、`rsync` 写入包根及其软链接入口的场景。复制到目录时，按当前工作目录及已知变量展开源文件通配符，并检查各源文件实际落盘的同名目标，包含已有软链接。写目标中的已知变量按命令顺序及实际子进程环境解析。已解析的 `env` 环境赋值和 `-C`、括号/管道/后台作用域、命令替换保留所属命令的工作目录和变量快照；子进程中的目录及变量变化不会改变父 shell 的目标。重定向按其执行时的上下文检查，命令替换不采用后续命令的状态。检查时无法确认目录切换是否可用，或已识别的前序目录修改可能使目标失效时，同时检查原目录与目标目录，涵盖前序命令创建/移动目录及失败 `cd`；相对写入的目录组合过多时返回错误，明确的绝对输出路径仍可使用。同条命令稍后创建复制源时，目标目录中匹配源通配符的受保护同名入口也会先拦截。读取产品根和写入具体的普通产品文件按产品授权执行。危险命令审批及操作系统、安装包的写权限参与最终操作判定。
+
+原生长工具结果默认保存在实际 Box-Agent 自有目录的 `sessions/<sessionId>/tool-results/` 下，回执会给出供后续读取的绝对路径。该目录通常在 workspace 外，也依赖同一内部目录规则。文件是否属于当前会话本身不会额外授予文件权限；自定义落盘目录仍需位于已有授权范围内。
 
 ---
 
@@ -303,13 +315,13 @@ PermissionEngine.check FILESYSTEM_WRITE → allowed=False, escalation=user_home
 
 | 场景 | 行为 |
 |---|---|
-| 宿主不传 `_meta.filesystem_policy` | 完全沿用 `config.yaml` —— 0.8.26 及之前的行为 |
+| 宿主不传 `_meta.filesystem_policy` | 沿用配置中的权限策略；受限会话的工作区根为空时补为当前 workspace |
 | 宿主传空对象 `{}` | 等价于不传 |
 | 宿主只传 `session_workspace_root` | 仅覆盖该字段，`allowed_directories` 与 `filesystem_scope` 沿用配置 |
-| `permission_mode=default` | workspace + 本 session policy；全局 allowed directories 不继承；无 policy 时仅 workspace |
+| `permission_mode=default` | workspace + 产品目录 + 本 session policy；全局 allowed directories 不继承 |
 | `permission_mode=unrestricted_filesystem` | 完全文件范围；危险命令仍逐次审批；Jupyter kernel 按 ACP session 隔离 |
 | `permission_mode=full_access` | 完全文件范围；危险命令无需应用层确认；仍保留硬阻断、删除备份和 Jupyter session 隔离 |
-| 未传 `permission_mode` | 兼容旧客户端，沿用 `tools.allow_full_access` 和原有 officev3 policy |
+| 未传 `permission_mode` | 沿用 `tools.allow_full_access` 和原有 officev3 policy；未配置全访问时也会创建权限引擎，统一应用内部目录和文件权限规则 |
 | 宿主同时还传 deprecated `officev3_permissions_override` | 旧字段会被 WARNING 但忽略；新字段照常生效 |
 
 受限 session 不再暴露 `execute_code`，这是为关闭真实 Python 进程绕过文件权限所必需的安全收紧。

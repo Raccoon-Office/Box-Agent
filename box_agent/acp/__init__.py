@@ -1972,7 +1972,7 @@ class BoxACPAgent:
             ),
         )
 
-        # Build PermissionEngine via policy composition if officev3 block is configured
+        # Use the shared engine for restricted sessions and configured legacy policies.
         perm_engine = None
         grant_store = GrantStore()
         effective_policy: CapabilityPolicy | None = None
@@ -2011,7 +2011,7 @@ class BoxACPAgent:
 
         if (
             permission_mode not in elevated_permission_modes
-            and (self._has_officev3_policy() or permission_mode == "default")
+            and (self._has_officev3_policy() or not session_allow_full_access)
         ):
             try:
                 # officev3_permissions_override is DEPRECATED — kept for parsing only.
