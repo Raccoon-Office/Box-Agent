@@ -178,6 +178,7 @@ class ShellRedirection:
     directory_changes: tuple[str, ...] = field(default=(), compare=False, repr=False)
     known_variables: tuple[tuple[str, str], ...] = field(default=(), compare=False, repr=False)
     literal_target: bool = field(default=False, compare=False, repr=False)
+    glob_target: bool = field(default=False, compare=False, repr=False)
 
     def expand_target(self) -> str:
         """Expand bindings from when this redirection is performed."""
@@ -547,6 +548,7 @@ def _extract_and_mask_redirections(
         target_end = target_start
         target_quote: str | None = None
         target_escaped = False
+        target_glob = False
         while target_end < len(value):
             target_char = value[target_end]
             if target_escaped:
@@ -567,6 +569,8 @@ def _extract_and_mask_redirections(
                 continue
             if target_quote is None and (target_char.isspace() or target_char in ";&|<>"):
                 break
+            if target_quote is None and target_char in "*?[$":
+                target_glob = True
             target_end += 1
 
         raw_operator = value[operator_start:operator_end]
@@ -577,6 +581,7 @@ def _extract_and_mask_redirections(
                     operator=raw_operator,
                     target=_dequote_shell_word(raw_target, posix=posix),
                     literal_target=bool(re.fullmatch(r"'[^']*'", raw_target)),
+                    glob_target=target_glob,
                 )
             )
         else:

@@ -85,7 +85,7 @@ def test_shell_guard_keeps_bundled_read_and_execute_available(tmp_path, bundled,
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell destination expansion")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("form", ["file", "directory", "target-option", "variable", "touch"])
+@pytest.mark.parametrize("form", ["file", "directory", "target-option", "variable", "touch", "redirect", "variable-redirect"])
 async def test_bash_destination_globs_keep_bundled_links_read_only(tmp_path, bundled, monkeypatch, form):
     from box_agent.tools.bash_tool import BashTool
 
@@ -108,6 +108,8 @@ async def test_bash_destination_globs_keep_bundled_links_read_only(tmp_path, bun
         "target-option": f'cp -t "{product}/"dir-* validator.js',
         "variable": f'DEST="{product}"; cp payload "$DEST/"*.js',
         "touch": f'touch "{product}/"*.js',
+        "redirect": f'printf changed > "{product}/"*.js',
+        "variable-redirect": f'TARGET="{product}/*.js"; printf changed > $TARGET',
     }
     assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(commands[form], workspace)
     denied = await tool.execute(command=commands[form])
@@ -122,6 +124,13 @@ async def test_bash_destination_globs_keep_bundled_links_read_only(tmp_path, bun
     allowed = await tool.execute(command=f'cp payload "{product}/"*.out')
     assert allowed.success, allowed.error
     assert external.read_text() == "changed"
+    redirected = await tool.execute(command=f'printf redirected > "{product}/"*.out')
+    assert redirected.success, redirected.error
+    assert external.read_text() == "redirected"
+    literal = await tool.execute(command=f'printf literal > "{product}/*.js"')
+    assert literal.success, literal.error
+    assert (product / "*.js").read_text() == "literal"
+    assert target.read_text() == "original"
 
 
 @pytest.mark.asyncio

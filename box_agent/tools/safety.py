@@ -102,8 +102,11 @@ def builtin_skill_command_write_error(
             if directories is None:
                 return directory_error
             for cwd in directories:
-                if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
-                    return error
+                destination = path if path.is_absolute() else cwd / path
+                targets = glob.glob(str(destination)) if event.glob_target else []
+                for target in targets or [str(destination)]:
+                    if error := builtin_skill_write_error(Path(target)):
+                        return error
             continue
         invocation = event
         name = Path(invocation.executable).name.lower().removesuffix(".exe")
