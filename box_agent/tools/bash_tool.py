@@ -1850,13 +1850,16 @@ Examples:
                         directory_targets.append(invocation.arguments[-1])
                     # Wrapper options remain in words even when the inspector
                     # exposes the wrapped executable (for example env -C ... cat).
-                    for index, word in enumerate(invocation.words):
+                    option_words = invocation.prefix
+                    if name in {"tar", "gtar", "git", "make", "gmake", "ninja"}:
+                        option_words += invocation.arguments
+                    for index, word in enumerate(option_words):
                         option, separator, value = word.partition("=")
                         if option in {"-C", "--chdir", "--directory", "--workdir", "--working-directory"}:
                             if separator:
                                 directory_targets.append(value)
-                            elif index + 1 < len(invocation.words):
-                                directory_targets.append(invocation.words[index + 1])
+                            elif index + 1 < len(option_words):
+                                directory_targets.append(option_words[index + 1])
                         elif word.startswith("-C") and len(word) > 2:
                             directory_targets.append(word[2:])
                     for value in directory_targets:

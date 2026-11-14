@@ -1597,6 +1597,8 @@ async def test_bash_product_directory_options_require_session_scope(
     )
     result = await tool.execute(command=safe_command)
     assert result.success, result.error
+    result = await tool.execute(command=f'echo --directory "{client}"')
+    assert result.success, result.error
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ln syntax")
