@@ -258,7 +258,7 @@ from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryErr
 
 from .debug_logger import acp_logger as log
 
-from box_agent.user_paths import configured_box_agent_home, state_path
+from box_agent.user_paths import browser_cache_path, configured_box_agent_home, state_path
 
 # Keep stdlib logger for backward compat with existing log calls
 logger = logging.getLogger(__name__)
@@ -6270,12 +6270,11 @@ async def run_acp_server(config: Config | None = None) -> None:
     # ~/.box-agent/browsers/ directory — same location `box-agent install-browser`
     # populates — so CLI installs are reusable from ACP.
     import os as _os
-    _os.environ.setdefault(
-        "PLAYWRIGHT_BROWSERS_PATH",
-        str(state_path('browsers')),
-    )
-    if configured_box_agent_home() is not None:
-        _os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(state_path("browsers", _os.environ["PLAYWRIGHT_BROWSERS_PATH"]))
+    # Browser binaries are a relocatable tool cache, not owned session/config data.
+    # In particular, a Windows junction to another drive must not prevent ACP
+    # startup. Keep host overrides (including Playwright's special "0" value)
+    # and leave browser availability/preparation to the browser tooling.
+    _os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_cache_path()
 
     # ── Stdout guard ────────────────────────────────────────
     # ACP protocol owns stdout exclusively.  Redirect sys.stdout to

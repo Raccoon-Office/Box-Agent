@@ -12,7 +12,7 @@ from pathlib import Path
 from box_agent.tools.runtime import SkillRuntimeContext
 from box_agent.user_paths import (
     PROFILE_ENV,
-    box_agent_home,
+    browser_cache_path,
     configured_box_agent_home,
     state_path,
 )
@@ -119,14 +119,10 @@ def build_skill_execution_env(
         is_windows=is_windows,
     )
 
-    browser_root = Path(
-        inherited.get("PLAYWRIGHT_BROWSERS_PATH")
-        or box_agent_home(home_dir, env=inherited) / "browsers"
-    )
-    if profile_root is not None:
-        browser_root = state_path(
-            "browsers", inherited.get("PLAYWRIGHT_BROWSERS_PATH") or None, env=inherited
-        )
+    browser_cache = browser_cache_path(env=inherited, home_dir=home_dir)
+    browser_root = None if browser_cache == "0" else Path(browser_cache)
+    # Browser binaries may be host-managed or relocated through a directory
+    # junction. They do not carry the profile's configuration/session authority.
     browser_executable = _resolve_skill_browser_executable(
         inherited,
         browser_root=browser_root,
@@ -143,7 +139,7 @@ def build_skill_execution_env(
         "NPM_CONFIG_CACHE": str(skill_tools_root / "npm-cache"),
         "PYTHONUSERBASE": str(python_user_base),
         "PYTHONPATH": separator.join(python_path),
-        "PLAYWRIGHT_BROWSERS_PATH": str(browser_root),
+        "PLAYWRIGHT_BROWSERS_PATH": browser_cache,
     }
     if is_windows:
         # BashTool decodes subprocess streams as UTF-8. Force Python-based
@@ -201,14 +197,14 @@ def _dedupe_paths(entries: list[str], *, is_windows: bool) -> list[str]:
 def _resolve_skill_browser_executable(
     env: dict[str, str],
     *,
-    browser_root: Path,
+    browser_root: Path | None,
     platform_name: str,
 ) -> str | None:
     for name in ("BOX_AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_EXECUTABLE_PATH"):
         candidate = env.get(name)
         if candidate and Path(candidate).is_file():
             return candidate
-    if not browser_root.is_dir():
+    if browser_root is None or not browser_root.is_dir():
         return None
     browser_dirs = sorted(
         browser_root.glob("chromium-*"),

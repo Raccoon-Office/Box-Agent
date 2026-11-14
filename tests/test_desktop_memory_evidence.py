@@ -287,17 +287,20 @@ def test_ordinary_metadata_fields_survive_structured_redaction():
 
 @pytest.mark.parametrize("size", [64 * 1024, 256 * 1024])
 def test_colon_heavy_url_filter_finishes_without_blocking(size):
-    # Isolate the deadline so an old quadratic regex cannot hang the test runner.
+    # Bound the child process so an old quadratic regex cannot hang the runner.
+    # Measure redaction separately from interpreter/dependency cold imports.
     import subprocess
     import sys
 
     subprocess.run([sys.executable, "-c", (
         "from box_agent.desktop_memory.evidence import _redact; "
+        "from time import perf_counter; started = perf_counter(); "
         f"text = 'postgres://' + ':' * {size}; "
         "assert _redact(text) == text; "
         "assert _redact(text + '@db') == '[REDACTED]'; "
-        "assert _redact('postgres://admin:密码@db') == '[REDACTED]'"
-    )], check=True, timeout=3)
+        "assert _redact('postgres://admin:密码@db') == '[REDACTED]'; "
+        "assert perf_counter() - started < 3, 'redaction exceeded 3 seconds'"
+    )], check=True, timeout=30)
 
 
 def test_pending_current_user_can_precede_refresh_but_completed_history_cannot(log):

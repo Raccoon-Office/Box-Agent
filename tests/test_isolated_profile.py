@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 def run_profile_probe(tmp_path, script):
     root = tmp_path / "profile"
@@ -33,6 +35,88 @@ sys.addaudithook(audit)
     result = subprocess.run([sys.executable, "-c", verified_script], cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stdout + result.stderr
     return root
+
+
+@pytest.mark.parametrize("cache", ["missing", "external", "relative", "zero", "linked"])
+def test_acp_initializes_with_relocatable_browser_cache(tmp_path, cache):
+    run_profile_probe(tmp_path, f'cache = {cache!r}\n' + '''
+import asyncio, json, shutil
+from types import SimpleNamespace
+import box_agent.acp as acp
+from box_agent.config import Config, AgentConfig, LLMConfig, ToolsConfig
+
+outside = root.parent / "browser-cache"
+outside.mkdir()
+marker = outside / "preserved.txt"
+marker.write_text("browser-cache-fixture")
+link = root / "browsers"
+if cache == "linked":
+    if os.name == "nt":
+        import subprocess
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                       check=True, capture_output=True)
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+    assert link.resolve() == outside.resolve()
+    # Owned data still rejects the same link; only browser startup is exempt.
+    from box_agent.user_paths import state_path
+    try:
+        state_path("browsers")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Owned-path escape protection was removed")
+override = {"external": str(outside), "relative": "browser-cache", "zero": "0"}.get(cache)
+if override is not None:
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = override
+else:
+    os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+
+config = Config(llm=LLMConfig(api_key="fixture-key"),
+    agent=AgentConfig(enable_memory=False),
+    tools=ToolsConfig(enable_mcp=False, enable_skills=False))
+async def close(): pass
+acp.build_llm_client = lambda **kwargs: SimpleNamespace(aclose=close)
+async def tools(*args, **kwargs): return [], None, None, None
+acp.initialize_base_tools = tools
+initialized = []
+class Writer:
+    transport = SimpleNamespace(_is_closing=False)
+    def write(self, data):
+        response = json.loads(data)
+        assert "error" not in response, response
+        initialized.append(response["result"]["protocolVersion"])
+        disconnect[0]()
+    async def drain(self): pass
+disconnect = []
+async def streams(**kwargs):
+    disconnect.append(kwargs["on_eof"])
+    reader = asyncio.StreamReader()
+    reader.feed_data(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}\\n')
+    return reader, Writer()
+acp.stdio_streams_largebuf = streams
+asyncio.run(acp.run_acp_server(config))
+assert initialized == [1]
+expected = str(root / override) if cache == "relative" else (override if override is not None else str(link))
+assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == expected
+from box_agent.tools.runtime import SkillRuntimeContext
+from box_agent.tools.skill_execution_env import build_skill_execution_env
+from box_agent.cli import _default_browsers_path
+base_env = dict(os.environ)
+if override is not None:
+    base_env["PLAYWRIGHT_BROWSERS_PATH"] = override
+workspace = root.parent / "different-session-cwd"
+workspace.mkdir()
+os.chdir(workspace)
+execution_env = build_skill_execution_env(SkillRuntimeContext(runtimes={}), base_env=base_env)
+assert execution_env["PLAYWRIGHT_BROWSERS_PATH"] == expected
+assert _default_browsers_path() == link
+assert marker.read_text() == "browser-cache-fixture"
+if cache == "missing":
+    assert not link.exists()
+if cache == "linked":
+    link.rmdir() if os.name == "nt" else link.unlink()
+''')
 
 
 def test_all_engine_default_providers_and_constructor_writes_use_profile(tmp_path):

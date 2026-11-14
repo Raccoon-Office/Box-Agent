@@ -57,6 +57,30 @@ def state_path(
     return candidate
 
 
+def browser_cache_path(
+    *, env: Mapping[str, str] | None = None, home_dir: Path | None = None,
+) -> str:
+    """Anchor a relocatable tool cache, retaining filesystem parent semantics."""
+    source = os.environ if env is None else env
+    configured = configured_box_agent_home(source)
+    override = source.get("PLAYWRIGHT_BROWSERS_PATH")
+    if override:
+        if override == "0" or configured is None:
+            return override
+        candidate = Path(override).expanduser()
+        candidate = configured / candidate
+        # Playwright uses Node path.join(), which folds '..' before following
+        # links. Resolve parent traversal first; ordinary caches/junctions need
+        # no target lookup and never receive owned-data containment checks.
+        if ".." in candidate.parts:
+            try:
+                candidate = candidate.resolve()
+            except (OSError, RuntimeError):
+                return str(configured / "browsers")
+        return str(candidate)
+    return str((configured or box_agent_home(home_dir, env=source)) / "browsers")
+
+
 def default_memory_dir() -> str:
     if configured_box_agent_home() is None:
         return "~/.box-agent/memory"
