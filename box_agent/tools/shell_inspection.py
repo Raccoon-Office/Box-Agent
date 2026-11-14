@@ -168,12 +168,15 @@ class ShellInvocation:
 
     def expand_argument(self, index: int, value: str, *, glob_pattern: bool = False) -> str:
         """Expand one operand, optionally escaping literal wildcard characters."""
-        word_index = self.executable_index + 1 + index
-        raw = self.raw_words[word_index] if word_index < len(self.raw_words) else None
+        return self.expand_word(self.executable_index + 1 + index, value, glob_pattern=glob_pattern)
+
+    def expand_word(self, index: int, value: str, *, glob_pattern: bool = False) -> str:
+        """Expand an argument or wrapper-prefix word from its original quoting."""
+        raw = self.raw_words[index] if 0 <= index < len(self.raw_words) else None
         if raw is None:
             return self.expand_known_parameters(value)
         pattern = _expand_script_word(raw, dict(self.known_variables), glob_pattern=glob_pattern)
-        word = self.words[word_index]
+        word = self.words[index]
         # Attached option values, e.g. -tDEST and --target-directory=DEST.
         prefix = word[:len(word) - len(value)] if word.endswith(value) else ""
         return pattern[len(prefix):] if pattern.startswith(prefix) else pattern
@@ -197,6 +200,8 @@ class ShellRedirection:
 
     def expand_target(self) -> str:
         """Expand bindings from when this redirection is performed."""
+        if self.raw_target is not None:
+            return _expand_script_word(self.raw_target, dict(self.known_variables))
         if self.literal_target:
             return self.target
         return _expand_known_parameters(self.target, dict(self.known_variables))
@@ -940,6 +945,7 @@ def _environment_context(
         cursor = index + 1
         while cursor < len(prefix) and prefix[cursor].startswith("-"):
             option = prefix[cursor]
+            value_index = cursor
             cursor += 1
             if option == "--":
                 break
@@ -951,17 +957,19 @@ def _environment_context(
             if option.startswith("-C") and option != "-C":
                 option_name, equals, value = "-C", "=", option[2:]
             if option_name in _WRAPPER_OPTIONS_WITH_VALUES["env"] and not equals and cursor < len(prefix):
+                value_index = cursor
                 value = prefix[cursor]
                 cursor += 1
             if option_name in {"-C", "--chdir"}:
-                context.directory_changes += (_expand_known_parameters(value, scope.known_variables),)
+                context.directory_changes += (invocation.expand_word(value_index, value),)
             elif option_name in {"-u", "--unset"}:
-                context.variables.pop(value, None)
-                context.known_variables.pop(value, None)
+                unset = invocation.expand_word(value_index, value)
+                context.variables.pop(unset, None)
+                context.known_variables.pop(unset, None)
         while cursor < len(prefix) and _ASSIGNMENT_RE.match(prefix[cursor]):
             name, value = prefix[cursor].split("=", 1)
             context.variables[name] = value
-            context.known_variables[name] = _expand_known_parameters(value, scope.known_variables)
+            context.known_variables[name] = invocation.expand_word(cursor, prefix[cursor]).split("=", 1)[1]
             cursor += 1
         index = cursor
     return context
@@ -1073,8 +1081,15 @@ def inspect_shell_command(
             include_nested(substitution, scope, defer=True)
         segment_assignments = _leading_assignments(words)
         known_assignments: dict[str, str] = {}
-        for name, value in segment_assignments.items():
-            known_assignments[name] = _expand_known_parameters(value, {**scope.known_variables, **known_assignments})
+        for index, word in enumerate(words):
+            if not _ASSIGNMENT_RE.match(word):
+                break
+            name, value = word.split("=", 1)
+            variables = {**scope.known_variables, **known_assignments}
+            known_assignments[name] = (
+                _expand_script_word(origins[index], variables).split("=", 1)[1]
+                if origins[index] is not None else _expand_known_parameters(value, variables)
+            )
         executable_index = _executable_index(words)
         redirect_variables = dict(scope.known_variables)
         if executable_index is None:
@@ -1119,12 +1134,15 @@ def inspect_shell_command(
         invocations.append(invocation)
         name = _command_name(invocation.executable)
         if name in {"declare", "export", "readonly", "typeset"}:
-            declared = _leading_assignments(list(invocation.arguments))
-            scope.variables.update(declared)
-            for variable, value in declared.items():
-                scope.known_variables[variable] = _expand_known_parameters(value, scope.known_variables)
+            for index, argument in enumerate(invocation.arguments):
+                if not _ASSIGNMENT_RE.match(argument):
+                    continue
+                variable, raw_value = argument.split("=", 1)
+                scope.variables[variable] = raw_value
+                variable, value = invocation.expand_argument(index, argument).split("=", 1)
+                scope.known_variables[variable] = value
         if name in {"cd", "set-location"} and invocation.arguments:
-            scope.directory_changes += (invocation.expand_known_parameters(invocation.arguments[-1]),)
+            scope.directory_changes += (invocation.expand_argument(len(invocation.arguments) - 1, invocation.arguments[-1]),)
         if script_indices := _shell_script_indices(invocation):
             def script_with(variables: dict[str, str]) -> str:
                 parts = []

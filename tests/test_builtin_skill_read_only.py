@@ -197,6 +197,52 @@ async def test_bash_blocks_bundled_mutation_but_writes_workspace_output(tmp_path
     assert (tmp_path / 'result.txt').read_text() == 'finished'
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX literal parameter references")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["redirect", "cd", "assignment", "export", "export-option", "readonly", "declare", "declare-option", "prefix", "env-binding", "env-cwd", "env-cwd-attached", "env-cwd-long", "escaped-assignment"])
+async def test_bash_literal_parameter_paths_preserve_bundled_write_protection(tmp_path, bundled, monkeypatch, form):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "$T").symlink_to(target)
+    (product / "$O").symlink_to(target)
+    (product / "$D").symlink_to(root, target_is_directory=True)
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(product))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    commands = {
+        "redirect": f'''T=ordinary; printf changed > "{product}/"'$T' ''',
+        "cd": f'''D=ordinary; cd "{product}"; cd '$D'; printf changed > validator.js''',
+        "assignment": f'''O=ordinary; T='$O'; printf changed > "{product}/$T"''',
+        "export": f'''O=ordinary; export T='$O'; printf changed > "{product}/$T"''',
+        "export-option": f'''O=ordinary; export -n T='$O'; printf changed > "{product}/$T"''',
+        "readonly": f'''O=ordinary; readonly T='$O'; printf changed > "{product}/$T"''',
+        "declare": f'''O=ordinary; declare T='$O'; printf changed > "{product}/$T"''',
+        "declare-option": f'''O=ordinary; declare -x T='$O'; printf changed > "{product}/$T"''',
+        "prefix": f'''O=ordinary; T='$O' bash -c 'printf changed > "{product}/$T"' ''',
+        "env-binding": f'''O=ordinary; env T='$O' bash -c 'printf changed > "{product}/$T"' ''',
+        "env-cwd": f'''D=ordinary; cd "{product}"; env -C '$D' bash -c 'printf changed > validator.js' ''',
+        "env-cwd-attached": f'''D=ordinary; cd "{product}"; env -C'$D' bash -c 'printf changed > validator.js' ''',
+        "env-cwd-long": f'''D=ordinary; cd "{product}"; env --chdir='$D' bash -c 'printf changed > validator.js' ''',
+        "escaped-assignment": f'''O=ordinary; T=\\$O; printf changed > "{product}/$T"''',
+    }
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(commands[form], workspace)
+    denied = await tool.execute(command=commands[form])
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert target.read_text() == "original"
+
+    ordinary = product / "ordinary"
+    allowed = await tool.execute(command=f'T="{ordinary}"; printf ordinary > "$T"')
+    assert allowed.success, allowed.error
+    assert ordinary.read_text() == "ordinary"
+
+
 @pytest.mark.parametrize("arguments", [
     "-R source/. '{target}'",
     "-R -t '{target}' source/.",
