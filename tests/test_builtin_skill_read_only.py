@@ -164,6 +164,60 @@ def test_rsync_filter_value_does_not_become_the_write_target(tmp_path, bundled):
     assert safety.builtin_skill_command_write_error(command, tmp_path) is None
 
 
+@pytest.mark.parametrize("arguments", [
+    "cp '{source}' '{product}'",
+    "cp '{source}' other.js '{product}'",
+    "cp -t '{product}' '{source}'",
+    "cp --target-directory='{product}' '{source}'",
+    "install '{source}' '{product}' --mode 644",
+    "install -t'{product}' '{source}'",
+])
+def test_copy_into_directory_checks_each_existing_destination_link(tmp_path, bundled, arguments):
+    _, target = bundled
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / target.name).symlink_to(target)
+    source = tmp_path / target.name
+    source.write_text("changed")
+    command = arguments.format(source=source, product=product)
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, tmp_path)
+    assert safety.builtin_skill_command_write_error(f"cp -T '{source}' '{product}'", tmp_path) is None
+    ordinary = tmp_path / "ordinary.txt"
+    ordinary.write_text("ordinary")
+    assert safety.builtin_skill_command_write_error(f"cp '{ordinary}' '{product}'", tmp_path) is None
+    assert target.read_text() == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cp and symlink syntax")
+@pytest.mark.asyncio
+async def test_bash_copy_to_directory_cannot_follow_link_into_bundled_code(tmp_path, bundled, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    product = tmp_path / "product"
+    product.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(product))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    source = workspace / target.name
+    source.write_text("changed")
+    linked = await tool.execute(command=f'ln -s "{target}" "{product / target.name}"')
+    assert linked.success, linked.error
+    denied = await tool.execute(command=f'cp "{source}" "{product}/"')
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert denied.permission_request is None
+    assert target.read_text() == "original"
+    ordinary = workspace / "ordinary.txt"
+    ordinary.write_text("ordinary")
+    allowed = await tool.execute(command=f'cp "{ordinary}" "{product}/"')
+    assert allowed.success, allowed.error
+    assert (product / ordinary.name).read_text() == "ordinary"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX recursive cp syntax")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("executable", ["cp", "rsync"])

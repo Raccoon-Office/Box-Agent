@@ -60,6 +60,7 @@ def builtin_skill_command_write_error(
         if name in {"cp", "install"} and args:
             operands: list[str] = []
             explicit_target: str | None = None
+            no_target_directory = False
             protect_ancestors = False
             options = iter(args)
             for option in options:
@@ -76,6 +77,9 @@ def builtin_skill_command_write_error(
                 ):
                     protect_ancestors = True
                     continue
+                if option == "--no-target-directory":
+                    no_target_directory = True
+                    continue
                 if option == "-t":
                     explicit_target = next(options, "")
                     continue
@@ -90,6 +94,8 @@ def builtin_skill_command_write_error(
                         next(options, None)
                 elif option.startswith("-") and not option.startswith("--"):
                     for index, letter in enumerate(option[1:], start=1):
+                        if letter == "T":
+                            no_target_directory = True
                         if letter == "Z":
                             break
                         if name == "cp" and letter in {"R", "r", "a"}:
@@ -100,6 +106,15 @@ def builtin_skill_command_write_error(
                                 explicit_target = value
                             break
             targets = (explicit_target,) if explicit_target is not None else tuple(operands[-1:])
+            if targets and not no_target_directory:
+                destination = Path(invocation.expand_known_parameters(targets[0])).expanduser()
+                destination = destination if destination.is_absolute() else cwd / destination
+                if destination.is_dir():
+                    sources = operands if explicit_target is not None else operands[:-1]
+                    targets += tuple(
+                        str(destination / Path(invocation.expand_known_parameters(source)).name)
+                        for source in sources
+                    )
         elif name == "rsync":
             value_options = {
                 "--rsh", "--filter", "--exclude", "--exclude-from", "--include", "--include-from",
