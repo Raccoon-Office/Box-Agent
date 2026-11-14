@@ -47,6 +47,15 @@ def builtin_skill_command_write_error(
     """
     inspection = inspect_shell_command(command, environment=os.environ if environment is None else environment)
     initial_cwd = workspace or Path.cwd()
+    invalidated_directories: set[Path] = set()
+
+    def directory_may_change(path: Path) -> bool:
+        resolved = path.resolve(strict=False)
+        return any(
+            path.is_relative_to(changed) or resolved.is_relative_to(changed)
+            for changed in invalidated_directories
+        )
+
     directory_error = (
         "BUILTIN_SKILL_READ_ONLY: too many uncertain directory changes to verify a relative write. "
         "Use an absolute output path or a separate Bash call."
@@ -61,7 +70,10 @@ def builtin_skill_command_write_error(
                 candidate = Path(os.path.abspath(candidate if candidate.is_absolute() else cwd / candidate))
                 possible[candidate] = None
                 try:
-                    available = candidate.is_dir() and os.access(candidate, os.X_OK)
+                    available = (
+                        candidate.is_dir() and os.access(candidate, os.X_OK)
+                        and not directory_may_change(candidate)
+                    )
                 except (OSError, RuntimeError):
                     available = False
                 if not available:
@@ -74,26 +86,26 @@ def builtin_skill_command_write_error(
         return directories
 
     skills_root = BUILTIN_SKILLS_ROOT.resolve()
-    redirections_by_invocation: dict[int, list[ShellRedirection]] = {}
-    for redirection in inspection.redirections:
-        redirections_by_invocation.setdefault(redirection.invocation_index, []).append(redirection)
-    for invocation_index in range(len(inspection.invocations) + 1):
-        for redirect in redirections_by_invocation.get(invocation_index, ()):
-            if ">" not in redirect.operator:
+    events = sorted(
+        (*inspection.invocations, *inspection.redirections),
+        key=lambda event: event.sequence_index,
+    )
+    for event in events:
+        if isinstance(event, ShellRedirection):
+            if ">" not in event.operator:
                 continue
-            target = redirect.expand_target()
-            if redirect.operator.endswith("&") and (target.isdigit() or target == "-"):
+            target = event.expand_target()
+            if event.operator.endswith("&") and (target.isdigit() or target == "-"):
                 continue
             path = Path(target).expanduser()
-            directories = (initial_cwd,) if path.is_absolute() else working_directories(redirect.directory_changes)
+            directories = (initial_cwd,) if path.is_absolute() else working_directories(event.directory_changes)
             if directories is None:
                 return directory_error
             for cwd in directories:
                 if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
                     return error
-        if invocation_index == len(inspection.invocations):
-            break
-        invocation = inspection.invocations[invocation_index]
+            continue
+        invocation = event
         name = Path(invocation.executable).name.lower().removesuffix(".exe")
         args = invocation.arguments
         if name in {"cd", "set-location"} and args:
@@ -211,23 +223,29 @@ def builtin_skill_command_write_error(
         )
         if directories is None:
             return directory_error
+        changed_directories: set[Path] = set()
         for cwd in directories:
             candidates = expanded_targets
+            stable_copy_directory: Path | None = None
             if name in {"cp", "install"} and not no_target_directory:
                 destination = Path(expanded_targets[0]).expanduser()
                 destination = destination if destination.is_absolute() else cwd / destination
                 destination = destination.resolve(strict=False)
+                if destination.is_dir() and copy_sources:
+                    stable_copy_directory = destination
                 for source in copy_sources:
                     source_path = Path(invocation.expand_known_parameters(source)).expanduser()
                     source_path = source_path if source_path.is_absolute() else cwd / source_path
                     matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
                     candidates += tuple(str(destination / Path(match).name) for match in matches)
                     candidates += (str(destination / source_path.name),)
+                    if source in {".", ".."} or source.rstrip("/").endswith("/."):
+                        stable_copy_directory = None
                     if glob.has_magic(source_path.name):
                         # The source or destination directory may be created
                         # before the copy; inspect existing target entries too.
                         candidates += tuple(str(match) for match in destination.glob(source_path.name))
-            for target in candidates:
+            for candidate_index, target in enumerate(candidates):
                 if target.startswith("-") and name not in {"cp", "install", "rsync"}:
                     continue
                 path = Path(target).expanduser()
@@ -236,6 +254,24 @@ def builtin_skill_command_write_error(
                     path = skills_root
                 if error := builtin_skill_write_error(path, skills_root):
                     return error
+                if (
+                    candidate_index < len(expanded_targets)
+                    and stable_copy_directory is not None
+                    and path.resolve(strict=False) == stable_copy_directory
+                ):
+                    # A copy into an existing directory changes its entries,
+                    # not the availability of the directory itself.
+                    continue
+                try:
+                    if path.is_dir():
+                        changed_directories.add(Path(os.path.abspath(path)))
+                        if name in {"mv", "rm", "rmdir"}:
+                            changed_directories.add(path.parent.resolve(strict=False) / path.name)
+                        else:
+                            changed_directories.add(path.resolve(strict=False))
+                except (OSError, RuntimeError):
+                    pass
+        invalidated_directories.update(changed_directories)
     return None
 
 _DANGEROUS_EXECUTABLE_REASONS = {

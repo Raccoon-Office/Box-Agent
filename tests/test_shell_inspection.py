@@ -386,3 +386,12 @@ def test_combined_output_redirection_does_not_background_the_command(operator):
     numeric_argument = inspect_shell_command(f'printf 2{operator} output', posix=True)
     assert numeric_argument.invocations[0].arguments == ("2",)
     assert numeric_argument.redirections[0].operator == operator
+
+
+def test_execution_sequence_keeps_substitution_effects_before_following_commands():
+    inspection = inspect_shell_command('printf "%s" "$(mv before after)"; cd before; printf x > output', posix=True)
+    # Public enumeration remains top-level-first, but execution facts retain
+    # when substitution effects actually occur.
+    assert [invocation.executable for invocation in inspection.invocations] == ["printf", "cd", "printf", "mv"]
+    ordered = sorted(inspection.invocations, key=lambda invocation: invocation.sequence_index)
+    assert [invocation.executable for invocation in ordered] == ["mv", "printf", "cd", "printf"]

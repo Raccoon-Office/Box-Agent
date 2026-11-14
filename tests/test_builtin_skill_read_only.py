@@ -519,3 +519,70 @@ async def test_many_uncertain_directories_do_not_block_absolute_workspace_output
     assert allowed.success, allowed.error
     assert output.read_text() == "ordinary"
     assert target.read_text() == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX move, cd and redirection")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_directory_moved_before_cd_preserves_bundled_write_protection(tmp_path, bundled, monkeypatch, wrapped):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    moved = tmp_path / "moved"
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    move = 'mv ../ordinary ../moved'
+    if wrapped:
+        move = 'printf "%s" "$(mv ../ordinary ../moved)"'
+    # Keep the protected cd path relative so the legacy coarse mutator-path
+    # classifier cannot mask this command-guard regression.
+    command = f'cd "{tmp_path}"; cd bundled; {move}; cd ../ordinary; printf changed > validator.js; cd ../bundled'
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, workspace, environment=tool._subprocess_env)
+    denied = await tool.execute(command=command)
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert target.read_text() == "original"
+    assert ordinary.is_dir()
+    assert not moved.exists()
+
+    # A move elsewhere does not make a valid workspace cd uncertain.
+    allowed = await tool.execute(command=f'cd "{tmp_path}"; cd bundled; mv ../ordinary ../moved; cd ../workspace; printf ordinary > validator.js')
+    assert allowed.success, allowed.error
+    assert (workspace / "validator.js").read_text() == "ordinary"
+    assert moved.is_dir()
+    assert target.read_text() == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX copy, move and cd")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["copy-before", "move-after"])
+async def test_unrelated_directory_operations_keep_normal_cd_writes_available(tmp_path, bundled, monkeypatch, operation):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    source = workspace / "data.txt"
+    source.write_text("data")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    if operation == "copy-before":
+        command = f'cd "{tmp_path}"; cd bundled; cp "{source}" "{ordinary}"; cd ../ordinary; printf ordinary > validator.js'
+        output = ordinary / "validator.js"
+    else:
+        command = f'cd "{tmp_path}"; cd bundled; cd ../workspace; printf ordinary > validator.js; mv "{ordinary}" "{tmp_path / "moved"}"'
+        output = workspace / "validator.js"
+    result = await tool.execute(command=command)
+    assert result.success, result.error
+    assert output.read_text() == "ordinary"
+    assert target.read_text() == "original"

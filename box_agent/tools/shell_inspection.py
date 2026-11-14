@@ -145,6 +145,7 @@ class ShellInvocation:
     dynamic_executable_evidence: str = ""
     known_variables: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     shell_depth: int = field(default=0, compare=False, repr=False)
+    sequence_index: int = field(default=0, compare=False, repr=False)
     directory_changes: tuple[str, ...] = field(default=(), compare=False, repr=False)
 
     @property
@@ -173,6 +174,7 @@ class ShellRedirection:
     indirect: bool = False
     invocation_index: int = field(default=0, compare=False, repr=False)
     shell_depth: int = field(default=0, compare=False, repr=False)
+    sequence_index: int = field(default=0, compare=False, repr=False)
     directory_changes: tuple[str, ...] = field(default=(), compare=False, repr=False)
     known_variables: tuple[tuple[str, str], ...] = field(default=(), compare=False, repr=False)
     literal_target: bool = field(default=False, compare=False, repr=False)
@@ -907,6 +909,7 @@ def inspect_shell_command(
     _variables: dict[str, str] | None = None,
     _known_variables: dict[str, str] | None = None,
     _directory_changes: tuple[str, ...] = (),
+    _sequence: list[int] | None = None,
 ) -> ShellInspection:
     """Inspect shell command structure without executing it.
 
@@ -916,6 +919,13 @@ def inspect_shell_command(
     """
     if posix is None:
         posix = platform.system() != "Windows"
+    sequence = [0] if _sequence is None else _sequence
+
+    def next_sequence() -> int:
+        index = sequence[0]
+        sequence[0] += 1
+        return index
+
     shell_text = _mask_shell_comments(_mask_heredoc_bodies(command))
     top_level_text, substitutions, mutating_arithmetic, substitution_positions = _extract_and_mask_substitutions(shell_text)
     command_text, _, redirect_ambiguous = _extract_and_mask_redirections(top_level_text, posix=posix)
@@ -960,6 +970,7 @@ def inspect_shell_command(
             _variables=context.variables,
             _known_variables=context.known_variables,
             _directory_changes=context.directory_changes,
+            _sequence=sequence,
         )
         if defer:
             deferred_substitutions.append(nested)
@@ -1005,6 +1016,7 @@ def inspect_shell_command(
                 redirection,
                 invocation_index=len(invocations),
                 shell_depth=_depth + len(scope_key),
+                sequence_index=next_sequence(),
                 directory_changes=scope.directory_changes,
                 known_variables=tuple(redirect_variables.items()),
             )
@@ -1025,6 +1037,7 @@ def inspect_shell_command(
             tuple(words), executable_index, segment,
             known_variables=tuple(scope.known_variables.items()),
             shell_depth=_depth + len(scope_key),
+            sequence_index=next_sequence(),
             directory_changes=scope.directory_changes,
             dynamic_executable_sources=dynamic_executable_sources,
             dynamic_executable_evidence=(
