@@ -1809,6 +1809,38 @@ Examples:
                 )
 
                 abs_paths = extract_absolute_paths(permission_command)
+                # Product grants apply to concrete file operands. A shell cwd
+                # change or link creation can redirect later operands outside them.
+                inspection = inspect_shell_command(
+                    permission_command, posix=not self.is_windows or self._bundled_win_bash is not None,
+                )
+                for invocation in inspection.invocations:
+                    name = invocation.executable.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+                    if name in {
+                        "ln", "ln.exe", "mklink",
+                    } or (
+                        name in {"new-item", "ni"}
+                        and any(arg.casefold() in {"symboliclink", "junction", "hardlink"} for arg in invocation.arguments)
+                    ) or (
+                        name in {"cmd", "cmd.exe"} and re.search(r"\bmklink\b", invocation.raw_segment, re.I)
+                    ):
+                        if inspection.has_control_operators or inspection.redirections:
+                            error = "Create links in a separate shell call before accessing files through them."
+                            return BashOutputResult(success=False, error=error, stderr=error, stdout="", exit_code=1)
+                    if (name not in {
+                        "cd", "chdir", "set-location", "sl", "pushd", "push-location", "pushl",
+                    } or not invocation.arguments):
+                        continue
+                    target = Path(invocation.arguments[-1]).expanduser()
+                    decision = self._perm.check(
+                        FILESYSTEM_READ, {"path": str(Path(self.workspace_dir) / target)},
+                        tool_name="bash", allow_product_directories=False,
+                    )
+                    if not decision.allowed:
+                        return BashOutputResult(
+                            success=False, error=decision.reason, stderr=decision.reason or "Permission denied",
+                            stdout="", exit_code=1, permission_request=decision.permission_request,
+                        )
                 log.debug(
                     "bash/perm/extracted paths=%s reason=%s cmd=%r",
                     abs_paths, escape_reason, command[:200],
