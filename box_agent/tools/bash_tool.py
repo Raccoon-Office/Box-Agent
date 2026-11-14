@@ -1816,17 +1816,31 @@ Examples:
                 )
                 for invocation in inspection.invocations:
                     name = invocation.executable.replace("\\", "/").rsplit("/", 1)[-1].casefold()
-                    if name in {
+                    creates_link = name in {
                         "ln", "ln.exe", "mklink",
                     } or (
                         name in {"new-item", "ni"}
-                        and any(arg.casefold() in {"symboliclink", "junction", "hardlink"} for arg in invocation.arguments)
+                        and any(
+                            arg.casefold() in {"symboliclink", "junction", "hardlink"}
+                            for arg in invocation.arguments
+                        )
                     ) or (
                         name in {"cmd", "cmd.exe"} and re.search(r"\bmklink\b", invocation.raw_segment, re.I)
-                    ):
-                        if inspection.has_control_operators or inspection.redirections:
-                            error = "Create links in a separate shell call before accessing files through them."
-                            return BashOutputResult(success=False, error=error, stderr=error, stdout="", exit_code=1)
+                    )
+                    if creates_link and (inspection.has_control_operators or inspection.redirections):
+                        for absolute_path in abs_paths:
+                            resource = {"path": absolute_path}
+                            if (
+                                self._perm.check(FILESYSTEM_READ, resource, tool_name="bash").allowed
+                                and not self._perm.check(
+                                    FILESYSTEM_READ, resource, tool_name="bash",
+                                    allow_product_directories=False,
+                                ).allowed
+                            ):
+                                error = "Create links in a separate shell call before accessing product files through them."
+                                return BashOutputResult(
+                                    success=False, error=error, stderr=error, stdout="", exit_code=1,
+                                )
                     if (name not in {
                         "cd", "chdir", "set-location", "sl", "pushd", "push-location", "pushl",
                     } or not invocation.arguments):
