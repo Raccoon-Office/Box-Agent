@@ -8,6 +8,25 @@ Version 2 keeps the system prompt and provider-facing tool definitions stable du
 
 Discovery returns bounded, complete schema entries. Oversized or omitted entries receive a notice rather than an executable reference. Required tool descriptions are delivered again after compaction removes them. Execution events, permission checks, budgets and hooks retain the real target's identity, while model history retains the original `call_tool` call and call ID.
 
+After a successful connector hit, `tool_search` also returns `connector_catalogs`:
+the exact model-facing names and short purposes of that connector's discoverable
+tools, including tools on its other MCP servers. This metadata does not activate
+sibling tools or issue their schemas or references; use `tool_names` to discover
+the tools needed for later steps. Authorization, visibility and name-conflict
+filters apply before building the catalog. Tools without a connector ID do not
+trigger this expansion.
+
+Purposes are whitespace-normalized and limited to 160 characters. Catalogs share
+an 8,000-character JSON budget per search, separate from the existing schema
+budget. `tool_count` gives the eligible total, `omitted_count` reports tools
+omitted from a group, and `connector_catalogs_omitted_count` reports whole groups
+omitted for size. Omitted tools remain searchable. An unchanged catalog is sent
+once per session; connection-generation or visibility changes allow an update.
+Version 2 also permits redelivery on the next matching search if compaction or
+projection removes the catalog from the model's history. Catalogs are not eagerly
+restored, nor inserted into the system prompt or top-level tool definitions.
+Version 1 retains session-level deduplication without history-based redelivery.
+
 Skill recommendations are bounded runtime messages, not system prompt changes. They are snapshots of the current visible recommendations, and later snapshots supersede earlier ones. Use `list_skills` for the full catalog and `get_skill` for the chosen Skill's instructions. Skill metadata and instructions do not grant tools or permissions. Selected or restored guidance is delivered as durable runtime messages or bounded reading instructions; long guidance can require paged reading.
 
 Compaction does not promote discoveries into the system prompt or top-level tool definitions. It restores complete, acknowledged tool descriptions (including schemas and existing refs) at the message tail when missing. Current definition, visibility, permission and connection-generation checks still apply; stale or unacknowledged discoveries are not restored. Required/always-load descriptions also retain their existing recovery path. Compaction alone does not disconnect MCP or issue new references.

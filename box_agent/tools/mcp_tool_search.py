@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 TOOL_SEARCH_NAME = "tool_search"
 _DISCOVERY_ENTRY_BUDGET_CHARS = 48_000
+_CONNECTOR_CATALOG_BUDGET_CHARS = 8_000
+_CONNECTOR_PURPOSE_CHARS = 160
 _ACTIVATION_COMPANIONS: dict[str, tuple[str, ...]] = {
     # Playwright navigation returns metadata before the page-body snapshot.
     # Exposing one without the other creates a runtime state the model cannot
@@ -66,6 +68,9 @@ class ToolSearchTool(Tool):
         self._activated_local = (
             activated_local_tools if activated_local_tools is not None else OrderedDict()
         )
+        self._delivered_connector_catalogs: dict[
+            str, tuple[tuple[tuple[str, int], ...], str]
+        ] = {}
 
     def _entry_is_allowed(self, entry) -> bool:
         if entry.connector_id is None:
@@ -73,6 +78,59 @@ class ToolSearchTool(Tool):
         if self._allowed_connector_ids_provider is None:
             return True
         return entry.connector_id in self._allowed_connector_ids_provider()
+
+    def _add_connector_catalogs(self, payload: dict, protected_names: frozenset[str]) -> None:
+        """Append bounded sibling metadata without activating or issuing refs."""
+        connector_ids = {
+            item["connector_id"] for item in payload["activated"]
+            if item.get("connector_id") is not None
+        }
+        groups = []
+        remaining = _CONNECTOR_CATALOG_BUDGET_CHARS - 2
+        omitted_connectors = 0
+        snapshot = self._catalog.snapshot() if connector_ids else ()
+        for connector_id in sorted(connector_ids):
+            entries = sorted(
+                (entry for entry in snapshot
+                 if entry.connector_id == connector_id and self._entry_is_allowed(entry)
+                 and not entry.name_conflict and entry.model_name not in protected_names
+                 and entry.model_name != TOOL_SEARCH_NAME
+                 and (self._stable_manager is None
+                      or self._stable_manager.is_discoverable(entry.tool))),
+                key=lambda entry: entry.tool_id,
+            )
+            signature = tuple((entry.tool_id, entry.generation) for entry in entries)
+            previous = self._delivered_connector_catalogs.get(connector_id)
+            if not entries or (previous is not None and previous[0] == signature):
+                continue
+            group = {"connector_id": connector_id, "tool_count": len(entries),
+                     "tools": [], "omitted_count": len(entries)}
+            available = remaining - len(json.dumps(group, ensure_ascii=False)) - 2
+            for entry in entries:
+                item = {"tool_name": entry.model_name,
+                        "purpose": " ".join(entry.description.split())[:_CONNECTOR_PURPOSE_CHARS]}
+                size = len(json.dumps(item, ensure_ascii=False)) + 2
+                if size > available:
+                    continue
+                group["tools"].append(item)
+                group["omitted_count"] -= 1
+                available -= size
+            if not group["tools"]:
+                omitted_connectors += 1
+                continue
+            groups.append(group)
+            remaining -= len(json.dumps(group, ensure_ascii=False)) + 2
+            self._delivered_connector_catalogs[connector_id] = (
+                signature, json.dumps(group, ensure_ascii=False, sort_keys=True),
+            )
+        if groups or omitted_connectors:
+            payload["connector_catalogs"] = groups
+            payload["connector_catalogs_omitted_count"] = omitted_connectors
+            payload["connector_catalogs_notice"] = (
+                "Connector catalogs contain names and short purposes only; listing a tool "
+                "does not activate it or issue a tool_ref. Search exact tool_names for "
+                "complete schemas. Omitted entries can still be found through tool_search."
+            )
 
     @property
     def name(self) -> str:
@@ -88,7 +146,7 @@ class ToolSearchTool(Tool):
             "plans, progress, goals, memory, scheduling and integrations when available. Every hit "
             "returned by this call is immediately activated for this session and "
             "only those activated hits are added to the next model step; other "
-            "deferred catalog tools are not exposed, while alwaysLoad tools remain "
+            "deferred catalog schemas are not exposed, while alwaysLoad tools remain "
             "visible without search. Use query for one keyword search, queries for "
             "independent bilingual or synonymous searches, or tool_names to activate "
             "only exact catalog IDs, model-facing names, or unique original MCP names. "
@@ -144,7 +202,7 @@ class ToolSearchTool(Tool):
                         "Exact tool IDs, model-facing names, or unique original MCP names "
                         "to activate, such as mcp:server/tool, server/tool, or an "
                         "MCP tools/list name. No fuzzy fallback is used, and unlisted "
-                        "catalog tools remain hidden."
+                        "catalog tools are not activated by this search."
                     ),
                 },
                 "server_name": {
@@ -174,7 +232,7 @@ class ToolSearchTool(Tool):
                         "ignored for tool_names and server-only activation. Choose any positive count required by "
                         "the task; there is no small fixed cap. Protocol-required "
                         "companions may be activated in addition to these query matches. "
-                        "Other unreturned catalog tools remain hidden."
+                        "Other unreturned catalog tools are not activated by this search."
                     ),
                 },
             },
@@ -431,7 +489,7 @@ class ToolSearchTool(Tool):
                 f"Activated {len(activated_results)} returned or required companion "
                 "tool(s) for this session. Only these hits, their protocol-required "
                 "companions, and explicit eager tools are callable by their real name "
-                "on the next step; all other catalog tools remain hidden."
+                "on the next step; other catalog tools are not activated by these hits."
                 if activated_results
                 else (
                     "Matching tools have conflicting model-facing names."
@@ -491,6 +549,7 @@ class ToolSearchTool(Tool):
                     success=False, content=json.dumps(payload, ensure_ascii=False),
                     error="MCP catalog is still loading; retry tool_search shortly.",
                 )
+        self._add_connector_catalogs(payload, protected_names)
         conflict_error = None
         if conflicts and not activated_results:
             conflict_error = (
@@ -530,6 +589,7 @@ class MCPToolExposureManager:
         self._search_refs: set[str] = set()
         self._pending_search_descriptors: dict[str, set[str]] = {}
         self._search_result_calls: dict[str, set[tuple[str, str]]] = {}
+        self._search_tool: ToolSearchTool | None = None
         self._stable_candidates: dict[str, Tool] = {}
         self._live_candidates: Callable[[], Mapping[str, Tool]] = lambda: self._stable_candidates
         self._stable_visibility: Callable[[str], bool] | None = None
@@ -564,6 +624,7 @@ class MCPToolExposureManager:
 
     def enable_stable_prefix(self, search_tool: ToolSearchTool) -> None:
         self.stable_prefix = True
+        self._search_tool = search_tool
         search_tool._stable_manager = self
         # Do not persist only a truncated description while issuing its reference.
         search_tool.max_result_size_chars = float("inf")
@@ -636,14 +697,30 @@ class MCPToolExposureManager:
         Only call IDs recorded when an actual search result was committed qualify.
         Already-prepared request snapshots are immutable and gain no new refs.
         """
+        visible_catalogs: set[str] = set()
         for message in messages:
             if (getattr(message, "role", None) != "tool"
                     or getattr(message, "name", None) != TOOL_SEARCH_NAME
                     or not isinstance(getattr(message, "content", None), str)):
                 continue
             issued = self._search_result_calls.get(getattr(message, "tool_call_id", None), set())
-            for ref, _ in self._matching_search_descriptors(message.content) & issued:
+            matched = self._matching_search_descriptors(message.content) & issued
+            for ref, _ in matched:
                 self._search_refs.add(ref)
+            if matched:
+                catalogs = json.loads(message.content).get("connector_catalogs", [])
+                if isinstance(catalogs, list):
+                    visible_catalogs.update(
+                        json.dumps(group, ensure_ascii=False, sort_keys=True)
+                        for group in catalogs if isinstance(group, dict)
+                    )
+        if self._search_tool is not None:
+            delivered = self._search_tool._delivered_connector_catalogs
+            # If compaction or projection removed a receipt, the next matching
+            # search may return its catalog again. Do not restore it eagerly.
+            for connector_id, (_, receipt) in tuple(delivered.items()):
+                if receipt not in visible_catalogs:
+                    del delivered[connector_id]
 
     def is_current_target(self, name: str, tool: Tool) -> bool:
         if self._scope_parent is not None:
