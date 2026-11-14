@@ -199,7 +199,7 @@ async def test_bash_blocks_bundled_mutation_but_writes_workspace_output(tmp_path
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX literal parameter references")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("form", ["redirect", "cd", "assignment", "export", "export-option", "readonly", "declare", "declare-option", "prefix", "env-binding", "env-cwd", "env-cwd-attached", "env-cwd-long", "escaped-assignment"])
+@pytest.mark.parametrize("form", ["redirect", "cd", "assignment", "export", "export-option", "readonly", "declare", "declare-option", "prefix", "env-binding", "env-cwd", "env-cwd-attached", "env-cwd-long", "escaped-assignment", "eval-cd", "eval-assignment"])
 async def test_bash_literal_parameter_paths_preserve_bundled_write_protection(tmp_path, bundled, monkeypatch, form):
     from box_agent.tools.bash_tool import BashTool
 
@@ -230,6 +230,8 @@ async def test_bash_literal_parameter_paths_preserve_bundled_write_protection(tm
         "env-cwd-attached": f'''D=ordinary; cd "{product}"; env -C'$D' bash -c 'printf changed > validator.js' ''',
         "env-cwd-long": f'''D=ordinary; cd "{product}"; env --chdir='$D' bash -c 'printf changed > validator.js' ''',
         "escaped-assignment": f'''O=ordinary; T=\\$O; printf changed > "{product}/$T"''',
+        "eval-cd": f'''D=ordinary; cd "{product}"; eval "cd '\\$D'"; printf changed > validator.js''',
+        "eval-assignment": f'''O=ordinary; eval "T='\\$O'"; printf changed > "{product}/$T"''',
     }
     assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(commands[form], workspace)
     denied = await tool.execute(command=commands[form])
@@ -241,6 +243,10 @@ async def test_bash_literal_parameter_paths_preserve_bundled_write_protection(tm
     allowed = await tool.execute(command=f'T="{ordinary}"; printf ordinary > "$T"')
     assert allowed.success, allowed.error
     assert ordinary.read_text() == "ordinary"
+
+    via_eval = await tool.execute(command=f'''eval 'cd "{product}"'; printf evaluated > evaluated.txt''')
+    assert via_eval.success, via_eval.error
+    assert (product / "evaluated.txt").read_text() == "evaluated"
 
 
 @pytest.mark.parametrize("arguments", [

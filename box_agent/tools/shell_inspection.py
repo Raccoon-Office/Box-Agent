@@ -985,6 +985,7 @@ def inspect_shell_command(
     _known_variables: dict[str, str] | None = None,
     _directory_changes: tuple[str, ...] = (),
     _sequence: list[int] | None = None,
+    _scope: _ShellScope | None = None,
 ) -> ShellInspection:
     """Inspect shell command structure without executing it.
 
@@ -1010,7 +1011,7 @@ def inspect_shell_command(
     all_redirections: list[ShellRedirection] = []
     ambiguous = list(redirect_ambiguous)
     deferred_substitutions: list[ShellInspection] = []
-    scopes: dict[tuple[int, ...], _ShellScope] = {(): _ShellScope(
+    scopes: dict[tuple[int, ...], _ShellScope] = {(): _scope if _scope is not None else _ShellScope(
         dict(_variables or {}),
         dict(environment or {}) if _known_variables is None else dict(_known_variables),
         _directory_changes,
@@ -1033,7 +1034,7 @@ def inspect_shell_command(
         mutating_arithmetic |= nested.mutating_arithmetic
         ambiguous.extend(nested.ambiguous_regions)
 
-    def include_nested(script: str, context: _ShellScope, *, defer: bool = False) -> None:
+    def include_nested(script: str, context: _ShellScope, *, defer: bool = False, same_shell: bool = False) -> None:
         if _depth >= _MAX_NESTED_SHELL_DEPTH:
             ambiguous.append(script)
             return
@@ -1046,6 +1047,7 @@ def inspect_shell_command(
             _known_variables=context.known_variables,
             _directory_changes=context.directory_changes,
             _sequence=sequence,
+            _scope=context if same_shell else None,
         )
         if defer:
             deferred_substitutions.append(nested)
@@ -1158,8 +1160,14 @@ def inspect_shell_command(
             # Argument expansion precedes command-prefix/env assignments. Single
             # quotes and escaped dollars defer expansion to the child shell.
             script = script_with(scope.known_variables)
-            include_nested(script, context)
             source_script = script_with(scope.variables)
+            include_nested(script, context, same_shell=name == "eval")
+            if name == "eval":
+                scope.directory_changes = context.directory_changes
+                # eval runs in this shell. Command-prefix bindings remain
+                # temporary, while assignments made to other names persist.
+                scope.variables.update({key: value for key, value in context.variables.items() if key not in segment_assignments})
+                scope.known_variables.update({key: value for key, value in context.known_variables.items() if key not in segment_assignments})
             if script != source_script and _depth < _MAX_NESTED_SHELL_DEPTH:
                 # Materializing host values must not turn an unresolved dynamic
                 # executable into a trusted literal. Retain only those approval
