@@ -20,7 +20,7 @@ def test_builtin_wrapper_preserves_the_actual_command(command, executable):
     assert _executables(command) == [executable]
 
 
-@pytest.mark.parametrize("literal", ["-execdir", "-okdir"])
+@pytest.mark.parametrize("literal", ["-execdir", "-okdir", "-follow"])
 def test_find_predicate_values_are_not_executed_commands(literal):
     assert _executables(f"find /client -name '{literal}' -print") == ["find"]
     assert _executables(f"find /client -exec printf '%s\\n' '{literal}' \\;") == ["find", "printf"]

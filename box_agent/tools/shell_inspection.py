@@ -782,6 +782,10 @@ def find_command_actions(invocation: ShellInvocation) -> tuple[tuple[str, tuple[
         if arguments[index] in _FIND_OPTIONS_WITH_VALUES:
             index += 3 if arguments[index] == "-fprintf" else 2
             continue
+        if arguments[index] == "-follow":
+            actions.append(("-follow", ()))
+            index += 1
+            continue
         if arguments[index] not in _FIND_EXEC_ACTIONS:
             index += 1
             continue
@@ -799,7 +803,7 @@ def find_command_actions(invocation: ShellInvocation) -> tuple[tuple[str, tuple[
 
 def _find_embedded_commands(invocation: ShellInvocation) -> tuple[str, ...]:
     """Return command payloads executed by find's -exec/-ok family."""
-    return tuple(shlex.join(words) for _, words in find_command_actions(invocation))
+    return tuple(shlex.join(words) for _, words in find_command_actions(invocation) if words)
 
 
 def inspect_shell_command(
