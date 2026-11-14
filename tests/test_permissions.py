@@ -1765,6 +1765,76 @@ async def test_bash_product_traversal_cannot_follow_external_links(
     assert secret.read_text() == "outside fixture content"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX link-following utilities")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executable", ["tar", "cp", "rg", "grep", "rsync"])
+@pytest.mark.parametrize("glob_root", [False, True])
+async def test_bash_link_following_utilities_require_session_directory_scope(
+    workspace, tmp_path, monkeypatch, executable, glob_root,
+):
+    import shutil
+    import tarfile
+
+    from box_agent.tools.bash_tool import BashTool
+
+    if shutil.which(executable) is None:
+        pytest.skip(f"{executable} is not installed")
+    client = tmp_path / "client"
+    client.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside-fixture-marker")
+    nested = client / "nested"
+    nested.mkdir()
+    (nested / "alias").symlink_to(outside, target_is_directory=True)
+    inside = client / "inside.txt"
+    inside.write_text("product-fixture-marker")
+    archive = workspace / "product.tar"
+    copied = workspace / "copied"
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    root_operand = str(client / "*") if glob_root else f'"{client}"'
+    commands = {
+        "tar": f'tar -h -cf "{archive}" {root_operand}',
+        "cp": f'cp -RL {root_operand} "{copied}"',
+        "rg": f'rg --follow outside-fixture-marker {root_operand}',
+        "grep": f'grep -R outside-fixture-marker {root_operand}',
+        "rsync": f'rsync -aL {root_operand} "{copied}/"',
+    }
+    result = await tool.execute(command=commands[executable])
+    assert not result.success
+    assert "Access denied" in result.error
+    assert "outside-fixture-marker" not in result.stdout
+    assert not archive.exists()
+    assert not copied.exists()
+
+    source = workspace / "source"
+    source.mkdir()
+    (source / "fixture.txt").write_text("workspace fixture")
+    positive_commands = {
+        "tar": f'tar -h -cf "{archive}" "{inside}"',
+        "cp": f'cp -RL "{source}" "{client / "received"}"',
+        "rg": f'rg --follow product-fixture-marker "{inside}"',
+        "grep": f'grep -R product-fixture-marker "{inside}"',
+        "rsync": f'rsync -aL "{source}/" "{client / "received"}/"',
+    }
+    result = await tool.execute(command=positive_commands[executable])
+    assert result.success, result.error
+    if executable == "tar":
+        with tarfile.open(archive) as bundle:
+            assert any(member.name.endswith("inside.txt") for member in bundle.getmembers())
+    elif executable in {"cp", "rsync"}:
+        assert (client / "received" / "fixture.txt").read_text() == "workspace fixture"
+    else:
+        assert "product-fixture-marker" in result.stdout
+    if executable == "rg":
+        result = await tool.execute(command=f'rg --follow --no-follow product-fixture-marker "{client}"')
+        assert result.success, result.error
+        result = await tool.execute(command=f'rg --no-follow --follow product-fixture-marker "{client}"')
+        assert not result.success
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ln syntax")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shell", ["direct", "nested", "two-shells"])
