@@ -263,3 +263,32 @@ def test_execution_wrappers_expose_dispatched_commands(command: str, expected: l
     inspection = inspect_shell_command(command, posix=True)
 
     assert [invocation.executable for invocation in inspection.invocations] == expected
+
+
+def test_redirections_keep_command_variable_snapshots_and_literal_quotes():
+    inspection = inspect_shell_command(
+        "TARGET=first; printf x > \"$TARGET\"; TARGET=second; printf y > \"$TARGET\"; printf z > '$TARGET'",
+        posix=True,
+        environment={"PRIVATE_VALUE": "host-private-value"},
+    )
+    assert [redirect.expand_target() for redirect in inspection.redirections] == ["first", "second", "$TARGET"]
+    assert [redirect.invocation_index for redirect in inspection.redirections] == [0, 1, 2]
+    assert "host-private-value" not in repr(inspection)
+
+
+@pytest.mark.parametrize("command, expected", [
+    ('TARGET=before; TARGET=after > "$TARGET"', "after"),
+    ('TARGET=before; TARGET=after printf x > "$TARGET"', "before"),
+])
+def test_redirection_expansion_respects_assignment_only_and_command_prefixes(command, expected):
+    inspection = inspect_shell_command(command, posix=True)
+    assert inspection.redirections[0].expand_target() == expected
+
+
+def test_nested_redirections_retain_parent_invocation_offsets_and_shell_depth():
+    inspection = inspect_shell_command(
+        "printf top; bash -c 'TARGET=child; printf x > \"$TARGET\"'; printf after > top.txt",
+        posix=True,
+    )
+    assert [(redirect.invocation_index, redirect.shell_depth, redirect.expand_target())
+            for redirect in inspection.redirections] == [(2, 1, "child"), (3, 0, "top.txt")]

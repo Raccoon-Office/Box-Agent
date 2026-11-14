@@ -144,6 +144,7 @@ class ShellInvocation:
     dynamic_executable_sources: tuple[str, ...] = ()
     dynamic_executable_evidence: str = ""
     known_variables: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    shell_depth: int = field(default=0, compare=False, repr=False)
 
     @property
     def executable(self) -> str:
@@ -169,6 +170,16 @@ class ShellRedirection:
     operator: str
     target: str
     indirect: bool = False
+    invocation_index: int = field(default=0, compare=False, repr=False)
+    shell_depth: int = field(default=0, compare=False, repr=False)
+    known_variables: tuple[tuple[str, str], ...] = field(default=(), compare=False, repr=False)
+    literal_target: bool = field(default=False, compare=False, repr=False)
+
+    def expand_target(self) -> str:
+        """Expand bindings from when this redirection is performed."""
+        if self.literal_target:
+            return self.target
+        return _expand_known_parameters(self.target, dict(self.known_variables))
 
 
 @dataclass(frozen=True)
@@ -542,6 +553,7 @@ def _extract_and_mask_redirections(
                 ShellRedirection(
                     operator=raw_operator,
                     target=_dequote_shell_word(raw_target, posix=posix),
+                    literal_target=bool(re.fullmatch(r"'[^']*'", raw_target)),
                 )
             )
         else:
@@ -552,8 +564,8 @@ def _extract_and_mask_redirections(
     return "".join(chars), tuple(redirections), tuple(ambiguous)
 
 
-def _split_shell_segments(value: str) -> tuple[list[str], bool]:
-    segments: list[str] = []
+def _split_shell_segments(value: str) -> tuple[list[tuple[str, int]], bool]:
+    segments: list[tuple[str, int]] = []
     start = 0
     quote: str | None = None
     escaped = False
@@ -578,13 +590,13 @@ def _split_shell_segments(value: str) -> tuple[list[str], bool]:
             index += 1
             continue
         if quote is None and char in ";&|\n()":
-            segments.append(value[start:index])
+            segments.append((value[start:index], start))
             has_control = True
             if index + 1 < len(value) and value[index + 1] == char and char in "&|":
                 index += 1
             start = index + 1
         index += 1
-    segments.append(value[start:])
+    segments.append((value[start:], start))
     return segments, has_control
 
 
@@ -809,20 +821,24 @@ def inspect_shell_command(
         posix = platform.system() != "Windows"
     shell_text = _mask_shell_comments(_mask_heredoc_bodies(command))
     top_level_text, substitutions, mutating_arithmetic = _extract_and_mask_substitutions(shell_text)
-    command_text, redirections, redirect_ambiguous = _extract_and_mask_redirections(
+    command_text, _, redirect_ambiguous = _extract_and_mask_redirections(
         top_level_text,
         posix=posix,
     )
     segments, has_control = _split_shell_segments(command_text)
     invocations: list[ShellInvocation] = []
     assigned_variables: set[str] = set()
-    all_redirections = list(redirections)
+    all_redirections: list[ShellRedirection] = []
     ambiguous = list(redirect_ambiguous)
     variables = dict(_variables or {})
 
-    for raw_segment in segments:
+    for raw_segment, segment_start in segments:
+        _, segment_redirections, _ = _extract_and_mask_redirections(
+            top_level_text[segment_start : segment_start + len(raw_segment)],
+            posix=posix,
+        )
         segment = raw_segment.strip()
-        if not segment:
+        if not segment and not segment_redirections:
             continue
         try:
             words = shlex.split(segment, posix=posix)
@@ -840,6 +856,18 @@ def inspect_shell_command(
             continue
         segment_assignments = _leading_assignments(words)
         executable_index = _executable_index(words)
+        redirect_variables = {**(environment or {}), **variables}
+        if executable_index is None:
+            redirect_variables.update(segment_assignments)
+        all_redirections.extend(
+            replace(
+                redirection,
+                invocation_index=len(invocations),
+                shell_depth=_depth,
+                known_variables=tuple(redirect_variables.items()),
+            )
+            for redirection in segment_redirections
+        )
         if executable_index is None:
             assigned_variables.update(segment_assignments)
             variables.update(segment_assignments)
@@ -861,6 +889,7 @@ def inspect_shell_command(
             executable_index,
             segment,
             known_variables=tuple({**(environment or {}), **variables}.items()),
+            shell_depth=_depth,
             dynamic_executable_sources=dynamic_executable_sources,
             dynamic_executable_evidence=(
                 _dynamic_executable_evidence(
@@ -893,12 +922,17 @@ def inspect_shell_command(
                     _depth=_depth + 1,
                     _variables=invocation_variables,
                 )
+                nested_offset = len(invocations)
                 invocations.extend(
                     replace(nested_invocation, indirect=True)
                     for nested_invocation in nested.invocations
                 )
                 all_redirections.extend(
-                    replace(redirection, indirect=True)
+                    replace(
+                        redirection,
+                        indirect=True,
+                        invocation_index=nested_offset + redirection.invocation_index,
+                    )
                     for redirection in nested.redirections
                 )
                 assigned_variables.update(nested.assigned_variables)
@@ -916,12 +950,17 @@ def inspect_shell_command(
                     _depth=_depth + 1,
                     _variables=invocation_variables,
                 )
+                nested_offset = len(invocations)
                 invocations.extend(
                     replace(nested_invocation, indirect=True)
                     for nested_invocation in nested.invocations
                 )
                 all_redirections.extend(
-                    replace(redirection, indirect=True)
+                    replace(
+                        redirection,
+                        indirect=True,
+                        invocation_index=nested_offset + redirection.invocation_index,
+                    )
                     for redirection in nested.redirections
                 )
                 assigned_variables.update(nested.assigned_variables)
@@ -939,12 +978,17 @@ def inspect_shell_command(
                 _depth=_depth + 1,
                 _variables=variables,
             )
+            nested_offset = len(invocations)
             invocations.extend(
                 replace(nested_invocation, indirect=True)
                 for nested_invocation in nested.invocations
             )
             all_redirections.extend(
-                replace(redirection, indirect=True)
+                replace(
+                    redirection,
+                    indirect=True,
+                    invocation_index=nested_offset + redirection.invocation_index,
+                )
                 for redirection in nested.redirections
             )
             assigned_variables.update(nested.assigned_variables)

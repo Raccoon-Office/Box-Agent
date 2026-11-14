@@ -16,7 +16,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 
-from .shell_inspection import ShellInspection, ShellInvocation, inspect_shell_command
+from .shell_inspection import ShellInspection, ShellInvocation, ShellRedirection, inspect_shell_command
 
 from box_agent.user_paths import state_path
 
@@ -46,14 +46,38 @@ def builtin_skill_command_write_error(
     File-tool writes are checked separately against their resolved target.
     """
     inspection = inspect_shell_command(command, environment=os.environ if environment is None else environment)
-    cwd = workspace or Path.cwd()
+    cwd_stack = [workspace or Path.cwd()]
+
+    def cwd_for_depth(depth: int) -> Path:
+        del cwd_stack[depth + 1:]
+        while len(cwd_stack) <= depth:
+            cwd_stack.append(cwd_stack[-1])
+        return cwd_stack[-1]
+
     skills_root = BUILTIN_SKILLS_ROOT.resolve()
-    for invocation in inspection.invocations:
+    redirections_by_invocation: dict[int, list[ShellRedirection]] = {}
+    for redirection in inspection.redirections:
+        redirections_by_invocation.setdefault(redirection.invocation_index, []).append(redirection)
+    for invocation_index in range(len(inspection.invocations) + 1):
+        for redirect in redirections_by_invocation.get(invocation_index, ()):
+            if ">" not in redirect.operator:
+                continue
+            target = redirect.expand_target()
+            if redirect.operator.endswith("&") and (target.isdigit() or target == "-"):
+                continue
+            path = Path(target).expanduser()
+            cwd = cwd_for_depth(redirect.shell_depth)
+            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
+                return error
+        if invocation_index == len(inspection.invocations):
+            break
+        invocation = inspection.invocations[invocation_index]
+        cwd = cwd_for_depth(invocation.shell_depth)
         name = Path(invocation.executable).name.lower().removesuffix(".exe")
         args = invocation.arguments
         if name in {"cd", "set-location"} and args:
             candidate = Path(invocation.expand_known_parameters(args[-1])).expanduser()
-            cwd = candidate if candidate.is_absolute() else cwd / candidate
+            cwd_stack[-1] = candidate if candidate.is_absolute() else cwd / candidate
             continue
         targets: tuple[str, ...] = ()
         protect_ancestors = True
@@ -176,11 +200,6 @@ def builtin_skill_command_write_error(
             if protect_ancestors and skills_root.is_relative_to(path.resolve()):
                 path = skills_root
             if error := builtin_skill_write_error(path, skills_root):
-                return error
-    for redirect in inspection.redirections:
-        if ">" in redirect.operator and not redirect.target.isdigit():
-            path = Path(redirect.target).expanduser()
-            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
                 return error
     return None
 

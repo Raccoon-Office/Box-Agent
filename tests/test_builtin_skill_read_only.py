@@ -310,3 +310,73 @@ def test_bundled_copy_checks_variable_values_in_command_order(tmp_path, bundled)
     assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, tmp_path)
     command = f'DEST="{root.parent}"; DEST="{tmp_path / "safe"}" cp -R input/. "$DEST"'
     assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX redirection and shell syntax")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_form", ["inline", "environment", "runtime", "assignment-only", "append", "reassigned", "nested", "prefix", "cd-redirect"])
+async def test_bash_variable_redirections_cannot_modify_bundled_code(tmp_path, bundled, monkeypatch, target_form):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
+    if target_form in {"environment", "prefix"}:
+        monkeypatch.setenv("REDIRECT_TARGET", str(target))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    command = f'cd "{tmp_path}" && TARGET=bundled/validator.js && printf changed > "$TARGET"'
+    if target_form == "environment":
+        command = 'printf changed > "$REDIRECT_TARGET"'
+    elif target_form == "runtime":
+        tool.update_runtime_env({"REDIRECT_TARGET": str(target)})
+        command = 'printf changed > "$REDIRECT_TARGET"'
+    elif target_form == "assignment-only":
+        command = f'cd "{tmp_path}"; TARGET=bundled/validator.js > "$TARGET"'
+    elif target_form == "append":
+        command = f'cd "{tmp_path}"; TARGET=bundled/validator.js; printf changed >> "$TARGET"'
+    elif target_form == "reassigned":
+        command = f'TARGET=ordinary.txt; TARGET="{target}"; printf changed > "$TARGET"'
+    elif target_form == "nested":
+        command = f"bash -c 'cd \"{tmp_path}\" && TARGET=bundled/validator.js && printf changed > \"$TARGET\"'"
+    elif target_form == "prefix":
+        command = 'REDIRECT_TARGET=ordinary.txt printf changed > "$REDIRECT_TARGET"'
+    elif target_form == "cd-redirect":
+        command = f'cd "{root}"; cd "{workspace}" > validator.js'
+    denied = await tool.execute(command=command)
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert denied.permission_request is None
+    assert target.read_text() == "original"
+
+    ordinary = tmp_path / "ordinary.txt"
+    allowed = await tool.execute(command=f'TARGET="{ordinary}"; printf ordinary > "$TARGET"')
+    assert allowed.success, allowed.error
+    assert ordinary.read_text() == "ordinary"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX nested shell syntax")
+@pytest.mark.asyncio
+async def test_child_shell_directory_does_not_change_parent_redirection_target(tmp_path, bundled, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    command = f"bash -c 'cd \"{root}\"'; printf ordinary > validator.js"
+    allowed = await tool.execute(command=command)
+    assert allowed.success, allowed.error
+    assert (workspace / "validator.js").read_text() == "ordinary"
+    assert target.read_text() == "original"
+
+
+def test_numeric_file_redirection_is_protected_but_descriptor_duplication_is_allowed(tmp_path, bundled):
+    root, _ = bundled
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(f'cd "{root}"; printf changed > 2', tmp_path)
+    assert safety.builtin_skill_command_write_error(f'cd "{root}"; FD=2; printf output 1>&"$FD"', tmp_path) is None
