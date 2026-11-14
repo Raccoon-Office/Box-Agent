@@ -311,3 +311,50 @@ def test_binding_snapshots_resolve_host_and_declared_variables_without_exposing_
     )
     assert inspection.redirections[0].expand_target() == "/host-private-path/validator.js"
     assert "/host-private-path" not in repr(inspection)
+
+
+def test_env_wrapper_binds_child_environment_and_directory_without_changing_outer_redirection():
+    inspection = inspect_shell_command(
+        "env -C product DEST=product bash -c 'cp -R input/. \"$DEST\"' > parent.log",
+        posix=True,
+    )
+    child = next(invocation for invocation in inspection.invocations if invocation.executable == "cp")
+    assert child.expand_known_parameters("$DEST") == "product"
+    assert child.directory_changes == ("product",)
+    assert inspection.redirections[0].directory_changes == ()
+
+
+def test_env_clear_and_unset_are_retained_in_nested_snapshots():
+    for prefix in ('env -i', 'env -u HOST_PATH'):
+        inspection = inspect_shell_command(
+            prefix + " bash -c 'printf x > \"$HOST_PATH\"'", posix=True,
+            environment={"HOST_PATH": "/host-private-path"},
+        )
+        assert inspection.redirections[0].expand_target() == "$HOST_PATH"
+        assert "/host-private-path" not in repr(inspection)
+
+
+def test_substitution_retains_owning_command_directory_and_bindings():
+    inspection = inspect_shell_command(
+        'cd product; TARGET=protected; printf "%s" "$(printf changed > "$TARGET")"; cd workspace; TARGET=ordinary',
+        posix=True,
+    )
+    redirect = inspection.redirections[0]
+    assert redirect.directory_changes == ("product",)
+    assert redirect.expand_target() == "protected"
+
+
+def test_env_option_values_are_not_reinterpreted_as_nested_wrappers():
+    inspection = inspect_shell_command("env --argv0 env -C product bash -c 'printf x > output'", posix=True)
+    assert inspection.redirections[0].directory_changes == ("product",)
+
+
+@pytest.mark.parametrize("form", ["subshell", "pipeline", "background"])
+def test_child_shell_bindings_and_directories_do_not_change_parent_facts(form):
+    operators = {"subshell": '(cd child; TARGET=ordinary)', "pipeline": 'cd child | cat', "background": 'cd child & wait'}
+    inspection = inspect_shell_command(
+        f'cd product; TARGET=protected; {operators[form]}; printf changed > "$TARGET"', posix=True,
+    )
+    redirect = inspection.redirections[-1]
+    assert redirect.directory_changes == ("product",)
+    assert redirect.expand_target() == "protected"

@@ -145,6 +145,7 @@ class ShellInvocation:
     dynamic_executable_evidence: str = ""
     known_variables: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     shell_depth: int = field(default=0, compare=False, repr=False)
+    directory_changes: tuple[str, ...] = field(default=(), compare=False, repr=False)
 
     @property
     def executable(self) -> str:
@@ -172,6 +173,7 @@ class ShellRedirection:
     indirect: bool = False
     invocation_index: int = field(default=0, compare=False, repr=False)
     shell_depth: int = field(default=0, compare=False, repr=False)
+    directory_changes: tuple[str, ...] = field(default=(), compare=False, repr=False)
     known_variables: tuple[tuple[str, str], ...] = field(default=(), compare=False, repr=False)
     literal_target: bool = field(default=False, compare=False, repr=False)
 
@@ -194,6 +196,16 @@ class ShellInspection:
     shell_text: str
     assigned_variables: frozenset[str] = frozenset()
     mutating_arithmetic: bool = False
+
+
+@dataclass
+class _ShellScope:
+    variables: dict[str, str] = field(repr=False)
+    known_variables: dict[str, str] = field(repr=False)
+    directory_changes: tuple[str, ...] = field(repr=False)
+
+    def child(self) -> _ShellScope:
+        return _ShellScope(dict(self.variables), dict(self.known_variables), self.directory_changes)
 
 
 def _newline_only(value: str) -> str:
@@ -365,10 +377,11 @@ def _substitution_marker(index: int) -> str:
     return chr(_SUBSTITUTION_MARKER_BASE + index)
 
 
-def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...], bool]:
+def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...], bool, tuple[int, ...]]:
     """Return top-level shell text plus nested command/process substitutions."""
     chars = list(value)
     substitutions: list[str] = []
+    substitution_positions: list[int] = []
     mutating_arithmetic = False
     quote: str | None = None
     escaped = False
@@ -397,8 +410,9 @@ def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...], b
                 chars[index:] = " " * (len(value) - index)
                 break
             arithmetic = value[index + 3 : end - 1]
-            _, nested_substitutions, nested_mutation = _extract_and_mask_substitutions(arithmetic)
+            _, nested_substitutions, nested_mutation, positions = _extract_and_mask_substitutions(arithmetic)
             substitutions.extend(nested_substitutions)
+            substitution_positions.extend(index + 3 + position for position in positions)
             mutating_arithmetic |= bool(_ARITHMETIC_MUTATION_RE.search(arithmetic)) or nested_mutation
             span = end + 1 - index
             chars[index : end + 1] = list(
@@ -412,8 +426,9 @@ def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...], b
                 chars[index:] = " " * (len(value) - index)
                 break
             arithmetic = value[index + 2 : end - 1]
-            _, nested_substitutions, nested_mutation = _extract_and_mask_substitutions(arithmetic)
+            _, nested_substitutions, nested_mutation, positions = _extract_and_mask_substitutions(arithmetic)
             substitutions.extend(nested_substitutions)
+            substitution_positions.extend(index + 2 + position for position in positions)
             mutating_arithmetic |= bool(_ARITHMETIC_MUTATION_RE.search(arithmetic)) or nested_mutation
             chars[index : end + 1] = " " * (end + 1 - index)
             index = end + 1
@@ -426,10 +441,12 @@ def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...], b
             end = _matching_parenthesis(value, index + 2)
             if end is None:
                 substitutions.append(value[index + 2 :])
+                substitution_positions.append(index)
                 chars[index:] = " " * (len(value) - index)
                 break
             marker = _substitution_marker(len(substitutions))
             substitutions.append(value[index + 2 : end])
+            substitution_positions.append(index)
             span = end + 1 - index
             chars[index : end + 1] = marker * span
             index = end + 1
@@ -442,16 +459,18 @@ def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...], b
                 end += 1
             if end >= len(value):
                 substitutions.append(value[index + 1 :])
+                substitution_positions.append(index)
                 chars[index:] = " " * (len(value) - index)
                 break
             marker = _substitution_marker(len(substitutions))
             substitutions.append(value[index + 1 : end])
+            substitution_positions.append(index)
             span = end + 1 - index
             chars[index : end + 1] = marker * span
             index = end + 1
             continue
         index += 1
-    return "".join(chars), tuple(substitutions), mutating_arithmetic
+    return "".join(chars), tuple(substitutions), mutating_arithmetic, tuple(substitution_positions)
 
 
 def _dequote_shell_word(value: str, *, posix: bool) -> str:
@@ -564,12 +583,14 @@ def _extract_and_mask_redirections(
     return "".join(chars), tuple(redirections), tuple(ambiguous)
 
 
-def _split_shell_segments(value: str) -> tuple[list[tuple[str, int]], bool]:
-    segments: list[tuple[str, int]] = []
+def _split_shell_segments(value: str) -> tuple[list[tuple[str, int, tuple[int, ...]]], bool]:
+    segments: list[tuple[str, int, tuple[int, ...]]] = []
     start = 0
     quote: str | None = None
     escaped = False
     has_control = False
+    groups: list[int] = []
+    pipeline = False
     index = 0
     while index < len(value):
         char = value[index]
@@ -590,13 +611,22 @@ def _split_shell_segments(value: str) -> tuple[list[tuple[str, int]], bool]:
             index += 1
             continue
         if quote is None and char in ";&|\n()":
-            segments.append((value[start:index], start))
+            paired = index + 1 < len(value) and value[index + 1] == char and char in "&|"
+            isolated = pipeline or (char in "&|" and not paired)
+            scope = (*groups, -(start + 1)) if isolated else tuple(groups)
+            segments.append((value[start:index], start, scope))
             has_control = True
-            if index + 1 < len(value) and value[index + 1] == char and char in "&|":
+            if char == "(":
+                groups.append(index + 1)
+            elif char == ")" and groups:
+                groups.pop()
+            pipeline = char == "|" and not paired
+            if paired:
                 index += 1
             start = index + 1
         index += 1
-    segments.append((value[start:], start))
+    scope = (*groups, -(start + 1)) if pipeline else tuple(groups)
+    segments.append((value[start:], start, scope))
     return segments, has_control
 
 
@@ -803,6 +833,53 @@ def _find_embedded_commands(invocation: ShellInvocation) -> tuple[str, ...]:
     return tuple(commands)
 
 
+def _environment_context(
+    invocation: ShellInvocation,
+    scope: _ShellScope,
+    assignments: dict[str, str],
+    known_assignments: dict[str, str],
+) -> _ShellScope:
+    context = _ShellScope(
+        {**scope.variables, **assignments},
+        {**scope.known_variables, **known_assignments},
+        scope.directory_changes,
+    )
+    prefix = invocation.prefix
+    index = 0
+    while index < len(prefix):
+        if _command_name(prefix[index]) != "env":
+            index += 1
+            continue
+        cursor = index + 1
+        while cursor < len(prefix) and prefix[cursor].startswith("-"):
+            option = prefix[cursor]
+            cursor += 1
+            if option == "--":
+                break
+            option_name, equals, value = option.partition("=")
+            if option in {"-i", "--ignore-environment"}:
+                context.variables.clear()
+                context.known_variables.clear()
+                continue
+            if option.startswith("-C") and option != "-C":
+                option_name, equals, value = "-C", "=", option[2:]
+            if option_name in _WRAPPER_OPTIONS_WITH_VALUES["env"] and not equals and cursor < len(prefix):
+                value = prefix[cursor]
+                cursor += 1
+            if option_name in {"-C", "--chdir"}:
+                context.directory_changes += (_expand_known_parameters(value, scope.known_variables),)
+            elif option_name in {"-u", "--unset"}:
+                context.variables.pop(value, None)
+                context.known_variables.pop(value, None)
+        while cursor < len(prefix) and _ASSIGNMENT_RE.match(prefix[cursor]):
+            name, value = prefix[cursor].split("=", 1)
+            context.variables[name] = value
+            context.known_variables[name] = _expand_known_parameters(value, scope.known_variables)
+            cursor += 1
+        index = cursor
+    return context
+
+
 def inspect_shell_command(
     command: str,
     *,
@@ -811,36 +888,76 @@ def inspect_shell_command(
     _depth: int = 0,
     _variables: dict[str, str] | None = None,
     _known_variables: dict[str, str] | None = None,
+    _directory_changes: tuple[str, ...] = (),
 ) -> ShellInspection:
     """Inspect shell command structure without executing it.
 
-    Parsing is intentionally bounded.  Unparseable regions are returned to the
+    Parsing is intentionally bounded. Unparseable regions are returned to the
     policy caller, which can fail closed only when its own capability appears
     in that region.
     """
     if posix is None:
         posix = platform.system() != "Windows"
     shell_text = _mask_shell_comments(_mask_heredoc_bodies(command))
-    top_level_text, substitutions, mutating_arithmetic = _extract_and_mask_substitutions(shell_text)
-    command_text, _, redirect_ambiguous = _extract_and_mask_redirections(
-        top_level_text,
-        posix=posix,
-    )
+    top_level_text, substitutions, mutating_arithmetic, substitution_positions = _extract_and_mask_substitutions(shell_text)
+    command_text, _, redirect_ambiguous = _extract_and_mask_redirections(top_level_text, posix=posix)
     segments, has_control = _split_shell_segments(command_text)
     invocations: list[ShellInvocation] = []
     assigned_variables: set[str] = set()
     all_redirections: list[ShellRedirection] = []
     ambiguous = list(redirect_ambiguous)
-    variables = dict(_variables or {})
-    known_variables = {**(environment or {}), **(_known_variables or {})}
+    deferred_substitutions: list[ShellInspection] = []
+    scopes: dict[tuple[int, ...], _ShellScope] = {(): _ShellScope(
+        dict(_variables or {}),
+        dict(environment or {}) if _known_variables is None else dict(_known_variables),
+        _directory_changes,
+    )}
 
-    for raw_segment, segment_start in segments:
-        _, segment_redirections, _ = _extract_and_mask_redirections(
-            top_level_text[segment_start : segment_start + len(raw_segment)],
+    def get_scope(key: tuple[int, ...]) -> _ShellScope:
+        if key not in scopes:
+            scopes[key] = get_scope(key[:-1]).child()
+        return scopes[key]
+
+    def merge_nested(nested: ShellInspection) -> None:
+        nonlocal mutating_arithmetic
+        offset = len(invocations)
+        invocations.extend(replace(invocation, indirect=True) for invocation in nested.invocations)
+        all_redirections.extend(
+            replace(redirect, indirect=True, invocation_index=offset + redirect.invocation_index)
+            for redirect in nested.redirections
+        )
+        assigned_variables.update(nested.assigned_variables)
+        mutating_arithmetic |= nested.mutating_arithmetic
+        ambiguous.extend(nested.ambiguous_regions)
+
+    def include_nested(script: str, context: _ShellScope, *, defer: bool = False) -> None:
+        if _depth >= _MAX_NESTED_SHELL_DEPTH:
+            ambiguous.append(script)
+            return
+        nested = inspect_shell_command(
+            script,
             posix=posix,
+            environment=environment,
+            _depth=_depth + 1,
+            _variables=context.variables,
+            _known_variables=context.known_variables,
+            _directory_changes=context.directory_changes,
+        )
+        if defer:
+            deferred_substitutions.append(nested)
+        else:
+            merge_nested(nested)
+
+    for raw_segment, segment_start, scope_key in segments:
+        scope = get_scope(scope_key)
+        original_segment = top_level_text[segment_start : segment_start + len(raw_segment)]
+        _, segment_redirections, _ = _extract_and_mask_redirections(original_segment, posix=posix)
+        segment_substitutions = tuple(
+            source for source, position in zip(substitutions, substitution_positions)
+            if segment_start <= position < segment_start + len(raw_segment)
         )
         segment = raw_segment.strip()
-        if not segment and not segment_redirections:
+        if not segment and not segment_redirections and not segment_substitutions:
             continue
         try:
             words = shlex.split(segment, posix=posix)
@@ -849,174 +966,80 @@ def inspect_shell_command(
             continue
         if not posix:
             words = _strip_matching_quotes(words)
-        words, split_string_ambiguous = _expand_env_split_strings(
-            words,
-            posix=posix,
-        )
+        words, split_string_ambiguous = _expand_env_split_strings(words, posix=posix)
         if split_string_ambiguous:
             ambiguous.append(segment)
             continue
+        # Command/process substitutions execute in the owning command's scope,
+        # before its redirections and before later commands can change state.
+        for substitution in segment_substitutions:
+            include_nested(substitution, scope, defer=True)
         segment_assignments = _leading_assignments(words)
         known_assignments: dict[str, str] = {}
         for name, value in segment_assignments.items():
-            known_assignments[name] = _expand_known_parameters(value, {**known_variables, **known_assignments})
+            known_assignments[name] = _expand_known_parameters(value, {**scope.known_variables, **known_assignments})
         executable_index = _executable_index(words)
-        redirect_variables = dict(known_variables)
+        redirect_variables = dict(scope.known_variables)
         if executable_index is None:
             redirect_variables.update(known_assignments)
         all_redirections.extend(
             replace(
                 redirection,
                 invocation_index=len(invocations),
-                shell_depth=_depth,
+                shell_depth=_depth + len(scope_key),
+                directory_changes=scope.directory_changes,
                 known_variables=tuple(redirect_variables.items()),
             )
             for redirection in segment_redirections
         )
         if executable_index is None:
             assigned_variables.update(segment_assignments)
-            variables.update(segment_assignments)
-            known_variables.update(known_assignments)
+            scope.variables.update(segment_assignments)
+            scope.known_variables.update(known_assignments)
             continue
         substitution_sources = tuple(
-            source
-            for source_index, source in enumerate(substitutions)
+            source for source_index, source in enumerate(substitutions)
             if _substitution_marker(source_index) in words[executable_index]
         )
-        parameter_sources = tuple(
-            match.group(0)
-            for match in _PARAMETER_EXPANSION_RE.finditer(words[executable_index])
-        )
-        dynamic_executable_sources = tuple(
-            dict.fromkeys((*substitution_sources, *parameter_sources))
-        )
+        parameter_sources = tuple(match.group(0) for match in _PARAMETER_EXPANSION_RE.finditer(words[executable_index]))
+        dynamic_executable_sources = tuple(dict.fromkeys((*substitution_sources, *parameter_sources)))
         invocation = ShellInvocation(
-            tuple(words),
-            executable_index,
-            segment,
-            known_variables=tuple(known_variables.items()),
-            shell_depth=_depth,
+            tuple(words), executable_index, segment,
+            known_variables=tuple(scope.known_variables.items()),
+            shell_depth=_depth + len(scope_key),
+            directory_changes=scope.directory_changes,
             dynamic_executable_sources=dynamic_executable_sources,
             dynamic_executable_evidence=(
-                _dynamic_executable_evidence(
-                    words[executable_index],
-                    substitutions,
-                    variables,
-                )
-                if dynamic_executable_sources
-                else ""
+                _dynamic_executable_evidence(words[executable_index], substitutions, scope.variables)
+                if dynamic_executable_sources else ""
             ),
         )
+        context = _environment_context(invocation, scope, segment_assignments, known_assignments)
+        invocation = replace(invocation, directory_changes=context.directory_changes)
         invocations.append(invocation)
-
-        invocation_variables = {**variables, **segment_assignments}
-        invocation_known_variables = {**known_variables, **known_assignments}
-        if _command_name(invocation.executable) in {
-            "declare",
-            "export",
-            "readonly",
-            "typeset",
-        }:
+        name = _command_name(invocation.executable)
+        if name in {"declare", "export", "readonly", "typeset"}:
             declared = _leading_assignments(list(invocation.arguments))
-            variables.update(declared)
-            for name, value in declared.items():
-                known_variables[name] = _expand_known_parameters(value, known_variables)
-
+            scope.variables.update(declared)
+            for variable, value in declared.items():
+                scope.known_variables[variable] = _expand_known_parameters(value, scope.known_variables)
+        if name in {"cd", "set-location"} and invocation.arguments:
+            scope.directory_changes += (invocation.expand_known_parameters(invocation.arguments[-1]),)
         if script := _shell_script_argument(invocation):
-            script = _expand_known_parameters(script, invocation_variables)
-            if _depth < _MAX_NESTED_SHELL_DEPTH:
-                nested = inspect_shell_command(
-                    script,
-                    posix=posix,
-                    environment=environment,
-                    _depth=_depth + 1,
-                    _variables=invocation_variables,
-                    _known_variables=invocation_known_variables,
-                )
-                nested_offset = len(invocations)
-                invocations.extend(
-                    replace(nested_invocation, indirect=True)
-                    for nested_invocation in nested.invocations
-                )
-                all_redirections.extend(
-                    replace(
-                        redirection,
-                        indirect=True,
-                        invocation_index=nested_offset + redirection.invocation_index,
-                    )
-                    for redirection in nested.redirections
-                )
-                assigned_variables.update(nested.assigned_variables)
-                mutating_arithmetic |= nested.mutating_arithmetic
-                ambiguous.extend(nested.ambiguous_regions)
-            else:
-                ambiguous.append(script)
-
+            # Expand an entire script variable, while leaving variables inside
+            # a literal script for its own command snapshots to resolve.
+            if _PARAMETER_EXPANSION_RE.fullmatch(script):
+                script = _expand_known_parameters(script, context.variables)
+            include_nested(script, context)
         for embedded_command in _find_embedded_commands(invocation):
-            if _depth < _MAX_NESTED_SHELL_DEPTH:
-                nested = inspect_shell_command(
-                    embedded_command,
-                    posix=posix,
-                    environment=environment,
-                    _depth=_depth + 1,
-                    _variables=invocation_variables,
-                    _known_variables=invocation_known_variables,
-                )
-                nested_offset = len(invocations)
-                invocations.extend(
-                    replace(nested_invocation, indirect=True)
-                    for nested_invocation in nested.invocations
-                )
-                all_redirections.extend(
-                    replace(
-                        redirection,
-                        indirect=True,
-                        invocation_index=nested_offset + redirection.invocation_index,
-                    )
-                    for redirection in nested.redirections
-                )
-                assigned_variables.update(nested.assigned_variables)
-                mutating_arithmetic |= nested.mutating_arithmetic
-                ambiguous.extend(nested.ambiguous_regions)
-            else:
-                ambiguous.append(embedded_command)
+            include_nested(embedded_command, context)
 
-    if _depth < _MAX_NESTED_SHELL_DEPTH:
-        for substitution in substitutions:
-            nested = inspect_shell_command(
-                substitution,
-                posix=posix,
-                environment=environment,
-                _depth=_depth + 1,
-                _variables=variables,
-                _known_variables=known_variables,
-            )
-            nested_offset = len(invocations)
-            invocations.extend(
-                replace(nested_invocation, indirect=True)
-                for nested_invocation in nested.invocations
-            )
-            all_redirections.extend(
-                replace(
-                    redirection,
-                    indirect=True,
-                    invocation_index=nested_offset + redirection.invocation_index,
-                )
-                for redirection in nested.redirections
-            )
-            assigned_variables.update(nested.assigned_variables)
-            mutating_arithmetic |= nested.mutating_arithmetic
-            ambiguous.extend(nested.ambiguous_regions)
-    else:
-        ambiguous.extend(substitutions)
+    for nested in deferred_substitutions:
+        merge_nested(nested)
 
     return ShellInspection(
-        invocations=tuple(invocations),
-        has_control_operators=has_control,
-        substitutions=substitutions,
-        redirections=tuple(all_redirections),
-        ambiguous_regions=tuple(ambiguous),
-        shell_text=shell_text,
-        assigned_variables=frozenset(assigned_variables),
-        mutating_arithmetic=mutating_arithmetic,
+        invocations=tuple(invocations), has_control_operators=has_control,
+        substitutions=substitutions, redirections=tuple(all_redirections),
+        ambiguous_regions=tuple(ambiguous), shell_text=shell_text,
+        assigned_variables=frozenset(assigned_variables), mutating_arithmetic=mutating_arithmetic,
     )

@@ -46,13 +46,12 @@ def builtin_skill_command_write_error(
     File-tool writes are checked separately against their resolved target.
     """
     inspection = inspect_shell_command(command, environment=os.environ if environment is None else environment)
-    cwd_stack = [workspace or Path.cwd()]
-
-    def cwd_for_depth(depth: int) -> Path:
-        del cwd_stack[depth + 1:]
-        while len(cwd_stack) <= depth:
-            cwd_stack.append(cwd_stack[-1])
-        return cwd_stack[-1]
+    def working_directory(changes: tuple[str, ...]) -> Path:
+        cwd = workspace or Path.cwd()
+        for change in changes:
+            candidate = Path(change).expanduser()
+            cwd = Path(os.path.abspath(candidate if candidate.is_absolute() else cwd / candidate))
+        return cwd
 
     skills_root = BUILTIN_SKILLS_ROOT.resolve()
     redirections_by_invocation: dict[int, list[ShellRedirection]] = {}
@@ -66,18 +65,16 @@ def builtin_skill_command_write_error(
             if redirect.operator.endswith("&") and (target.isdigit() or target == "-"):
                 continue
             path = Path(target).expanduser()
-            cwd = cwd_for_depth(redirect.shell_depth)
+            cwd = working_directory(redirect.directory_changes)
             if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
                 return error
         if invocation_index == len(inspection.invocations):
             break
         invocation = inspection.invocations[invocation_index]
-        cwd = cwd_for_depth(invocation.shell_depth)
+        cwd = working_directory(invocation.directory_changes)
         name = Path(invocation.executable).name.lower().removesuffix(".exe")
         args = invocation.arguments
         if name in {"cd", "set-location"} and args:
-            candidate = Path(invocation.expand_known_parameters(args[-1])).expanduser()
-            cwd_stack[-1] = candidate if candidate.is_absolute() else cwd / candidate
             continue
         targets: tuple[str, ...] = ()
         protect_ancestors = True
@@ -140,6 +137,10 @@ def builtin_skill_command_write_error(
                         source_path = source_path if source_path.is_absolute() else cwd / source_path
                         matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
                         targets += tuple(str(destination / Path(match).name) for match in matches)
+                        if glob.has_magic(source_path.name):
+                            # A preceding command may create source files after
+                            # inspection; protect matching existing targets too.
+                            targets += tuple(str(match) for match in destination.glob(source_path.name))
         elif name == "rsync":
             value_options = {
                 "--rsh", "--filter", "--exclude", "--exclude-from", "--include", "--include-from",

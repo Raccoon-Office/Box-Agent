@@ -384,3 +384,46 @@ def test_numeric_file_redirection_is_protected_but_descriptor_duplication_is_all
     root, _ = bundled
     assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(f'cd "{root}"; printf changed > 2', tmp_path)
     assert safety.builtin_skill_command_write_error(f'cd "{root}"; FD=2; printf output 1>&"$FD"', tmp_path) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell execution contexts")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["env-binding", "env-cwd-copy", "env-cwd-redirect", "subshell", "pipeline", "background", "substitution", "future-glob", "child-variable"])
+async def test_bash_execution_contexts_preserve_bundled_write_protection(tmp_path, bundled, monkeypatch, form):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "input" / root.name
+    source.mkdir(parents=True)
+    (source / target.name).write_text("changed")
+    (tmp_path / target.name).symlink_to(target)
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    commands = {
+        "env-binding": f"env DEST=\"{tmp_path}\" bash -c 'cp -R input/. \"$DEST\"'",
+        "env-cwd-copy": f'env -C "{tmp_path}" cp -R "{workspace}/input/." .',
+        "env-cwd-redirect": f"env -C \"{root}\" bash -c 'printf changed > validator.js'",
+        "subshell": f'cd "{tmp_path}"; (cd "{workspace}"); printf changed > bundled/validator.js',
+        "pipeline": f'cd "{tmp_path}"; cd "{workspace}" | cat; printf changed > bundled/validator.js',
+        "background": f'cd "{tmp_path}"; cd "{workspace}" & wait; printf changed > bundled/validator.js',
+        "substitution": f'cd "{tmp_path}"; printf "%s" "$(printf changed > bundled/validator.js)"; cd "{workspace}"',
+        "future-glob": f'printf changed > validator.js; cp ./*.js "{tmp_path}"',
+        "child-variable": f'cd "{tmp_path}"; TARGET=bundled/validator.js; (TARGET=ordinary.txt); printf changed > "$TARGET"',
+    }
+    denied = await tool.execute(command=commands[form])
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert denied.permission_request is None
+    assert target.read_text() == "original"
+    if form == "future-glob":
+        assert not (workspace / target.name).exists()
+
+    # Child directory changes must also leave an ordinary parent write usable.
+    allowed = await tool.execute(command=f'(cd "{root}"); printf ordinary > validator.js')
+    assert allowed.success, allowed.error
+    assert (workspace / target.name).read_text() == "ordinary"
+    assert target.read_text() == "original"
