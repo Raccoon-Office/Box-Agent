@@ -1398,7 +1398,7 @@ class TestBoxAgentDirAlwaysAllowed:
             session_workspace_root=str(workspace),
         )
         eng = PermissionEngine(policy, workspace)
-        eng._box_agent_dir = box_dir.resolve()
+        eng._product_dirs = (box_dir.resolve(),)
         return eng
 
     def test_box_agent_skill_dir_allowed_session_workspace(
@@ -1445,3 +1445,44 @@ class TestBoxAgentDirAlwaysAllowed:
         eng._home_dir = (tmp_path / "fake-home").resolve()
         decision = eng.check(FILESYSTEM_READ, {"path": str(sibling)})
         assert decision.allowed is False
+
+
+@pytest.mark.parametrize("capability", [FILESYSTEM_READ, FILESYSTEM_WRITE])
+def test_product_directory_roots_do_not_grant_neighbors_or_symlink_targets(
+    workspace, tmp_path, monkeypatch, capability,
+):
+    client = tmp_path / "raccoon-client"
+    client.mkdir()
+    unrelated = tmp_path / "raccoon-client-other"
+    unrelated.mkdir()
+    target = unrelated / "settings.json"
+    target.touch()
+    alias = client / "alias"
+    try:
+        alias.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("creating symbolic links is not supported in this environment")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    monkeypatch.setenv("BOX_AGENT_CLIENT_DATA_ROOT", str(Path.home().parent))
+    monkeypatch.setenv("BOX_AGENT_RUNTIME_ROOT", "../raccoon-client-other")
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    assert engine.check(capability, {"path": str(client / "settings.json")}, tool_name="bash").allowed
+    for path in (target, alias, Path.home() / "private.txt"):
+        assert not engine.check(capability, {"path": str(path)}, tool_name="bash").allowed
+
+
+def test_frozen_runtime_directory_is_writable_without_a_host_override(workspace, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from box_agent.tools import permissions
+
+    runtime = tmp_path / "box-agent-runtime"
+    entry = runtime / "bin" / "box-agent-acp"
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    (runtime / "manifest.json").write_text("{}")
+    monkeypatch.setattr(permissions, "sys", SimpleNamespace(frozen=True, executable=str(entry)))
+    monkeypatch.delenv("BOX_AGENT_RUNTIME_ROOT", raising=False)
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    assert engine.check(FILESYSTEM_WRITE, {"path": str(runtime / "VERSION")}).allowed
+    assert not engine.check(FILESYSTEM_WRITE, {"path": str(tmp_path / "VERSION")}).allowed

@@ -225,7 +225,9 @@ def _path_allowed_by_scope(self, resolved: Path, scope: str) -> bool:
 
 **权限引擎会放行实际的 Box-Agent 自有目录：设置了 `BOX_AGENT_HOME` 时使用该目录，否则使用 `~/.box-agent/`。**无需再把它加入 `allowed_directories`。因此，workspace 外、实际 `BOX_AGENT_HOME/skills/cloud/<skill>/references/` 内的普通参考文件可以被 `read_file` 读取。路径按解析后的真实位置检查；相似名称的邻接目录，或指向未授权外部路径的软链接，不会因此被放行。
 
-这项既有内部目录规则包含读写权限，覆盖 skills 内嵌资源、runtime-packages、browsers cache、log、trash 等框架数据。缺省受限会话启用引擎后，文件读写、Bash 等工具共同使用该策略，而不是仅对 `read_file` 增加特殊豁免；未授权的业务文件仍需权限检查，危险命令审批保持独立。
+显式 `default` 和缺省受限会话都允许读写当前 Box-Agent 包目录、数据目录以及实际运行包。桌面主进程在启动 ACP 时用 `BOX_AGENT_RUNTIME_ROOT`、`BOX_AGENT_CLIENT_ROOT` 和 `BOX_AGENT_CLIENT_DATA_ROOT` 提供实际运行包、客户端安装目录和应用数据目录的绝对路径。未由宿主传入的客户端目录需要已有路径授权。根目录解析后才用于权限判断，不接受系统根、用户主目录及其祖先作为默认产品目录。
+
+文件读写和 Bash 共用这些目录规则。包内置 Skill 保留现有的文件修改保护，危险命令仍走原审批，操作系统及安装包的写权限也仍然生效。目录授权不随软链接扩展到未授权目标。
 
 原生长工具结果默认保存在实际 Box-Agent 自有目录的 `sessions/<sessionId>/tool-results/` 下，回执会给出供后续读取的绝对路径。该目录通常在 workspace 外，也依赖同一内部目录规则。文件是否属于当前会话本身不会额外授予文件权限；自定义落盘目录仍需位于已有授权范围内。
 
