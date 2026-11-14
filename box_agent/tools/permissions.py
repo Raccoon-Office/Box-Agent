@@ -247,6 +247,8 @@ class PermissionEngine:
         capability: str,
         resource: dict,
         tool_name: str | None = None,
+        *,
+        allow_product_directories: bool = True,
     ) -> PermissionDecision:
         if capability == FILESYSTEM_READ:
             return self._check_filesystem(
@@ -254,6 +256,7 @@ class PermissionEngine:
                 self._policy.filesystem_scope,
                 "read",
                 tool_name,
+                allow_product_directories=allow_product_directories,
             )
         elif capability == FILESYSTEM_WRITE:
             return self._check_filesystem(
@@ -261,6 +264,7 @@ class PermissionEngine:
                 self._policy.filesystem_scope,
                 "write",
                 tool_name,
+                allow_product_directories=allow_product_directories,
             )
         elif capability == MEMORY_OPENCLAW_IMPORT:
             return self._check_memory_openclaw()
@@ -271,9 +275,15 @@ class PermissionEngine:
     # ── filesystem ──
 
     def _check_filesystem(
-        self, path: Path, scope: str, operation: str, tool_name: str | None = None
+        self, path: Path, scope: str, operation: str, tool_name: str | None = None,
+        *, allow_product_directories: bool,
     ) -> PermissionDecision:
-        resolved = self._resolve_for_check(path)
+        try:
+            # Resolve through missing targets as well, including dangling links
+            # and ".." after a directory the command has yet to create.
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return PermissionDecision(allowed=False, reason=f"Access denied: cannot resolve {path}")
 
         if operation == "write" and self._builtin_skills_dir:
             if error := builtin_skill_write_error(resolved, self._builtin_skills_dir):
@@ -293,7 +303,9 @@ class PermissionEngine:
             if self._grant_store.has_grant("filesystem", "user_home"):
                 scope = "user_home"
 
-        if self._path_allowed_by_scope(resolved, scope, operation, tool_name):
+        if self._path_allowed_by_scope(
+            resolved, scope, operation, tool_name, allow_product_directories=allow_product_directories,
+        ):
             return PermissionDecision(allowed=True)
 
         escalation = self._compute_escalation(resolved, scope, requested_path=path)
@@ -372,36 +384,15 @@ class PermissionEngine:
     def _is_under_home(self, resolved: Path) -> bool:
         return self._is_inside(resolved, self._home_dir)
 
-    def _resolve_for_check(self, path: Path) -> Path:
-        """Resolve a path for permission checking.
-
-        For existing paths: full resolve (follows symlinks).
-        For non-existing paths: resolve the existing parent, then append
-        remaining components.
-        """
-        if path.exists():
-            return path.resolve()
-        parts_below: list[str] = []
-        cursor = path
-        while not cursor.exists():
-            parts_below.append(cursor.name)
-            parent = cursor.parent
-            if parent == cursor:
-                break
-            cursor = parent
-        resolved_parent = cursor.resolve()
-        for part in reversed(parts_below):
-            resolved_parent = resolved_parent / part
-        return resolved_parent
-
     def _path_allowed_by_scope(
-        self, resolved: Path, scope: str, operation: str, tool_name: str | None = None
+        self, resolved: Path, scope: str, operation: str, tool_name: str | None = None,
+        *, allow_product_directories: bool = True,
     ) -> bool:
         # workspace_dir is always allowed regardless of scope
         if self._is_inside(resolved, self._workspace_dir):
             return True
 
-        if any(self._is_inside(resolved, root) for root in self._product_dirs):
+        if allow_product_directories and any(self._is_inside(resolved, root) for root in self._product_dirs):
             return True
 
         # Packaged built-in skills are executable product resources rather

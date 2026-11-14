@@ -26,6 +26,7 @@ _HEREDOC_RE = re.compile(
 _DIRECT_WRAPPERS = frozenset(
     {
         "busybox",
+        "builtin",
         "chroot",
         "command",
         "env",

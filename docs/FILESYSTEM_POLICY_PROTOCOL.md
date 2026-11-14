@@ -227,7 +227,7 @@ def _path_allowed_by_scope(self, resolved: Path, scope: str) -> bool:
 
 显式 `default` 和缺省受限会话都允许读写当前 Box-Agent 包目录、数据目录以及实际运行包。桌面主进程在启动 ACP 时用 `BOX_AGENT_RUNTIME_ROOT`、`BOX_AGENT_CLIENT_ROOT` 和 `BOX_AGENT_CLIENT_DATA_ROOT` 提供实际运行包、客户端安装目录和应用数据目录的绝对路径。未由宿主传入的客户端目录需要已有路径授权。根目录解析后才用于权限判断，不接受系统根、用户主目录及其祖先作为默认产品目录。
 
-文件读写和 Bash 共用这些目录规则。包内置 Skill 保留现有的文件修改保护，危险命令仍走原审批，操作系统及安装包的写权限也仍然生效。目录授权不随软链接扩展到未授权目标。
+文件读写和 Bash 共用这些目录规则。Bash 可使用产品目录下的绝对文件路径，切换工作目录仍需已有的会话目录权限，避免后续相对路径越界。包内置 Skill 保留现有的文件修改保护，危险命令仍走原审批，操作系统及安装包的写权限也仍然生效。目录授权不随软链接扩展到未授权目标。
 
 原生长工具结果默认保存在实际 Box-Agent 自有目录的 `sessions/<sessionId>/tool-results/` 下，回执会给出供后续读取的绝对路径。该目录通常在 workspace 外，也依赖同一内部目录规则。文件是否属于当前会话本身不会额外授予文件权限；自定义落盘目录仍需位于已有授权范围内。
 
@@ -314,7 +314,7 @@ PermissionEngine.check FILESYSTEM_WRITE → allowed=False, escalation=user_home
 | 宿主不传 `_meta.filesystem_policy` | 沿用配置中的权限策略；受限会话的工作区根为空时补为当前 workspace |
 | 宿主传空对象 `{}` | 等价于不传 |
 | 宿主只传 `session_workspace_root` | 仅覆盖该字段，`allowed_directories` 与 `filesystem_scope` 沿用配置 |
-| `permission_mode=default` | workspace + 本 session policy；全局 allowed directories 不继承；无 policy 时仅 workspace |
+| `permission_mode=default` | workspace + 产品目录 + 本 session policy；全局 allowed directories 不继承 |
 | `permission_mode=unrestricted_filesystem` | 完全文件范围；危险命令仍逐次审批；Jupyter kernel 按 ACP session 隔离 |
 | `permission_mode=full_access` | 完全文件范围；危险命令无需应用层确认；仍保留硬阻断、删除备份和 Jupyter session 隔离 |
 | 未传 `permission_mode` | 沿用 `tools.allow_full_access` 和原有 officev3 policy；未配置全访问时也会创建权限引擎，统一应用内部目录和文件权限规则 |

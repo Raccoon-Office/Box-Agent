@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -1486,3 +1487,76 @@ def test_frozen_runtime_directory_is_writable_without_a_host_override(workspace,
     engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
     assert engine.check(FILESYSTEM_WRITE, {"path": str(runtime / "VERSION")}).allowed
     assert not engine.check(FILESYSTEM_WRITE, {"path": str(tmp_path / "VERSION")}).allowed
+
+
+@pytest.mark.asyncio
+async def test_bash_cannot_write_outside_client_through_missing_components(workspace, tmp_path, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    path = client / "missing" / ".." / ".." / "outside.txt"
+    assert not engine.check(FILESYSTEM_WRITE, {"path": str(path)}, tool_name="bash").allowed
+    if os.name != "nt":
+        tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+        result = await tool.execute(command=f'mkdir "{client / "missing"}" && echo escaped > "{path}"')
+        assert not result.success
+        assert not (tmp_path / "outside.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_bash_cannot_write_through_a_dangling_link_in_client_directory(workspace, tmp_path, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    target = tmp_path / "outside.txt"
+    alias = client / "dangling"
+    try:
+        alias.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("creating symbolic links is not supported in this environment")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    result = await tool.execute(command=f'echo escaped > "{alias}"')
+    assert not result.success
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_bash_client_directory_grant_cannot_escape_via_relative_redirect(workspace, tmp_path, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    allowed = await tool.execute(command=f'echo allowed > "{client / "inside.txt"}"')
+    assert allowed.success, allowed.error
+    for cd in (("cd", "builtin cd") if os.name != "nt" else ("cd",)):
+        rejected = await tool.execute(command=f'{cd} "{client}" && echo escaped > ../outside.txt')
+        assert not rejected.success
+        assert not (tmp_path / "outside.txt").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ln syntax")
+@pytest.mark.asyncio
+async def test_bash_cannot_create_and_write_through_link_in_one_call(workspace, tmp_path, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    target = tmp_path / "outside"
+    target.mkdir()
+    link = client / "alias"
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    result = await tool.execute(command=f'ln -s ../outside "{link}" && echo escaped > "{link / "proof"}"')
+    assert not result.success
+    assert not link.is_symlink()
+    assert not (target / "proof").exists()
