@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -1398,7 +1399,7 @@ class TestBoxAgentDirAlwaysAllowed:
             session_workspace_root=str(workspace),
         )
         eng = PermissionEngine(policy, workspace)
-        eng._box_agent_dir = box_dir.resolve()
+        eng._product_dirs = (box_dir.resolve(),)
         return eng
 
     def test_box_agent_skill_dir_allowed_session_workspace(
@@ -1445,3 +1446,419 @@ class TestBoxAgentDirAlwaysAllowed:
         eng._home_dir = (tmp_path / "fake-home").resolve()
         decision = eng.check(FILESYSTEM_READ, {"path": str(sibling)})
         assert decision.allowed is False
+
+
+@pytest.mark.parametrize("capability", [FILESYSTEM_READ, FILESYSTEM_WRITE])
+def test_product_directory_roots_do_not_grant_neighbors_or_symlink_targets(
+    workspace, tmp_path, monkeypatch, capability,
+):
+    client = tmp_path / "raccoon-client"
+    client.mkdir()
+    unrelated = tmp_path / "raccoon-client-other"
+    unrelated.mkdir()
+    target = unrelated / "settings.json"
+    target.touch()
+    alias = client / "alias"
+    try:
+        alias.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("creating symbolic links is not supported in this environment")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    monkeypatch.setenv("BOX_AGENT_CLIENT_DATA_ROOT", str(Path.home().parent))
+    monkeypatch.setenv("BOX_AGENT_RUNTIME_ROOT", "../raccoon-client-other")
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    assert engine.check(capability, {"path": str(client / "settings.json")}, tool_name="bash").allowed
+    for path in (target, alias, Path.home() / "private.txt"):
+        assert not engine.check(capability, {"path": str(path)}, tool_name="bash").allowed
+
+
+def test_frozen_runtime_directory_is_writable_without_a_host_override(workspace, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from box_agent.tools import permissions
+
+    runtime = tmp_path / "box-agent-runtime"
+    entry = runtime / "bin" / "box-agent-acp"
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    (runtime / "manifest.json").write_text("{}")
+    monkeypatch.setattr(permissions, "sys", SimpleNamespace(frozen=True, executable=str(entry)))
+    monkeypatch.delenv("BOX_AGENT_RUNTIME_ROOT", raising=False)
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    assert engine.check(FILESYSTEM_WRITE, {"path": str(runtime / "VERSION")}).allowed
+    assert not engine.check(FILESYSTEM_WRITE, {"path": str(tmp_path / "VERSION")}).allowed
+
+
+@pytest.mark.asyncio
+async def test_bash_cannot_write_outside_client_through_missing_components(workspace, tmp_path, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    path = client / "missing" / ".." / ".." / "outside.txt"
+    assert not engine.check(FILESYSTEM_WRITE, {"path": str(path)}, tool_name="bash").allowed
+    if os.name != "nt":
+        tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+        result = await tool.execute(command=f'mkdir "{client / "missing"}" && echo escaped > "{path}"')
+        assert not result.success
+        assert not (tmp_path / "outside.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_bash_cannot_write_through_a_dangling_link_in_client_directory(workspace, tmp_path, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    target = tmp_path / "outside.txt"
+    alias = client / "dangling"
+    try:
+        alias.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("creating symbolic links is not supported in this environment")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    result = await tool.execute(command=f'echo escaped > "{alias}"')
+    assert not result.success
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_bash_client_directory_grant_cannot_escape_via_relative_redirect(workspace, tmp_path, monkeypatch):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    allowed = await tool.execute(command=f'echo allowed > "{client / "inside.txt"}"')
+    assert allowed.success, allowed.error
+    for cd in (("cd", "builtin cd") if os.name != "nt" else ("cd",)):
+        rejected = await tool.execute(command=f'{cd} "{client}" && echo escaped > ../outside.txt')
+        assert not rejected.success
+        assert not (tmp_path / "outside.txt").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX env and tar directory options")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["env-read", "env-write", "tar-read", "tar-write"])
+@pytest.mark.parametrize("option_style", ["separate", "attached", "long"])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_bash_product_directory_options_require_session_scope(
+    workspace, tmp_path, monkeypatch, operation, option_style, nested,
+):
+    import shlex
+    import shutil
+
+    from box_agent.tools.bash_tool import BashTool
+
+    executable = operation.split("-")[0]
+    if shutil.which(executable) is None:
+        pytest.skip(f"{executable} is not installed")
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / "fixture.txt").write_text("product fixture")
+    (workspace / "fixture.txt").write_text("workspace fixture")
+    (tmp_path / "private.txt").write_text("outside fixture content")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+
+    def command_for(directory):
+        quoted = shlex.quote(str(directory))
+        directory_option = {
+            "separate": f"-C {quoted}",
+            "attached": f"-C{quoted}",
+            "long": f"{'--chdir' if executable == 'env' else '--directory'}={quoted}",
+        }[option_style]
+        arguments = {
+            "env-read": "cat ../private.txt",
+            "env-write": "sh -c 'echo escaped > ../outside-write.txt'",
+            "tar-read": "-cf - ../private.txt",
+            "tar-write": "-cf ../outside-write.txt fixture.txt",
+        }[operation]
+        command = f"{executable} {directory_option} {arguments}"
+        return "bash -c " + shlex.quote(command) if nested else command
+
+    result = await tool.execute(command=command_for(client))
+    assert not result.success
+    assert "outside fixture content" not in result.stdout
+    assert not (tmp_path / "outside-write.txt").exists()
+    assert "Access denied" in result.error
+
+    safe_command = (
+        f'env -C "{workspace}" cat fixture.txt'
+        if executable == "env"
+        else f'tar -C "{workspace}" -cf "{workspace / "fixture.tar"}" fixture.txt'
+    )
+    result = await tool.execute(command=safe_command)
+    assert result.success, result.error
+    result = await tool.execute(command=f'echo --directory "{client}"')
+    assert result.success, result.error
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX find directory actions")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["-execdir", "-okdir"])
+@pytest.mark.parametrize("operation", ["read", "write"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("search_file", [False, True])
+async def test_bash_find_directory_actions_require_session_scope(
+    workspace, tmp_path, monkeypatch, action, operation, nested, search_file,
+):
+    import shlex
+    import shutil
+
+    from box_agent.tools.bash_tool import BashTool
+
+    if shutil.which("find") is None:
+        pytest.skip("find is not installed")
+    client = tmp_path / "client"
+    client.mkdir()
+    fixture = client / "fixture.txt"
+    fixture.write_text("product fixture")
+    (workspace / "fixture.txt").write_text("workspace fixture")
+    private = tmp_path / "private.txt"
+    private.write_text("outside fixture content")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    payload = "cat ../private.txt" if operation == "read" else "sh -c 'echo changed > ../private.txt'"
+    root = fixture if search_file else client
+    command = f'find -H "{root}" -type f {action} {payload} \\;'
+    if nested:
+        command = "bash -c " + shlex.quote(command)
+    result = await tool.execute(command=command)
+    assert not result.success
+    assert "Access denied" in result.error
+    assert "outside fixture content" not in result.stdout
+    assert private.read_text() == "outside fixture content"
+
+    result = await tool.execute(command=f'find "{workspace}" -type f -execdir cat fixture.txt \\;')
+    assert result.success, result.error
+    assert "workspace fixture" in result.stdout
+    result = await tool.execute(command=f'cat "{fixture}"')
+    assert result.success, result.error
+    assert "product fixture" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX find syntax")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("literal", ["-execdir", "-okdir", "-follow"])
+async def test_bash_find_action_names_in_data_are_ordinary_arguments(workspace, tmp_path, monkeypatch, literal):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / literal).write_text("product fixture")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    result = await tool.execute(command=f'find "{client}" -name "{literal}" -print')
+    assert result.success, result.error
+    assert literal in result.stdout
+    result = await tool.execute(command=f'find "{client}" -type f -exec printf "%s\\n" "{literal}" \\;')
+    assert result.success, result.error
+    assert literal in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX tar syntax")
+@pytest.mark.asyncio
+async def test_bash_tar_directory_option_in_exclude_is_ordinary_data(workspace, tmp_path, monkeypatch):
+    import tarfile
+
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    (workspace / "fixture.txt").write_text("workspace fixture")
+    archive = workspace / "fixture.tar"
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    result = await tool.execute(command=(
+        f'tar -cf "{archive}" --exclude "--directory={client}" -C "{workspace}" fixture.txt'
+    ))
+    assert result.success, result.error
+    with tarfile.open(archive) as bundle:
+        assert "fixture.txt" in bundle.getnames()
+
+
+@pytest.mark.parametrize("count", [1000, 1001])
+def test_bash_pathname_expansion_has_a_bounded_match_count(monkeypatch, count):
+    from box_agent.tools import bash_tool
+
+    monkeypatch.setattr(bash_tool.glob, "iglob", lambda path: iter(["/client/file.txt"] * count))
+    paths = bash_tool._shell_permission_paths("/client/*.txt")
+    if count == 1000:
+        assert len(paths) == count
+    else:
+        assert paths is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pathname expansion")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["read", "write"])
+@pytest.mark.parametrize("pattern", ["*/secret.txt", "ali*/secret.txt", "**/secret.txt", "{alias,safe}/secret.txt"])
+async def test_bash_expanded_product_paths_cannot_follow_external_links(
+    workspace, tmp_path, monkeypatch, operation, pattern,
+):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("outside fixture content")
+    (client / "alias").symlink_to(outside, target_is_directory=True)
+    (client / "inside.txt").write_text("product fixture")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    path = client / pattern
+    command = f"cat {path}" if operation == "read" else f"printf changed > {path}"
+    result = await tool.execute(command=command)
+    assert not result.success
+    assert "outside fixture content" not in result.stdout
+    assert secret.read_text() == "outside fixture content"
+
+    result = await tool.execute(command=f"cat {client}/*.txt")
+    assert result.success, result.error
+    assert "product fixture" in result.stdout
+    result = await tool.execute(command=f"printf changed > {client}/*.txt")
+    assert result.success, result.error
+    assert (client / "inside.txt").read_text() == "changed"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX find traversal")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("traversal", ["-L", "-H -L", "-follow", "dynamic-action"])
+@pytest.mark.parametrize("operation", ["read", "write"])
+async def test_bash_product_traversal_cannot_follow_external_links(
+    workspace, tmp_path, monkeypatch, traversal, operation,
+):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("outside fixture content")
+    (client / "alias").symlink_to(outside, target_is_directory=True)
+    (client / "file-alias.txt").symlink_to(secret)
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    prefix = f"find {traversal} {client}" if traversal.startswith("-L") or traversal == "-H -L" else f"find {client}"
+    if traversal == "-follow":
+        prefix += " -follow"
+    payload = "cat {}" if operation == "read" else "sh -c 'printf changed > \"$1\"' _ {}"
+    result = await tool.execute(command=f"{prefix} -exec {payload} \\;")
+    assert not result.success
+    assert "outside fixture content" not in result.stdout
+    assert secret.read_text() == "outside fixture content"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX link-following utilities")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executable", ["tar", "cp", "rg", "grep", "rsync"])
+@pytest.mark.parametrize("glob_root", [False, True])
+async def test_bash_link_following_utilities_require_session_directory_scope(
+    workspace, tmp_path, monkeypatch, executable, glob_root,
+):
+    import shutil
+    import tarfile
+
+    from box_agent.tools.bash_tool import BashTool
+
+    if shutil.which(executable) is None:
+        pytest.skip(f"{executable} is not installed")
+    client = tmp_path / "client"
+    client.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside-fixture-marker")
+    nested = client / "nested"
+    nested.mkdir()
+    (nested / "alias").symlink_to(outside, target_is_directory=True)
+    inside = client / "inside.txt"
+    inside.write_text("product-fixture-marker")
+    archive = workspace / "product.tar"
+    copied = workspace / "copied"
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    root_operand = str(client / "*") if glob_root else f'"{client}"'
+    commands = {
+        "tar": f'tar -h -cf "{archive}" {root_operand}',
+        "cp": f'cp -RL {root_operand} "{copied}"',
+        "rg": f'rg --follow outside-fixture-marker {root_operand}',
+        "grep": f'grep -R outside-fixture-marker {root_operand}',
+        "rsync": f'rsync -aL {root_operand} "{copied}/"',
+    }
+    result = await tool.execute(command=commands[executable])
+    assert not result.success
+    assert "Access denied" in result.error
+    assert "outside-fixture-marker" not in result.stdout
+    assert not archive.exists()
+    assert not copied.exists()
+
+    source = workspace / "source"
+    source.mkdir()
+    (source / "fixture.txt").write_text("workspace fixture")
+    positive_commands = {
+        "tar": f'tar -h -cf "{archive}" "{inside}"',
+        "cp": f'cp -RL "{source}" "{client / "received"}"',
+        "rg": f'rg --follow product-fixture-marker "{inside}"',
+        "grep": f'grep -R product-fixture-marker "{inside}"',
+        "rsync": f'rsync -aL "{source}/" "{client / "received"}/"',
+    }
+    result = await tool.execute(command=positive_commands[executable])
+    assert result.success, result.error
+    if executable == "tar":
+        with tarfile.open(archive) as bundle:
+            assert any(member.name.endswith("inside.txt") for member in bundle.getmembers())
+    elif executable in {"cp", "rsync"}:
+        assert (client / "received" / "fixture.txt").read_text() == "workspace fixture"
+    else:
+        assert "product-fixture-marker" in result.stdout
+    if executable == "rg":
+        result = await tool.execute(command=f'rg --follow --no-follow product-fixture-marker "{client}"')
+        assert result.success, result.error
+        result = await tool.execute(command=f'rg --no-follow --follow product-fixture-marker "{client}"')
+        assert not result.success
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ln syntax")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shell", ["direct", "nested", "two-shells"])
+async def test_bash_cannot_create_and_write_through_link_in_one_call(workspace, tmp_path, monkeypatch, shell):
+    import shlex
+
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    target = tmp_path / "outside"
+    target.mkdir()
+    link = client / "alias"
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    command = f'ln -s ../outside "{link}" && echo escaped > "{link / "proof"}"'
+    for _ in range({"direct": 0, "nested": 1, "two-shells": 2}[shell]):
+        command = "bash -c " + shlex.quote(command)
+    result = await tool.execute(command=command)
+    assert not result.success
+    assert not link.is_symlink()
+    assert not (target / "proof").exists()
+    (workspace / "fixture.txt").write_text("workspace fixture")
+    result = await tool.execute(command="ln -s fixture.txt fixture-link.txt && cat fixture-link.txt")
+    assert result.success, result.error
+    assert "workspace fixture" in result.stdout

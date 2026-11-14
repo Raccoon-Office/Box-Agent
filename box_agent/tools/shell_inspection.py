@@ -26,6 +26,7 @@ _HEREDOC_RE = re.compile(
 _DIRECT_WRAPPERS = frozenset(
     {
         "busybox",
+        "builtin",
         "chroot",
         "command",
         "env",
@@ -50,6 +51,7 @@ _MAX_NESTED_SHELL_DEPTH = 2
 _SUBSTITUTION_PLACEHOLDER = "__box_agent_substitution__"
 _SUBSTITUTION_MARKER_BASE = 0xE000
 _WRAPPER_OPTIONS_WITH_VALUES = {
+    "builtin": frozenset(),
     "command": frozenset(),
     "busybox": frozenset(),
     "chroot": frozenset({"--groups", "--userspec"}),
@@ -130,6 +132,12 @@ _SHELL_OPTIONS_WITH_VALUES = frozenset(
     {"+O", "+o", "--init-file", "--rcfile", "-O", "-o"}
 )
 _FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+_FIND_OPTIONS_WITH_VALUES = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+    "-regex", "-iregex", "-lname", "-ilname", "-type", "-xtype",
+    "-newer", "-anewer", "-cnewer", "-samefile", "-printf", "-fprintf",
+    "-fprint", "-fprint0", "-fls", "-files0-from", "-D", "-f",
+})
 
 
 @dataclass(frozen=True)
@@ -761,28 +769,129 @@ def _shell_script_argument(invocation: ShellInvocation) -> str | None:
     return None
 
 
-def _find_embedded_commands(invocation: ShellInvocation) -> tuple[str, ...]:
-    """Return command payloads executed by find's -exec/-ok family."""
+def find_command_actions(invocation: ShellInvocation) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return actual find actions, excluding predicate values and command data."""
     executable = _command_name(invocation.executable)
-    if executable != "find":
+    if executable not in {"find", "gfind"}:
         return ()
 
-    commands: list[str] = []
+    actions = []
     arguments = list(invocation.arguments)
     index = 0
     while index < len(arguments):
+        if arguments[index] in _FIND_OPTIONS_WITH_VALUES:
+            index += 3 if arguments[index] == "-fprintf" else 2
+            continue
+        if arguments[index] == "-follow":
+            actions.append(("-follow", ()))
+            index += 1
+            continue
         if arguments[index] not in _FIND_EXEC_ACTIONS:
             index += 1
             continue
+        action = arguments[index]
         index += 1
         start = index
         while index < len(arguments) and arguments[index] not in {";", "+"}:
             index += 1
         if index > start:
-            commands.append(shlex.join(arguments[start:index]))
+            actions.append((action, tuple(arguments[start:index])))
         if index < len(arguments):
             index += 1
-    return tuple(commands)
+    return tuple(actions)
+
+
+def _find_embedded_commands(invocation: ShellInvocation) -> tuple[str, ...]:
+    """Return command payloads executed by find's -exec/-ok family."""
+    return tuple(shlex.join(words) for _, words in find_command_actions(invocation) if words)
+
+
+def link_following_operands(invocation: ShellInvocation) -> tuple[str, ...]:
+    """Return literal inputs of commands explicitly following filesystem links."""
+    name = _command_name(invocation.executable)
+    name = {"gtar": "tar", "gcp": "cp", "ggrep": "grep", "ripgrep": "rg"}.get(name, name)
+    options = {
+        "tar": (
+            {"h"}, {"--dereference": "h"}, {"f", "T", "X", "C"},
+            {"--file", "--files-from", "--exclude", "--exclude-from", "--directory"},
+        ),
+        "cp": (
+            {"L"}, {"--dereference": "L"}, {"t", "S"}, {"--target-directory", "--suffix"},
+        ),
+        "rg": (
+            {"L"}, {"--follow": "L"}, {"e", "f", "g", "t", "T", "m", "A", "B", "C"},
+            {"--regexp", "--file", "--glob", "--iglob", "--type", "--type-not",
+             "--max-count", "--context", "--before-context", "--after-context"},
+        ),
+        "grep": (
+            {"R"}, {"--dereference-recursive": "R"}, {"e", "f", "m", "A", "B", "C"},
+            {"--regexp", "--file", "--include", "--exclude", "--exclude-from", "--exclude-dir",
+             "--max-count", "--context", "--before-context", "--after-context"},
+        ),
+        "rsync": (
+            {"L", "k", "K"},
+            {"--copy-links": "L", "--copy-dirlinks": "k",
+             "--keep-dirlinks": "K", "--copy-unsafe-links": "unsafe"},
+            {"e", "f", "B", "T"},
+            {"--rsh", "--filter", "--exclude", "--exclude-from", "--include", "--include-from",
+             "--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--rsync-path",
+             "--backup-dir", "--temp-dir", "--partial-dir", "--out-format", "--log-file"},
+        ),
+    }
+    if name not in options:
+        return ()
+    follow_short, follow_long, value_short, value_long = options[name]
+    arguments = iter(enumerate(invocation.arguments))
+    operands = []
+    follow_modes = set()
+    explicit_pattern = False
+    explicit_target = False
+    for index, word in arguments:
+        if word == "--":
+            operands.extend(value for _, value in arguments)
+            break
+        option, separator, _ = word.partition("=")
+        if option in value_long:
+            explicit_pattern |= option in {"--regexp", "--file"} and name in {"rg", "grep"}
+            explicit_target |= option == "--target-directory"
+            if not separator:
+                next(arguments, None)
+            continue
+        if word.startswith("--"):
+            if (name == "cp" and word == "--no-dereference") or (name == "rg" and word == "--no-follow"):
+                follow_modes.clear()
+            elif name == "rsync" and word.startswith("--no-"):
+                positive = "--" + word.removeprefix("--no-")
+                mode = follow_long.get(positive, word.removeprefix("--no-"))
+                follow_modes.discard(mode)
+            elif mode := follow_long.get(word):
+                follow_modes.add(mode)
+            continue
+        traditional_tar_options = name == "tar" and index == 0 and word.isalpha()
+        if word.startswith("-") or traditional_tar_options:
+            letters = word[1:] if word.startswith("-") else word
+            for offset, letter in enumerate(letters):
+                if letter in value_short:
+                    explicit_pattern |= letter in {"e", "f"} and name in {"rg", "grep"}
+                    explicit_target |= letter == "t" and name == "cp"
+                    if offset == len(letters) - 1:
+                        next(arguments, None)
+                    break
+                if (name == "cp" and letter in {"H", "P"}) or (name == "grep" and letter == "r"):
+                    follow_modes.clear()
+                if letter in follow_short:
+                    follow_modes.add(letter)
+            continue
+        operands.append(word)
+    if not follow_modes:
+        return ()
+    if name == "cp" and not explicit_target:
+        return tuple(operands[:-1])
+    if name == "rsync" and "K" not in follow_modes:
+        return tuple(operands[:-1])
+    if name in {"rg", "grep"} and not explicit_pattern:
+        return tuple(operands[1:])
+    return tuple(operands)
 
 
 def inspect_shell_command(

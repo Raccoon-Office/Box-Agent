@@ -6,6 +6,7 @@ Supports both bash (Unix/Linux/macOS) and PowerShell (Windows).
 from __future__ import annotations
 
 import asyncio
+import glob
 import logging
 import math
 import ntpath
@@ -21,6 +22,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -35,7 +37,7 @@ from .pptx_safety import (
     detect_pptx_self_check_bypass,
 )
 from .runtime import bundled_win_bash
-from .shell_inspection import inspect_shell_command
+from .shell_inspection import find_command_actions, inspect_shell_command, link_following_operands
 from .owned_file_cleanup import OwnedFileCleanup
 from .safety import (
     backup_file,
@@ -240,6 +242,21 @@ def _is_shell_output_redirect_path(command: str, path: str) -> bool:
         )
         is not None
     )
+
+
+def _shell_permission_paths(path: str) -> list[str] | None:
+    """Expand bounded pathname globs, leaving complex expansions to session scope."""
+    if "**" in path or re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", path):
+        return None
+    if not glob.has_magic(path):
+        return [path]
+    try:
+        matches = list(islice(glob.iglob(path), 1001))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if len(matches) > 1000:
+        return None
+    return matches or [path]
 
 
 def _is_temp_shell_redirect_path(command: str, path: str) -> bool:
@@ -1809,6 +1826,127 @@ Examples:
                 )
 
                 abs_paths = extract_absolute_paths(permission_command)
+                # Product grants apply to concrete file operands. A shell cwd
+                # change or link creation can redirect later operands outside them.
+                inspection = inspect_shell_command(
+                    permission_command, posix=not self.is_windows or self._bundled_win_bash is not None,
+                )
+                pattern_words = [word for invocation in inspection.invocations for word in invocation.words]
+                pattern_words.extend(redirection.target for redirection in inspection.redirections)
+                for word in pattern_words:
+                    if (
+                        Path(word).is_absolute()
+                        and re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", word)
+                        and word not in abs_paths
+                    ):
+                        abs_paths.append(word)
+                for invocation in inspection.invocations:
+                    name = invocation.executable.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+                    creates_link = name in {
+                        "ln", "ln.exe", "mklink",
+                    } or (
+                        name in {"new-item", "ni"}
+                        and any(
+                            arg.casefold() in {"symboliclink", "junction", "hardlink"}
+                            for arg in invocation.arguments
+                        )
+                    ) or (
+                        name in {"cmd", "cmd.exe"} and re.search(r"\bmklink\b", invocation.raw_segment, re.I)
+                    )
+                    if creates_link and (
+                        inspection.has_control_operators or inspection.redirections or invocation.indirect
+                    ):
+                        for absolute_path in abs_paths:
+                            resource = {"path": absolute_path}
+                            if (
+                                self._perm.check(FILESYSTEM_READ, resource, tool_name="bash").allowed
+                                and not self._perm.check(
+                                    FILESYSTEM_READ, resource, tool_name="bash",
+                                    allow_product_directories=False,
+                                ).allowed
+                            ):
+                                error = "Create links in a separate shell call before accessing product files through them."
+                                return BashOutputResult(
+                                    success=False, error=error, stderr=error, stdout="", exit_code=1,
+                                )
+                    directory_targets = []
+                    for operand in link_following_operands(invocation):
+                        target = Path(self.workspace_dir) / Path(operand).expanduser()
+                        if not self._perm.check(FILESYSTEM_READ, {"path": str(target)}, tool_name="bash").allowed:
+                            directory_targets.append(str(target))
+                            continue
+                        for actual_path in _shell_permission_paths(str(target)) or [str(target)]:
+                            if Path(actual_path).is_dir():
+                                directory_targets.append(actual_path)
+                    if name in {
+                        "cd", "chdir", "set-location", "sl", "pushd", "push-location", "pushl",
+                    } and invocation.arguments:
+                        directory_targets.append(invocation.arguments[-1])
+                    if name in {"find", "gfind"}:
+                        actions = find_command_actions(invocation)
+                        requires_directory_scope = any(
+                            action in {"-execdir", "-okdir", "-follow"}
+                            or any("{}" in word for word in words)
+                            for action, words in actions
+                        )
+                        search_roots = []
+                        follows_links = False
+                        search_arguments = iter(invocation.arguments)
+                        for argument in search_arguments:
+                            if argument == "-D":
+                                next(search_arguments, None)
+                                continue
+                            if argument in {"-H", "-L", "-P"}:
+                                follows_links = argument == "-L"
+                                continue
+                            if argument == "--" or argument.startswith("-O"):
+                                continue
+                            if argument == "-f":
+                                argument = next(search_arguments, ".")
+                            if argument.startswith("-") or argument in {"!", "("}:
+                                break
+                            search_root = Path(self.workspace_dir) / Path(argument).expanduser()
+                            search_roots.append(
+                                str(search_root.parent if search_root.is_file() else search_root)
+                            )
+                        if requires_directory_scope or follows_links:
+                            directory_targets.extend(search_roots)
+                    # Wrapper options remain in words even when the inspector
+                    # exposes the wrapped executable (for example env -C ... cat).
+                    option_words = invocation.prefix
+                    if name in {"tar", "gtar", "git", "make", "gmake", "ninja"}:
+                        option_words += invocation.arguments
+                    skip_value = False
+                    for index, word in enumerate(option_words):
+                        if skip_value:
+                            skip_value = False
+                            continue
+                        if name in {"tar", "gtar"} and (
+                            word in {"--file", "--exclude", "--exclude-from", "--files-from", "-f", "-T", "-X"}
+                            or (word.startswith("-") and not word.startswith("--") and word.endswith("f"))
+                        ):
+                            skip_value = True
+                            continue
+                        option, separator, value = word.partition("=")
+                        if option in {"-C", "--chdir", "--directory", "--workdir", "--working-directory"}:
+                            if separator:
+                                directory_targets.append(value)
+                            elif index + 1 < len(option_words):
+                                directory_targets.append(option_words[index + 1])
+                                skip_value = True
+                        elif word.startswith("-C") and len(word) > 2:
+                            directory_targets.append(word[2:])
+                    for value in directory_targets:
+                        target = Path(value).expanduser()
+                        decision = self._perm.check(
+                            FILESYSTEM_READ, {"path": str(Path(self.workspace_dir) / target)},
+                            tool_name="bash", allow_product_directories=False,
+                        )
+                        if not decision.allowed:
+                            return BashOutputResult(
+                                success=False, error=decision.reason, stderr=decision.reason or "Permission denied",
+                                stdout="", exit_code=1, permission_request=decision.permission_request,
+                            )
                 log.debug(
                     "bash/perm/extracted paths=%s reason=%s cmd=%r",
                     abs_paths, escape_reason, command[:200],
@@ -1844,6 +1982,17 @@ Examples:
                         resource={"path": p},
                         tool_name="bash",
                     )
+                    if decision.allowed:
+                        expanded_paths = _shell_permission_paths(p)
+                        if expanded_paths is None:
+                            decision = self._perm.check(
+                                cap, {"path": p}, tool_name="bash", allow_product_directories=False,
+                            )
+                        else:
+                            for actual_path in expanded_paths:
+                                decision = self._perm.check(cap, {"path": actual_path}, tool_name="bash")
+                                if not decision.allowed:
+                                    break
                     if not decision.allowed:
                         log.warning(
                             "bash/perm/denied path=%s cap=%s extracted=%s cmd=%r",
