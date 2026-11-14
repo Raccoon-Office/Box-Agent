@@ -1560,3 +1560,7 @@ async def test_bash_cannot_create_and_write_through_link_in_one_call(workspace, 
     assert not result.success
     assert not link.is_symlink()
     assert not (target / "proof").exists()
+    (workspace / "fixture.txt").write_text("workspace fixture")
+    result = await tool.execute(command="ln -s fixture.txt fixture-link.txt && cat fixture-link.txt")
+    assert result.success, result.error
+    assert "workspace fixture" in result.stdout
