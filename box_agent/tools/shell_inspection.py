@@ -132,6 +132,12 @@ _SHELL_OPTIONS_WITH_VALUES = frozenset(
     {"+O", "+o", "--init-file", "--rcfile", "-O", "-o"}
 )
 _FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+_FIND_OPTIONS_WITH_VALUES = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+    "-regex", "-iregex", "-lname", "-ilname", "-type", "-xtype",
+    "-newer", "-anewer", "-cnewer", "-samefile", "-printf", "-fprintf",
+    "-fprint", "-fprint0", "-fls", "-files0-from", "-D", "-f",
+})
 
 
 @dataclass(frozen=True)
@@ -763,28 +769,37 @@ def _shell_script_argument(invocation: ShellInvocation) -> str | None:
     return None
 
 
-def _find_embedded_commands(invocation: ShellInvocation) -> tuple[str, ...]:
-    """Return command payloads executed by find's -exec/-ok family."""
+def find_command_actions(invocation: ShellInvocation) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return actual find actions, excluding predicate values and command data."""
     executable = _command_name(invocation.executable)
-    if executable != "find":
+    if executable not in {"find", "gfind"}:
         return ()
 
-    commands: list[str] = []
+    actions = []
     arguments = list(invocation.arguments)
     index = 0
     while index < len(arguments):
+        if arguments[index] in _FIND_OPTIONS_WITH_VALUES:
+            index += 3 if arguments[index] == "-fprintf" else 2
+            continue
         if arguments[index] not in _FIND_EXEC_ACTIONS:
             index += 1
             continue
+        action = arguments[index]
         index += 1
         start = index
         while index < len(arguments) and arguments[index] not in {";", "+"}:
             index += 1
         if index > start:
-            commands.append(shlex.join(arguments[start:index]))
+            actions.append((action, tuple(arguments[start:index])))
         if index < len(arguments):
             index += 1
-    return tuple(commands)
+    return tuple(actions)
+
+
+def _find_embedded_commands(invocation: ShellInvocation) -> tuple[str, ...]:
+    """Return command payloads executed by find's -exec/-ok family."""
+    return tuple(shlex.join(words) for _, words in find_command_actions(invocation))
 
 
 def inspect_shell_command(

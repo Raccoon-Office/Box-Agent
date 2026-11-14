@@ -35,7 +35,7 @@ from .pptx_safety import (
     detect_pptx_self_check_bypass,
 )
 from .runtime import bundled_win_bash
-from .shell_inspection import inspect_shell_command
+from .shell_inspection import find_command_actions, inspect_shell_command
 from .owned_file_cleanup import OwnedFileCleanup
 from .safety import (
     backup_file,
@@ -1848,18 +1848,47 @@ Examples:
                         "cd", "chdir", "set-location", "sl", "pushd", "push-location", "pushl",
                     } and invocation.arguments:
                         directory_targets.append(invocation.arguments[-1])
+                    if any(
+                        action in {"-execdir", "-okdir"} for action, _ in find_command_actions(invocation)
+                    ):
+                        search_arguments = iter(invocation.arguments)
+                        for argument in search_arguments:
+                            if argument == "-D":
+                                next(search_arguments, None)
+                                continue
+                            if argument in {"-H", "-L", "-P", "--"} or argument.startswith("-O"):
+                                continue
+                            if argument == "-f":
+                                argument = next(search_arguments, ".")
+                            if argument.startswith("-") or argument in {"!", "("}:
+                                break
+                            search_root = Path(self.workspace_dir) / Path(argument).expanduser()
+                            directory_targets.append(
+                                str(search_root.parent if search_root.is_file() else search_root)
+                            )
                     # Wrapper options remain in words even when the inspector
                     # exposes the wrapped executable (for example env -C ... cat).
                     option_words = invocation.prefix
                     if name in {"tar", "gtar", "git", "make", "gmake", "ninja"}:
                         option_words += invocation.arguments
+                    skip_value = False
                     for index, word in enumerate(option_words):
+                        if skip_value:
+                            skip_value = False
+                            continue
+                        if name in {"tar", "gtar"} and (
+                            word in {"--file", "--exclude", "--exclude-from", "--files-from", "-f", "-T", "-X"}
+                            or (word.startswith("-") and not word.startswith("--") and word.endswith("f"))
+                        ):
+                            skip_value = True
+                            continue
                         option, separator, value = word.partition("=")
                         if option in {"-C", "--chdir", "--directory", "--workdir", "--working-directory"}:
                             if separator:
                                 directory_targets.append(value)
                             elif index + 1 < len(option_words):
                                 directory_targets.append(option_words[index + 1])
+                                skip_value = True
                         elif word.startswith("-C") and len(word) > 2:
                             directory_targets.append(word[2:])
                     for value in directory_targets:
