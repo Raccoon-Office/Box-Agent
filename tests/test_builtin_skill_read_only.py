@@ -190,7 +190,8 @@ def test_copy_into_directory_checks_each_existing_destination_link(tmp_path, bun
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX cp and symlink syntax")
 @pytest.mark.asyncio
-async def test_bash_copy_to_directory_cannot_follow_link_into_bundled_code(tmp_path, bundled, monkeypatch):
+@pytest.mark.parametrize("source_form", ["literal", "glob", "relative-glob", "inline-variable-glob", "environment-variable-glob", "runtime-variable-glob"])
+async def test_bash_copy_to_directory_cannot_follow_link_into_bundled_code(tmp_path, bundled, monkeypatch, source_form):
     from box_agent.tools.bash_tool import BashTool
 
     root, target = bundled
@@ -199,6 +200,8 @@ async def test_bash_copy_to_directory_cannot_follow_link_into_bundled_code(tmp_p
     product = tmp_path / "product"
     product.mkdir()
     monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(product))
+    if source_form == "environment-variable-glob":
+        monkeypatch.setenv("BOX_AGENT_COPY_SOURCE", str(workspace))
     engine = PermissionEngine(CapabilityPolicy(), workspace)
     engine._builtin_skills_dir = root.resolve()
     tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
@@ -206,14 +209,26 @@ async def test_bash_copy_to_directory_cannot_follow_link_into_bundled_code(tmp_p
     source.write_text("changed")
     linked = await tool.execute(command=f'ln -s "{target}" "{product / target.name}"')
     assert linked.success, linked.error
-    denied = await tool.execute(command=f'cp "{source}" "{product}/"')
+    command = f'cp "{source}" "{product}/"'
+    if source_form == "glob":
+        command = f'cp "{workspace}"/*.js "{product}/"'
+    elif source_form == "relative-glob":
+        command = f'cp ./*.js "{product}/"'
+    elif source_form == "inline-variable-glob":
+        command = f'SOURCE="{workspace}"; cp "$SOURCE"/*.js "{product}/"'
+    elif source_form == "environment-variable-glob":
+        command = f'cp "$BOX_AGENT_COPY_SOURCE"/*.js "{product}/"'
+    elif source_form == "runtime-variable-glob":
+        tool.update_runtime_env({"COPY_SOURCE": str(workspace)})
+        command = f'cp "$COPY_SOURCE"/*.js "{product}/"'
+    denied = await tool.execute(command=command)
     assert not denied.success
     assert "BUILTIN_SKILL_READ_ONLY" in denied.error
     assert denied.permission_request is None
     assert target.read_text() == "original"
     ordinary = workspace / "ordinary.txt"
     ordinary.write_text("ordinary")
-    allowed = await tool.execute(command=f'cp "{ordinary}" "{product}/"')
+    allowed = await tool.execute(command=f'cp "{workspace}"/*.txt "{product}/"')
     assert allowed.success, allowed.error
     assert (product / ordinary.name).read_text() == "ordinary"
 

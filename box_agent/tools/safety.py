@@ -111,10 +111,11 @@ def builtin_skill_command_write_error(
                 destination = destination if destination.is_absolute() else cwd / destination
                 if destination.is_dir():
                     sources = operands if explicit_target is not None else operands[:-1]
-                    targets += tuple(
-                        str(destination / Path(invocation.expand_known_parameters(source)).name)
-                        for source in sources
-                    )
+                    for source in sources:
+                        source_path = Path(invocation.expand_known_parameters(source)).expanduser()
+                        source_path = source_path if source_path.is_absolute() else cwd / source_path
+                        matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
+                        targets += tuple(str(destination / Path(match).name) for match in matches)
         elif name == "rsync":
             value_options = {
                 "--rsh", "--filter", "--exclude", "--exclude-from", "--include", "--include-from",
