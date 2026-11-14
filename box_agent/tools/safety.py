@@ -58,12 +58,17 @@ def builtin_skill_command_write_error(
         targets: tuple[str, ...] = ()
         protect_ancestors = True
         if name in {"cp", "install"} and args:
-            targets = args[-1:]
+            operands: list[str] = []
+            explicit_target: str | None = None
             protect_ancestors = False
             options = iter(args)
             for option in options:
                 if option == "--":
+                    operands.extend(options)
                     break
+                if not option.startswith("-") or option == "-":
+                    operands.append(option)
+                    continue
                 long_option, has_value, value = option.partition("=")
                 is_long_option = long_option.startswith("--") and len(long_option) > 2
                 if name == "cp" and is_long_option and any(
@@ -72,23 +77,62 @@ def builtin_skill_command_write_error(
                     protect_ancestors = True
                     continue
                 if option == "-t":
-                    targets = (next(options, ""),)
+                    explicit_target = next(options, "")
                     continue
                 if is_long_option and "--target-directory".startswith(long_option):
-                    targets = (value if has_value else next(options, ""),)
+                    explicit_target = value if has_value else next(options, "")
                     continue
-                if is_long_option and "--suffix".startswith(long_option):
+                value_options = {"--suffix"}
+                if name == "install":
+                    value_options.update({"--mode", "--owner", "--group", "--strip-program"})
+                if is_long_option and any(value_option.startswith(long_option) for value_option in value_options):
                     if not has_value:
                         next(options, None)
                 elif option.startswith("-") and not option.startswith("--"):
                     for index, letter in enumerate(option[1:], start=1):
+                        if letter == "Z":
+                            break
                         if name == "cp" and letter in {"R", "r", "a"}:
                             protect_ancestors = True
-                        if letter in {"S", "t"}:
+                        if letter in ({"S", "t", "m", "o", "g"} if name == "install" else {"S", "t"}):
                             value = option[index + 1:] or next(options, "")
                             if letter == "t":
-                                targets = (value,)
+                                explicit_target = value
                             break
+            targets = (explicit_target,) if explicit_target is not None else tuple(operands[-1:])
+        elif name == "rsync":
+            value_options = {
+                "--rsh", "--filter", "--exclude", "--exclude-from", "--include", "--include-from",
+                "--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--rsync-path",
+                "--backup-dir", "--temp-dir", "--partial-dir", "--out-format", "--log-file",
+                "--password-file", "--bwlimit", "--port", "--timeout", "--contimeout",
+                "--modify-window", "--max-size", "--min-size", "--block-size", "--chmod",
+                "--suffix", "--chown", "--usermap", "--groupmap", "--max-delete",
+                "--remote-option", "--compress-level", "--compress-choice", "--checksum-seed",
+                "--address", "--sockopts", "--protocol", "--iconv", "--skip-compress",
+                "--write-batch", "--only-write-batch", "--read-batch", "--info", "--debug",
+            }
+            operands = []
+            options = iter(args)
+            for option in options:
+                if option == "--":
+                    operands.extend(options)
+                    break
+                if not option.startswith("-") or option == "-":
+                    operands.append(option)
+                    continue
+                long_option, has_value, _ = option.partition("=")
+                if long_option.startswith("--") and len(long_option) > 2 and not has_value and any(
+                    value_option.startswith(long_option) for value_option in value_options
+                ):
+                    next(options, None)
+                elif not option.startswith("--"):
+                    for index, letter in enumerate(option[1:], start=1):
+                        if letter in {"e", "f", "B", "T", "M"}:
+                            if index == len(option) - 1:
+                                next(options, None)
+                            break
+            targets = tuple(operands[-1:])
         elif name in {"mv", "rm", "rmdir", "tee", "chmod", "chown", "touch"}:
             targets = args
         elif name == "sed" and any(arg.startswith("-i") for arg in args):
@@ -109,7 +153,7 @@ def builtin_skill_command_write_error(
             )
         for target in targets:
             target = invocation.expand_known_parameters(target)
-            if target.startswith("-"):
+            if target.startswith("-") and name not in {"cp", "install", "rsync"}:
                 continue
             path = Path(target).expanduser()
             path = path if path.is_absolute() else cwd / path

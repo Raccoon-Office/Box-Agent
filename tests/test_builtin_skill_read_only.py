@@ -108,6 +108,7 @@ async def test_bash_blocks_bundled_mutation_but_writes_workspace_output(tmp_path
     "--rec source/. '{target}'",
     "--parents source/skills/validator.js '{target}'",
     "-R --target-dir='{target}' source/.",
+    "source/. '{target}' -R",
 ])
 @pytest.mark.parametrize("executable", ["cp", "cp.exe"])
 def test_shell_copy_target_options_cannot_overwrite_bundled_ancestors(tmp_path, bundled, arguments, executable):
@@ -138,14 +139,44 @@ def test_install_target_options_reject_bundled_destinations(tmp_path, bundled, t
     assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, tmp_path)
 
 
+def test_install_mode_after_target_does_not_replace_the_write_destination(tmp_path, bundled):
+    root, _ = bundled
+    command = f"install validator.js '{root}' --mode 'u=rw,go=r'"
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, tmp_path)
+
+
+@pytest.mark.parametrize("arguments", [
+    "-a source/ '{target}/'",
+    "source/ '{target}/' -a",
+    "-a source/ '{target}/' --exclude '*.tmp'",
+    "-a source/ '{target}/' -e 'ssh -p 22'",
+    "-a -- source/ '{target}/'",
+])
+def test_rsync_write_target_options_protect_bundled_ancestors(tmp_path, bundled, arguments):
+    root, _ = bundled
+    command = "rsync " + arguments.format(target=root.parent)
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, tmp_path)
+
+
+def test_rsync_filter_value_does_not_become_the_write_target(tmp_path, bundled):
+    root, _ = bundled
+    command = f"rsync -a source/ copied/ --exclude '{root.parent}'"
+    assert safety.builtin_skill_command_write_error(command, tmp_path) is None
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX recursive cp syntax")
 @pytest.mark.asyncio
+@pytest.mark.parametrize("executable", ["cp", "rsync"])
 @pytest.mark.parametrize("target_form", ["root", "alias", "relative", "inline-variable", "environment-variable", "runtime-variable"])
 async def test_bash_rejects_recursive_overwrite_of_bundled_descendants(
-    tmp_path, monkeypatch, target_form,
+    tmp_path, monkeypatch, target_form, executable,
 ):
+    import shutil
+
     from box_agent.tools.bash_tool import BashTool
 
+    if shutil.which(executable) is None:
+        pytest.skip(f"{executable} is not installed")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     product = tmp_path / "product"
@@ -164,16 +195,17 @@ async def test_bash_rejects_recursive_overwrite_of_bundled_descendants(
     engine._builtin_skills_dir = builtin.resolve()
     tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
     target = entry if target_form == "alias" else product
-    command = f'cp -R "{source}/." "{target}/"'
+    copy_prefix = f'cp -R "{source}/."' if executable == "cp" else f'rsync -a "{source}/"'
+    command = f'{copy_prefix} "{target}/"'
     if target_form == "relative":
-        command = f'cd "{entry}" && cp -R "{source}/." .'
+        command = f'cd "{entry}" && {copy_prefix} .'
     elif target_form == "inline-variable":
-        command = f'DEST="{product}"; cp -R "{source}/." "$DEST"'
+        command = f'DEST="{product}"; {copy_prefix} "$DEST"'
     elif target_form == "environment-variable":
-        command = f'cp -R "{source}/." "$BOX_AGENT_CLIENT_ROOT"'
+        command = f'{copy_prefix} "$BOX_AGENT_CLIENT_ROOT"'
     elif target_form == "runtime-variable":
         tool.update_runtime_env({"COPY_TARGET": str(product)})
-        command = f'cp -R "{source}/." "$COPY_TARGET"'
+        command = f'{copy_prefix} "$COPY_TARGET"'
     result = await tool.execute(command=command)
     assert not result.success
     assert "BUILTIN_SKILL_READ_ONLY" in result.error
@@ -181,17 +213,22 @@ async def test_bash_rejects_recursive_overwrite_of_bundled_descendants(
     assert validator.read_text() == "original"
 
     exported = workspace / "exported"
-    result = await tool.execute(command=f'cp -R "{product}" "{exported}"')
+    export_command = (
+        f'cp -R "{product}" "{exported}"' if executable == "cp"
+        else f'rsync -a "{product}/" "{exported}/"'
+    )
+    result = await tool.execute(command=export_command)
     assert result.success, result.error
     assert (exported / "skills" / "validator.js").read_text() == "original"
     ordinary = workspace / "ordinary.txt"
     ordinary.write_text("ordinary product data")
-    result = await tool.execute(command=f'cp "{ordinary}" "{product}/"')
-    assert result.success, result.error
-    result = await tool.execute(command=f'cp "{ordinary}" "{product / "ordinary.txt"}"')
+    if executable == "cp":
+        result = await tool.execute(command=f'cp "{ordinary}" "{product}/"')
+        assert result.success, result.error
+    result = await tool.execute(command=f'{executable} "{ordinary}" "{product / "ordinary.txt"}"')
     assert result.success, result.error
     tool.update_runtime_env({"COPY_TARGET": str(product / "ordinary.txt")})
-    result = await tool.execute(command=f'cp "{ordinary}" "$COPY_TARGET"')
+    result = await tool.execute(command=f'{executable} "{ordinary}" "$COPY_TARGET"')
     assert result.success, result.error
     result = await tool.execute(command=f'printf updated > "{product / "ordinary.txt"}"')
     assert result.success, result.error
