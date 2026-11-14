@@ -1601,6 +1601,93 @@ async def test_bash_product_directory_options_require_session_scope(
     assert result.success, result.error
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX find directory actions")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["-execdir", "-okdir"])
+@pytest.mark.parametrize("operation", ["read", "write"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("search_file", [False, True])
+async def test_bash_find_directory_actions_require_session_scope(
+    workspace, tmp_path, monkeypatch, action, operation, nested, search_file,
+):
+    import shlex
+    import shutil
+
+    from box_agent.tools.bash_tool import BashTool
+
+    if shutil.which("find") is None:
+        pytest.skip("find is not installed")
+    client = tmp_path / "client"
+    client.mkdir()
+    fixture = client / "fixture.txt"
+    fixture.write_text("product fixture")
+    (workspace / "fixture.txt").write_text("workspace fixture")
+    private = tmp_path / "private.txt"
+    private.write_text("outside fixture content")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    payload = "cat ../private.txt" if operation == "read" else "sh -c 'echo changed > ../private.txt'"
+    root = fixture if search_file else client
+    command = f'find -H "{root}" -type f {action} {payload} \\;'
+    if nested:
+        command = "bash -c " + shlex.quote(command)
+    result = await tool.execute(command=command)
+    assert not result.success
+    assert "Access denied" in result.error
+    assert "outside fixture content" not in result.stdout
+    assert private.read_text() == "outside fixture content"
+
+    result = await tool.execute(command=f'find "{workspace}" -type f -execdir cat fixture.txt \\;')
+    assert result.success, result.error
+    assert "workspace fixture" in result.stdout
+    result = await tool.execute(command=f'cat "{fixture}"')
+    assert result.success, result.error
+    assert "product fixture" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX find syntax")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("literal", ["-execdir", "-okdir"])
+async def test_bash_find_action_names_in_data_are_ordinary_arguments(workspace, tmp_path, monkeypatch, literal):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / literal).write_text("product fixture")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    result = await tool.execute(command=f'find "{client}" -name "{literal}" -print')
+    assert result.success, result.error
+    assert literal in result.stdout
+    result = await tool.execute(command=f'find "{client}" -type f -exec printf "%s\\n" "{literal}" \\;')
+    assert result.success, result.error
+    assert literal in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX tar syntax")
+@pytest.mark.asyncio
+async def test_bash_tar_directory_option_in_exclude_is_ordinary_data(workspace, tmp_path, monkeypatch):
+    import tarfile
+
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    (workspace / "fixture.txt").write_text("workspace fixture")
+    archive = workspace / "fixture.tar"
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    result = await tool.execute(command=(
+        f'tar -cf "{archive}" --exclude "--directory={client}" -C "{workspace}" fixture.txt'
+    ))
+    assert result.success, result.error
+    with tarfile.open(archive) as bundle:
+        assert "fixture.txt" in bundle.getnames()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ln syntax")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shell", ["direct", "nested", "two-shells"])

@@ -20,6 +20,12 @@ def test_builtin_wrapper_preserves_the_actual_command(command, executable):
     assert _executables(command) == [executable]
 
 
+@pytest.mark.parametrize("literal", ["-execdir", "-okdir"])
+def test_find_predicate_values_are_not_executed_commands(literal):
+    assert _executables(f"find /client -name '{literal}' -print") == ["find"]
+    assert _executables(f"find /client -exec printf '%s\\n' '{literal}' \\;") == ["find", "printf"]
+
+
 def test_heredoc_body_is_not_parsed_as_shell_commands():
     command = """python3 << 'PY'\n# Let's discuss Q1'24 values.\ndd = 12\nformat = 'wide'\nPY"""
 
