@@ -192,13 +192,8 @@ class PermissionEngine:
                 product_roots.append(Path(raw))
         self._product_dirs = self._resolve_product_dirs(product_roots)
 
-        # Built-in skills are trusted, engine-owned code. Packaged runtimes
-        # place them beside this module (for example under an application
-        # bundle), which is intentionally outside the user's filesystem
-        # scope. Allow Bash to read that exact tree so bundled skill scripts
-        # can run, while keeping writes and unrelated application paths
-        # blocked. Resolving both the root and requested path preserves the
-        # existing symlink-escape protection.
+        # Built-in Skill write protection takes precedence over product
+        # directory grants, using the canonical root and requested target.
         try:
             self._builtin_skills_dir: Path | None = (package_root / "skills").resolve()
         except (OSError, RuntimeError):
@@ -238,6 +233,20 @@ class PermissionEngine:
                 resolved_dirs.append(root)
         return tuple(resolved_dirs)
 
+    def _is_bash_product_path(self, path: Path) -> bool:
+        # Normalize lexical traversal before identifying the trusted product
+        # root. Resolve ancestors to support a symlinked runtime/client entry,
+        # while allowing links below that entry to lead outside its real tree.
+        candidate = Path(os.path.abspath(path.expanduser()))
+        for ancestor in (candidate, *candidate.parents):
+            try:
+                resolved = ancestor.resolve(strict=False)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if any(self._is_inside(resolved, root) for root in self._product_dirs):
+                return True
+        return False
+
     @property
     def policy(self) -> CapabilityPolicy:
         return self._policy
@@ -247,8 +256,6 @@ class PermissionEngine:
         capability: str,
         resource: dict,
         tool_name: str | None = None,
-        *,
-        allow_product_directories: bool = True,
     ) -> PermissionDecision:
         if capability == FILESYSTEM_READ:
             return self._check_filesystem(
@@ -256,7 +263,6 @@ class PermissionEngine:
                 self._policy.filesystem_scope,
                 "read",
                 tool_name,
-                allow_product_directories=allow_product_directories,
             )
         elif capability == FILESYSTEM_WRITE:
             return self._check_filesystem(
@@ -264,7 +270,6 @@ class PermissionEngine:
                 self._policy.filesystem_scope,
                 "write",
                 tool_name,
-                allow_product_directories=allow_product_directories,
             )
         elif capability == MEMORY_OPENCLAW_IMPORT:
             return self._check_memory_openclaw()
@@ -275,8 +280,7 @@ class PermissionEngine:
     # ── filesystem ──
 
     def _check_filesystem(
-        self, path: Path, scope: str, operation: str, tool_name: str | None = None,
-        *, allow_product_directories: bool,
+        self, path: Path, scope: str, operation: str, tool_name: str | None = None
     ) -> PermissionDecision:
         try:
             # Resolve through missing targets as well, including dangling links
@@ -288,6 +292,9 @@ class PermissionEngine:
         if operation == "write" and self._builtin_skills_dir:
             if error := builtin_skill_write_error(resolved, self._builtin_skills_dir):
                 return PermissionDecision(allowed=False, reason=error)
+
+        if tool_name == "bash" and self._is_bash_product_path(path):
+            return PermissionDecision(allowed=True)
 
         # Directory-level grants take precedence over scope checks. These are
         # recorded by the negotiator after the user approves a permission
@@ -303,9 +310,7 @@ class PermissionEngine:
             if self._grant_store.has_grant("filesystem", "user_home"):
                 scope = "user_home"
 
-        if self._path_allowed_by_scope(
-            resolved, scope, operation, tool_name, allow_product_directories=allow_product_directories,
-        ):
+        if self._path_allowed_by_scope(resolved, scope, operation, tool_name):
             return PermissionDecision(allowed=True)
 
         escalation = self._compute_escalation(resolved, scope, requested_path=path)
@@ -385,14 +390,13 @@ class PermissionEngine:
         return self._is_inside(resolved, self._home_dir)
 
     def _path_allowed_by_scope(
-        self, resolved: Path, scope: str, operation: str, tool_name: str | None = None,
-        *, allow_product_directories: bool = True,
+        self, resolved: Path, scope: str, operation: str, tool_name: str | None = None
     ) -> bool:
         # workspace_dir is always allowed regardless of scope
         if self._is_inside(resolved, self._workspace_dir):
             return True
 
-        if allow_product_directories and any(self._is_inside(resolved, root) for root in self._product_dirs):
+        if any(self._is_inside(resolved, root) for root in self._product_dirs):
             return True
 
         # Packaged built-in skills are executable product resources rather
@@ -515,7 +519,7 @@ class GrantStore:
         """True if any granted dir equals or contains *target*.
 
         ``target`` should already be resolved by the caller (the engine does
-        this via ``_resolve_for_check``).
+        this before querying the grant store).
         """
         for d in self._session_dirs:
             if target == d:
