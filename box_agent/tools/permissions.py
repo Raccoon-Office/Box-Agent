@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -173,13 +174,23 @@ class PermissionEngine:
                 log.warning("permission/bad_allowed_dir", extra={"path": d, "error": str(exc)})
         self._allowed_dirs: tuple[Path, ...] = tuple(resolved_dirs)
 
-        # Box-Agent owns ~/.box-agent (skills, runtime-packages, browsers,
-        # trash, log, ...). It is engine-internal data, not user business
-        # data — never prompt for it, regardless of scope or config.
+        # Product directories belong to this process and its launching host.
+        package_root = Path(__file__).resolve().parents[1]
+        product_roots = [package_root]
         try:
-            self._box_agent_dir: Path | None = state_path("", home_dir=self._home_dir).resolve()
+            product_roots.append(state_path("", home_dir=self._home_dir).resolve())
         except (OSError, RuntimeError):
-            self._box_agent_dir = None
+            pass
+        if getattr(sys, "frozen", False):
+            entry_dir = Path(sys.executable).resolve().parent
+            runtime_root = entry_dir.parent
+            if entry_dir.name == "bin" and (runtime_root / "manifest.json").is_file():
+                product_roots.append(runtime_root)
+        for name in ("BOX_AGENT_RUNTIME_ROOT", "BOX_AGENT_CLIENT_ROOT", "BOX_AGENT_CLIENT_DATA_ROOT"):
+            raw = os.environ.get(name)
+            if raw and Path(raw).is_absolute():
+                product_roots.append(Path(raw))
+        self._product_dirs = self._resolve_product_dirs(product_roots)
 
         # Built-in skills are trusted, engine-owned code. Packaged runtimes
         # place them beside this module (for example under an application
@@ -189,9 +200,7 @@ class PermissionEngine:
         # blocked. Resolving both the root and requested path preserves the
         # existing symlink-escape protection.
         try:
-            self._builtin_skills_dir: Path | None = (
-                Path(__file__).resolve().parent.parent / "skills"
-            ).resolve()
+            self._builtin_skills_dir: Path | None = (package_root / "skills").resolve()
         except (OSError, RuntimeError):
             self._builtin_skills_dir = None
 
@@ -215,6 +224,19 @@ class PermissionEngine:
             if resolved not in resolved_app_dirs:
                 resolved_app_dirs.append(resolved)
         self._app_read_dirs: tuple[Path, ...] = tuple(resolved_app_dirs)
+
+    def _resolve_product_dirs(self, roots: list[Path]) -> tuple[Path, ...]:
+        resolved_dirs = []
+        for path in roots:
+            try:
+                root = path.resolve()
+                if self._home_dir.is_relative_to(root) or root == root.parent:
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if root not in resolved_dirs:
+                resolved_dirs.append(root)
+        return tuple(resolved_dirs)
 
     @property
     def policy(self) -> CapabilityPolicy:
@@ -379,8 +401,7 @@ class PermissionEngine:
         if self._is_inside(resolved, self._workspace_dir):
             return True
 
-        # ~/.box-agent is engine-owned data — always allowed.
-        if self._box_agent_dir is not None and self._is_inside(resolved, self._box_agent_dir):
+        if any(self._is_inside(resolved, root) for root in self._product_dirs):
             return True
 
         # Packaged built-in skills are executable product resources rather

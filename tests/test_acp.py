@@ -7678,6 +7678,7 @@ def acp_permission_layout(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
     profile = root / "mnt/user/box-agent-home"
     skill = profile / "skills/cloud/qa-cloud-actions"
     (skill / "references/nested").mkdir(parents=True)
@@ -7762,6 +7763,39 @@ async def test_acp_implicit_restricted_mode_reads_owned_skill_references(acp_per
         assert not result.success
         assert result.permission_request is not None
         assert result.permission_request["scope"] == "safety"
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission_mode", [None, "default"])
+async def test_acp_restricted_mode_reads_and_writes_runtime_and_client_directories(
+    acp_permission_layout, monkeypatch, permission_mode,
+):
+    layout = acp_permission_layout
+    roots = {
+        "BOX_AGENT_RUNTIME_ROOT": layout.outside / "box-agent-runtime",
+        "BOX_AGENT_CLIENT_ROOT": layout.outside / "client",
+        "BOX_AGENT_CLIENT_DATA_ROOT": layout.outside / "client-data",
+    }
+    for name, root in roots.items():
+        root.mkdir()
+        monkeypatch.setenv(name, str(root))
+    adapter = BoxACPAgent(DummyConn(), _acp_permission_config(layout), DoneLLM(), [], "system")
+    try:
+        meta = {"permission_mode": permission_mode} if permission_mode else {}
+        session = await adapter.new_session(
+            **acp_params(SimpleNamespace(cwd=str(layout.workspace), field_meta=meta)),
+        )
+        tools = adapter._sessions[session.sessionId].agent.tools
+        for root in (layout.profile, *roots.values()):
+            target = root / "product-file.txt"
+            saved = await tools["write_file"].execute(path=str(target), content="product fixture")
+            assert saved.success, saved.error
+            read = await tools["read_file"].execute(path=str(target))
+            assert read.success and "product fixture" in read.content, read.error
+        unrelated = await tools["read_file"].execute(path=str(layout.outside / "private.txt"))
+        assert not unrelated.success
     finally:
         await adapter.aclose()
 
