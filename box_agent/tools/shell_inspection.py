@@ -11,7 +11,8 @@ from __future__ import annotations
 import platform
 import re
 import shlex
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 
 
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -142,6 +143,7 @@ class ShellInvocation:
     indirect: bool = False
     dynamic_executable_sources: tuple[str, ...] = ()
     dynamic_executable_evidence: str = ""
+    known_variables: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     @property
     def executable(self) -> str:
@@ -154,6 +156,10 @@ class ShellInvocation:
     @property
     def prefix(self) -> tuple[str, ...]:
         return self.words[: self.executable_index]
+
+    def expand_known_parameters(self, value: str) -> str:
+        """Expand literal bindings available when this command is invoked."""
+        return _expand_known_parameters(value, dict(self.known_variables))
 
 
 @dataclass(frozen=True)
@@ -789,6 +795,7 @@ def inspect_shell_command(
     command: str,
     *,
     posix: bool | None = None,
+    environment: Mapping[str, str] | None = None,
     _depth: int = 0,
     _variables: dict[str, str] | None = None,
 ) -> ShellInspection:
@@ -853,6 +860,7 @@ def inspect_shell_command(
             tuple(words),
             executable_index,
             segment,
+            known_variables=tuple({**(environment or {}), **variables}.items()),
             dynamic_executable_sources=dynamic_executable_sources,
             dynamic_executable_evidence=(
                 _dynamic_executable_evidence(
@@ -881,6 +889,7 @@ def inspect_shell_command(
                 nested = inspect_shell_command(
                     script,
                     posix=posix,
+                    environment=environment,
                     _depth=_depth + 1,
                     _variables=invocation_variables,
                 )
@@ -903,6 +912,7 @@ def inspect_shell_command(
                 nested = inspect_shell_command(
                     embedded_command,
                     posix=posix,
+                    environment=environment,
                     _depth=_depth + 1,
                     _variables=invocation_variables,
                 )
@@ -925,6 +935,7 @@ def inspect_shell_command(
             nested = inspect_shell_command(
                 substitution,
                 posix=posix,
+                environment=environment,
                 _depth=_depth + 1,
                 _variables=variables,
             )

@@ -37,20 +37,22 @@ def builtin_skill_write_error(path: Path, skills_root: Path | None = None) -> st
     return None
 
 
-def builtin_skill_command_write_error(command: str, workspace: Path | None) -> str | None:
+def builtin_skill_command_write_error(
+    command: str, workspace: Path | None, *, environment: Mapping[str, str] | None = None,
+) -> str | None:
     """Reject direct shell/inline-code mutations of bundled Skill resources.
 
     This is a command guard, not an OS sandbox for arbitrary external programs.
     File-tool writes are checked separately against their resolved target.
     """
-    inspection = inspect_shell_command(command)
+    inspection = inspect_shell_command(command, environment=os.environ if environment is None else environment)
     cwd = workspace or Path.cwd()
     skills_root = BUILTIN_SKILLS_ROOT.resolve()
     for invocation in inspection.invocations:
         name = Path(invocation.executable).name.lower().removesuffix(".exe")
         args = invocation.arguments
         if name in {"cd", "set-location"} and args:
-            candidate = Path(args[-1]).expanduser()
+            candidate = Path(invocation.expand_known_parameters(args[-1])).expanduser()
             cwd = candidate if candidate.is_absolute() else cwd / candidate
             continue
         targets: tuple[str, ...] = ()
@@ -106,6 +108,7 @@ def builtin_skill_command_write_error(command: str, workspace: Path | None) -> s
                 for match in re.findall(pattern, code)
             )
         for target in targets:
+            target = invocation.expand_known_parameters(target)
             if target.startswith("-"):
                 continue
             path = Path(target).expanduser()

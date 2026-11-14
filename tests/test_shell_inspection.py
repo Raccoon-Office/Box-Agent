@@ -12,6 +12,29 @@ def _executables(command: str) -> list[str]:
     ]
 
 
+def test_command_parameter_bindings_follow_assignment_order():
+    inspection = inspect_shell_command(
+        'DEST=/first; cp input "$DEST"; DEST=/second; cp input "${DEST}/file"',
+        posix=True,
+    )
+    first, second = inspection.invocations
+    assert first.expand_known_parameters(first.arguments[-1]) == "/first"
+    assert second.expand_known_parameters(second.arguments[-1]) == "/second/file"
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_environment_parameter_bindings_are_not_in_inspection_repr(nested):
+    command = 'cp input "$DEST"'
+    if nested:
+        command = "bash -c '" + command + "'"
+    inspection = inspect_shell_command(
+        command, posix=True, environment={"DEST": "/private-environment-marker"},
+    )
+    invocation = inspection.invocations[-1]
+    assert invocation.expand_known_parameters(invocation.arguments[-1]) == "/private-environment-marker"
+    assert "/private-environment-marker" not in repr(inspection)
+
+
 def test_heredoc_body_is_not_parsed_as_shell_commands():
     command = """python3 << 'PY'\n# Let's discuss Q1'24 values.\ndd = 12\nformat = 'wide'\nPY"""
 

@@ -140,7 +140,7 @@ def test_install_target_options_reject_bundled_destinations(tmp_path, bundled, t
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX recursive cp syntax")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target_form", ["root", "alias", "relative"])
+@pytest.mark.parametrize("target_form", ["root", "alias", "relative", "inline-variable", "environment-variable", "runtime-variable"])
 async def test_bash_rejects_recursive_overwrite_of_bundled_descendants(
     tmp_path, monkeypatch, target_form,
 ):
@@ -167,6 +167,13 @@ async def test_bash_rejects_recursive_overwrite_of_bundled_descendants(
     command = f'cp -R "{source}/." "{target}/"'
     if target_form == "relative":
         command = f'cd "{entry}" && cp -R "{source}/." .'
+    elif target_form == "inline-variable":
+        command = f'DEST="{product}"; cp -R "{source}/." "$DEST"'
+    elif target_form == "environment-variable":
+        command = f'cp -R "{source}/." "$BOX_AGENT_CLIENT_ROOT"'
+    elif target_form == "runtime-variable":
+        tool.update_runtime_env({"COPY_TARGET": str(product)})
+        command = f'cp -R "{source}/." "$COPY_TARGET"'
     result = await tool.execute(command=command)
     assert not result.success
     assert "BUILTIN_SKILL_READ_ONLY" in result.error
@@ -183,6 +190,17 @@ async def test_bash_rejects_recursive_overwrite_of_bundled_descendants(
     assert result.success, result.error
     result = await tool.execute(command=f'cp "{ordinary}" "{product / "ordinary.txt"}"')
     assert result.success, result.error
+    tool.update_runtime_env({"COPY_TARGET": str(product / "ordinary.txt")})
+    result = await tool.execute(command=f'cp "{ordinary}" "$COPY_TARGET"')
+    assert result.success, result.error
     result = await tool.execute(command=f'printf updated > "{product / "ordinary.txt"}"')
     assert result.success, result.error
     assert (product / "ordinary.txt").read_text() == "updated"
+
+
+def test_bundled_copy_checks_variable_values_in_command_order(tmp_path, bundled):
+    root, _ = bundled
+    command = f'DEST="{root.parent}"; cp -R input/. "$DEST"; DEST="{tmp_path / "safe"}"'
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, tmp_path)
+    command = f'DEST="{root.parent}"; DEST="{tmp_path / "safe"}" cp -R input/. "$DEST"'
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(command, tmp_path)

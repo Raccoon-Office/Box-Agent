@@ -1678,7 +1678,9 @@ Examples:
                     exit_code=1,
                 )
             # --- Safety checks ---
-            if source_error := builtin_skill_command_write_error(command, self.workspace_dir):
+            if source_error := builtin_skill_command_write_error(
+                command, self.workspace_dir, environment=self._subprocess_env,
+            ):
                 return BashOutputResult(
                     success=False, error=source_error, stdout="", stderr=source_error,
                     exit_code=1,
