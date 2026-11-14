@@ -1843,20 +1843,33 @@ Examples:
                                 return BashOutputResult(
                                     success=False, error=error, stderr=error, stdout="", exit_code=1,
                                 )
-                    if (name not in {
+                    directory_targets = []
+                    if name in {
                         "cd", "chdir", "set-location", "sl", "pushd", "push-location", "pushl",
-                    } or not invocation.arguments):
-                        continue
-                    target = Path(invocation.arguments[-1]).expanduser()
-                    decision = self._perm.check(
-                        FILESYSTEM_READ, {"path": str(Path(self.workspace_dir) / target)},
-                        tool_name="bash", allow_product_directories=False,
-                    )
-                    if not decision.allowed:
-                        return BashOutputResult(
-                            success=False, error=decision.reason, stderr=decision.reason or "Permission denied",
-                            stdout="", exit_code=1, permission_request=decision.permission_request,
+                    } and invocation.arguments:
+                        directory_targets.append(invocation.arguments[-1])
+                    # Wrapper options remain in words even when the inspector
+                    # exposes the wrapped executable (for example env -C ... cat).
+                    for index, word in enumerate(invocation.words):
+                        option, separator, value = word.partition("=")
+                        if option in {"-C", "--chdir", "--directory", "--workdir", "--working-directory"}:
+                            if separator:
+                                directory_targets.append(value)
+                            elif index + 1 < len(invocation.words):
+                                directory_targets.append(invocation.words[index + 1])
+                        elif word.startswith("-C") and len(word) > 2:
+                            directory_targets.append(word[2:])
+                    for value in directory_targets:
+                        target = Path(value).expanduser()
+                        decision = self._perm.check(
+                            FILESYSTEM_READ, {"path": str(Path(self.workspace_dir) / target)},
+                            tool_name="bash", allow_product_directories=False,
                         )
+                        if not decision.allowed:
+                            return BashOutputResult(
+                                success=False, error=decision.reason, stderr=decision.reason or "Permission denied",
+                                stdout="", exit_code=1, permission_request=decision.permission_request,
+                            )
                 log.debug(
                     "bash/perm/extracted paths=%s reason=%s cmd=%r",
                     abs_paths, escape_reason, command[:200],
