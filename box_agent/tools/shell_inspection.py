@@ -810,6 +810,7 @@ def inspect_shell_command(
     environment: Mapping[str, str] | None = None,
     _depth: int = 0,
     _variables: dict[str, str] | None = None,
+    _known_variables: dict[str, str] | None = None,
 ) -> ShellInspection:
     """Inspect shell command structure without executing it.
 
@@ -831,6 +832,7 @@ def inspect_shell_command(
     all_redirections: list[ShellRedirection] = []
     ambiguous = list(redirect_ambiguous)
     variables = dict(_variables or {})
+    known_variables = {**(environment or {}), **(_known_variables or {})}
 
     for raw_segment, segment_start in segments:
         _, segment_redirections, _ = _extract_and_mask_redirections(
@@ -855,10 +857,13 @@ def inspect_shell_command(
             ambiguous.append(segment)
             continue
         segment_assignments = _leading_assignments(words)
+        known_assignments: dict[str, str] = {}
+        for name, value in segment_assignments.items():
+            known_assignments[name] = _expand_known_parameters(value, {**known_variables, **known_assignments})
         executable_index = _executable_index(words)
-        redirect_variables = {**(environment or {}), **variables}
+        redirect_variables = dict(known_variables)
         if executable_index is None:
-            redirect_variables.update(segment_assignments)
+            redirect_variables.update(known_assignments)
         all_redirections.extend(
             replace(
                 redirection,
@@ -871,6 +876,7 @@ def inspect_shell_command(
         if executable_index is None:
             assigned_variables.update(segment_assignments)
             variables.update(segment_assignments)
+            known_variables.update(known_assignments)
             continue
         substitution_sources = tuple(
             source
@@ -888,7 +894,7 @@ def inspect_shell_command(
             tuple(words),
             executable_index,
             segment,
-            known_variables=tuple({**(environment or {}), **variables}.items()),
+            known_variables=tuple(known_variables.items()),
             shell_depth=_depth,
             dynamic_executable_sources=dynamic_executable_sources,
             dynamic_executable_evidence=(
@@ -904,13 +910,17 @@ def inspect_shell_command(
         invocations.append(invocation)
 
         invocation_variables = {**variables, **segment_assignments}
+        invocation_known_variables = {**known_variables, **known_assignments}
         if _command_name(invocation.executable) in {
             "declare",
             "export",
             "readonly",
             "typeset",
         }:
-            variables.update(_leading_assignments(list(invocation.arguments)))
+            declared = _leading_assignments(list(invocation.arguments))
+            variables.update(declared)
+            for name, value in declared.items():
+                known_variables[name] = _expand_known_parameters(value, known_variables)
 
         if script := _shell_script_argument(invocation):
             script = _expand_known_parameters(script, invocation_variables)
@@ -921,6 +931,7 @@ def inspect_shell_command(
                     environment=environment,
                     _depth=_depth + 1,
                     _variables=invocation_variables,
+                    _known_variables=invocation_known_variables,
                 )
                 nested_offset = len(invocations)
                 invocations.extend(
@@ -949,6 +960,7 @@ def inspect_shell_command(
                     environment=environment,
                     _depth=_depth + 1,
                     _variables=invocation_variables,
+                    _known_variables=invocation_known_variables,
                 )
                 nested_offset = len(invocations)
                 invocations.extend(
@@ -977,6 +989,7 @@ def inspect_shell_command(
                 environment=environment,
                 _depth=_depth + 1,
                 _variables=variables,
+                _known_variables=known_variables,
             )
             nested_offset = len(invocations)
             invocations.extend(

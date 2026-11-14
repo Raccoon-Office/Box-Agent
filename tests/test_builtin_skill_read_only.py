@@ -314,7 +314,7 @@ def test_bundled_copy_checks_variable_values_in_command_order(tmp_path, bundled)
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX redirection and shell syntax")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target_form", ["inline", "environment", "runtime", "assignment-only", "append", "reassigned", "nested", "prefix", "cd-redirect"])
+@pytest.mark.parametrize("target_form", ["inline", "environment", "runtime", "assignment-only", "append", "reassigned", "nested", "prefix", "cd-redirect", "chained-relative", "chained-reassigned"])
 async def test_bash_variable_redirections_cannot_modify_bundled_code(tmp_path, bundled, monkeypatch, target_form):
     from box_agent.tools.bash_tool import BashTool
 
@@ -345,6 +345,10 @@ async def test_bash_variable_redirections_cannot_modify_bundled_code(tmp_path, b
         command = 'REDIRECT_TARGET=ordinary.txt printf changed > "$REDIRECT_TARGET"'
     elif target_form == "cd-redirect":
         command = f'cd "{root}"; cd "{workspace}" > validator.js'
+    elif target_form == "chained-relative":
+        command = f'cd "{tmp_path}"; ROOT=bundled; TARGET="$ROOT/validator.js"; printf changed > "$TARGET"'
+    elif target_form == "chained-reassigned":
+        command = f'cd "{tmp_path}"; ROOT=bundled; TARGET="$ROOT/validator.js"; ROOT=ordinary; printf changed > "$TARGET"'
     denied = await tool.execute(command=command)
     assert not denied.success
     assert "BUILTIN_SKILL_READ_ONLY" in denied.error

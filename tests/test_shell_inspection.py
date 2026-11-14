@@ -292,3 +292,22 @@ def test_nested_redirections_retain_parent_invocation_offsets_and_shell_depth():
     )
     assert [(redirect.invocation_index, redirect.shell_depth, redirect.expand_target())
             for redirect in inspection.redirections] == [(2, 1, "child"), (3, 0, "top.txt")]
+
+
+def test_binding_snapshots_resolve_chained_assignments_before_later_reassignment():
+    inspection = inspect_shell_command(
+        'ROOT=skills; TARGET="$ROOT/validator.js"; ROOT=ordinary; printf x > "$TARGET"; cp patch.js "$TARGET"',
+        posix=True,
+    )
+    assert inspection.redirections[0].expand_target() == "skills/validator.js"
+    assert inspection.invocations[-1].expand_known_parameters("$TARGET") == "skills/validator.js"
+
+
+def test_binding_snapshots_resolve_host_and_declared_variables_without_exposing_environment():
+    inspection = inspect_shell_command(
+        'export ROOT="$HOST_PATH"; TARGET="$ROOT/validator.js"; printf x > "$TARGET"',
+        posix=True,
+        environment={"HOST_PATH": "/host-private-path"},
+    )
+    assert inspection.redirections[0].expand_target() == "/host-private-path/validator.js"
+    assert "/host-private-path" not in repr(inspection)
