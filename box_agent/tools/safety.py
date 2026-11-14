@@ -137,6 +137,7 @@ def builtin_skill_command_write_error(
                         source_path = source_path if source_path.is_absolute() else cwd / source_path
                         matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
                         targets += tuple(str(destination / Path(match).name) for match in matches)
+                        targets += (str(destination / source_path.name),)
                         if glob.has_magic(source_path.name):
                             # A preceding command may create source files after
                             # inspection; protect matching existing targets too.

@@ -388,7 +388,7 @@ def test_numeric_file_redirection_is_protected_but_descriptor_duplication_is_all
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell execution contexts")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("form", ["env-binding", "env-cwd-copy", "env-cwd-redirect", "subshell", "pipeline", "background", "substitution", "future-glob", "child-variable"])
+@pytest.mark.parametrize("form", ["env-binding", "env-cwd-copy", "env-cwd-redirect", "subshell", "pipeline", "background", "substitution", "future-glob", "future-parent-glob", "async-and", "async-or", "combined-redirect", "child-variable"])
 async def test_bash_execution_contexts_preserve_bundled_write_protection(tmp_path, bundled, monkeypatch, form):
     from box_agent.tools.bash_tool import BashTool
 
@@ -412,6 +412,10 @@ async def test_bash_execution_contexts_preserve_bundled_write_protection(tmp_pat
         "background": f'cd "{tmp_path}"; cd "{workspace}" & wait; printf changed > bundled/validator.js',
         "substitution": f'cd "{tmp_path}"; printf "%s" "$(printf changed > bundled/validator.js)"; cd "{workspace}"',
         "future-glob": f'printf changed > validator.js; cp ./*.js "{tmp_path}"',
+        "future-parent-glob": f'mkdir -p generated/run; printf changed > generated/run/validator.js; cp generated/*/validator.js "{tmp_path}"',
+        "async-and": f'cd "{tmp_path}"; cd "{workspace}" && true & wait; printf changed > bundled/validator.js',
+        "async-or": f'cd "{tmp_path}"; cd "{workspace}" || false & wait; printf changed > bundled/validator.js',
+        "combined-redirect": f'cd "{tmp_path}" &> /dev/null; printf changed > bundled/validator.js',
         "child-variable": f'cd "{tmp_path}"; TARGET=bundled/validator.js; (TARGET=ordinary.txt); printf changed > "$TARGET"',
     }
     denied = await tool.execute(command=commands[form])
@@ -421,6 +425,8 @@ async def test_bash_execution_contexts_preserve_bundled_write_protection(tmp_pat
     assert target.read_text() == "original"
     if form == "future-glob":
         assert not (workspace / target.name).exists()
+    elif form == "future-parent-glob":
+        assert not (workspace / "generated").exists()
 
     # Child directory changes must also leave an ordinary parent write usable.
     allowed = await tool.execute(command=f'(cd "{root}"); printf ordinary > validator.js')

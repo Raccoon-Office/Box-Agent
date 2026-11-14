@@ -519,19 +519,21 @@ def _extract_and_mask_redirections(
             quote = None if quote == '"' else '"'
             index += 1
             continue
-        if quote is not None or char not in "<>":
+        combined_output = char == "&" and value[index + 1:index + 2] == ">"
+        if quote is not None or (char not in "<>" and not combined_output):
             index += 1
             continue
 
         operator_start = index
-        descriptor_start = index
-        while descriptor_start > 0 and value[descriptor_start - 1].isdigit():
-            descriptor_start -= 1
-        if descriptor_start == 0 or not (
-            value[descriptor_start - 1].isalnum()
-            or value[descriptor_start - 1] == "_"
-        ):
-            operator_start = descriptor_start
+        if not combined_output:
+            descriptor_start = index
+            while descriptor_start > 0 and value[descriptor_start - 1].isdigit():
+                descriptor_start -= 1
+            if descriptor_start == 0 or not (
+                value[descriptor_start - 1].isalnum()
+                or value[descriptor_start - 1] == "_"
+            ):
+                operator_start = descriptor_start
 
         operator_end = index + 1
         while operator_end < len(value) and value[operator_end] in "<>&|":
@@ -590,6 +592,7 @@ def _split_shell_segments(value: str) -> tuple[list[tuple[str, int, tuple[int, .
     escaped = False
     has_control = False
     groups: list[int] = []
+    and_list_starts = [0]
     pipeline = False
     index = 0
     while index < len(value):
@@ -612,14 +615,29 @@ def _split_shell_segments(value: str) -> tuple[list[tuple[str, int, tuple[int, .
             continue
         if quote is None and char in ";&|\n()":
             paired = index + 1 < len(value) and value[index + 1] == char and char in "&|"
-            isolated = pipeline or (char in "&|" and not paired)
+            isolated = pipeline or (char == "|" and not paired)
             scope = (*groups, -(start + 1)) if isolated else tuple(groups)
             segments.append((value[start:index], start, scope))
             has_control = True
+            if char == "&" and not paired:
+                # An asynchronous AND/OR-list is one child shell, including
+                # commands before the final ampersand, with pipelines inside.
+                first = and_list_starts[-1]
+                parent = tuple(groups)
+                background = -(segments[first][1] + 1)
+                for segment_index in range(first, len(segments)):
+                    text, position, child_scope = segments[segment_index]
+                    segments[segment_index] = (
+                        text, position, (*parent, background, *child_scope[len(parent):]),
+                    )
             if char == "(":
                 groups.append(index + 1)
+                and_list_starts.append(len(segments))
             elif char == ")" and groups:
                 groups.pop()
+                and_list_starts.pop()
+            elif char in ";\n" or (char == "&" and not paired):
+                and_list_starts[-1] = len(segments)
             pipeline = char == "|" and not paired
             if paired:
                 index += 1

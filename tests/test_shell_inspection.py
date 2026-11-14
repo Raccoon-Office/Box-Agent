@@ -358,3 +358,31 @@ def test_child_shell_bindings_and_directories_do_not_change_parent_facts(form):
     redirect = inspection.redirections[-1]
     assert redirect.directory_changes == ("product",)
     assert redirect.expand_target() == "protected"
+
+
+@pytest.mark.parametrize("body", ["cd child && true", "cd child || false", "(cd child) && true", "cd child | cat && true"])
+def test_async_and_or_lists_do_not_change_parent_directory_or_bindings(body):
+    inspection = inspect_shell_command(
+        f'cd product; TARGET=protected; {body} & wait; printf x > "$TARGET"', posix=True,
+    )
+    assert inspection.redirections[-1].directory_changes == ("product",)
+    assert inspection.redirections[-1].expand_target() == "protected"
+
+
+def test_commands_in_one_async_list_share_a_child_scope():
+    inspection = inspect_shell_command(
+        'cd product; cd child && printf x > output & wait; printf x > parent', posix=True,
+    )
+    assert [redirect.directory_changes for redirect in inspection.redirections] == [
+        ("product", "child"), ("product",),
+    ]
+
+
+@pytest.mark.parametrize("operator", ["&>", "&>>"])
+def test_combined_output_redirection_does_not_background_the_command(operator):
+    inspection = inspect_shell_command(f'cd product {operator} output; printf x > target', posix=True)
+    assert [redirect.operator for redirect in inspection.redirections] == [operator, ">"]
+    assert inspection.redirections[-1].directory_changes == ("product",)
+    numeric_argument = inspect_shell_command(f'printf 2{operator} output', posix=True)
+    assert numeric_argument.invocations[0].arguments == ("2",)
+    assert numeric_argument.redirections[0].operator == operator
