@@ -146,17 +146,46 @@ def _warn(msg: str) -> None:
     sys.stderr.write(msg + "\n")
 
 
+def _legacy_public_mcp_tool_name(
+    server_name: str,
+    remote_name: str,
+    connector_id: str | None = None,
+) -> str:
+    """Reconstruct pre-namespace names for lookup of installed tools and history."""
+    mapped_name = public_browser_tool_name(server_name, remote_name)
+    if connector_id and mapped_name == remote_name:
+        mapped_name = f"mcp__{server_name}__{remote_name}"
+    return _safe_mcp_tool_name(server_name, remote_name, mapped_name)
+
+
 def _public_mcp_tool_name(
     server_name: str,
     remote_name: str,
     connector_id: str | None = None,
 ) -> str:
-    """Return a stable provider-safe name while preserving the MCP name separately."""
+    """Namespace ordinary MCP tools; retain explicit first-party public contracts."""
     mapped_name = public_browser_tool_name(server_name, remote_name)
-    if connector_id and mapped_name == remote_name:
-        mapped_name = f"mcp__{server_name}__{remote_name}"
+    if mapped_name != remote_name:
+        return _safe_mcp_tool_name(server_name, remote_name, mapped_name)
+    # These are deliberate replacements for the native search/extract fallbacks,
+    # not a general exemption for tools with matching names.
+    if not connector_id and (server_name, remote_name) in {
+        ("mcp-server-askecho-search-infinity", "web_search"),
+        ("box-agent-web-extract", "web_extract"),
+    }:
+        return remote_name
+    return _safe_mcp_tool_name(
+        server_name, remote_name, f"mcp__{server_name}__{remote_name}",
+        # Avoid ambiguous server/tool boundaries, e.g. a__b/c vs a/b__c.
+        force_hash="__" in server_name or server_name.endswith("_"),
+    )
+
+
+def _safe_mcp_tool_name(
+    server_name: str, remote_name: str, mapped_name: str, *, force_hash: bool = False,
+) -> str:
     if (
-        len(mapped_name) <= _MODEL_TOOL_NAME_MAX_LENGTH
+        not force_hash and len(mapped_name) <= _MODEL_TOOL_NAME_MAX_LENGTH
         and not _INVALID_MODEL_TOOL_NAME_CHARACTER.search(mapped_name)
     ):
         return mapped_name
@@ -890,6 +919,7 @@ class MCPTool(Tool):
         concurrency_limiter: asyncio.Semaphore | None = None,
         session_lease: SessionLease | None = None,
         server_url: str = "",
+        legacy_names: tuple[str, ...] = (),
     ):
         """
         ``session`` is the fixed ClientSession shared by every caller (classic
@@ -916,6 +946,7 @@ class MCPTool(Tool):
         self._connector_name = connector_name
         self._concurrency_limiter = concurrency_limiter
         self._mcp_generation = 0
+        self._legacy_names = legacy_names
 
     @property
     def name(self) -> str:
@@ -936,6 +967,11 @@ class MCPTool(Tool):
     def remote_name(self) -> str:
         """Name used when calling the backing MCP server."""
         return self._remote_name
+
+    @property
+    def mcp_legacy_names(self) -> tuple[str, ...]:
+        """Compatibility lookup names, never advertised as additional tools."""
+        return self._legacy_names
 
     @property
     def mcp_tool_id(self) -> str:
@@ -1841,10 +1877,14 @@ class MCPServerConnection:
                     tool.name,
                     self.connector_id,
                 )
+                legacy_name = _legacy_public_mcp_tool_name(
+                    self.name, tool.name, self.connector_id,
+                )
                 fixed_arguments = browser_tool_fixed_arguments(self.name, parameters)
                 parameters = public_browser_tool_parameters(parameters, fixed_arguments)
                 mcp_tool = MCPTool(
                     name=public_name,
+                    legacy_names=(legacy_name,) if legacy_name != public_name else (),
                     remote_name=tool.name,
                     description=public_browser_tool_description(
                         self.name,

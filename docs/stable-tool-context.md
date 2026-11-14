@@ -8,6 +8,30 @@ Version 2 keeps the system prompt and provider-facing tool definitions stable du
 
 Discovery returns bounded, complete schema entries. Oversized or omitted entries receive a notice rather than an executable reference. Required tool descriptions are delivered again after compaction removes them. Execution events, permission checks, budgets and hooks retain the real target's identity, while model history retains the original `call_tool` call and call ID.
 
+Ordinary MCP tools use `mcp__<server>__<tool>` model-facing names, including
+user-installed servers without connector metadata. Provider-invalid, long or
+ambiguous separator names receive a deterministic hash suffix. Existing browser
+public names and the explicit hosted `web_search`/`web_extract` replacements keep
+their public contracts. Native tools and tools from different MCP servers can
+therefore share an upstream name without replacing or hiding each other.
+
+Installed MCP configuration, credentials and upstream `tools/call` names do not
+change. `tool_search` accepts original names and previous public names/IDs;
+ambiguous short names require `server_name` or a qualified ID such as
+`mcp:seko/generate_image`. Version 1 additionally accepts an old direct-call name
+only when its target is unique, currently offered, and does not shadow any
+registered native name/alias or current MCP name. Hidden and unactivated tools
+still participate in direct-call ambiguity checks. New definitions advertise
+only the canonical name; permission and connection-generation checks still apply.
+
+Restored sessions keep their protocol version and historical calls/results.
+A runtime notice requests rediscovery using the server and original tool name;
+completed historical calls are not replayed. Version 2 requires fresh references
+and does not accept legacy direct-call aliases. Custom Skills/scripts should use
+qualified names (or server-scoped discovery) when a short name is ambiguous.
+The new naming takes effect when connections are created by the updated runtime;
+existing live tool objects are not renamed in place.
+
 After a successful connector hit, `tool_search` also returns `connector_catalogs`:
 the exact model-facing names and short purposes of that connector's discoverable
 tools, including tools on its other MCP servers. This metadata does not activate

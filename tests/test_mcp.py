@@ -59,7 +59,7 @@ def test_public_mcp_tool_name_sanitizes_provider_invalid_remote_name():
 
     public_name = _public_mcp_tool_name("pkulaw", remote_name)
 
-    assert public_name.startswith("mcp-law-search-service_search_article__")
+    assert public_name.startswith("mcp__pkulaw__mcp-law-search-service_search_article")
     assert len(public_name) <= 64
     assert all(
         character.isascii() and (character.isalnum() or character in "_-")
@@ -1686,7 +1686,7 @@ async def test_mcp_tool_execution():
         # Try to find and test create_entities (from memory server)
         create_tool = None
         for tool in tools:
-            if tool.name == "create_entities":
+            if tool.remote_name == "create_entities":
                 create_tool = tool
                 break
 

@@ -262,8 +262,12 @@ def build_tool_name_index(tools: Iterable[Tool]) -> dict[str, Tool]:
 
     offered_tools = list(tools)
     index: dict[str, Tool] = {}
+    implicit_mcp_aliases: dict[str, list[Tool]] = {}
 
     for tool in offered_tools:
+        existing = index.get(tool.name)
+        if existing is not None and existing is not tool:
+            raise ValueError(f"Tool name '{tool.name}' conflicts with another tool")
         index[tool.name] = tool
 
     for tool in offered_tools:
@@ -276,6 +280,12 @@ def build_tool_name_index(tools: Iterable[Tool]) -> dict[str, Tool]:
             seen_aliases.add(alias)
 
         for declared_name in (tool.name, *tool.aliases):
+            if declared_name == tool.name and getattr(tool, "mcp_tool_id", None) is not None:
+                # MCP identifiers are exact. A synthesized hyphen alias must not
+                # make distinct server/tool names collide or shadow native aliases.
+                for call_name in tool_call_name_variants(declared_name)[1:]:
+                    implicit_mcp_aliases.setdefault(call_name, []).append(tool)
+                continue
             for call_name in tool_call_name_variants(declared_name):
                 existing = index.get(call_name)
                 if existing is not None and existing is not tool:
@@ -285,6 +295,9 @@ def build_tool_name_index(tools: Iterable[Tool]) -> dict[str, Tool]:
                     )
                 index[call_name] = tool
 
+    for name, targets in implicit_mcp_aliases.items():
+        if len(targets) == 1 and name not in index:
+            index[name] = targets[0]
     return index
 
 

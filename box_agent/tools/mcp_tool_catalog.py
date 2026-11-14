@@ -13,7 +13,34 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from threading import RLock
 
-from .base import Tool
+from .base import Tool, tool_call_name_variants
+
+
+def legacy_mcp_call_names(
+    available: Iterable[Tool], offered: Iterable[Tool],
+) -> dict[str, str]:
+    """Resolve old v1 call names only when unique across the whole registry.
+
+    Hidden/unactivated tools still participate in ambiguity checks; an alias
+    cannot turn an unoffered target into a callable one or shadow a native name.
+    """
+    available = list({id(tool): tool for tool in available}.values())
+    protected = {
+        name for tool in available for declared in (tool.name, *tool.aliases)
+        for name in tool_call_name_variants(declared)
+    }
+    claims: dict[str, list[Tool]] = {}
+    for tool in available:
+        if getattr(tool, "mcp_tool_id", None) is not None:
+            names = {name for old in getattr(tool, "mcp_legacy_names", ())
+                     for name in tool_call_name_variants(old)}
+            for name in names:
+                claims.setdefault(name, []).append(tool)
+    offered_ids = {id(tool) for tool in offered}
+    return {
+        name: targets[0].name for name, targets in claims.items()
+        if len(targets) == 1 and name not in protected and id(targets[0]) in offered_ids
+    }
 
 
 def _normalize(value: str) -> str:
@@ -341,35 +368,40 @@ class MCPToolCatalog:
         resolved: list[MCPToolEntry] = []
         resolved_ids: set[str] = set()
         missing: list[str] = []
+
+        def canonical_names(entry: MCPToolEntry) -> tuple[str, ...]:
+            return (entry.tool_id, entry.model_name,
+                    f"{entry.server_name}/{entry.model_name}",
+                    f"{entry.server_name}:{entry.model_name}")
+
+        def compatibility_names(entry: MCPToolEntry) -> set[str]:
+            names = (*getattr(entry.tool, "mcp_legacy_names", ()), entry.remote_name)
+            return {
+                value for name in names if name
+                for value in (name, f"{entry.server_name}/{name}",
+                              f"{entry.server_name}:{name}", f"mcp:{entry.server_name}/{name}")
+            }
+
         for requested_name in tool_names:
-            normalized_name = _normalize(requested_name)
-            if not normalized_name:
+            requested_name = requested_name.strip()
+            if not requested_name:
                 continue
-            matches = [
-                entry
-                for entry in entries
-                if normalized_name
-                in {
-                    _normalize(entry.tool_id),
-                    _normalize(f"{entry.server_name}/{entry.model_name}"),
-                    _normalize(f"{entry.server_name}:{entry.model_name}"),
-                    _normalize(entry.model_name),
-                }
-            ]
+
+            # Prefer byte-exact identity: normalization must not conflate distinct
+            # server/tool names differing in case, underscores, or hyphens.
+            matches = [entry for entry in entries if requested_name in canonical_names(entry)]
             if not matches:
-                remote_matches = [
-                    entry
-                    for entry in entries
-                    if entry.remote_name
-                    and normalized_name
-                    in {
-                        _normalize(entry.remote_name),
-                        _normalize(f"{entry.server_name}/{entry.remote_name}"),
-                        _normalize(f"{entry.server_name}:{entry.remote_name}"),
-                    }
-                ]
-                if len(remote_matches) == 1:
-                    matches = remote_matches
+                matches = [entry for entry in entries if requested_name in compatibility_names(entry)]
+                if len(matches) != 1:
+                    matches = []
+            if not matches:
+                normalized_name = _normalize(requested_name)
+                normalized_matches = [entry for entry in entries if any(
+                    normalized_name == _normalize(name)
+                    for name in (*canonical_names(entry), *compatibility_names(entry))
+                )]
+                if len(normalized_matches) == 1:
+                    matches = normalized_matches
             if not matches:
                 missing.append(requested_name)
                 continue
