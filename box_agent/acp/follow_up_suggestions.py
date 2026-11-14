@@ -2,17 +2,23 @@
 
 ACP accepts an inline metadata block as a fast path, then falls back to an
 isolated tool-free completion after the visible answer. Both paths forward a
-validated payload to the host through a structured session update.
+validated payload to the host through a structured session update. A standalone
+unfenced marker followed by a suggestions JSON object is also accepted when
+the model omits the Markdown fence; unconfirmed bare text remains visible.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
 _BLOCK_START = "```follow_up_suggestions"
 _BLOCK_FENCE = "```"
+_BARE_START = "follow_up_suggestions"
+_BARE_HEADER = re.compile(r"follow_up_suggestions[ \t]*\r?\n\s*")
+_MAX_BARE_BLOCK_CHARS = 16_384
 _MAX_SUGGESTIONS = 3
 _MAX_SUGGESTION_CHARS = 160
 
@@ -100,6 +106,8 @@ class FollowUpSuggestionsStreamExtractor:
         self._buffer = ""
         self._suggestions: list[str] = []
         self._holding_block = False
+        self._holding_bare = False
+        self._previous_char = "\n"
 
     @property
     def suggestions(self) -> list[str]:
@@ -120,23 +128,65 @@ class FollowUpSuggestionsStreamExtractor:
         elif self._buffer:
             output.append(self._buffer)
             self._buffer = ""
+        self._holding_bare = False
         return output
+
+    def _emit(self, output: list[str], length: int) -> None:
+        text = self._buffer[:length]
+        if text:
+            output.append(text)
+            self._previous_char = text[-1]
+            self._buffer = self._buffer[length:]
 
     def _drain(self) -> list[str]:
         output: list[str] = []
         while self._buffer:
+            if self._holding_bare:
+                header = _BARE_HEADER.match(self._buffer)
+                if header is None:
+                    remainder = self._buffer[len(_BARE_START):]
+                    if not remainder.strip(" \t\r") and len(self._buffer) <= _MAX_BARE_BLOCK_CHARS:
+                        break
+                    self._holding_bare = False
+                    self._emit(output, 1)
+                    continue
+                payload = self._buffer[header.end():]
+                try:
+                    decoded, end = json.JSONDecoder().raw_decode(payload)
+                except json.JSONDecodeError:
+                    # Wait for split JSON, but do not indefinitely buffer prose.
+                    if (
+                        (not payload or payload.startswith("{"))
+                        and len(self._buffer) <= _MAX_BARE_BLOCK_CHARS
+                    ):
+                        break
+                    self._holding_bare = False
+                    self._emit(output, 1)
+                    continue
+                if isinstance(decoded, dict) and isinstance(decoded.get("suggestions"), list):
+                    self._suggestions = normalize_follow_up_suggestions(decoded["suggestions"])
+                    self._previous_char = self._buffer[header.end() + end - 1]
+                    self._buffer = self._buffer[header.end() + end:]
+                else:
+                    self._emit(output, header.end() + end)
+                self._holding_bare = False
+                continue
             if not self._holding_block:
                 start = self._buffer.find(_BLOCK_START)
+                bare = re.search(r"(?m)^follow_up_suggestions", self._previous_char + self._buffer)
+                bare_start = bare.start() - 1 if bare else -1
+                if bare_start >= 0 and (start == -1 or bare_start < start):
+                    self._emit(output, bare_start)
+                    self._holding_bare = True
+                    continue
                 if start == -1:
-                    keep = _partial_block_start_len(self._buffer)
+                    keep = _partial_block_start_len(self._buffer, self._previous_char)
                     emit_len = len(self._buffer) - keep
                     if emit_len > 0:
-                        output.append(self._buffer[:emit_len])
-                        self._buffer = self._buffer[emit_len:]
+                        self._emit(output, emit_len)
                     break
                 if start > 0:
-                    output.append(self._buffer[:start])
-                    self._buffer = self._buffer[start:]
+                    self._emit(output, start)
                 self._holding_block = True
 
             close = self._buffer.find(_BLOCK_FENCE, len(_BLOCK_START))
@@ -145,6 +195,7 @@ class FollowUpSuggestionsStreamExtractor:
 
             block_end = close + len(_BLOCK_FENCE)
             self._suggestions = _parse_suggestions_block(self._buffer[:block_end])
+            self._previous_char = self._buffer[block_end - 1]
             self._buffer = self._buffer[block_end:]
             self._holding_block = False
         return output
@@ -161,9 +212,12 @@ def _parse_suggestions_block(block: str) -> list[str]:
     return parse_follow_up_suggestions_response(payload)
 
 
-def _partial_block_start_len(text: str) -> int:
+def _partial_block_start_len(text: str, previous_char: str = "\n") -> int:
     max_len = min(len(text), len(_BLOCK_START) - 1)
     for size in range(max_len, 0, -1):
         if _BLOCK_START.startswith(text[-size:]):
+            return size
+        preceding = text[-size - 1] if size < len(text) else previous_char
+        if preceding == "\n" and _BARE_START.startswith(text[-size:]):
             return size
     return 0
