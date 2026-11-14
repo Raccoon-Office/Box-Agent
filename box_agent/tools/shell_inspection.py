@@ -137,12 +137,12 @@ _FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 class ShellInvocation:
     """One executable command extracted from a shell command string."""
 
-    words: tuple[str, ...]
+    words: tuple[str, ...] = field(repr=False)
     executable_index: int
-    raw_segment: str
+    raw_segment: str = field(repr=False)
     indirect: bool = False
-    dynamic_executable_sources: tuple[str, ...] = ()
-    dynamic_executable_evidence: str = ""
+    dynamic_executable_sources: tuple[str, ...] = field(default=(), repr=False)
+    dynamic_executable_evidence: str = field(default="", repr=False)
     known_variables: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     shell_depth: int = field(default=0, compare=False, repr=False)
     sequence_index: int = field(default=0, compare=False, repr=False)
@@ -170,7 +170,7 @@ class ShellRedirection:
     """One shell redirection extracted outside quoted or embedded code."""
 
     operator: str
-    target: str
+    target: str = field(repr=False)
     indirect: bool = False
     invocation_index: int = field(default=0, compare=False, repr=False)
     shell_depth: int = field(default=0, compare=False, repr=False)
@@ -194,9 +194,9 @@ class ShellInspection:
     has_control_operators: bool
     substitutions: tuple[str, ...]
     redirections: tuple[ShellRedirection, ...]
-    ambiguous_regions: tuple[str, ...]
+    ambiguous_regions: tuple[str, ...] = field(repr=False)
     shell_text: str
-    assigned_variables: frozenset[str] = frozenset()
+    assigned_variables: frozenset[str] = field(default=frozenset(), repr=False)
     mutating_arithmetic: bool = False
 
 
@@ -722,6 +722,7 @@ def _expand_env_split_strings(
     words: list[str],
     *,
     posix: bool,
+    origins: list[str | None],
 ) -> tuple[list[str], bool]:
     """Expand env -S/--split-string values before wrapper resolution."""
     expanded = list(words)
@@ -754,6 +755,7 @@ def _expand_env_split_strings(
             if not replacement:
                 return expanded, True
             expanded[option_index : option_index + consumed] = replacement
+            origins[option_index : option_index + consumed] = [None] * len(replacement)
             break
         index = option_index + 1
     return expanded, False
@@ -797,27 +799,27 @@ def _executable_index(words: list[str]) -> int | None:
     return index if index < len(words) else None
 
 
-def _shell_script_argument(invocation: ShellInvocation) -> str | None:
+def _shell_script_indices(invocation: ShellInvocation) -> tuple[int, ...]:
     executable = _command_name(invocation.executable)
     if executable == "eval":
-        return " ".join(invocation.arguments) or None
+        return tuple(range(invocation.executable_index + 1, len(invocation.words)))
     if executable not in _SHELL_EXECUTABLES:
-        return None
+        return ()
     arguments = invocation.arguments
     index = 0
     while index < len(arguments):
         argument = arguments[index]
         if argument == "--":
-            return None
+            return ()
         if argument == "-c" and index + 1 < len(arguments):
-            return arguments[index + 1]
+            return (invocation.executable_index + index + 2,)
         if (
             argument.startswith("-")
             and not argument.startswith("--")
             and "c" in argument[1:]
             and index + 1 < len(arguments)
         ):
-            return arguments[index + 1]
+            return (invocation.executable_index + index + 2,)
         option_name = argument.split("=", 1)[0]
         if option_name in _SHELL_OPTIONS_WITH_VALUES and "=" not in argument:
             index += 2
@@ -825,8 +827,46 @@ def _shell_script_argument(invocation: ShellInvocation) -> str | None:
         if argument.startswith(("-", "+")):
             index += 1
             continue
-        return None
-    return None
+        return ()
+    return ()
+
+
+def _raw_shell_words(segment: str, words: list[str], *, posix: bool) -> list[str | None]:
+    """Retain outer quoting alongside shlex's dequoted argument list."""
+    raw = re.findall(r'''(?:[^\s'"\\]|\\[\s\S]|'(?:[^']*)'|"(?:[^"\\]|\\[\s\S])*")+''', segment)
+    if posix and len(raw) == len(words) and all(
+        _dequote_shell_word(source, posix=True) == word
+        for source, word in zip(raw, words)
+    ):
+        return raw
+    return [None] * len(words)
+
+
+def _expand_script_word(raw: str, variables: dict[str, str]) -> str:
+    """Perform the outer shell's quote removal and known parameter expansion."""
+    result: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char in {"'", '"'} and (not quote or quote == char):
+            quote = "" if quote else char
+            index += 1
+            continue
+        if char == "\\" and quote != "'" and index + 1 < len(raw):
+            following = raw[index + 1]
+            if not quote or following in {'$', '`', '"', "\\", "\n"}:
+                if following != "\n":
+                    result.append(following)
+                index += 2
+                continue
+        if quote != "'" and (match := _PARAMETER_EXPANSION_RE.match(raw, index)):
+            result.append(_expand_known_parameters(match.group(0), variables))
+            index = match.end()
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
 
 
 def _find_embedded_commands(invocation: ShellInvocation) -> tuple[str, ...]:
@@ -995,7 +1035,8 @@ def inspect_shell_command(
             continue
         if not posix:
             words = _strip_matching_quotes(words)
-        words, split_string_ambiguous = _expand_env_split_strings(words, posix=posix)
+        origins = _raw_shell_words(segment, words, posix=posix)
+        words, split_string_ambiguous = _expand_env_split_strings(words, posix=posix, origins=origins)
         if split_string_ambiguous:
             ambiguous.append(segment)
             continue
@@ -1056,12 +1097,37 @@ def inspect_shell_command(
                 scope.known_variables[variable] = _expand_known_parameters(value, scope.known_variables)
         if name in {"cd", "set-location"} and invocation.arguments:
             scope.directory_changes += (invocation.expand_known_parameters(invocation.arguments[-1]),)
-        if script := _shell_script_argument(invocation):
-            # Expand an entire script variable, while leaving variables inside
-            # a literal script for its own command snapshots to resolve.
-            if _PARAMETER_EXPANSION_RE.fullmatch(script):
-                script = _expand_known_parameters(script, context.variables)
+        if script_indices := _shell_script_indices(invocation):
+            def script_with(variables: dict[str, str]) -> str:
+                parts = []
+                for index in script_indices:
+                    raw = origins[index]
+                    value = invocation.words[index]
+                    parts.append(
+                        _expand_script_word(raw, variables) if raw is not None
+                        else _expand_known_parameters(value, variables)
+                    )
+                return " ".join(parts)
+
+            # Argument expansion precedes command-prefix/env assignments. Single
+            # quotes and escaped dollars defer expansion to the child shell.
+            script = script_with(scope.known_variables)
             include_nested(script, context)
+            source_script = script_with(scope.variables)
+            if script != source_script and _depth < _MAX_NESTED_SHELL_DEPTH:
+                # Materializing host values must not turn an unresolved dynamic
+                # executable into a trusted literal. Retain only those approval
+                # facts, not speculative writes/cd effects from unexpanded code.
+                source = inspect_shell_command(
+                    source_script, posix=posix, _depth=_depth + 1,
+                    _variables=context.variables,
+                    _known_variables=context.variables,
+                    _directory_changes=context.directory_changes,
+                )
+                invocations.extend(
+                    replace(item, indirect=True, sequence_index=next_sequence())
+                    for item in source.invocations if item.dynamic_executable_sources
+                )
         for embedded_command in _find_embedded_commands(invocation):
             include_nested(embedded_command, context)
 

@@ -313,6 +313,43 @@ def test_binding_snapshots_resolve_host_and_declared_variables_without_exposing_
     assert "/host-private-path" not in repr(inspection)
 
 
+@pytest.mark.parametrize("command, expected", [
+    ('TARGET=parent; bash -c "TARGET=child; printf x > $TARGET"', "parent"),
+    ('''TARGET=parent; bash -c 'TARGET=child; printf x > "$TARGET"' ''', "child"),
+    (r'TARGET=parent; bash -c "TARGET=child; printf x > \$TARGET"', "child"),
+    ('''TARGET=parent; bash -c 'printf x > '"$TARGET"'/output' ''', "parent/output"),
+    ('TARGET=parent; TARGET=child bash -c "printf x > $TARGET"', "parent"),
+    ('TARGET=parent; env -i TARGET=child bash -c "printf x > $TARGET"', "parent"),
+    ('''SCRIPT='printf x > output'; bash -c "$SCRIPT"''', "output"),
+])
+def test_nested_script_expansion_respects_outer_quotes_and_binding_stage(command, expected):
+    inspection = inspect_shell_command(command, posix=True)
+    assert inspection.redirections[-1].expand_target() == expected
+
+
+@pytest.mark.parametrize("body", [
+    'TARGET=child; printf x > $TARGET',
+    'printf x > $TARGET; echo \\"unterminated',
+])
+def test_outer_environment_expansion_is_frozen_and_not_exposed_in_repr(body):
+    inspection = inspect_shell_command(
+        'bash -c "' + body + '"', posix=True,
+        environment={"TARGET": "/host-private-path"},
+    )
+    if inspection.redirections:
+        assert inspection.redirections[0].expand_target() == "/host-private-path"
+    assert "/host-private-path" not in repr(inspection)
+
+
+def test_expanding_a_host_executable_retains_its_dynamic_approval_fact():
+    inspection = inspect_shell_command(
+        'bash -c "$TOOL --version"', posix=True,
+        environment={"TOOL": "/private-environment-marker"},
+    )
+    assert any(item.dynamic_executable_sources == ("$TOOL",) for item in inspection.invocations)
+    assert "/private-environment-marker" not in repr(inspection)
+
+
 def test_env_wrapper_binds_child_environment_and_directory_without_changing_outer_redirection():
     inspection = inspect_shell_command(
         "env -C product DEST=product bash -c 'cp -R input/. \"$DEST\"' > parent.log",

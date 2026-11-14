@@ -27,8 +27,9 @@ of every commit.
 - Proof anchors: `tests/test_permissions.py`,
   `tests/test_builtin_skill_read_only.py`, `tests/test_shell_inspection.py`,
   `tests/test_acp.py` and `tests/test_session_adapter_assembly.py`. They cover
-  literal/variable/glob destinations, directory copy/sync, env wrapper facts,
-  child shell scopes, substitution timing and normal product writes. Exact-head
+  literal/variable/glob destinations (including destination links), directory copy/sync, env wrapper facts,
+  child shell scopes, outer double-quote versus child parameter expansion,
+  dangerous-command approval before launch, substitution timing and normal product writes. Exact-head
   CI and review results belong to the PR; these anchors do not certify a later
   commit or an installed client.
 - Client path propagation is a paired desktop change awaiting integration.

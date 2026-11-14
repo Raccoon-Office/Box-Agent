@@ -156,6 +156,27 @@ class TestDetectDangerousCommand:
     def test_diskutil_erase_detected(self, command):
         assert detect_dangerous_command(command) is not None
 
+    @pytest.mark.parametrize("command", [
+        'OP=eraseDisk; bash -c "diskutil $OP APFS Scratch disk4"',
+        'OP=eraseDisk; bash -c "diskutil ${OP} APFS Scratch disk4"',
+        '''OP=eraseDisk; bash -c 'diskutil '"$OP"' APFS Scratch disk4' ''',
+        '''OP=list; bash -c 'OP=eraseDisk; diskutil "$OP" APFS Scratch disk4' ''',
+        'OP=eraseDisk; env -i OP=list bash -c "diskutil $OP APFS Scratch disk4"',
+        'OP=eraseDisk; eval "diskutil $OP APFS Scratch disk4"',
+    ])
+    @pytest.mark.usefixtures("posix_command_parser")
+    def test_nested_shell_parameter_expansion_preserves_dangerous_approval(self, command):
+        # Static inspection only: never execute a disk operation in this test.
+        assert detect_dangerous_command(command) == "diskutil erase: erases disk"
+
+    @pytest.mark.parametrize("command", [
+        '''OP=eraseDisk; bash -c 'OP=list; diskutil "$OP"' ''',
+        'OP=list; bash -c "OP=eraseDisk; diskutil $OP"',
+    ])
+    @pytest.mark.usefixtures("posix_command_parser")
+    def test_nested_shell_uses_the_variable_value_at_the_actual_expansion_stage(self, command):
+        assert detect_dangerous_command(command) is None
+
     @pytest.mark.parametrize(
         "command",
         [

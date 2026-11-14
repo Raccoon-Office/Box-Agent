@@ -227,24 +227,35 @@ def builtin_skill_command_write_error(
         for cwd in directories:
             candidates = expanded_targets
             stable_copy_directory: Path | None = None
+            if name in {"cp", "install", "rsync", "mv", "rm", "rmdir", "tee", "chmod", "chown", "touch", "sed"}:
+                # Shell destination patterns can themselves name a protected
+                # file/link. Check every match, including directory-form copies.
+                target_matches: list[str] = []
+                for target in expanded_targets:
+                    path = Path(target).expanduser()
+                    pattern = str(path if path.is_absolute() else cwd / path)
+                    target_matches.extend(glob.glob(pattern) or [pattern])
+                candidates = tuple(target_matches)
             if name in {"cp", "install"} and not no_target_directory:
-                destination = Path(expanded_targets[0]).expanduser()
-                destination = destination if destination.is_absolute() else cwd / destination
-                destination = destination.resolve(strict=False)
-                if destination.is_dir() and copy_sources:
-                    stable_copy_directory = destination
-                for source in copy_sources:
-                    source_path = Path(invocation.expand_known_parameters(source)).expanduser()
-                    source_path = source_path if source_path.is_absolute() else cwd / source_path
-                    matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
-                    candidates += tuple(str(destination / Path(match).name) for match in matches)
-                    candidates += (str(destination / source_path.name),)
-                    if source in {".", ".."} or source.rstrip("/").endswith("/."):
-                        stable_copy_directory = None
-                    if glob.has_magic(source_path.name):
-                        # The source or destination directory may be created
-                        # before the copy; inspect existing target entries too.
-                        candidates += tuple(str(match) for match in destination.glob(source_path.name))
+                destinations = candidates
+                for destination_value in destinations:
+                    destination = Path(destination_value).expanduser()
+                    destination = destination if destination.is_absolute() else cwd / destination
+                    destination = destination.resolve(strict=False)
+                    if len(destinations) == 1 and destination.is_dir() and copy_sources:
+                        stable_copy_directory = destination
+                    for source in copy_sources:
+                        source_path = Path(invocation.expand_known_parameters(source)).expanduser()
+                        source_path = source_path if source_path.is_absolute() else cwd / source_path
+                        matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
+                        candidates += tuple(str(destination / Path(match).name) for match in matches)
+                        candidates += (str(destination / source_path.name),)
+                        if source in {".", ".."} or source.rstrip("/").endswith("/."):
+                            stable_copy_directory = None
+                        if glob.has_magic(source_path.name):
+                            # The source or destination directory may be created
+                            # before the copy; inspect existing target entries too.
+                            candidates += tuple(str(match) for match in destination.glob(source_path.name))
             for candidate_index, target in enumerate(candidates):
                 if target.startswith("-") and name not in {"cp", "install", "rsync"}:
                     continue
@@ -693,18 +704,19 @@ def _dangerous_invocation_reason(invocation: ShellInvocation) -> str | None:
         return "sudo: runs command as root"
 
     executable = _normalized_executable(invocation.executable)
+    arguments = tuple(invocation.expand_known_parameters(value) for value in invocation.arguments)
     if executable == "sudo":
         return "sudo: runs command as root"
     if executable == "mkfs" or executable.startswith("mkfs."):
         return "mkfs: formats filesystem"
     if executable == "mv" and any(
         argument.rstrip("/") == "/dev/null"
-        for argument in invocation.arguments
+        for argument in arguments
     ):
         return "mv to /dev/null: destroys file"
     if executable == "diskutil" and any(
         argument.casefold() in {"erase", "erasedisk", "erasevolume", "secureerase"}
-        for argument in invocation.arguments
+        for argument in arguments
     ):
         return "diskutil erase: erases disk"
     return _DANGEROUS_EXECUTABLE_REASONS.get(executable)

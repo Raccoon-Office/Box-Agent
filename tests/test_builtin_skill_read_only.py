@@ -83,6 +83,47 @@ def test_shell_guard_keeps_bundled_read_and_execute_available(tmp_path, bundled,
     assert safety.builtin_skill_command_write_error(command.format(target=target), tmp_path) is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell destination expansion")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["file", "directory", "target-option", "variable", "touch"])
+async def test_bash_destination_globs_keep_bundled_links_read_only(tmp_path, bundled, monkeypatch, form):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    product = tmp_path / "product"
+    product.mkdir()
+    (workspace / "payload").write_text("changed")
+    (workspace / target.name).write_text("changed")
+    (product / "entry.js").symlink_to(target)
+    (product / "dir-link").symlink_to(root, target_is_directory=True)
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(product))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    commands = {
+        "file": f'cp payload "{product}/"*.js',
+        "directory": f'cp validator.js "{product}/"dir-*',
+        "target-option": f'cp -t "{product}/"dir-* validator.js',
+        "variable": f'DEST="{product}"; cp payload "$DEST/"*.js',
+        "touch": f'touch "{product}/"*.js',
+    }
+    assert "BUILTIN_SKILL_READ_ONLY" in safety.builtin_skill_command_write_error(commands[form], workspace)
+    denied = await tool.execute(command=commands[form])
+    assert not denied.success
+    assert "BUILTIN_SKILL_READ_ONLY" in denied.error
+    assert target.read_text() == "original"
+
+    # Ordinary product globs and accepted links to unrelated external output work.
+    external = tmp_path / "external.txt"
+    external.write_text("old")
+    (product / "ordinary.out").symlink_to(external)
+    allowed = await tool.execute(command=f'cp payload "{product}/"*.out')
+    assert allowed.success, allowed.error
+    assert external.read_text() == "changed"
+
+
 @pytest.mark.asyncio
 async def test_bash_blocks_bundled_mutation_but_writes_workspace_output(tmp_path, bundled):
     from box_agent.tools.bash_tool import BashTool
@@ -314,7 +355,7 @@ def test_bundled_copy_checks_variable_values_in_command_order(tmp_path, bundled)
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX redirection and shell syntax")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target_form", ["inline", "environment", "runtime", "assignment-only", "append", "reassigned", "nested", "prefix", "cd-redirect", "chained-relative", "chained-reassigned"])
+@pytest.mark.parametrize("target_form", ["inline", "environment", "runtime", "assignment-only", "append", "reassigned", "nested", "nested-double", "environment-nested-double", "prefix", "cd-redirect", "chained-relative", "chained-reassigned"])
 async def test_bash_variable_redirections_cannot_modify_bundled_code(tmp_path, bundled, monkeypatch, target_form):
     from box_agent.tools.bash_tool import BashTool
 
@@ -322,7 +363,7 @@ async def test_bash_variable_redirections_cannot_modify_bundled_code(tmp_path, b
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(tmp_path))
-    if target_form in {"environment", "prefix"}:
+    if target_form in {"environment", "prefix", "environment-nested-double"}:
         monkeypatch.setenv("REDIRECT_TARGET", str(target))
     engine = PermissionEngine(CapabilityPolicy(), workspace)
     engine._builtin_skills_dir = root.resolve()
@@ -341,6 +382,10 @@ async def test_bash_variable_redirections_cannot_modify_bundled_code(tmp_path, b
         command = f'TARGET=ordinary.txt; TARGET="{target}"; printf changed > "$TARGET"'
     elif target_form == "nested":
         command = f"bash -c 'cd \"{tmp_path}\" && TARGET=bundled/validator.js && printf changed > \"$TARGET\"'"
+    elif target_form == "nested-double":
+        command = f'TARGET="{target}"; bash -c "TARGET=ordinary.txt; printf changed > $TARGET"'
+    elif target_form == "environment-nested-double":
+        command = 'bash -c "REDIRECT_TARGET=ordinary.txt; printf changed > $REDIRECT_TARGET"'
     elif target_form == "prefix":
         command = 'REDIRECT_TARGET=ordinary.txt printf changed > "$REDIRECT_TARGET"'
     elif target_form == "cd-redirect":
