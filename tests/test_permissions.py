@@ -1648,7 +1648,7 @@ async def test_bash_find_directory_actions_require_session_scope(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX find syntax")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("literal", ["-execdir", "-okdir"])
+@pytest.mark.parametrize("literal", ["-execdir", "-okdir", "-follow"])
 async def test_bash_find_action_names_in_data_are_ordinary_arguments(workspace, tmp_path, monkeypatch, literal):
     from box_agent.tools.bash_tool import BashTool
 
@@ -1686,6 +1686,83 @@ async def test_bash_tar_directory_option_in_exclude_is_ordinary_data(workspace, 
     assert result.success, result.error
     with tarfile.open(archive) as bundle:
         assert "fixture.txt" in bundle.getnames()
+
+
+@pytest.mark.parametrize("count", [1000, 1001])
+def test_bash_pathname_expansion_has_a_bounded_match_count(monkeypatch, count):
+    from box_agent.tools import bash_tool
+
+    monkeypatch.setattr(bash_tool.glob, "iglob", lambda path: iter(["/client/file.txt"] * count))
+    paths = bash_tool._shell_permission_paths("/client/*.txt")
+    if count == 1000:
+        assert len(paths) == count
+    else:
+        assert paths is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pathname expansion")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["read", "write"])
+@pytest.mark.parametrize("pattern", ["*/secret.txt", "ali*/secret.txt", "**/secret.txt", "{alias,safe}/secret.txt"])
+async def test_bash_expanded_product_paths_cannot_follow_external_links(
+    workspace, tmp_path, monkeypatch, operation, pattern,
+):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("outside fixture content")
+    (client / "alias").symlink_to(outside, target_is_directory=True)
+    (client / "inside.txt").write_text("product fixture")
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    path = client / pattern
+    command = f"cat {path}" if operation == "read" else f"printf changed > {path}"
+    result = await tool.execute(command=command)
+    assert not result.success
+    assert "outside fixture content" not in result.stdout
+    assert secret.read_text() == "outside fixture content"
+
+    result = await tool.execute(command=f"cat {client}/*.txt")
+    assert result.success, result.error
+    assert "product fixture" in result.stdout
+    result = await tool.execute(command=f"printf changed > {client}/*.txt")
+    assert result.success, result.error
+    assert (client / "inside.txt").read_text() == "changed"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX find traversal")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("traversal", ["-L", "-H -L", "-follow", "dynamic-action"])
+@pytest.mark.parametrize("operation", ["read", "write"])
+async def test_bash_product_traversal_cannot_follow_external_links(
+    workspace, tmp_path, monkeypatch, traversal, operation,
+):
+    from box_agent.tools.bash_tool import BashTool
+
+    client = tmp_path / "client"
+    client.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("outside fixture content")
+    (client / "alias").symlink_to(outside, target_is_directory=True)
+    (client / "file-alias.txt").symlink_to(secret)
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
+    engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    prefix = f"find {traversal} {client}" if traversal.startswith("-L") or traversal == "-H -L" else f"find {client}"
+    if traversal == "-follow":
+        prefix += " -follow"
+    payload = "cat {}" if operation == "read" else "sh -c 'printf changed > \"$1\"' _ {}"
+    result = await tool.execute(command=f"{prefix} -exec {payload} \\;")
+    assert not result.success
+    assert "outside fixture content" not in result.stdout
+    assert secret.read_text() == "outside fixture content"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ln syntax")

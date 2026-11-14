@@ -6,6 +6,7 @@ Supports both bash (Unix/Linux/macOS) and PowerShell (Windows).
 from __future__ import annotations
 
 import asyncio
+import glob
 import logging
 import math
 import ntpath
@@ -21,6 +22,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -240,6 +242,21 @@ def _is_shell_output_redirect_path(command: str, path: str) -> bool:
         )
         is not None
     )
+
+
+def _shell_permission_paths(path: str) -> list[str] | None:
+    """Expand bounded pathname globs, leaving complex expansions to session scope."""
+    if "**" in path or re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", path):
+        return None
+    if not glob.has_magic(path):
+        return [path]
+    try:
+        matches = list(islice(glob.iglob(path), 1001))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if len(matches) > 1000:
+        return None
+    return matches or [path]
 
 
 def _is_temp_shell_redirect_path(command: str, path: str) -> bool:
@@ -1814,6 +1831,15 @@ Examples:
                 inspection = inspect_shell_command(
                     permission_command, posix=not self.is_windows or self._bundled_win_bash is not None,
                 )
+                pattern_words = [word for invocation in inspection.invocations for word in invocation.words]
+                pattern_words.extend(redirection.target for redirection in inspection.redirections)
+                for word in pattern_words:
+                    if (
+                        Path(word).is_absolute()
+                        and re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", word)
+                        and word not in abs_paths
+                    ):
+                        abs_paths.append(word)
                 for invocation in inspection.invocations:
                     name = invocation.executable.replace("\\", "/").rsplit("/", 1)[-1].casefold()
                     creates_link = name in {
@@ -1848,24 +1874,35 @@ Examples:
                         "cd", "chdir", "set-location", "sl", "pushd", "push-location", "pushl",
                     } and invocation.arguments:
                         directory_targets.append(invocation.arguments[-1])
-                    if any(
-                        action in {"-execdir", "-okdir"} for action, _ in find_command_actions(invocation)
-                    ):
+                    if name in {"find", "gfind"}:
+                        actions = find_command_actions(invocation)
+                        requires_directory_scope = any(
+                            action in {"-execdir", "-okdir", "-follow"}
+                            or any("{}" in word for word in words)
+                            for action, words in actions
+                        )
+                        search_roots = []
+                        follows_links = False
                         search_arguments = iter(invocation.arguments)
                         for argument in search_arguments:
                             if argument == "-D":
                                 next(search_arguments, None)
                                 continue
-                            if argument in {"-H", "-L", "-P", "--"} or argument.startswith("-O"):
+                            if argument in {"-H", "-L", "-P"}:
+                                follows_links = argument == "-L"
+                                continue
+                            if argument == "--" or argument.startswith("-O"):
                                 continue
                             if argument == "-f":
                                 argument = next(search_arguments, ".")
                             if argument.startswith("-") or argument in {"!", "("}:
                                 break
                             search_root = Path(self.workspace_dir) / Path(argument).expanduser()
-                            directory_targets.append(
+                            search_roots.append(
                                 str(search_root.parent if search_root.is_file() else search_root)
                             )
+                        if requires_directory_scope or follows_links:
+                            directory_targets.extend(search_roots)
                     # Wrapper options remain in words even when the inspector
                     # exposes the wrapped executable (for example env -C ... cat).
                     option_words = invocation.prefix
@@ -1937,6 +1974,17 @@ Examples:
                         resource={"path": p},
                         tool_name="bash",
                     )
+                    if decision.allowed:
+                        expanded_paths = _shell_permission_paths(p)
+                        if expanded_paths is None:
+                            decision = self._perm.check(
+                                cap, {"path": p}, tool_name="bash", allow_product_directories=False,
+                            )
+                        else:
+                            for actual_path in expanded_paths:
+                                decision = self._perm.check(cap, {"path": actual_path}, tool_name="bash")
+                                if not decision.allowed:
+                                    break
                     if not decision.allowed:
                         log.warning(
                             "bash/perm/denied path=%s cap=%s extracted=%s cmd=%r",
