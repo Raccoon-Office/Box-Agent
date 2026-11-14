@@ -1827,7 +1827,9 @@ Examples:
                     ) or (
                         name in {"cmd", "cmd.exe"} and re.search(r"\bmklink\b", invocation.raw_segment, re.I)
                     )
-                    if creates_link and (inspection.has_control_operators or inspection.redirections):
+                    if creates_link and (
+                        inspection.has_control_operators or inspection.redirections or invocation.indirect
+                    ):
                         for absolute_path in abs_paths:
                             resource = {"path": absolute_path}
                             if (

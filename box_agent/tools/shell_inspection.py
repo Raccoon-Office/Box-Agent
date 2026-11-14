@@ -51,6 +51,7 @@ _MAX_NESTED_SHELL_DEPTH = 2
 _SUBSTITUTION_PLACEHOLDER = "__box_agent_substitution__"
 _SUBSTITUTION_MARKER_BASE = 0xE000
 _WRAPPER_OPTIONS_WITH_VALUES = {
+    "builtin": frozenset(),
     "command": frozenset(),
     "busybox": frozenset(),
     "chroot": frozenset({"--groups", "--userspec"}),

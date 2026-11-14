@@ -12,6 +12,14 @@ def _executables(command: str) -> list[str]:
     ]
 
 
+@pytest.mark.parametrize("command, executable", [
+    ("builtin pwd", "pwd"),
+    ("builtin cd /tmp", "cd"),
+])
+def test_builtin_wrapper_preserves_the_actual_command(command, executable):
+    assert _executables(command) == [executable]
+
+
 def test_heredoc_body_is_not_parsed_as_shell_commands():
     command = """python3 << 'PY'\n# Let's discuss Q1'24 values.\ndd = 12\nformat = 'wide'\nPY"""
 

@@ -1545,7 +1545,10 @@ async def test_bash_client_directory_grant_cannot_escape_via_relative_redirect(w
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ln syntax")
 @pytest.mark.asyncio
-async def test_bash_cannot_create_and_write_through_link_in_one_call(workspace, tmp_path, monkeypatch):
+@pytest.mark.parametrize("shell", ["direct", "nested", "two-shells"])
+async def test_bash_cannot_create_and_write_through_link_in_one_call(workspace, tmp_path, monkeypatch, shell):
+    import shlex
+
     from box_agent.tools.bash_tool import BashTool
 
     client = tmp_path / "client"
@@ -1556,7 +1559,10 @@ async def test_bash_cannot_create_and_write_through_link_in_one_call(workspace, 
     monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(client))
     engine = PermissionEngine(CapabilityPolicy(session_workspace_root=str(workspace)), workspace)
     tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
-    result = await tool.execute(command=f'ln -s ../outside "{link}" && echo escaped > "{link / "proof"}"')
+    command = f'ln -s ../outside "{link}" && echo escaped > "{link / "proof"}"'
+    for _ in range({"direct": 0, "nested": 1, "two-shells": 2}[shell]):
+        command = "bash -c " + shlex.quote(command)
+    result = await tool.execute(command=command)
     assert not result.success
     assert not link.is_symlink()
     assert not (target / "proof").exists()
