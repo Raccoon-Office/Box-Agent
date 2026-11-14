@@ -103,7 +103,9 @@ def builtin_skill_command_write_error(
                 return directory_error
             for cwd in directories:
                 destination = path if path.is_absolute() else cwd / path
-                targets = glob.glob(str(destination)) if event.glob_target else []
+                pattern = Path(event.target_glob_pattern()).expanduser()
+                pattern = pattern if pattern.is_absolute() else cwd / pattern
+                targets = glob.glob(str(pattern)) if event.glob_target else []
                 for target in targets or [str(destination)]:
                     if error := builtin_skill_write_error(Path(target)):
                         return error
@@ -114,20 +116,27 @@ def builtin_skill_command_write_error(
         if name in {"cd", "set-location"} and args:
             continue
         targets: tuple[str, ...] = ()
+        target_indices: tuple[int, ...] = ()
         copy_sources: list[str] = []
+        copy_source_indices: list[int] = []
         protect_ancestors = True
         if name in {"cp", "install"} and args:
             operands: list[str] = []
+            operand_indices: list[int] = []
             explicit_target: str | None = None
+            explicit_target_index = 0
             no_target_directory = False
             protect_ancestors = False
-            options = iter(args)
-            for option in options:
+            options = iter(enumerate(args))
+            for option_index, option in options:
                 if option == "--":
-                    operands.extend(options)
+                    for index, value in options:
+                        operands.append(value)
+                        operand_indices.append(index)
                     break
                 if not option.startswith("-") or option == "-":
                     operands.append(option)
+                    operand_indices.append(option_index)
                     continue
                 long_option, has_value, value = option.partition("=")
                 is_long_option = long_option.startswith("--") and len(long_option) > 2
@@ -140,10 +149,13 @@ def builtin_skill_command_write_error(
                     no_target_directory = True
                     continue
                 if option == "-t":
-                    explicit_target = next(options, "")
+                    explicit_target_index, explicit_target = next(options, (option_index, ""))
                     continue
                 if is_long_option and "--target-directory".startswith(long_option):
-                    explicit_target = value if has_value else next(options, "")
+                    if has_value:
+                        explicit_target_index, explicit_target = option_index, value
+                    else:
+                        explicit_target_index, explicit_target = next(options, (option_index, ""))
                     continue
                 value_options = {"--suffix"}
                 if name == "install":
@@ -160,12 +172,15 @@ def builtin_skill_command_write_error(
                         if name == "cp" and letter in {"R", "r", "a"}:
                             protect_ancestors = True
                         if letter in ({"S", "t", "m", "o", "g"} if name == "install" else {"S", "t"}):
-                            value = option[index + 1:] or next(options, "")
+                            value_index, value = (option_index, option[index + 1:]) if option[index + 1:] else next(options, (option_index, ""))
                             if letter == "t":
                                 explicit_target = value
+                                explicit_target_index = value_index
                             break
             targets = (explicit_target,) if explicit_target is not None else tuple(operands[-1:])
+            target_indices = (explicit_target_index,) if explicit_target is not None else tuple(operand_indices[-1:])
             copy_sources = operands if explicit_target is not None else operands[:-1]
+            copy_source_indices = operand_indices if explicit_target is not None else operand_indices[:-1]
         elif name == "rsync":
             value_options = {
                 "--rsh", "--filter", "--exclude", "--exclude-from", "--include", "--include-from",
@@ -179,13 +194,17 @@ def builtin_skill_command_write_error(
                 "--write-batch", "--only-write-batch", "--read-batch", "--info", "--debug",
             }
             operands = []
-            options = iter(args)
-            for option in options:
+            operand_indices = []
+            options = iter(enumerate(args))
+            for option_index, option in options:
                 if option == "--":
-                    operands.extend(options)
+                    for index, value in options:
+                        operands.append(value)
+                        operand_indices.append(index)
                     break
                 if not option.startswith("-") or option == "-":
                     operands.append(option)
+                    operand_indices.append(option_index)
                     continue
                 long_option, has_value, _ = option.partition("=")
                 if long_option.startswith("--") and len(long_option) > 2 and not has_value and any(
@@ -199,10 +218,13 @@ def builtin_skill_command_write_error(
                                 next(options, None)
                             break
             targets = tuple(operands[-1:])
+            target_indices = tuple(operand_indices[-1:])
         elif name in {"mv", "rm", "rmdir", "tee", "chmod", "chown", "touch"}:
             targets = args
+            target_indices = tuple(range(len(args)))
         elif name == "sed" and any(arg.startswith("-i") for arg in args):
             targets = args
+            target_indices = tuple(range(len(args)))
         else:
             # Quoted paths inside Python/JS are not shell words of their own.
             # Inspect path arguments, not arbitrary quoted file contents.
@@ -219,7 +241,10 @@ def builtin_skill_command_write_error(
             )
         if not targets:
             continue
-        expanded_targets = tuple(invocation.expand_known_parameters(target) for target in targets)
+        expanded_targets = (
+            tuple(invocation.expand_argument(index, target) for index, target in zip(target_indices, targets))
+            if target_indices else tuple(invocation.expand_known_parameters(target) for target in targets)
+        )
         directories = (
             (initial_cwd,) if all(Path(target).expanduser().is_absolute() for target in expanded_targets)
             else working_directories(invocation.directory_changes)
@@ -234,10 +259,12 @@ def builtin_skill_command_write_error(
                 # Shell destination patterns can themselves name a protected
                 # file/link. Check every match, including directory-form copies.
                 target_matches: list[str] = []
-                for target in expanded_targets:
+                for target, index, value in zip(expanded_targets, target_indices, targets):
                     path = Path(target).expanduser()
-                    pattern = str(path if path.is_absolute() else cwd / path)
-                    target_matches.extend(glob.glob(pattern) or [pattern])
+                    literal = str(path if path.is_absolute() else cwd / path)
+                    pattern = Path(invocation.expand_argument(index, value, glob_pattern=True)).expanduser()
+                    pattern = pattern if pattern.is_absolute() else cwd / pattern
+                    target_matches.extend(glob.glob(str(pattern)) or [literal])
                 candidates = tuple(target_matches)
             if name in {"cp", "install"} and not no_target_directory:
                 destinations = candidates
@@ -247,18 +274,20 @@ def builtin_skill_command_write_error(
                     destination = destination.resolve(strict=False)
                     if len(destinations) == 1 and destination.is_dir() and copy_sources:
                         stable_copy_directory = destination
-                    for source in copy_sources:
-                        source_path = Path(invocation.expand_known_parameters(source)).expanduser()
+                    for source, source_index in zip(copy_sources, copy_source_indices):
+                        source_path = Path(invocation.expand_argument(source_index, source)).expanduser()
                         source_path = source_path if source_path.is_absolute() else cwd / source_path
-                        matches = glob.glob(str(source_path)) if glob.has_magic(str(source_path)) else [str(source_path)]
+                        source_pattern = Path(invocation.expand_argument(source_index, source, glob_pattern=True)).expanduser()
+                        source_pattern = source_pattern if source_pattern.is_absolute() else cwd / source_pattern
+                        matches = glob.glob(str(source_pattern)) or [str(source_path)]
                         candidates += tuple(str(destination / Path(match).name) for match in matches)
                         candidates += (str(destination / source_path.name),)
                         if source in {".", ".."} or source.rstrip("/").endswith("/."):
                             stable_copy_directory = None
-                        if glob.has_magic(source_path.name):
+                        if glob.has_magic(source_pattern.name):
                             # The source or destination directory may be created
                             # before the copy; inspect existing target entries too.
-                            candidates += tuple(str(match) for match in destination.glob(source_path.name))
+                            candidates += tuple(str(match) for match in destination.glob(source_pattern.name))
             for candidate_index, target in enumerate(candidates):
                 if target.startswith("-") and name not in {"cp", "install", "rsync"}:
                     continue
@@ -707,7 +736,7 @@ def _dangerous_invocation_reason(invocation: ShellInvocation) -> str | None:
         return "sudo: runs command as root"
 
     executable = _normalized_executable(invocation.executable)
-    arguments = tuple(invocation.expand_known_parameters(value) for value in invocation.arguments)
+    arguments = tuple(invocation.expand_argument(index, value) for index, value in enumerate(invocation.arguments))
     if executable == "sudo":
         return "sudo: runs command as root"
     if executable == "mkfs" or executable.startswith("mkfs."):

@@ -8,6 +8,7 @@ belong to another language and are never scanned as top-level shell commands.
 
 from __future__ import annotations
 
+import glob
 import platform
 import re
 import shlex
@@ -147,6 +148,7 @@ class ShellInvocation:
     shell_depth: int = field(default=0, compare=False, repr=False)
     sequence_index: int = field(default=0, compare=False, repr=False)
     directory_changes: tuple[str, ...] = field(default=(), compare=False, repr=False)
+    raw_words: tuple[str | None, ...] = field(default=(), compare=False, repr=False)
 
     @property
     def executable(self) -> str:
@@ -164,6 +166,18 @@ class ShellInvocation:
         """Expand literal bindings available when this command is invoked."""
         return _expand_known_parameters(value, dict(self.known_variables))
 
+    def expand_argument(self, index: int, value: str, *, glob_pattern: bool = False) -> str:
+        """Expand one operand, optionally escaping literal wildcard characters."""
+        word_index = self.executable_index + 1 + index
+        raw = self.raw_words[word_index] if word_index < len(self.raw_words) else None
+        if raw is None:
+            return self.expand_known_parameters(value)
+        pattern = _expand_script_word(raw, dict(self.known_variables), glob_pattern=glob_pattern)
+        word = self.words[word_index]
+        # Attached option values, e.g. -tDEST and --target-directory=DEST.
+        prefix = word[:len(word) - len(value)] if word.endswith(value) else ""
+        return pattern[len(prefix):] if pattern.startswith(prefix) else pattern
+
 
 @dataclass(frozen=True)
 class ShellRedirection:
@@ -179,12 +193,18 @@ class ShellRedirection:
     known_variables: tuple[tuple[str, str], ...] = field(default=(), compare=False, repr=False)
     literal_target: bool = field(default=False, compare=False, repr=False)
     glob_target: bool = field(default=False, compare=False, repr=False)
+    raw_target: str | None = field(default=None, compare=False, repr=False)
 
     def expand_target(self) -> str:
         """Expand bindings from when this redirection is performed."""
         if self.literal_target:
             return self.target
         return _expand_known_parameters(self.target, dict(self.known_variables))
+
+    def target_glob_pattern(self) -> str:
+        if self.raw_target is None:
+            return self.expand_target()
+        return _expand_script_word(self.raw_target, dict(self.known_variables), glob_pattern=True)
 
 
 @dataclass(frozen=True)
@@ -582,6 +602,7 @@ def _extract_and_mask_redirections(
                     target=_dequote_shell_word(raw_target, posix=posix),
                     literal_target=bool(re.fullmatch(r"'[^']*'", raw_target)),
                     glob_target=target_glob,
+                    raw_target=raw_target,
                 )
             )
         else:
@@ -847,7 +868,7 @@ def _raw_shell_words(segment: str, words: list[str], *, posix: bool) -> list[str
     return [None] * len(words)
 
 
-def _expand_script_word(raw: str, variables: dict[str, str]) -> str:
+def _expand_script_word(raw: str, variables: dict[str, str], *, glob_pattern: bool = False) -> str:
     """Perform the outer shell's quote removal and known parameter expansion."""
     result: list[str] = []
     quote = ""
@@ -862,14 +883,15 @@ def _expand_script_word(raw: str, variables: dict[str, str]) -> str:
             following = raw[index + 1]
             if not quote or following in {'$', '`', '"', "\\", "\n"}:
                 if following != "\n":
-                    result.append(following)
+                    result.append(glob.escape(following) if glob_pattern else following)
                 index += 2
                 continue
         if quote != "'" and (match := _PARAMETER_EXPANSION_RE.match(raw, index)):
-            result.append(_expand_known_parameters(match.group(0), variables))
+            value = _expand_known_parameters(match.group(0), variables)
+            result.append(glob.escape(value) if glob_pattern and quote else value)
             index = match.end()
             continue
-        result.append(char)
+        result.append(glob.escape(char) if glob_pattern and quote else char)
         index += 1
     return "".join(result)
 
@@ -1085,6 +1107,7 @@ def inspect_shell_command(
             shell_depth=_depth + len(scope_key),
             sequence_index=next_sequence(),
             directory_changes=scope.directory_changes,
+            raw_words=tuple(origins),
             dynamic_executable_sources=dynamic_executable_sources,
             dynamic_executable_evidence=(
                 _dynamic_executable_evidence(words[executable_index], substitutions, scope.variables)

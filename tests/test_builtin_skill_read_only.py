@@ -1,5 +1,6 @@
 """Task tools cannot rewrite the bundled code they use to validate output."""
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,54 @@ async def test_bash_destination_globs_keep_bundled_links_read_only(tmp_path, bun
     literal = await tool.execute(command=f'printf literal > "{product}/*.js"')
     assert literal.success, literal.error
     assert (product / "*.js").read_text() == "literal"
+    assert target.read_text() == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX quoted wildcard paths")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["quoted", "escaped", "variable", "single-dollar", "partial-quote", "attached-target", "long-target", "touch", "install"])
+async def test_bash_literal_wildcard_outputs_remain_writable(tmp_path, bundled, monkeypatch, form):
+    from box_agent.tools.bash_tool import BashTool
+
+    root, target = bundled
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "payload").write_text("changed")
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "entry.js").symlink_to(target)
+    literal = product / "entry.*"
+    literal.write_text("old")
+    (product / "dir-link").symlink_to(root, target_is_directory=True)
+    directory = product / "dir.*"
+    directory.mkdir()
+    monkeypatch.setenv("BOX_AGENT_CLIENT_ROOT", str(product))
+    engine = PermissionEngine(CapabilityPolicy(), workspace)
+    engine._builtin_skills_dir = root.resolve()
+    tool = BashTool(workspace_dir=str(workspace), permission_engine=engine)
+    commands = {
+        "quoted": f'cp payload "{literal}"',
+        "escaped": f'cp payload "{product}/"entry.\\*',
+        "variable": f'DEST="{literal}"; cp payload "$DEST"',
+        "single-dollar": f'cd "{product}"; TARGET=entry.js; cp "{workspace}/payload" \'$TARGET\'',
+        "partial-quote": f'cp payload "{product}/entry"*".*"',
+        "attached-target": f'cp -t"{directory}" payload',
+        "long-target": f'cp --target-directory="{directory}" payload',
+        "touch": f'touch "{literal}"',
+        "install": f'install payload "{literal}"',
+    }
+    if form == "long-target" and sys.platform == "darwin":
+        pytest.skip("macOS cp does not support --target-directory")
+    if form == "attached-target" and sys.platform == "darwin":
+        pytest.skip("macOS cp does not support -t")
+    allowed = await tool.execute(command=commands[form])
+    assert allowed.success, allowed.error
+    if form in {"attached-target", "long-target"}:
+        assert (directory / "payload").read_text() == "changed"
+    elif form == "single-dollar":
+        assert (product / "$TARGET").read_text() == "changed"
+    elif form != "touch":
+        assert literal.read_text() == "changed"
     assert target.read_text() == "original"
 
 

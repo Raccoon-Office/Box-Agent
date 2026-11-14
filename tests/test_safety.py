@@ -172,6 +172,7 @@ class TestDetectDangerousCommand:
     @pytest.mark.parametrize("command", [
         '''OP=eraseDisk; bash -c 'OP=list; diskutil "$OP"' ''',
         'OP=list; bash -c "OP=eraseDisk; diskutil $OP"',
+        "OP=eraseDisk; diskutil '$OP'",
     ])
     @pytest.mark.usefixtures("posix_command_parser")
     def test_nested_shell_uses_the_variable_value_at_the_actual_expansion_stage(self, command):
