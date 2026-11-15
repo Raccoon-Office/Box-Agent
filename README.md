@@ -154,6 +154,7 @@ the current file, not a snapshot; existing model-context budgets still apply.
 
 ### More
 
+- **Image inputs**: Each message and `inspect_images` call accepts up to 20 images. Existing file-size, total-byte, pixel, permission, and model-context budgets still apply; model vision support is required to inspect image contents.
 - **MCP Tools**: Connect to any [MCP server](https://github.com/modelcontextprotocol/servers) — web search, knowledge graphs, databases
 - **Claude Skills**: 12 built-in runtime, Office, and artifact skills, plus on-demand marketplace skill sources
 - **ACP Protocol**: Embed Box Agent in Electron apps, Zed Editor, or any ACP-compatible host via JSON-RPC over stdio

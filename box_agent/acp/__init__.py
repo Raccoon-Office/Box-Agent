@@ -191,6 +191,7 @@ from box_agent.session_trace import (
 from box_agent.session_log import SessionLog, run_session_io
 from box_agent.api.input import UserInput
 from box_agent.input_preparation import prepare_user_input, resource_image_paths
+from box_agent.input_images import MAX_INPUT_IMAGES
 from box_agent.task_context import TaskContext, normalize_task_id
 from box_agent.session_continuation import import_continuation_images, parse_session_continuation
 from box_agent.session_history import prompt_fingerprint, revision_request, revise_agent_history
@@ -2594,7 +2595,7 @@ class BoxACPAgent:
     ) -> _ImageAttachmentContext | None:
         """Adapt the shared preparation's genuine tool results to ACP updates."""
         from box_agent.input_images import prepare_image_attachments
-        paths = _meta_string_list(prompt_meta, "image_attachment_paths", "imageAttachmentPaths", limit=6)
+        paths = _meta_string_list(prompt_meta, "image_attachment_paths", "imageAttachmentPaths", limit=MAX_INPUT_IMAGES)
         trace = getattr(state, "trace_writer", None)
 
         async def started(call_id, name, arguments):
@@ -3205,7 +3206,7 @@ class BoxACPAgent:
         attachment_meter_token = start_token_meter()
         resource_paths = resource_image_paths(prepared_input) if prepared_input else []
         if resource_paths:
-            legacy_paths = _meta_string_list(prompt_meta, "image_attachment_paths", "imageAttachmentPaths", limit=6)
+            legacy_paths = _meta_string_list(prompt_meta, "image_attachment_paths", "imageAttachmentPaths", limit=MAX_INPUT_IMAGES)
             prompt_meta = {**prompt_meta, "image_attachment_paths": list(dict.fromkeys([*legacy_paths, *resource_paths]))}
         try:
             image_attachment_context = await self._run_image_attachment_tool(

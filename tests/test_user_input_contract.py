@@ -17,6 +17,38 @@ def link(path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["linked", "inline", "mixed"])
+async def test_twenty_images_reach_model_and_twenty_one_are_rejected_before_history(tmp_path, kind):
+    import base64
+    images = []
+    for index in range(21):
+        block = image_block()
+        if kind == "inline" or (kind == "mixed" and index % 2 == 0):
+            images.append({"type": "image", "mimeType": block["media_type"], "data": block["data"]})
+        else:
+            picture = tmp_path / f"image-{index}.png"
+            picture.write_bytes(base64.b64decode(block["data"]))
+            images.append({**link(picture), "mimeType": "image/png"})
+    llm = CaptureLLM()
+    llm.capabilities = {"image_input": True}
+    host = adapter(tmp_path, llm)
+    try:
+        session = await host.new_session(str(tmp_path), session_id=f"twenty-{kind}")
+        await host.prompt(session.session_id, images[:20], turn_id="accepted")
+        projected = [block for message in llm.requests[-1] if isinstance(message.content, list)
+                     for block in message.content if block.get("type") == "input_image"]
+        assert len(projected) == 20
+        log = host._sessions[session.session_id].agent.session_log
+        original, calls = log.path.read_bytes(), len(llm.requests)
+        with pytest.raises(Exception, match="INVALID_INPUT_IMAGE_COUNT"):
+            await host.prompt(session.session_id, images, turn_id="rejected")
+        assert len(llm.requests) == calls
+        assert log.path.read_bytes() == original
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('method', ['load_session', 'resume_session'])
 async def test_resource_image_preparation_result_is_durable_and_replayed_without_execution(tmp_path, method):
     import base64

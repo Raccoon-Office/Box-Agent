@@ -51,6 +51,29 @@ def _tool(tmp_path: Path, llm=None, **kwargs) -> ImageInspectionTool:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot", [False, True])
+async def test_twenty_images_are_loaded_without_truncation_and_twenty_one_are_rejected(tmp_path, snapshot):
+    paths = []
+    for index in range(21):
+        image = tmp_path / f"{index}.png"
+        image.write_bytes(_ONE_PIXEL_PNG)
+        paths.append(str(image))
+    llm = FakeVisionLLM()
+    tool = (ImageAttachmentSnapshotTool(llm=None, workspace_dir=str(tmp_path), allow_full_access=False)
+            if snapshot else _tool(tmp_path, llm))
+    result = await tool.invoke({"image_paths": paths[:20], "instruction": "Describe all images."})
+    assert result.success, result.error
+    assert len(result.raw_output["images"]) == 20
+    if snapshot:
+        assert len([b for b in result.image_content if b["type"] == "input_image"]) == 20
+    else:
+        assert len([b for b in llm.messages[1].content if b["type"] == "input_image"]) == 20
+    rejected = await tool.invoke({"image_paths": paths, "instruction": "Describe all images."})
+    assert not rejected.success
+    assert rejected.raw_output["code"] == "INVALID_TOOL_ARGUMENTS"
+
+
+@pytest.mark.asyncio
 async def test_attachment_snapshot_respects_read_permissions_without_a_vision_client(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -449,7 +472,7 @@ async def test_inspect_images_lets_instruction_determine_multi_image_answer(tmp_
         ),
         (
             {
-                "image_paths": [f"{index}.png" for index in range(7)],
+                "image_paths": [f"{index}.png" for index in range(21)],
                 "instruction": "Describe them.",
             },
             "/image_paths",
