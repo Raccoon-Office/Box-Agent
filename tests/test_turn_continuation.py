@@ -293,6 +293,8 @@ async def test_recovery_identifies_the_unfinished_action_without_granting_author
     )
     assert request is not None
     assert (next_action if isinstance(next_action, str) else candidate) in request.prompt
+    assert request.evidence == (next_action if isinstance(next_action, str) else candidate)
+    assert "request_user_decision" not in request.evidence
     assert "reference data" in request.prompt
     assert "permissions" in request.prompt
     assert "manual choice" in request.prompt
@@ -315,6 +317,8 @@ async def test_recovery_bounds_long_hints_and_redacts_multimodal_fallback_eviden
         assert request is not None
         assert len(request.prompt) < 4_000
         assert "PRIVATE_" not in request.prompt
+        assert len(request.evidence) <= 4_000
+        assert "PRIVATE_" not in request.evidence
         assert "补全图注" in request.prompt
 
 

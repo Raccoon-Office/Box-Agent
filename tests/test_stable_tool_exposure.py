@@ -84,6 +84,79 @@ def test_always_load_ref_is_ineligible_until_description_acknowledged():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["bootstrap", "search"])
+@pytest.mark.parametrize("schema, arguments", [
+    (
+        {
+            "type": "object", "properties": {"url": {"type": "string"}},
+            "required": ["url"], "additionalProperties": False,
+        },
+        {"url": "https://example.test"},
+    ),
+    (
+        {
+            "type": "object", "properties": {
+                "filter": {
+                    "type": "object", "properties": {"status": {"enum": ["open", "closed"]}},
+                    "required": ["status"], "additionalProperties": False,
+                },
+                "limit": {"type": "integer"},
+            },
+            "required": ["filter", "limit"], "additionalProperties": False,
+        },
+        {"filter": {"status": "open"}, "limit": 3},
+    ),
+    ({"type": "object", "properties": {}, "additionalProperties": False}, {}),
+], ids=["url", "nested-query", "no-arguments"])
+async def test_discovered_description_identifies_callable_entry_without_invalid_empty_example(
+    delivery, schema, arguments,
+):
+    class ArgumentTool(Remote):
+        parameters = schema
+
+        async def execute(self, **kwargs):
+            return ToolResult(success=True, content=json.dumps(kwargs))
+
+    catalog, manager, search, engine = make()
+    tool = ArgumentTool()
+    catalog.replace_server(tool.server_name, [tool])
+    before = engine.prepare_tools()
+    if delivery == "bootstrap":
+        descriptions = manager.pending_bootstrap_descriptions()
+        descriptor = json.loads(descriptions[0])
+    else:
+        result = await search.execute(tool_names=[tool.name])
+        descriptor = json.loads(result.content)["activated"][0]
+    assert descriptor["name"] == tool.name
+    assert descriptor["callable_function"] in {item.name for item in before.definitions}
+    assert descriptor["callable_function"] == "call_tool"
+    assert descriptor["input_schema"] == tool.parameters
+    assert "call_example" not in descriptor  # Empty arguments are not valid for every schema.
+    assert "arguments_json matching input_schema" in descriptor["invocation"]
+    request = ToolCall(id="invoke", type="function", function=FunctionCall(
+        name=descriptor["callable_function"], arguments={
+            "tool_ref": descriptor["tool_ref"],
+            "arguments_json": json.dumps(arguments),
+        },
+    ))
+    assert before.resolve_call(request)[2]
+    if delivery == "bootstrap":
+        manager.ack_bootstrap_descriptions(descriptions)
+    else:
+        manager.record_search_result("search", result.content)
+        manager.acknowledge_search_results([Message(
+            role="tool", name="tool_search", tool_call_id="search", content=result.content,
+        )])
+    prepared = engine.prepare_tools()
+    resolved, routed, error = prepared.resolve_call(request)
+    assert routed and error is None
+    assert resolved.function.name == tool.name
+    executed = await prepared.routed_targets[tool.name].invoke(resolved.function.arguments)
+    assert executed.success and json.loads(executed.content) == arguments
+    assert [item.to_schema() for item in before.definitions] == [item.to_schema() for item in prepared.definitions]
+
+
+@pytest.mark.asyncio
 async def test_eager_mcp_tool_order_preserves_discovered_refs_until_replacement():
     from tests.test_mcp_tool_search import FakeMCPTool
 

@@ -111,3 +111,19 @@ def test_child_prompt_does_not_inherit_parent_discovery_instructions(heading):
     assert "Parent constraints." in child_prompt
     assert "Keep this boundary." in child_prompt
     assert "`tool_search` is not available here" in child_prompt
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_discovered_interface_maps_workflow_apis_without_relaxing_user_constraints(tmp_path, version):
+    user_policy = "Only read the account; wait for the user to approve any changes."
+    agent = Agent(llm_client=object(), system_prompt=user_policy, tools=[],
+                  workspace_dir=str(tmp_path), tool_interface_version=version)
+    assert agent.system_prompt.startswith(user_policy)
+    mapping = "Workflow documents and Skills may describe tools or APIs from another environment."
+    if version == 1:
+        assert mapping not in agent.system_prompt
+    else:
+        assert mapping in agent.system_prompt
+        assert "Preserve their business steps, constraints, approvals and manual choices" in agent.system_prompt
+        assert "invoke its callable_function" in agent.system_prompt
+        assert "If no equivalent exists, identify the exact gap" in agent.system_prompt

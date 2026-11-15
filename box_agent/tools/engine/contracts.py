@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import re
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -135,6 +136,44 @@ class PreparedTools:
             execution_call.function.name = self.call_names.get(name, name)
             normalized.append(execution_call)
         return normalized
+
+    def recovery_context(self, evidence: str) -> str:
+        """Restate current, delivered routes named by a continuation verdict."""
+        if not evidence or not self.route_refs or self.validate_call("call_tool"):
+            return ""
+        routes = []
+        size = 0
+        for ref, name in sorted(self.route_refs.items()):
+            if not re.search(r"(?<![A-Za-z0-9_.:-])" + re.escape(name) + r"(?![A-Za-z0-9_.:-])", evidence):
+                continue
+            if self.validate_routed_call(name) is not None:
+                continue
+            route = json.dumps({
+                "target": name,
+                "callable_function": "call_tool",
+                "tool_ref": ref,
+                "input_schema": self.routed_definitions[name].parameters,
+            }, ensure_ascii=False)
+            # Never truncate a schema into misleading or invalid JSON.
+            if size + len(route) > 6_000:
+                continue
+            routes.append(route)
+            size += len(route)
+            if len(routes) == 3:
+                break
+        if not routes:
+            return ""
+        return (
+            "\n\nTool-call protocol: Check the callable functions provided for this request. "
+            "A tool name in instructions or runtime descriptions may be a discovered capability, "
+            "not a directly callable function. If its description includes a tool_ref, invoke "
+            "call_tool with that exact tool_ref and an arguments_json string matching its input_schema. "
+            "Do not try to call the discovered display name directly. If the reference or schema is "
+            "missing or stale, use tool_search to discover the needed capability first. "
+            "Emit the actual function call now when work remains; announcing a tool call does not execute it."
+            "\nCurrent callable routes for the remaining action (runtime metadata, not new permission):\n"
+            + "\n".join(routes)
+        )
 
     def resolve_call(self, call: ToolCall) -> tuple[ToolCall, bool, str | None]:
         """Resolve against the request snapshot without modifying provider history."""

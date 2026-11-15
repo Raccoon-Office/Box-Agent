@@ -285,8 +285,11 @@ def empty_final_answer_retry_text(tool_call_count: int) -> str:
     return (
         "The previous natural end produced no visible final answer after using "
         f"{tool_call_count} visible tool call(s). "
-        "Answer the user now with a concise final conclusion. Do not call tools unless the task is impossible "
-        "to summarize without one."
+        "This does not mean the task is complete. If authorized work remains, continue it now using "
+        "available tools; when the needed capability is not exposed, use the available tool discovery "
+        "mechanism first. Preserve completed work and do not repeat successful actions. "
+        "If the task is complete, provide a concise final answer. If blocked, explain the concrete "
+        "blocker or ask for the exact missing input. Do not merely announce the next action."
     )
 
 
@@ -972,6 +975,7 @@ async def _run_agent_loop_impl(
     # preserve existing behavior.
     no_progress_steps = 0
     turn_continuation = TurnContinuationController()
+    continuation_evidence = ""
     completion_checks = await CompletionChecks.create(
         tools,
         CompletionContext(tuple(messages), cancelled, session_log, turn_id, resume_scope=messages,
@@ -1328,6 +1332,7 @@ async def _run_agent_loop_impl(
                     injected_event = injection.apply(messages)
                 if injection.kind is InjectionKind.USER_SUPPLEMENT and injected_event.status == "injected":
                     continuation_user_request = injection.content
+                    continuation_evidence = ""
                     await completion_checks.include_inputs(
                         tools, CompletionContext(tuple(messages), cancelled, session_log, turn_id,
                                                  resume_scope=messages,
@@ -2611,6 +2616,7 @@ async def _run_agent_loop_impl(
                 ):
                     empty_final_answer_retry_injected = True
                     retry_text = empty_final_answer_retry_text(visible_tool_call_total)
+                    retry_text += prepared_tools.recovery_context(continuation_evidence)
                     yield MessageInjection(
                         InjectionKind.FINAL_RESPONSE, retry_text,
                     ).apply(messages)
@@ -2742,8 +2748,10 @@ async def _run_agent_loop_impl(
                 )
                 continue
             if continuation is not None:
+                continuation_evidence = continuation.evidence
                 yield MessageInjection(
-                    InjectionKind.TASK_CONTINUATION, continuation.prompt,
+                    InjectionKind.TASK_CONTINUATION,
+                    continuation.prompt + prepared_tools.recovery_context(continuation_evidence),
                 ).apply(messages)
                 elapsed = perf_counter() - step_start
                 total = perf_counter() - run_start
@@ -2894,6 +2902,8 @@ async def _run_agent_loop_impl(
             raise RuntimeError("Tool engine ended without a step summary")
         step_made_progress = tool_summary.made_progress
         turn_continuation.record_tool_progress(step_made_progress)
+        if step_made_progress:
+            continuation_evidence = ""
         visible_tool_call_total += tool_summary.visible_calls
         completed_turn_ending_tool = tool_summary.completed_turn_ending_tool
         plan_write_succeeded = plan_write_succeeded or "plan_write" in tool_summary.successful_tools
