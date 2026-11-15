@@ -4,6 +4,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
 
+MAX_INPUT_IMAGES = 20
+
 @dataclass(frozen=True)
 class ImageAttachmentContext:
     text: str

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from box_agent.llm.capabilities import image_input_support
+from box_agent.input_images import MAX_INPUT_IMAGES
 from box_agent.llm.image_payload import RequestBodyTooLargeError
 from box_agent.llm.task_budgets import (
     LONG_TASK_MAX_OUTPUT_TOKENS, SMALL_TASK_MAX_OUTPUT_TOKENS,
@@ -32,7 +33,7 @@ _MAX_TOTAL_IMAGE_PIXELS = 80_000_000
 _MAX_LONG_EDGE_PX = 1568
 _RETRY_LONG_EDGE_PX = 1024
 _IMAGE_TIMEOUT_RETRIES = 1
-_MAX_IMAGES = 6
+_MAX_IMAGES = MAX_INPUT_IMAGES
 _JPEG_QUALITY = 85
 _IMAGE_INSPECTION_TIMEOUT = 120.0
 _MAX_MODEL_CONTEXT_CHARS = 24_000
@@ -92,7 +93,7 @@ class ImageInspectionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Inspect 1-6 local PNG, JPEG, or WebP images (first frame for animated WebP). "
+            f"Inspect 1-{_MAX_IMAGES} local PNG, JPEG, or WebP images (first frame for animated WebP). "
             "proxy returns a vision model's "
             "written analysis; native shows image pixels to you under the session's "
             "image-context retention policy. Omit strategy to use native when the "

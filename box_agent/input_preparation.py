@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
 from .api.input import UserInput
+from .input_images import MAX_INPUT_IMAGES
 from .input_resources import normalize_file_inputs
 
 
@@ -24,7 +25,7 @@ def prepare_user_input(
     files = normalize_file_inputs(list(value.blocks), workspace_dir, permission_engine)
     if sum(block["type"] == "image" for block in value.blocks) + sum(
         item.get("mimeType", "").startswith("image/") for item in files
-    ) > 6:
+    ) > MAX_INPUT_IMAGES:
         raise ValueError("INVALID_INPUT_IMAGE_COUNT")
     images = []
     blocks = []
