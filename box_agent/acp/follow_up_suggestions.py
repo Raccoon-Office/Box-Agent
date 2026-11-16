@@ -152,7 +152,7 @@ class FollowUpSuggestionsStreamExtractor:
         self._html_previous_char = ""
         self._inline_code_ticks = 0
         self._inline_tick_run = 0
-        self._inline_code_at_line_start = False
+        self._line_has_text = False
 
     @property
     def suggestions(self) -> list[str]:
@@ -190,11 +190,15 @@ class FollowUpSuggestionsStreamExtractor:
         *lines, tail = text.split("\n")
         for line in lines:
             self._track_html_code(line + "\n")
-            if self._markdown_line is not None and not self._inline_code_at_line_start:
+            if not self._line_has_text and not line.strip():
+                self._inline_code_ticks = 0
+                self._inline_tick_run = 0
+            if self._markdown_line is not None:
                 self._track_markdown_line(_markdown_line_for_fence(self._markdown_line + line))
             self._markdown_line = ""
-            self._inline_code_at_line_start = bool(self._inline_code_ticks)
+            self._line_has_text = False
         self._track_html_code(tail)
+        self._line_has_text = self._line_has_text or bool(tail.strip())
         if self._markdown_line is not None:
             line = self._markdown_line + tail
             fence_line = _markdown_line_for_fence(line)
@@ -475,19 +479,32 @@ class FollowUpSuggestionsStreamExtractor:
                     if close:
                         self._emit(output, close)
                         continue
-                    if not final and len(self._buffer) < _MAX_BARE_BLOCK_CHARS:
+                    if close == 0 and not final and len(self._buffer) < _MAX_BARE_BLOCK_CHARS:
                         break
                 self._inline_code_ticks = 0
                 self._inline_tick_run = 0
-                self._inline_code_at_line_start = False
                 self._holding = opener
         return output
 
 
-def _inline_code_end(text: str, ticks: int, *, final: bool) -> int:
-    for run in re.finditer(r"`+", text):
-        if len(run.group()) == ticks and (run.end() < len(text) or final):
-            return run.end()
+def _inline_code_end(text: str, ticks: int, *, final: bool) -> int | None:
+    """Find a closing run without crossing a higher-priority Markdown block."""
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        complete = line.endswith("\n") or final
+        content = line.rstrip("\r\n")
+        if not content.strip() and complete:
+            return None
+        fence = _MARKDOWN_FENCE.fullmatch(content)
+        if fence is not None:
+            marker, info = fence.groups()
+            if marker[0] == "~" or "`" not in info:
+                return None if complete else 0
+        for run in re.finditer(r"`+", line):
+            end = offset + run.end()
+            if len(run.group()) == ticks and (end < len(text) or final):
+                return end
+        offset += len(line)
     return 0
 
 

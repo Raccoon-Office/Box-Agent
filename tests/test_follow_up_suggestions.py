@@ -564,6 +564,22 @@ def test_extractor_bounds_waiting_for_an_unmatched_inline_code_span():
         assert extractor.suggestions == ["Next"]
 
 
+def test_extractor_gives_fenced_blocks_priority_over_unmatched_inline_backticks():
+    example = 'Example: `\n```python\nfollow_up_suggestions\n{"suggestions":["Example"]}\n```\n'
+    text = example + '```follow_up_suggestions\n{"suggestions":["Next"]}\n```'
+    _assert_extraction_at_every_split(text, example, ["Next"])
+
+
+@pytest.mark.parametrize("prefix, suffix", [
+    ('Example: `\n\n', '\n`'),
+    ('Example: `\n', '\n\n`'),
+    ('Example: `\n', '\n```python\ntext `\n```'),
+])
+def test_extractor_does_not_extend_inline_code_across_block_boundaries(prefix, suffix):
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["Next"]}' + suffix
+    _assert_extraction_at_every_split(text, prefix + suffix, ["Next"])
+
+
 @pytest.mark.parametrize("closing", ["``` ", "````\t\r"])
 def test_extractor_recovers_from_oversized_truncated_metadata_with_padded_closer(closing):
     text = '回答。\n```follow_up_suggestions\n{"suggestions":["' + "x" * 17_000 + '\n' + closing + '\n后续正文。'
