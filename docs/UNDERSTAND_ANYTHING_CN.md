@@ -8,11 +8,10 @@ Box-Agent 使用 Understand Anything 作为纳入版本管理的架构索引，�
 
 共享分析范围由
 [`../.understand-anything/.understandignore`](../.understand-anything/.understandignore)
-定义。当前配置包含核心运行时、ACP 适配层、工具、配置、示例和文档；同时排除内置
-skill 资源、测试、workspace、虚拟环境和生成产物，使图谱聚焦产品架构。受控 PPTX
-编译器 `box_agent/skills/document-skills/pptx/` 是明确例外：其 DeckDocument、主题与
-构图解析、布局注册表、HTML runtime 和架构文档会进入共享图谱；其中 vendored runtime
-与生成 bundle 仍然排除。
+定义。当前配置包含核心运行时、ACP 适配层、工具、配置、示例、文档、测试，以及所有
+仓库自有 Skill 的入口、实现、参考文档和配置。测试节点与 `tested_by` 关系帮助定位
+已有验证；纳入图谱不表示测试已执行或通过。第三方依赖、vendor、字体、媒体、二进制、
+workspace、虚拟环境和生成产物仍然排除，包括 PPTX 的 vendored runtime 与生成 bundle。
 
 Git 中只应提交以下共享文件：
 
@@ -56,6 +55,10 @@ Git 中只应提交以下共享文件：
 5. 在本地保留 `scan-result.json`，让后续增量运行可以复用确定性的文件清单。
 6. 启动 dashboard 后，应打开 plugin 输出的带 token URL；仅访问本地服务裸地址
    无法通过访问校验。
+
+刷新读取当前工作树。若包含尚未提交的文件，提交 hash 只表示基础提交，不能单独证明
+快照与该提交完全一致；共享前应核对工作树改动及配套 fingerprints。不要为了刷新自动
+拉取、覆盖或提交他人的工作。
 
 入口文件、子系统边界、共享工具、ACP 协议、运行时打包或需要进入引导路径的文档
 发生变化后，应刷新图谱。不影响图结构或阅读路线的小型源码改动无需立即刷新图谱。

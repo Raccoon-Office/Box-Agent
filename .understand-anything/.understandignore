@@ -8,14 +8,9 @@
 #
 # --- Active exclusions (Box-Agent scope) ---
 
-# Skill bundles are excluded by default. The controlled PPTX compiler is a
-# deliberate exception because its DeckDocument, theme/composition resolver,
-# layout registry, HTML runtime, and architecture docs form one product
-# subsystem that should remain navigable in the shared graph.
-box_agent/skills/*
-!box_agent/skills/document-skills/
-box_agent/skills/document-skills/*
-!box_agent/skills/document-skills/pptx/
+# Include tests and all repository-owned Skill entry points, implementation,
+# references, and configuration. Built-in defaults still exclude dependencies,
+# vendor directories, fonts, media, archives, and generated/minified payloads.
 
 # Keep generated/vendored PPTX runtime payloads out of the graph.
 box_agent/skills/document-skills/pptx/runtime/vendor/
@@ -36,6 +31,16 @@ output/
 # Generated / vendored
 *.egg-info/
 *.so
+*.pyc
+*.pyo
+*.dylib
+*.dll
+*.exe
+*.wasm
+*.otf
+*.pptx
+*.docx
+*.xlsx
 
 # --- From .gitignore (uncomment to exclude) ---
 
@@ -46,7 +51,7 @@ output/
 
 # --- Detected directories (uncomment to exclude) ---
 
-tests/
+# tests/ are intentionally included in the shared graph.
 # docs/
 # examples/
 # scripts/

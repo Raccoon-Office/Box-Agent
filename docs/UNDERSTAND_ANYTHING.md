@@ -10,10 +10,12 @@ runtime probes remain the source of truth.
 The shared scope is defined by
 [`../.understand-anything/.understandignore`](../.understand-anything/.understandignore).
 The current configuration includes the core runtime, ACP adapters, tools,
-configuration, examples, documentation, and the controlled PPTX compiler under
-`box_agent/skills/document-skills/pptx/`. Other bundled skill assets, tests,
-workspaces, virtual environments, generated output, and vendored PPTX runtime
-payloads remain excluded so the graph stays focused on product architecture.
+configuration, examples, documentation, tests, and every repository-owned Skill's
+entry points, implementation, references, and configuration. Test nodes and
+`tested_by` edges help locate existing checks; inclusion does not mean a test
+was executed or passed. Third-party dependencies, vendor directories, fonts,
+media, binaries, workspaces, virtual environments, and generated output remain
+excluded, including vendored PPTX runtime payloads and generated bundles.
 
 Only these shared files belong in Git:
 
@@ -64,6 +66,11 @@ not intended to be queried for architecture answers.
    deterministic file inventory.
 6. If the dashboard is launched, open the tokenized URL emitted by the plugin;
    the bare local server URL is not sufficient.
+
+A refresh reads the current working tree. If it includes uncommitted files, the
+commit hash identifies the base commit, not an exact committed snapshot. Check
+working-tree changes and the matching fingerprints before sharing. A refresh
+must not automatically pull, overwrite, or commit someone else's work.
 
 Refresh the graph after changes to entry points, subsystem boundaries, shared
 tools, ACP contracts, runtime packaging, or documentation that should appear in
