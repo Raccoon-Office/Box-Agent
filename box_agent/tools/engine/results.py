@@ -296,6 +296,8 @@ def process_tool_result(
         "policy_decision": event_metadata["policy_decision"],
         "user_visible": pipeline_input.user_visible,
     }
+    if type(getattr(result, "exit_code", None)) is int:
+        trace_data["exit_code"] = result.exit_code
     if pipeline_input.parallel:
         trace_data["parallel"] = True
     trace_data["duration_ms"] = (

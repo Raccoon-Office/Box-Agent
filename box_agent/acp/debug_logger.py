@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from box_agent.user_paths import state_path
-from box_agent.payload_privacy import private_payloads
+from box_agent.payload_privacy import private_payloads, private_tool_diagnostics
 
 # ── Level constants ──────────────────────────────────────────
 
@@ -37,13 +37,6 @@ _LEVEL_NAMES = {40: "ERROR", 30: "WARN", 20: "INFO", 10: "DEBUG"}
 # ── Truncation helper ────────────────────────────────────────
 
 _PREVIEW_LEN = 200
-
-# Diagnostic metadata only. Payload previews and raw errors are still private
-# even when short, and even when a caller explicitly enables DEBUG/full payloads.
-_PRIVATE_FIELDS = {
-    "session_id", "turn_id", "tool_call_id", "tool_name", "tool_id", "server_name",
-    "step", "success", "user_visible", "duration_ms", "elapsed_ms", "cancelled",
-}
 
 
 def _preview(value: Any, max_len: int = _PREVIEW_LEN) -> str:
@@ -137,11 +130,7 @@ class ACPDebugLogger:
         if private_payloads() or (
             isinstance(tool_name, str) and tool_name.startswith("memory_")
         ):
-            fields = {
-                key: value for key, value in fields.items()
-                if key in _PRIVATE_FIELDS and isinstance(value, (str, int, float, bool))
-            }
-            fields["payload_redacted"] = True
+            fields = private_tool_diagnostics(event, fields)
 
         # Sanitize: truncate known large fields
         for key in ("message", "content", "prompt", "arguments", "result"):

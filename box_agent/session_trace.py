@@ -309,10 +309,13 @@ class SessionTraceWriter:
         if not self.enabled:
             return
         try:
-            from .payload_privacy import private_payloads
+            from .payload_privacy import private_payloads, private_tool_diagnostics
 
             if private_payloads():
-                data = {"payload_redacted": True}
+                data = (
+                    private_tool_diagnostics(event, data or {})
+                    if event.startswith("tool.") else {"payload_redacted": True}
+                )
             record: dict[str, Any] = {
                 "schema_version": _TRACE_SCHEMA_VERSION,
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
