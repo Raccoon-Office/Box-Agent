@@ -26,10 +26,16 @@ def normalize_raccoon_thinking(value: object) -> dict | None:
     """Unavailable/malformed catalog metadata must not enable unified controls."""
     if not isinstance(value, dict):
         return None
+    managed = value.get("managed", True)
+    if type(managed) is not bool:
+        return None
     supported, can_disable = value.get("supported"), value.get("can_disable")
     levels, default = value.get("display_levels"), value.get("default_level")
     if type(supported) is not bool or type(can_disable) is not bool or not isinstance(levels, list):
         return None
+    if not managed:
+        return (dict(value) if not supported and not can_disable and levels == []
+                and "default_level" not in value else None)
     if not supported:
         return dict(value) if can_disable and levels == [] and default == "off" else None
     names = []
@@ -50,7 +56,7 @@ def unified_thinking_params(client: object, thinking_enabled: bool) -> dict | No
     """None means legacy route; an empty dict means unified with backend defaults."""
     capabilities = getattr(client, "raccoon_thinking_models", {})
     capability = normalize_raccoon_thinking(capabilities.get(getattr(client, "model", None)))
-    if capability is None:
+    if capability is None or capability.get("managed") is False:
         return None
     level = getattr(client, "raccoon_thinking_level", None)
     if not thinking_enabled or level is None or not capability["supported"]:

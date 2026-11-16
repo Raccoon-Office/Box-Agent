@@ -33,6 +33,16 @@ uses that profile metadata, never a model-name heuristic or a bare ACP flag, to
 select the unified protocol. The OpenAI SDK extension emits the new field at the
 HTTP top level, with no native reasoning controls. Model IDs are unchanged.
 
+Catalog metadata distinguishes managed supported, managed unsupported, and
+unmanaged entries. `managed` may be omitted only on an otherwise valid managed
+capability for backward compatibility. An explicit non-boolean is invalid.
+Unmanaged entries require `supported=false`, `can_disable=false`, an empty
+`display_levels`, and no `default_level`; they preserve the native request route
+and do not emit a unified field. Hosts hide/disable unified controls without
+claiming that upstream thinking has been disabled, and retain the saved preference.
+Managed unsupported entries instead require `can_disable=true` and
+`default_level=off`; their unified route emits no thinking controls.
+
 Unsupported models omit the new field. `off` on a model that cannot disable
 thinking becomes `level_1` for that request; the host preserves the saved `off`
 preference. Sparse display levels round upward for presentation only: a saved

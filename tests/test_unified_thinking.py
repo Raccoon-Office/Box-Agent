@@ -279,3 +279,22 @@ async def test_http_capability_conflict_reaches_acp_with_structured_code_without
         assert len(calls) == 1
         assert calls[0]["raccoon_thinking_level"] == "level_5"
         assert state.raccoon_thinking_level == "level_5"
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_unmanaged_catalog_keeps_existing_native_wire(stream, enabled):
+    async with wire_client(model="sn-glm-5-3") as (base, calls):
+        async def send():
+            messages = [Message(role="user", content="hello")]
+            if stream:
+                _ = [event async for event in base.generate_stream(messages, thinking_enabled=enabled)]
+            else:
+                await base.generate(messages, thinking_enabled=enabled)
+        await send()
+        previous = calls[-1]
+        base._client.raccoon_thinking_models = {base.model: {
+            "managed": False, "supported": False, "can_disable": False, "display_levels": [],
+        }}
+        await send()
+        assert calls[-1] == previous
+        assert "raccoon_thinking_level" not in calls[-1]
