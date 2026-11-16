@@ -289,7 +289,8 @@ async def test_model_switch_keeps_explicit_session_budget_after_default_changes(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["fits", "compacts", "recheck_rejects"])
-async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(tmp_path, case):
+@pytest.mark.parametrize("entrypoint", ["prompt", "resume", "resume_twice", "load", "new"])
+async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(tmp_path, case, entrypoint):
     from box_agent.acp import BoxACPAgent
     from box_agent.schema import Message
     from tests.test_image_context import image_block
@@ -341,13 +342,32 @@ async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(t
         session.agent.add_user_message("Decide what to do next.")
         session.agent.messages.append(Message(role="assistant", content=old_output))
 
+    target_binding = {"source": "builtin", "model": "small",
+                      "contextWindow": 48_000, "maxTokens": 1_000}
+    if entrypoint != "prompt":
+        session.agent.session_log.append_unlogged_messages(session.agent.messages[1:], turn=0, step=None)
+        session.agent.session_log.flush()
+        if entrypoint == "new":
+            await adapter.new_session(
+                cwd=str(tmp_path), session_id="context-transition-test",
+                llm_binding=target_binding, execution_profile="deep",
+            )
+        else:
+            restore = adapter.resume_session if entrypoint.startswith("resume") else adapter.load_session
+            await restore(cwd=str(tmp_path), session_id=response.sessionId,
+                          llm_binding=target_binding, execution_profile="deep")
+            if entrypoint == "resume_twice":
+                await restore(cwd=str(tmp_path), session_id=response.sessionId, execution_profile="deep")
+        session = adapter._sessions[response.sessionId]
+
     prompt = [{"type": "text", "text": "Keep this pending message."}]
     if case == "recheck_rejects":
         prompt.append({"type": "image", "mimeType": "image/png", "data": image_block()["data"]})
     result = await adapter.prompt(**acp_params(SimpleNamespace(
         sessionId=response.sessionId, prompt=prompt,
-        field_meta={"llm_binding": {"source": "builtin", "model": "small",
-                                    "contextWindow": 48_000, "maxTokens": 1_000}},
+        # Resume/load carry the selected model themselves; the next prompt
+        # need not repeat that binding to receive the same transition guard.
+        field_meta={"llm_binding": target_binding} if entrypoint == "prompt" else {},
     )))
 
     assert prepared and all(model == "model-main" for model, _ in prepared)
@@ -391,6 +411,41 @@ async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(t
         assert session.llm_binding["model"] == "small"
         assert session.agent.llm.model == "small"
         assert session.agent.token_limit == 42_300
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override_at", ["resume", "prompt"])
+async def test_pending_smaller_model_can_be_replaced_before_the_next_prompt(tmp_path, override_at):
+    from box_agent.acp import BoxACPAgent
+    from tests.test_lite_llm_routing import _DummyConn, _DummyLLM
+
+    config = session_config(tmp_path)
+    config.llm.context_window = 300_000
+    main = _DummyLLM("main")
+    main.context_window = 300_000
+    adapter = BoxACPAgent(_DummyConn(), config, main, [], "system")
+    try:
+        created = await adapter.new_session(str(tmp_path))
+        target = {"source": "builtin", "model": "small", "contextWindow": 48_000, "maxTokens": 1_000}
+        await adapter.resume_session(str(tmp_path), created.session_id, llm_binding=target)
+        state = adapter._sessions[created.session_id]
+        assert state.session_llm.model == "model-main"
+        assert state.pending_llm_binding["model"] == "small"
+        replacement = {"source": "builtin", "model": "replacement",
+                       "contextWindow": 300_000, "maxTokens": 80_000}
+        if override_at == "resume":
+            await adapter.resume_session(str(tmp_path), created.session_id, llm_binding=replacement)
+        result = await adapter.prompt(
+            created.session_id, [{"type": "text", "text": "Continue."}],
+            **({"llm_binding": replacement} if override_at == "prompt" else {}),
+        )
+        state = adapter._sessions[created.session_id]
+        assert result.field_meta["ok"] is True
+        assert state.session_llm.model == "replacement"
+        assert state.llm_binding["model"] == "replacement"
+        assert state.pending_llm_binding is None
+    finally:
+        await adapter.aclose()
 
 
 @pytest.mark.asyncio

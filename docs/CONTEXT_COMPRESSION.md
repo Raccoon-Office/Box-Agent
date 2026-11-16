@@ -26,6 +26,14 @@ keeps the previous binding, original history and submitted user message with
 its attachments. The target model receives the request only after it passes
 this check.
 
+The same preflight applies when `session/resume`, `session/load`, or repeated
+`session/new` rebinds an existing live session with a smaller model (for example,
+while changing its execution profile). Restore keeps the accepted model and
+defers the requested binding to the next prompt, which may override that choice.
+Restore itself does not call a model. A cold restore without a live previous
+session has no previous client to reuse and retains the ordinary bounded
+compaction path with the supplied model.
+
 ## Request lifecycle
 
 ```text
