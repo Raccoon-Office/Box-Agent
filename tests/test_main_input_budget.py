@@ -29,6 +29,12 @@ async def wire_llm(context_window=20_000):
     def handle(request):
         payload = json.loads(request.content)
         requests.append(payload)
+        if not payload.get("stream"):
+            return httpx.Response(200, json={
+                "id": "judge", "object": "chat.completion", "created": 0, "model": payload["model"],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": '{"continue":false}'},
+                             "finish_reason": "stop"}],
+            })
         response = ("<summary>kept</summary>"
                     if payload["messages"][-1]["content"] == _SUMMARY_REQUEST else "done")
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=(
@@ -56,6 +62,67 @@ async def wire_llm(context_window=20_000):
         yield llm, requests
     finally:
         await llm.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding_source", ["builtin", "profile"])
+async def test_resumed_smaller_model_summarizes_on_previous_provider_before_target_request(
+    tmp_path, monkeypatch, binding_source,
+):
+    from tests.test_agent_session import session_config
+    from tests.test_acp import DummyConn
+
+    config = session_config(tmp_path)
+    config.llm.context_window = 256_000
+    config.llm.max_output_tokens = 63_999
+    target = {"source": binding_source, "model": "small-model",
+              "contextWindow": 180_000, "maxTokens": 80_000}
+    if binding_source == "profile":
+        target.update(version=2, profileId="hosted", profileRevision="target", routingMode="manual")
+    target_limit = derive_context_token_limit(180_000, 80_000)
+    async with wire_llm(context_window=256_000) as (llm, requests):
+        llm.max_output_tokens = 63_999
+        monkeypatch.setattr("box_agent.acp.client_for_model_profile", lambda binding, **kwargs:
+                            llm.for_model(binding["model"], max_output_tokens=binding["maxTokens"]))
+        adapter = BoxACPAgent(DummyConn(), config, llm, [], "system")
+        try:
+            original_binding = {**target, "model": llm.model, "contextWindow": 256_000, "maxTokens": 63_999}
+            if binding_source == "profile":
+                original_binding["profileRevision"] = "original"
+            created = await adapter.new_session(str(tmp_path), session_id="smaller-model-wire",
+                                                llm_binding=original_binding)
+            original = adapter._sessions[created.session_id]
+            original.agent.add_user_message("Retain the saved decision.")
+            old_detail = "old investigation detail. " * 14_000
+            original.agent.messages.append(Message(role="assistant", content=old_detail))
+            summary_estimate = _fallback_context_estimate([
+                *original.agent.messages, Message(role="user", content=_SUMMARY_REQUEST),
+            ], {}, llm=llm)
+            assert derive_context_token_limit(180_000, 8_192) < summary_estimate
+            assert summary_estimate < derive_context_token_limit(256_000, 8_192)
+            log = original.agent.session_log
+            log.append_unlogged_messages(original.agent.messages[1:], turn=0, step=None)
+            log.flush()
+
+            await adapter.resume_session(str(tmp_path), created.session_id, llm_binding=target,
+                                         execution_profile="deep")
+            assert requests == []  # Restoring a session must not run the model.
+            result = await adapter.prompt(created.session_id, [{"type": "text", "text": "Continue."}])
+
+            assert result.field_meta["ok"] is True
+            summary_requests = [r for r in requests if r["messages"][-1]["content"] == _SUMMARY_REQUEST]
+            assert len(summary_requests) == 1
+            assert summary_requests[0]["model"] == llm.model
+            assert any(m.get("content") == old_detail for m in summary_requests[0]["messages"])
+            assert summary_requests[0].get("max_tokens", summary_requests[0].get("max_completion_tokens")) == 8_192
+            main_requests = [r for r in requests if r["model"] == "small-model" and r.get("stream")]
+            assert len(main_requests) == 1
+            assert any("Summary:" in str(m.get("content")) for m in main_requests[0]["messages"])
+            assert not any(m.get("content") == old_detail for m in main_requests[0]["messages"])
+            assert (len(json.dumps(main_requests[0], ensure_ascii=False).encode("utf-8")) + 1) // 2 < target_limit
+            assert adapter._sessions[created.session_id].agent.token_limit == target_limit == 90_000
+        finally:
+            await adapter.aclose()
 
 
 @pytest.mark.asyncio
