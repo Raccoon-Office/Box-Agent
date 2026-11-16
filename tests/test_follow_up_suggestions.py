@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from box_agent.acp import BoxACPAgent
+from box_agent.acp import follow_up_suggestions as suggestions_module
 from box_agent.acp.follow_up_suggestions import (
     FollowUpSuggestionsStreamExtractor,
     build_follow_up_suggestions_generation_system_prompt,
@@ -29,6 +30,9 @@ class _RecordingConn:
 
 
 class _FollowUpLLM:
+    fenced = True
+    prefix = "已完成方案。\n"
+
     async def generate(self, messages, tools=None):
         return LLMResponse(content="完成。", finish_reason="stop")
 
@@ -36,7 +40,7 @@ class _FollowUpLLM:
         yield StreamEvent(
             type="text",
             delta=(
-                "已完成方案。\n```follow_up_suggestions\n"
+                self.prefix + ("```" if self.fenced else "") + "follow_up_suggestions\n"
                 '{"suggestions":["把方案拆成'
             ),
         )
@@ -46,7 +50,7 @@ class _FollowUpLLM:
         )
         yield StreamEvent(
             type="text",
-            delta='今日待办", "给我一份风险清单"]}\n```',
+            delta='今日待办", "给我一份风险清单"]}' + ("\n```" if self.fenced else ""),
         )
         yield StreamEvent(type="finish", finish_reason="stop")
 
@@ -162,6 +166,502 @@ def test_extractor_drops_invalid_or_unfinished_metadata() -> None:
     assert extractor.finish() == []
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_extractor_hides_bare_metadata_at_every_split(newline) -> None:
+    prefix = "小鸟图片已生成完成。" + newline
+    metadata = 'follow_up_suggestions' + newline * 2 + '{"suggestions":["换个风格", "生成空中的小鸟"]}'
+    text = prefix + metadata + newline + "后续正文"
+    for split in range(len(text) + 1):
+        extractor = FollowUpSuggestionsStreamExtractor()
+        chunks = extractor.push(text[:split]) + extractor.push(text[split:]) + extractor.finish()
+        assert "".join(chunks) == prefix + newline + "后续正文", split
+        assert extractor.suggestions == ["换个风格", "生成空中的小鸟"], split
+    extractor = FollowUpSuggestionsStreamExtractor()
+    visible = []
+    for char in text:
+        visible.extend(extractor.push(char))
+    visible.extend(extractor.finish())
+    assert "".join(visible) == prefix + newline + "后续正文"
+    assert extractor.suggestions == ["换个风格", "生成空中的小鸟"]
+
+
+@pytest.mark.parametrize("text", [
+    '正文提到 follow_up_suggestions\n{"suggestions":["继续"]}',
+    'follow_up_suggestions 是协议名称。',
+    'follow_up_suggestions_extra\n{"suggestions":["继续"]}',
+    'follow_up_suggestions\n普通正文',
+    'follow_up_suggestions\n{"other":["继续"]}',
+    'follow_up_suggestions\n{"suggestions":"继续"}',
+    'follow_up_suggestions\n{bad json}',
+    'follow_up_suggestions\n{"suggestions":["未完成',
+    'follow_up_sugg',
+])
+def test_extractor_preserves_non_metadata_bare_text(text) -> None:
+    extractor = FollowUpSuggestionsStreamExtractor()
+    visible = []
+    for char in text:
+        visible.extend(extractor.push(char))
+    visible.extend(extractor.finish())
+    assert "".join(visible) == text
+    assert extractor.suggestions == []
+
+
+def test_extractor_releases_oversized_unconfirmed_bare_text() -> None:
+    for suffix in [" " * 17_000, '\n{"unfinished":"' + "x" * 17_000]:
+        text = "follow_up_suggestions" + suffix
+        extractor = FollowUpSuggestionsStreamExtractor()
+        assert "".join(extractor.push(text)) == text
+        assert extractor.finish() == []
+        assert extractor.suggestions == []
+
+
+@pytest.mark.parametrize("candidate", ["{bad json}", '{"suggestions":["未完成'])
+def test_extractor_recovers_fenced_suggestions_after_bad_bare_candidate(candidate):
+    visible = f"回答。\nfollow_up_suggestions\n{candidate}\n"
+    fenced = '```follow_up_suggestions\n{"suggestions":["继续"]}\n```'
+    extractor = FollowUpSuggestionsStreamExtractor()
+    chunks = extractor.push(visible)
+    for char in fenced:
+        chunks.extend(extractor.push(char))
+    assert "".join(chunks) == visible
+    assert extractor.suggestions == ["继续"]
+    assert extractor.finish() == []
+
+
+def test_extractor_recovers_bare_suggestions_after_bad_candidate_at_every_split():
+    visible = 'follow_up_suggestions\n{"unterminated"\n'
+    text = visible + 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    for split in range(len(text) + 1):
+        extractor = FollowUpSuggestionsStreamExtractor()
+        chunks = extractor.push(text[:split]) + extractor.push(text[split:]) + extractor.finish()
+        assert "".join(chunks) == visible, split
+        assert extractor.suggestions == ["继续"], split
+
+
+def test_extractor_applies_bare_limit_independently_of_chunk_size():
+    prefix = 'follow_up_suggestions\n{"suggestions":["继续"],"extra":"'
+    limit = 16_384
+    for size in (limit, limit + 1):
+        text = prefix + "x" * (size - len(prefix) - 2) + '"}'
+        for split in (0, limit - 1, limit, len(text)):
+            extractor = FollowUpSuggestionsStreamExtractor()
+            chunks = extractor.push(text[:split]) + extractor.push(text[split:]) + extractor.finish()
+            assert "".join(chunks) == ("" if size == limit else text)
+            assert extractor.suggestions == (["继续"] if size == limit else [])
+
+
+@pytest.mark.parametrize("opening, closing", [
+    ("```text", "```"),
+    ("  ~~~~json", "  ~~~~~  "),
+    ("````text\r\n```", "````"),
+])
+def test_extractor_preserves_markdown_examples_at_every_split(opening, closing):
+    example = (
+        f"示例：\r\n{opening}\r\n"
+        'follow_up_suggestions\r\n{"suggestions":["示例"]}\r\n'
+        f"{closing}\r\n"
+    )
+    text = example + 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    for split in range(len(text) + 1):
+        extractor = FollowUpSuggestionsStreamExtractor()
+        chunks = extractor.push(text[:split]) + extractor.push(text[split:]) + extractor.finish()
+        assert "".join(chunks) == example, split
+        assert extractor.suggestions == ["继续"], split
+
+
+@pytest.mark.parametrize("example", [
+    "- ```text\n  follow_up_suggestions\n  {\"suggestions\":[\"示例\"]}\n  ```\n\n",
+    "10. ~~~text\n    示例\n    ~~~\n\n",
+    "1.  ```text\n    示例\n\n",
+    "- ```text\n\t示例\n  ```\n\n",
+    "- ```text\n \t示例\n  ```\n\n",
+    "- ```text\n  示例\n\n```text\nfollow_up_suggestions\n"
+    "{\"suggestions\":[\"示例\"]}\n```\n\n",
+])
+def test_extractor_accepts_top_level_metadata_after_list_code_fence(example):
+    text = example + 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    for split in range(len(text) + 1):
+        extractor = FollowUpSuggestionsStreamExtractor()
+        chunks = extractor.push(text[:split]) + extractor.push(text[split:]) + extractor.finish()
+        assert "".join(chunks) == example, split
+        assert extractor.suggestions == ["继续"], split
+
+
+@pytest.mark.parametrize("extra", [
+    pytest.param("9" * 5000, id="oversized-integer"),
+    pytest.param("NaN", id="invalid-constant"),
+])
+def test_extractor_preserves_bare_payload_on_decoder_errors(extra):
+    text = 'follow_up_suggestions\n{"suggestions":["继续"],"extra":' + extra + '}\n后续正文。'
+    extractor = FollowUpSuggestionsStreamExtractor()
+    assert "".join(extractor.push(text) + extractor.finish()) == text
+    assert extractor.suggestions == []
+
+
+def test_extractor_preserves_bare_payload_if_decoder_hits_recursion_limit(monkeypatch):
+    def decode(*args):
+        raise RecursionError
+
+    # The native decoder's recursion limit varies by Python version and platform.
+    monkeypatch.setattr(suggestions_module._BARE_DECODER, "raw_decode", decode)
+    text = 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    extractor = FollowUpSuggestionsStreamExtractor()
+    assert "".join(extractor.push(text) + extractor.finish()) == text
+    assert extractor.suggestions == []
+
+
+def test_extractor_waits_for_split_number_that_completes_as_a_float():
+    prefix = 'follow_up_suggestions\n{"suggestions":["继续"],"extra":' + "9" * 5000
+    extractor = FollowUpSuggestionsStreamExtractor()
+    assert extractor.push(prefix) == []
+    assert extractor.push("e-5000}") + extractor.finish() == []
+    assert extractor.suggestions == ["继续"]
+
+
+def test_extractor_bare_json_handles_escaped_quotes_braces_and_empty_suggestions() -> None:
+    extractor = FollowUpSuggestionsStreamExtractor()
+    text = 'follow_up_suggestions\n{"suggestions":["解释 } 和 \\"引号\\"", "次へ", "Continue"]}'
+    assert extractor.push(text) + extractor.finish() == []
+    assert extractor.suggestions == ['解释 } 和 "引号"', '次へ', 'Continue']
+    extractor = FollowUpSuggestionsStreamExtractor()
+    assert extractor.push('follow_up_suggestions\n{"suggestions":[]}') + extractor.finish() == []
+    assert extractor.suggestions == []
+
+
+def _assert_extraction_at_every_split(text, expected, suggestions):
+    chunkings = [[text[:split], text[split:]] for split in range(len(text) + 1)]
+    chunkings.append(list(text))
+    for chunks in chunkings:
+        extractor = FollowUpSuggestionsStreamExtractor()
+        visible = [piece for chunk in chunks for piece in extractor.push(chunk)]
+        visible.extend(extractor.finish())
+        assert "".join(visible) == expected, chunks
+        assert extractor.suggestions == suggestions, chunks
+
+
+@pytest.mark.parametrize("opening, closing", [
+    ("<follow_up_suggestions>", "</follow_up_suggestions>"),
+    ("follow_up_suggestions\n", "</follow_up_suggestions>"),
+    ("```follow_up_suggestions\n", "</follow_up_suggestions>"),
+    ("<follow_up_suggestions>\n", "```"),
+    ("```follow_up_suggestions\n", "```"),
+])
+def test_extractor_hides_xml_and_mixed_metadata_at_every_split(opening, closing):
+    text = '回答。\n' + opening + '{"suggestions":["继续"]}\n' + closing + '\n后续正文。'
+    _assert_extraction_at_every_split(text, '回答。\n\n后续正文。', ["继续"])
+
+
+@pytest.mark.parametrize("opening, closing", [
+    ("```follow_up_suggestions\n", "```"),
+    ("<follow_up_suggestions>", "</follow_up_suggestions>"),
+    ("follow_up_suggestions\n", "</follow_up_suggestions>"),
+])
+def test_extractor_does_not_close_on_delimiters_inside_json_strings(opening, closing):
+    text = (
+        '回答。\n' + opening
+        + '{"suggestions":["解释 ``` 和 </follow_up_suggestions> 的差异"]}\n'
+        + closing + '\n后续正文。'
+    )
+    _assert_extraction_at_every_split(
+        text, '回答。\n\n后续正文。', ["解释 ``` 和 </follow_up_suggestions> 的差异"],
+    )
+
+
+@pytest.mark.parametrize("text", [
+    '````markdown\n```follow_up_suggestions\n{"suggestions":["示例"]}\n```\n````',
+    '~~~text\n<follow_up_suggestions>{"suggestions":["示例"]}</follow_up_suggestions>\n~~~',
+    '```follow_up_suggestions_example\n{"suggestions":["示例"]}\n```',
+    '`<follow_up_suggestions>{"suggestions":["示例"]}</follow_up_suggestions>`',
+    '正文中的 ```follow_up_suggestions\n{"suggestions":["示例"]}\n```',
+    '> <follow_up_suggestions>{"suggestions":["示例"]}</follow_up_suggestions>',
+    '    <follow_up_suggestions>{"suggestions":["示例"]}</follow_up_suggestions>',
+    '<follow_up_suggestions_example>{"suggestions":["示例"]}</follow_up_suggestions_example>',
+])
+def test_extractor_preserves_metadata_examples_and_similar_names(text):
+    _assert_extraction_at_every_split(text, text, [])
+
+
+@pytest.mark.parametrize("opening", ["```follow_up_suggestions\n", "<follow_up_suggestions>"])
+def test_extractor_keeps_answer_after_metadata_missing_its_close(opening):
+    text = '回答。\n' + opening + '{"suggestions":["继续"]}\n后续正文。'
+    _assert_extraction_at_every_split(text, '回答。\n\n后续正文。', ["继续"])
+
+
+@pytest.mark.parametrize("opening", ["```follow_up_suggestions\n", "<follow_up_suggestions>"])
+@pytest.mark.parametrize("next_opening", ["```follow_up_suggestions\n", "<follow_up_suggestions>"])
+def test_extractor_recovers_a_new_block_after_truncated_explicit_metadata(opening, next_opening):
+    text = (
+        '回答。\n' + opening + '{"suggestions":["未完成\n'
+        + next_opening + '{"suggestions":["继续"]}\n</follow_up_suggestions>\n后续正文。'
+    )
+    _assert_extraction_at_every_split(text, '回答。\n\n后续正文。', ["继续"])
+
+
+def test_extractor_bounds_oversized_explicit_metadata_without_leaking_its_tail():
+    prefix = '回答。\n```follow_up_suggestions\n{"suggestions":["'
+    text = prefix + "x" * 17_000 + '</follow_up_suggestions> ``` more"]}\n```\n后续正文。'
+    for chunks in ([text], [text[:16_384], text[16_384:]], [text[i:i + 31] for i in range(0, len(text), 31)]):
+        extractor = FollowUpSuggestionsStreamExtractor()
+        visible = []
+        for chunk in chunks:
+            visible.extend(extractor.push(chunk))
+            assert len(extractor._buffer) <= 16_384
+        visible.extend(extractor.finish())
+        assert "".join(visible) == '回答。\n\n后续正文。'
+        assert extractor.suggestions == []
+
+
+@pytest.mark.parametrize("suffix", [
+    '\n<',
+    '\n</follow_up_sugg',
+    '\n```\nfollow_up_suggestions\n{"suggestions":["代码示例"]}\n```',
+])
+def test_extractor_preserves_code_and_unconfirmed_closers_after_bare_json(suffix):
+    text = 'follow_up_suggestions\n{"suggestions":["继续"]}' + suffix
+    _assert_extraction_at_every_split(text, suffix, ["继续"])
+
+
+@pytest.mark.parametrize("payload", ["123", "1e20", "-1.25", "null", '["not an object"]'])
+def test_extractor_discards_invalid_explicit_scalar_payloads_at_every_split(payload):
+    text = '回答。\n```follow_up_suggestions\n' + payload + '\n```\n后续正文。'
+    _assert_extraction_at_every_split(text, '回答。\n\n后续正文。', [])
+
+
+@pytest.mark.parametrize("opening, closing", [
+    ("<pre>", "</pre>"),
+    ("<code>", "</code>"),
+    ("<pre><code>", "</code></pre>"),
+    ('<pre class="example"><code data-language="json">', "</code></pre>"),
+    ('<PRE class="example">', "</PRE>"),
+])
+@pytest.mark.parametrize("metadata", [
+    'follow_up_suggestions\n{"suggestions":["示例"]}',
+    '```follow_up_suggestions\n{"suggestions":["示例"]}\n```',
+    '<follow_up_suggestions>{"suggestions":["示例"]}</follow_up_suggestions>',
+])
+def test_extractor_preserves_html_code_containers_at_every_split(opening, closing, metadata):
+    example = '示例：\n' + opening + '\n' + metadata + '\n' + closing + '\n正文。\n'
+    text = example + 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    _assert_extraction_at_every_split(text, example, ["继续"])
+
+
+def test_extractor_ignores_html_tags_inside_markdown_code_examples():
+    example = '```html\n<pre>\n```\n'
+    text = example + 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    _assert_extraction_at_every_split(text, example, ["继续"])
+
+
+@pytest.mark.parametrize("literal", [
+    '{"suggestions":["解释 &lt;/pre&gt; 和 &lt;/code&gt; 的作用"]}',
+    '{"suggestions":["解释 \\"&lt;/pre&gt;\\" 和 &lt;/code&gt; 的作用"]}',
+])
+def test_extractor_preserves_encoded_html_closers_inside_code_containers(literal):
+    block = 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    example = '<pre><code>\n' + literal + '\n' + block + '\n</code></pre>\n'
+    _assert_extraction_at_every_split(example + block, example, ["继续"])
+
+
+def test_extractor_accepts_crlf_closing_fence_at_every_split():
+    text = '回答。\r\n```follow_up_suggestions\r\n{"suggestions":["继续"]}\r\n```\r\n后续正文。'
+    _assert_extraction_at_every_split(text, '回答。\r\n\r\n后续正文。', ["继续"])
+
+
+@pytest.mark.parametrize("indent", [" ", "  ", "   "])
+def test_extractor_accepts_markdown_fence_indentation_at_every_split(indent):
+    text = '回答。\n' + indent + '```follow_up_suggestions\n{"suggestions":["继续"]}\n' + indent + '```\n后续正文。'
+    _assert_extraction_at_every_split(text, '回答。\n\n后续正文。', ["继续"])
+
+
+@pytest.mark.parametrize("example", [
+    '    ```follow_up_suggestions\n    {"suggestions":["示例"]}\n    ```\n',
+    '\t```follow_up_suggestions\n\t{"suggestions":["示例"]}\n\t```\n',
+    '````markdown\n ```follow_up_suggestions\n{"suggestions":["示例"]}\n ```\n````\n',
+])
+def test_extractor_preserves_indented_and_nested_fence_examples(example):
+    _assert_extraction_at_every_split(example, example, [])
+
+
+@pytest.mark.parametrize("opening, closing", [
+    ("Example: <code>", "</code>"),
+    ("Here's <code>", "</code>"),
+    ('Example: <pre class="example"><code>', "</code></pre>"),
+    ("<div><pre>", "</pre></div>"),
+    ("<code><code>inner</code>", "</code>"),
+    ("<code>\nconst tag = '&lt;/code&gt;';", "</code>"),
+    ("<code>\nconst tag = `&lt;/code&gt;`;", "</code>"),
+    ('<pre data-title="a > </pre> b">', "</pre>"),
+])
+def test_extractor_preserves_html_code_after_inline_prose(opening, closing):
+    example = opening + '\nfollow_up_suggestions\n{"suggestions":["Example"]}\n' + closing + '\n'
+    _assert_extraction_at_every_split(example, example, [])
+
+
+@pytest.mark.parametrize("prefix", [
+    'Example: ` <code> `\n',
+    'Example: `` <code> ``\n',
+    'Example: \\<code>\n',
+    'Example: &lt;code&gt;\n',
+])
+def test_extractor_does_not_treat_quoted_or_escaped_tags_as_html_containers(prefix):
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    _assert_extraction_at_every_split(text, prefix, ["继续"])
+
+
+@pytest.mark.parametrize("prefix", [
+    '<span title="<code>">Example</span>\n',
+    "<span title='<pre> > <code>'>Example</span>\n",
+    '<!-- <code> -->\n',
+    '<!-- > <pre> and <code> -->\n',
+])
+def test_extractor_does_not_open_code_containers_from_attributes_or_comments(prefix):
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+@pytest.mark.parametrize("tag", ["pre", "code"])
+@pytest.mark.parametrize("word", ["don't", "users'"])
+def test_extractor_does_not_treat_apostrophes_in_html_code_as_quoted_strings(tag, word):
+    prefix = f'Example: <{tag}>{word}</{tag}>\n'
+    text = prefix + '```follow_up_suggestions\n{"suggestions":["Next"]}\n```'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+def test_extractor_honors_real_html_closers_after_an_unmatched_quote(quote):
+    prefix = 'Example: <code>' + quote + '</code>\n'
+    text = prefix + '```follow_up_suggestions\n{"suggestions":["Next"]}\n```'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_extractor_honors_html_closers_even_between_paired_text_quotes(quote):
+    prefix = '<code>' + quote + '</code>' + quote + '\n'
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+def test_extractor_keeps_a_code_container_without_a_real_closing_tag(quote):
+    example = '<code>' + quote + '\nfollow_up_suggestions\n{"suggestions":["Example"]}'
+    _assert_extraction_at_every_split(example, example, [])
+
+
+def test_extractor_preserves_a_multiline_template_string_containing_an_encoded_tag():
+    example = (
+        '<code>const template = `literal &lt;/code&gt;\n'
+        'follow_up_suggestions\n{"suggestions":["Example"]}\n'
+        '`;\n</code>\n'
+    )
+    text = example + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, example, ["Next"])
+
+
+def test_extractor_closes_nested_code_containers_with_their_ancestor():
+    prefix = '<pre><code>Example</pre>\n'
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+def test_extractor_ignores_html_closers_without_a_matching_container():
+    example = '<pre>Example </code>\nfollow_up_suggestions\n{"suggestions":["Example"]}\n</pre>\n'
+    text = example + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, example, ["Next"])
+
+
+@pytest.mark.parametrize("tag", ["code", "pre"])
+@pytest.mark.parametrize("wrapper", ["`", "``", "\\"])
+@pytest.mark.parametrize("raw", [False, True])
+def test_extractor_matches_renderer_markdown_context_around_html_closers(tag, wrapper, raw):
+    prefix = f'<{tag}>\n' if raw else f'Example: <{tag}>'
+    closing = wrapper + f'</{tag}>' + ("" if wrapper == "\\" else wrapper)
+    metadata = 'follow_up_suggestions\n{"suggestions":["Example"]}'
+    text = prefix + closing + '\n' + metadata + f'\n</{tag}>'
+    expected = prefix + closing + f'\n\n</{tag}>' if raw else text
+    _assert_extraction_at_every_split(text, expected, ["Example"] if raw else [])
+
+
+@pytest.mark.parametrize("prefix, raw", [
+    ('<code>', False),
+    ('Example:\n<code>\n', False),
+    ('Example:\n\n<code>\n', True),
+])
+def test_extractor_starts_raw_code_blocks_only_at_paragraph_boundaries(prefix, raw):
+    closing = '`</code>`\n'
+    metadata = 'follow_up_suggestions\n{"suggestions":["Example"]}'
+    text = prefix + closing + metadata + '\n</code>'
+    expected = prefix + closing + '\n</code>' if raw else text
+    _assert_extraction_at_every_split(text, expected, ["Example"] if raw else [])
+
+
+@pytest.mark.parametrize("ticks", ["`", "``"])
+def test_extractor_preserves_metadata_inside_closed_multiline_inline_code(ticks):
+    example = 'Example: ' + ticks + '\nfollow_up_suggestions\n{"suggestions":["Example"]}\n' + ticks + '\n'
+    text = example + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, example, ["Next"])
+
+
+@pytest.mark.parametrize("ticks", ["`", "``"])
+@pytest.mark.parametrize("fenced", [False, True])
+def test_extractor_accepts_metadata_after_unmatched_inline_backticks(ticks, fenced):
+    prefix = 'An unmatched ' + ticks + ' is ordinary text.\n'
+    metadata = 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    text = prefix + ('```' + metadata + '\n```' if fenced else metadata)
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+def test_extractor_confirms_inline_closing_run_at_end_of_response():
+    example = 'Example: ``\nfollow_up_suggestions\n{"suggestions":["Explain ` ticks"]}\n``'
+    _assert_extraction_at_every_split(example, example, [])
+
+
+def test_extractor_bounds_waiting_for_an_unmatched_inline_code_span():
+    prefix = 'Example: `\n'
+    metadata = 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    suffix = '\n' + 'x' * 17_000
+    text = prefix + metadata + suffix
+    chunkings = [[text], [text[:16_384], text[16_384:]], [text[i:i + 97] for i in range(0, len(text), 97)]]
+    for chunks in chunkings:
+        extractor = FollowUpSuggestionsStreamExtractor()
+        visible = []
+        for chunk in chunks:
+            visible.extend(extractor.push(chunk))
+            assert len(extractor._buffer) <= 16_384
+        visible.extend(extractor.finish())
+        assert ''.join(visible) == prefix + suffix
+        assert extractor.suggestions == ["Next"]
+
+
+def test_extractor_gives_fenced_blocks_priority_over_unmatched_inline_backticks():
+    example = 'Example: `\n```python\nfollow_up_suggestions\n{"suggestions":["Example"]}\n```\n'
+    text = example + '```follow_up_suggestions\n{"suggestions":["Next"]}\n```'
+    _assert_extraction_at_every_split(text, example, ["Next"])
+
+
+@pytest.mark.parametrize("prefix, suffix", [
+    ('Example: `\n\n', '\n`'),
+    ('Example: `\n', '\n\n`'),
+    ('Example: `\n', '\n```python\ntext `\n```'),
+])
+def test_extractor_does_not_extend_inline_code_across_block_boundaries(prefix, suffix):
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["Next"]}' + suffix
+    _assert_extraction_at_every_split(text, prefix + suffix, ["Next"])
+
+
+@pytest.mark.parametrize("closing", ["``` ", "````\t\r"])
+def test_extractor_recovers_from_oversized_truncated_metadata_with_padded_closer(closing):
+    text = '回答。\n```follow_up_suggestions\n{"suggestions":["' + "x" * 17_000 + '\n' + closing + '\n后续正文。'
+    expected = '回答。\n' + ('\r' if closing.endswith('\r') else '') + '\n后续正文。'
+    chunkings = [[text], list(text), [text[index:index + 97] for index in range(0, len(text), 97)]]
+    close_start = text.index(closing)
+    chunkings.extend([text[:split], text[split:]] for split in range(close_start, len(text) + 1))
+    for chunks in chunkings:
+        extractor = FollowUpSuggestionsStreamExtractor()
+        visible = [part for chunk in chunks for part in extractor.push(chunk)]
+        visible.extend(extractor.finish())
+        assert ''.join(visible) == expected, list(map(len, chunks))
+        assert extractor.suggestions == []
+
+
 def test_normalize_follow_up_suggestions_limits_and_deduplicates() -> None:
     assert normalize_follow_up_suggestions(
         ["  整理成待办  ", "整理成待办", "再生成风险清单", "补充负责人", "第四条"]
@@ -185,11 +685,22 @@ def test_prompt_requires_a_structured_follow_up_block_only_after_completion() ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("judge_enabled", [False, True])
+@pytest.mark.parametrize("fenced, invalid_bare", [
+    (False, ""),
+    (True, ""),
+    pytest.param(
+        True,
+        'follow_up_suggestions\n{"suggestions":["忽略"],"extra":' + "9" * 5000 + '}\n后续正文。\n',
+        id="fenced-after-decoder-error",
+    ),
+])
 async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(
-    tmp_path, judge_enabled,
+    tmp_path, judge_enabled, fenced, invalid_bare,
 ) -> None:
     conn = _RecordingConn()
     llm = _JudgedFollowUpLLM() if judge_enabled else _FollowUpLLM()
+    llm.fenced = fenced
+    llm.prefix += invalid_bare
     agent = BoxACPAgent(
         conn,
         Config(
@@ -219,8 +730,7 @@ async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(
         for update in conn.updates
         if getattr(update.update, "sessionUpdate", None) == "agent_message_chunk"
     )
-    assert visible_text == "已完成方案。\n"
-    assert "follow_up_suggestions" not in visible_text
+    assert visible_text == "已完成方案。\n" + invalid_bare
     suggestion_updates = [
         update.update.rawOutput
         for update in conn.updates

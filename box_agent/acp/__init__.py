@@ -1037,6 +1037,7 @@ class SessionState(AgentSession):
     trace_writer: SessionTraceWriter | None = None
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None
+    pending_llm_binding: dict[str, Any] | None = None
     inject_queue: InjectionManager = field(default_factory=InjectionManager)
     wrap_up_requested: bool = False
     connector_skill_grants: set[str] = field(default_factory=set)
@@ -1821,7 +1822,12 @@ class BoxACPAgent:
         self, params: NewSessionRequest, upstream_session_id: str, *, load_existing=False,
     ) -> NewSessionResponse:
         meta = getattr(params, "field_meta", None) or {}
-        llm_binding = _normalize_llm_binding(meta) or self._default_llm_binding
+        import base64
+        session_id = "acp-v1-" + base64.urlsafe_b64encode(upstream_session_id.encode()).decode().rstrip("=")
+        previous = self._sessions.get(session_id)
+        llm_binding = (_normalize_llm_binding(meta)
+                       or (previous.pending_llm_binding if previous is not None else None)
+                       or self._default_llm_binding)
         bound_client = self._llm_for_binding(llm_binding)
         if "raccoon_thinking_level" in meta:
             provider = getattr(bound_client, "_client", None)
@@ -1836,8 +1842,6 @@ class BoxACPAgent:
         # is populated on the first turn). This is a no-op after the first
         # session — the task caches its result.
         await self._ensure_skills_loaded()
-        import base64
-        session_id = "acp-v1-" + base64.urlsafe_b64encode(upstream_session_id.encode()).decode().rstrip("=")
         supplied_product_id = bool((getattr(params, "field_meta", None) or {}).get("session_id"))
         bash_process_owner_id = (
             f"acp-{uuid5(self._process_owner_namespace, upstream_session_id).hex}"
@@ -1978,7 +1982,32 @@ class BoxACPAgent:
             session_context_window,
             session_max_output_tokens,
         )
+        pending_llm_binding = None
+        if (previous is not None and previous.session_llm is not None
+                and llm_binding is not None and llm_binding != previous.llm_binding
+                and session_token_limit < previous.agent.token_limit):
+            # A host may resume/recreate the session to change execution settings
+            # and its model together. Keep the accepted model through that rebind;
+            # prompt uses the same transactional preflight as an in-place switch.
+            pending_llm_binding = llm_binding
+            llm_binding = previous.llm_binding
+            # Keep the accepted model, but bind the new session preferences to a
+            # fresh client so a changed/reset preference cannot inherit the old one.
+            session_llm = SessionBoundLLM(
+                self._llm_for_binding(previous.llm_binding).for_model(
+                    previous.session_llm.model,
+                    max_output_tokens=previous.session_llm.max_output_tokens,
+                ),
+                reasoning_effort=reasoning_effort,
+                raccoon_thinking_level=raccoon_thinking_level,
+            )
+            session_context_window = previous.session_llm.context_window
+            session_max_output_tokens = previous.session_llm.max_output_tokens
+            session_token_limit = previous.agent.token_limit
+            session_llm.context_window = session_context_window
+            session_llm.max_output_tokens = session_max_output_tokens
         session_llm.set_auto_model_candidates(
+            previous.session_llm.auto_model_candidates if pending_llm_binding else
             (llm_binding or {}).get("autoRouting", {}).get("models", [])
         )
         session_llm.set_request_context(
@@ -2324,6 +2353,7 @@ class BoxACPAgent:
                 summary_llm=summary_llm,
                 session_mode=session_mode,
                 llm_binding=llm_binding,
+                pending_llm_binding=pending_llm_binding,
                 permission_engine=perm_engine, grant_store=grant_store,
                 thinking_enabled=deep_think,
                 reasoning_effort=reasoning_effort,
@@ -2962,7 +2992,7 @@ class BoxACPAgent:
                          error_type=type(exc).__name__)
                 host_connector_status = _UNAVAILABLE_CONNECTOR_STATUS
         pending_llm = None
-        requested_llm_binding = _normalize_llm_binding(prompt_meta)
+        requested_llm_binding = _normalize_llm_binding(prompt_meta) or state.pending_llm_binding
         if requested_llm_binding is not None and requested_llm_binding != state.llm_binding:
             if state.turn_active:
                 raise ValueError("cannot switch llm_binding while a turn is active")
@@ -3168,6 +3198,7 @@ class BoxACPAgent:
                 summary_llm=state.summary_llm or state.session_llm,
                 commit=commit_model_switch,
             )
+        state.pending_llm_binding = None
         if state.memory_extractor is not None and hasattr(state.memory_extractor, "set_turn_id"):
             state.memory_extractor.set_turn_id(turn_id)
         plan_approval = None if cloud_handoff else _plan_approval_from_meta(prompt_meta)

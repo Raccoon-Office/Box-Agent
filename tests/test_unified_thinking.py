@@ -298,3 +298,56 @@ async def test_unmanaged_catalog_keeps_existing_native_wire(stream, enabled):
         await send()
         assert calls[-1] == previous
         assert "raccoon_thinking_level" not in calls[-1]
+
+
+@pytest.mark.parametrize("preference_key,initial,next_value", [
+    ("raccoon_thinking_level", "level_5", "level_2"),
+    ("raccoon_thinking_level", "level_5", None),
+    ("reasoning_effort", "max", "medium"),
+    ("reasoning_effort", "max", None),
+])
+async def test_smaller_model_restore_uses_new_preferences_before_and_after_binding(
+    tmp_path, preference_key, initial, next_value,
+):
+    async with wire_client(model="gpt-6-astra") as (base, calls):
+        base._client.raccoon_thinking_models = {
+            "gpt-6-astra": CAPABILITY, "gpt-6-small": CAPABILITY,
+        } if preference_key == "raccoon_thinking_level" else {}
+        async with protocol(tmp_path, base) as (request, state_for):
+            first = state_for(await request({
+                "session_id": "restore-thinking", preference_key: initial,
+                "llm_binding": {"source": "builtin", "model": "gpt-6-astra",
+                                "contextWindow": 300000, "maxTokens": 4000},
+            }))
+            meta = {"session_id": "restore-thinking", "deep_think": True,
+                    "llm_binding": {"source": "builtin", "model": "gpt-6-small",
+                                    "contextWindow": 48000, "maxTokens": 1000}}
+            if next_value is not None:
+                meta[preference_key] = next_value
+            restored = state_for(await request(meta))
+            assert restored.pending_llm_binding["model"] == "gpt-6-small"
+            assert restored.session_llm.model == "gpt-6-astra"
+            assert getattr(restored.session_llm, "_" + preference_key) == next_value
+            assert getattr(first.session_llm, "_" + preference_key) == initial
+            # A second restore without an explicit target must retain the pending
+            # binding while keeping the newly supplied (or reset) preference.
+            meta.pop("llm_binding")
+            restored_reply = await request(meta)
+            restored = state_for(restored_reply)
+            assert restored.pending_llm_binding["model"] == "gpt-6-small"
+            assert getattr(restored.session_llm, "_" + preference_key) == next_value
+            messages = [Message(role="user", content="hello")]
+            for model in ("gpt-6-astra", "gpt-6-small"):
+                if model == "gpt-6-small":
+                    result = await request({}, method="session/prompt",
+                                           session_id=restored_reply["result"]["sessionId"])
+                    assert "error" not in result
+                    assert restored.pending_llm_binding is None
+                await restored.session_llm.generate(messages, thinking_enabled=True)
+                assert calls[-1]["model"] == model
+                if preference_key == "raccoon_thinking_level":
+                    assert calls[-1].get(preference_key) == next_value
+                elif next_value is not None:
+                    assert calls[-1]["reasoning_effort"] == "medium"
+                else:
+                    assert calls[-1].get("reasoning_effort") != "xhigh"
