@@ -6,6 +6,57 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## Five-level session reasoning and unified hosted thinking (PR #257)
+
+- **Scope and source:** [PR #257](https://github.com/Raccoon-Office/Box-Agent/pull/257)
+  owns the implementation and [source protocol](https://github.com/Raccoon-Office/Box-Agent/blob/54e3e51fdb5abd44a760d44e72b070a8dbc8df09/docs/reasoning-configuration.md).
+  This companion record lands ahead of that implementation; it does not activate
+  or release the protocol. Read the source contract while the PR is pending,
+  then the repository's [thinking configuration](../reasoning-configuration.md).
+- **Native compatibility:** Optional ACP `reasoning_effort` accepts `fast`,
+  `medium`, `high`, `xhigh`, and `max`; omission retains the legacy boolean
+  selection. Provider adapters own native wire mapping and Anthropic response
+  headroom. Opus 4.7/4.8 also use adaptive thinking for legacy
+  `deep_think=true` without an explicit effort; only explicit non-Fast choices
+  add `output_config.effort`. Fast, utilities, and omitted disabled choices do
+  not request thinking. This model-specific format change must not be confused
+  with retaining the previous manual-budget request.
+- **Hosted contract:** ACP initialize advertises
+  `_meta.raccoon_thinking.protocol_version: 1`; hosts renegotiate it per process
+  before sending `_meta.raccoon_thinking_level` (`off`, `level_1` through
+  `level_5`). The native host validates `models[].params.raccoon_thinking` and
+  freezes `raccoonThinkingModels` in an authenticated model-profile revision.
+  That metadata, rather than a model-name guess or renderer flag, selects the
+  unified HTTP field. Explicit unmanaged entries keep native policy, including
+  when a unified preference was saved; managed unsupported entries omit both
+  native and unified controls. Missing/malformed capabilities do not enable
+  unified requests. Invalid, null, or mutually exclusive ACP fields fail with
+  `-32602` before workspace creation.
+- **Session and auxiliary boundary:** Store the original preference across
+  model switches, child clones, and smaller-window restores; derive each
+  request's supported value without mutating process defaults or the saved
+  choice. Read with the [context compression contract](../CONTEXT_COMPRESSION.md):
+  deferred model binding uses the new session preference, not the old client's.
+  Utilities and summaries do not inherit main-request thinking controls;
+  utility runs also keep memory disabled instead of restoring a process backend.
+- **Deployment and rollback:** `raccoon-lab` owns UI/persistence and authenticated
+  catalog profiles; the business backend and matching LiteLLM deployment own
+  unified-to-provider translation. Omitted preferences remain compatible with
+  older hosts; an older runtime without the advertised capability requires the
+  paired host to omit/reset the new preference or request an upgrade. Coordinate
+  rollback of runtime, host controls/profile metadata, and backend support;
+  do not leave a host requiring a capability the restored runtime lacks. No
+  existing session history or user data is rewritten by this protocol.
+- **Proof and remaining boundary:** Pinned source regression entry points are
+  [protocol/SDK wire tests](https://github.com/Raccoon-Office/Box-Agent/blob/54e3e51fdb5abd44a760d44e72b070a8dbc8df09/tests/test_unified_thinking.py),
+  [native effort/budget tests](https://github.com/Raccoon-Office/Box-Agent/blob/54e3e51fdb5abd44a760d44e72b070a8dbc8df09/tests/test_reasoning_effort.py),
+  and [catalog validation tests](https://github.com/Raccoon-Office/Box-Agent/blob/54e3e51fdb5abd44a760d44e72b070a8dbc8df09/tests/test_thinking_catalog_managed.py).
+  Existing disabled-policy, model-profile, session/input-budget, and utility
+  memory tests cover adjacent contracts. These anchors are not a claim that a
+  later Head or installed runtime passed. Rebuild, install, restart, fresh-task
+  desktop validation, and real provider acceptance remain separate release
+  checks; earlier runtime evidence cannot certify the main-synchronized Head.
+
 ## Desktop-managed builtin Skill sources (PR #269)
 
 - [PR #269](https://github.com/Raccoon-Office/Box-Agent/pull/269) adds
@@ -312,6 +363,7 @@ decision, read those entries together.
 
 | Area | Affected paths or keywords | Current effective decision | Relationship | Details |
 | --- | --- | --- | --- | --- |
+| Session reasoning and hosted thinking | `llm/reasoning.py`, `model_profiles.py`, `reasoning_effort`, `raccoon_thinking_level`, `raccoonThinkingModels` | PR #257 adds isolated native effort and capability-gated hosted preferences; utilities retain disabled policy and unmanaged entries retain native routing. | Companion record precedes implementation; coordinates host/backend/runtime adoption and rollback, without changing existing data. | [PR #257 contract and rollout](#five-level-session-reasoning-and-unified-hosted-thinking-pr-257) |
 | Product directory access | `PermissionEngine`, `shell_inspection.py`, `BOX_AGENT_CLIENT_ROOT`, `BOX_AGENT_CLIENT_DATA_ROOT`, restricted ACP | Actual product roots default to read/write; Bash product symlink traversal is accepted while canonical file checks and recognized builtin Skill write guards remain. | Supersedes physical containment for Bash product access; paired desktop path propagation and runtime rollout remain separate. | [PR #264](#product-directory-defaults-and-bash-traversal-pr-264) |
 | ACP structured input | `input_context.py`, `selection_context`, `database_context`, history edit, `_inject` | Agent validates and projects host facts; semantic context participates in idempotency without granting tool access. | Paired host contract; prompts without new context retain their fingerprint. | [PR #246](#structured-input-and-selection-ownership-pr-246) |
 | Session/output directories | `params.cwd`, `artifact_mode`, `artifact_root_dir`, `BOX_AGENT_OUTPUT_DIR`, artifact scan, PPT, research | Session cwd is stable; legacy path selectors warn and are ignored; General-mode task folders are model-created file organization only. | Supersedes fixed per-session output-root behavior. | [2026-09-09 cwd-owned task organization](#2026-09-09--cwd-owned-task-organization-and-legacy-output-root-deprecation) |
