@@ -10,7 +10,118 @@ Utility calls, including image inspection, long-page summaries and the
 continuation judge, continue to request `thinking_enabled=False`. They use the
 same provider adapter, so endpoint compatibility applies to them too.
 
-## Enabled thinking effort
+## Unified hosted model selection
+
+ACP initialize advertises `_meta.raccoon_thinking.protocol_version: 1`.
+Hosts must verify this capability before sending an explicit unified preference;
+older runtimes may silently ignore unknown metadata. The desktop rejects such
+requests with upgrade/reset guidance, while omitted preferences remain compatible.
+The capability must be renegotiated for each runtime process.
+
+ACP carries the original preference, not the main model's derived HTTP value.
+For example, `off` on a required-thinking parent becomes `level_1` only in that
+parent's HTTP request; a child using a disable-capable model still sends `off`.
+Unsupported parent models likewise retain an enabled preference for later child
+models and rebinding. Utility calls continue to omit the unified field.
+
+Ordinary hosted business models use `_meta.raccoon_thinking_level`: `off`,
+`level_1` … `level_5`. An absent preference stays absent, so the business backend
+chooses its default. The desktop reads `models[].params.raccoon_thinking` from
+the ordinary model catalog and freezes the validated per-model capability map
+as `raccoonThinkingModels` in its authenticated model-profile revision. Box-Agent
+uses that profile metadata, never a model-name heuristic or a bare ACP flag, to
+select the unified protocol. The OpenAI SDK extension emits the new field at the
+HTTP top level, with no native reasoning controls. Model IDs are unchanged.
+
+Catalog metadata distinguishes managed supported, managed unsupported, and
+unmanaged entries. `managed` may be omitted only on an otherwise valid managed
+capability for backward compatibility. An explicit non-boolean is invalid.
+Unmanaged entries require `supported=false`, `can_disable=false`, an empty
+`display_levels`, and no `default_level`; they preserve the native request route
+and do not emit a unified field. Hosts hide/disable unified controls without
+claiming that upstream thinking has been disabled, and retain the saved preference.
+Managed unsupported entries instead require `can_disable=true` and
+`default_level=off`; their unified route emits no thinking controls.
+
+Unsupported models omit the new field. `off` on a model that cannot disable
+thinking becomes `level_1` for that request; the host preserves the saved `off`
+preference. Sparse display levels round upward for presentation only: a saved
+`level_4` still sends `level_4` even when the UI displays the `level_5` label.
+Missing/malformed capabilities disable the new control and retain the old route.
+Special catalogs and custom native profiles retain their native behavior.
+
+The new and legacy ACP effort fields are mutually exclusive. Invalid values
+(including null), conflicting fields, or a new field without a hosted capability
+return ACP `-32602 Invalid params` before workspace creation. Utility sessions
+and in-session summaries omit inherited unified levels; native utilities retain
+the endpoint's existing disabled policy. Explicit main-request Fast is evaluated
+by the provider adapter; `thinking_enabled=False` always means the auxiliary/
+legacy disabled policy, without a session-effort override.
+
+The business backend owns native model translation and must be deployed with
+its matching LiteLLM support. Capability availability gates adoption; local tests
+do not establish deployment or live-provider acceptance.
+
+## Five-level native host selection
+
+ACP `session/new` and `session/load` accept optional `_meta.reasoning_effort`:
+`fast`, `medium`, `high`, `xhigh`, or `max`. Invalid values fail validation.
+When present, this field takes precedence over `deep_think`; omission keeps the
+legacy boolean behavior. It is independent of the three-level `execution_profile`.
+Hosts must recreate/load the ACP session to change effort between turns.
+
+The session owns an isolated provider view. Model rebinding and child model
+clones preserve the choice without modifying process defaults. Calls that
+explicitly disable thinking (such as summaries) retain their existing policy.
+
+| Provider dialect | Translation |
+| --- | --- |
+| OpenAI-compatible, including SenseNova | Forward the selected effort exactly; `fast` uses the existing disabled-thinking policy. GPT-6 Astra / GPT-6.1 Sol/Terra fast calls use `low`. |
+| Kimi K3, GLM-5.2/5.3 | Medium/high use `high`; xhigh/max use `max`; fast keeps the existing dialect. |
+| DeepSeek V4 family | Medium/high/xhigh use `high`; max uses `max`; fast disables native thinking. |
+| Gemini | Medium uses `medium`; higher settings use `high`; fast retains its model-specific policy. |
+| Qwen, Doubao, older DeepSeek | Retain their native on/off controls. |
+| Anthropic manual-thinking models | Native thinking budgets: 4,000 / 8,000 / 16,000 / 32,000 tokens, capped to leave at least 25% of `max_output_tokens` (minimum 1,024 tokens) for the response; fast omits thinking. |
+
+Claude Opus 4.7/4.8 use `thinking.type=adaptive` plus `output_config.effort`
+for explicit non-Fast native selections. Fast, omitted choices, and utilities
+preserve their previous default request. GPT-4.1 and other non-reasoning GPT-4/
+GPT-3.5 families omit native effort even when an old host supplies a preference.
+See [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort).
+
+Anthropic manual thinking requires `max_output_tokens >= 2048` so both thinking and
+the response have at least 1,024 tokens available. Smaller caps fail locally
+when thinking is requested; fast and utility calls retain the full output cap
+without a thinking budget. At an 8,192-token cap, xhigh/max request 6,144 thinking
+tokens; at 12,288, they request 9,216. The default 64,000-token cap retains all
+four native budgets. This headroom reduces truncation risk, but cannot guarantee
+a complete response for every task. See the [Anthropic budget rules](https://platform.claude.com/docs/en/build-with-claude/extended-thinking#budget-rules-and-tuning).
+
+GLM-5.2 fast and utility requests retain the legacy disabled-thinking dialect:
+no effort field by default, or the existing SenseNova policy when the model is
+explicitly opted into that dialect through `BOX_AGENT_SENSENOVA_MODEL_PREFIXES`.
+In the latter case, `reasoning_effort_when_disabled: low` remains effective even
+when the session has an explicit effort.
+
+Five host choices do not imply five distinct native levels on every model.
+OpenAI-compatible gateways that reject an explicit effort return the provider
+error; there is no hidden retry at another level. On 2026-11-09, a rebuilt
+1.0.0 darwin-arm64 runtime installed in the raccoon-lab development client
+completed live requests at all five levels using `sn-sensenova-6-8-flash-lite-p`.
+Switching the same conversation to `sn-sensenova-6-8-flash-p` at `max` also
+completed, with the runtime reporting the new actual model. A separate local
+HTTP fixture verified the packaged runtime's exact outbound effort values.
+These checks establish request acceptance, not distinct server-side compute
+budgets or task-quality differences. Other model gateways were not live-tested.
+Existing GPT-6 Sol/Luna Chat Completions function-tool restrictions remain in place.
+
+References: [OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning),
+[Kimi K3](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart),
+[GLM thinking](https://docs.z.ai/guides/capabilities/thinking),
+[DeepSeek thinking](https://api-docs.deepseek.com/guides/thinking_mode/).
+
+## Legacy enabled thinking effort
+
 
 For OpenAI-compatible requests, enabling thinking selects `reasoning_effort: "max"`
 only for these documented model families:
@@ -30,9 +141,8 @@ model's existing behavior. In particular, Kimi K3 and GLM-5.3 still use `low`,
 and GPT-6 Sol/Luna requests with function tools still force `none` on both paths.
 
 Gemini, older models and unknown model names retain their existing mappings.
-Qwen and Doubao retain their existing thinking switches. Anthropic requests
-still use their native thinking budget; `output_config.effort` is a separate API
-contract and is not changed here.
+Qwen and Doubao retain their existing thinking switches. Anthropic legacy manual-thinking models retain their native budget; supported
+adaptive models use the model-specific path described above.
 
 `max` is intended for demanding tasks and can increase latency and token usage.
 [OpenAI recommends evaluating the tradeoff](https://developers.openai.com/api/docs/guides/deployment-checklist)

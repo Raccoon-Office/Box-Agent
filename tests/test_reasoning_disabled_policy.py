@@ -9,7 +9,7 @@ from openai import AsyncOpenAI, UnprocessableEntityError
 from pydantic import ValidationError
 
 from box_agent.config import Config
-from box_agent.llm import LLMClient
+from box_agent.llm import LLMClient, SessionBoundLLM
 from box_agent.retry import RetryConfig
 from box_agent.schema import LLMProvider, Message
 
@@ -374,3 +374,36 @@ def test_cli_config_reports_endpoint_policy_and_validates_updates(tmp_path, monk
     previous = path.read_text()
     assert cli.cmd_config(set_pair=(set_key, "medium")) == 1
     assert path.read_text() == previous
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("sensenova_dialect", [False, True])
+@pytest.mark.parametrize("policy", [None, "none", "low"])
+@pytest.mark.parametrize("effort", [None, "fast", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_glm52_session_effort_preserves_disabled_endpoint_policy(
+    monkeypatch, stream, sensenova_dialect, policy, effort, enabled,
+):
+    monkeypatch.setenv(
+        "BOX_AGENT_SENSENOVA_MODEL_PREFIXES", "sn-glm-" if sensenova_dialect else "",
+    )
+    async with wire_client(model="sn-glm-5-2", policy=policy) as (client, requests):
+        bound = SessionBoundLLM(client, reasoning_effort=effort)
+        messages = [Message(role="user", content="hello")]
+        if stream:
+            events = [event async for event in bound.generate_stream(
+                messages, thinking_enabled=enabled)]
+            assert events[-1].type == "finish"
+        else:
+            await bound.generate(messages, thinking_enabled=enabled)
+        assert len(requests) == 1
+        payload = requests[0]
+        if enabled and effort != "fast":
+            assert payload["reasoning_effort"] == (
+                "high" if effort in ("medium", "high") else "max"
+            )
+        elif sensenova_dialect:
+            assert payload["reasoning_effort"] == (policy or "none")
+        else:
+            assert "reasoning_effort" not in payload

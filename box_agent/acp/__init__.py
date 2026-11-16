@@ -234,6 +234,11 @@ from box_agent.run_observer import (
     cleanup_turn_resources,
 )
 from box_agent.experts import ExpertSessionContext
+from box_agent.llm.reasoning import (
+    normalize_raccoon_thinking,
+    parse_raccoon_thinking_level,
+    parse_reasoning_effort,
+)
 from box_agent.execution_profile import (
     FAST_OPTIONAL_SKILLS,
     ExecutionProfile,
@@ -1738,7 +1743,7 @@ class BoxACPAgent:
             agent_info=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
         skills = self._skills_meta()
-        response_meta: dict[str, Any] = {}
+        response_meta: dict[str, Any] = {"raccoon_thinking": {"protocol_version": 1}}
         if skills is not None:
             # Pydantic alias: _meta ↔ field_meta
             response_meta["skills"] = skills
@@ -1775,6 +1780,17 @@ class BoxACPAgent:
 
     async def _new_session_with_binding(self, params: NewSessionRequest, *, load_existing=False) -> NewSessionResponse:
         meta = getattr(params, "field_meta", None) or {}
+        try:
+            if "reasoning_effort" in meta:
+                if meta["reasoning_effort"] is None:
+                    raise ValueError("reasoning_effort must not be null")
+                parse_reasoning_effort(meta["reasoning_effort"])
+            if "raccoon_thinking_level" in meta:
+                parse_raccoon_thinking_level(meta["raccoon_thinking_level"])
+                if "reasoning_effort" in meta:
+                    raise ValueError("reasoning_effort and raccoon_thinking_level are mutually exclusive")
+        except ValueError as exc:
+            raise RequestError(-32602, "Invalid params", {"detail": str(exc)}) from exc
         raw_upstream = meta.get("session_id") if isinstance(meta, dict) else None
         upstream_session_id = raw_upstream.strip() if isinstance(raw_upstream, str) else ""
         if not upstream_session_id:
@@ -1806,14 +1822,27 @@ class BoxACPAgent:
     async def _new_session(
         self, params: NewSessionRequest, upstream_session_id: str, *, load_existing=False,
     ) -> NewSessionResponse:
+        meta = getattr(params, "field_meta", None) or {}
+        import base64
+        session_id = "acp-v1-" + base64.urlsafe_b64encode(upstream_session_id.encode()).decode().rstrip("=")
+        previous = self._sessions.get(session_id)
+        llm_binding = (_normalize_llm_binding(meta)
+                       or (previous.pending_llm_binding if previous is not None else None)
+                       or self._default_llm_binding)
+        bound_client = self._llm_for_binding(llm_binding)
+        if "raccoon_thinking_level" in meta:
+            provider = getattr(bound_client, "_client", None)
+            capabilities = getattr(provider, "raccoon_thinking_models", {})
+            if normalize_raccoon_thinking(capabilities.get(getattr(bound_client, "model", None))) is None:
+                raise RequestError(-32602, "Invalid params", {
+                    "detail": "raccoon_thinking_level requires a hosted catalog capability",
+                })
         # Skill discovery ran in the background so stdio came up fast; make
         # sure the catalog is present before we build the session's system
         # prompt (SkillSelector.bind reads the sentinel; the metadata block
         # is populated on the first turn). This is a no-op after the first
         # session — the task caches its result.
         await self._ensure_skills_loaded()
-        import base64
-        session_id = "acp-v1-" + base64.urlsafe_b64encode(upstream_session_id.encode()).decode().rstrip("=")
         supplied_product_id = bool((getattr(params, "field_meta", None) or {}).get("session_id"))
         bash_process_owner_id = (
             f"acp-{uuid5(self._process_owner_namespace, upstream_session_id).hex}"
@@ -1829,6 +1858,8 @@ class BoxACPAgent:
         # Pydantic aliases _meta to field_meta
         session_mode = None
         deep_think = False
+        reasoning_effort = None
+        raccoon_thinking_level = None
         execution_profile = normalize_execution_profile(None)
         env_context: EnvContext | None = None
         expert_context: ExpertSessionContext | None = None
@@ -1853,11 +1884,20 @@ class BoxACPAgent:
         if isinstance(meta, dict):
             client_info = ClientInfo.from_meta(meta.get("host_client_info")) or client_info
             session_mode = meta.get("session_mode")
-            deep_think = bool(meta.get("deep_think", False))
+            reasoning_effort = parse_reasoning_effort(meta.get("reasoning_effort"))
+            # Main-request controls (including Fast/off) are interpreted by the
+            # adapter. Auxiliary False must bypass the inherited session choice.
+            deep_think = (
+                True if reasoning_effort is not None or "raccoon_thinking_level" in meta
+                else bool(meta.get("deep_think", False))
+            )
             execution_profile = normalize_execution_profile(
                 meta.get("execution_profile")
             )
             utility = bool(meta.get("utility", False))
+            raccoon_thinking_level = meta.get("raccoon_thinking_level")
+            if utility:
+                deep_think = False
             force_plan_start = _meta_bool(meta, "force_plan_start", "forcePlanStart")
             require_plan_approval = _meta_bool(
                 meta,
@@ -1930,11 +1970,10 @@ class BoxACPAgent:
             if session_mode is None:
                 session_mode = "code_agent"
 
-        previous = self._sessions.get(session_id)
-        llm_binding = (_normalize_llm_binding(meta)
-                       or (previous.pending_llm_binding if previous is not None else None)
-                       or self._default_llm_binding)
-        session_llm = SessionBoundLLM(self._llm_for_binding(llm_binding))
+        session_llm = SessionBoundLLM(
+            bound_client, reasoning_effort=reasoning_effort,
+            raccoon_thinking_level=raccoon_thinking_level,
+        )
         session_context_window, session_max_output_tokens = (
             self._context_capabilities_for_binding(llm_binding, llm=session_llm)
         )
@@ -1953,9 +1992,15 @@ class BoxACPAgent:
             # prompt uses the same transactional preflight as an in-place switch.
             pending_llm_binding = llm_binding
             llm_binding = previous.llm_binding
-            session_llm = previous.session_llm.for_model(
-                previous.session_llm.model,
-                max_output_tokens=previous.session_llm.max_output_tokens,
+            # Keep the accepted model, but bind the new session preferences to a
+            # fresh client so a changed/reset preference cannot inherit the old one.
+            session_llm = SessionBoundLLM(
+                self._llm_for_binding(previous.llm_binding).for_model(
+                    previous.session_llm.model,
+                    max_output_tokens=previous.session_llm.max_output_tokens,
+                ),
+                reasoning_effort=reasoning_effort,
+                raccoon_thinking_level=raccoon_thinking_level,
             )
             session_context_window = previous.session_llm.context_window
             session_max_output_tokens = previous.session_llm.max_output_tokens
@@ -2313,6 +2358,8 @@ class BoxACPAgent:
                 pending_llm_binding=pending_llm_binding,
                 permission_engine=perm_engine, grant_store=grant_store,
                 thinking_enabled=deep_think,
+                reasoning_effort=reasoning_effort,
+                raccoon_thinking_level=raccoon_thinking_level,
                 execution_profile=execution_profile,
                 env_context=env_context,
                 expert_context=expert_context,
@@ -2983,7 +3030,10 @@ class BoxACPAgent:
                 )
 
             if requested_token_limit < state.agent.token_limit:
-                pending_llm = SessionBoundLLM(requested_llm)
+                pending_llm = SessionBoundLLM(
+                    requested_llm, reasoning_effort=state.reasoning_effort,
+                    raccoon_thinking_level=state.raccoon_thinking_level,
+                )
                 pending_llm.context_window = requested_context_window
                 pending_llm.max_output_tokens = requested_max_output_tokens
                 pending_llm.set_auto_model_candidates(candidates)
@@ -5200,7 +5250,9 @@ class BoxACPAgent:
             logger=None,  # ACP uses its own logging via the connection
             permission_negotiator=negotiator,
             hooks=self._hooks,
-            memory_manager=state.memory_manager or self._memory,
+            # Utility sessions deliberately omit memory during assembly. Do not
+            # restore the process backend at run time (including promotion).
+            memory_manager=None if state.utility_session else state.memory_manager or self._memory,
             memory_turn_id=turn_id,
             session_id=state.upstream_session_id,
             turn_id=turn_id,
