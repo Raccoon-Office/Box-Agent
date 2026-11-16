@@ -23,6 +23,9 @@ _BLOCKS = [
     f"follow_up_suggestions\n{_PAYLOAD}\n</follow_up_suggestions>",
     f"<follow_up_suggestions>\n{_PAYLOAD}\n</follow_up_suggestions>",
     f"```follow_up_suggestions\n{_PAYLOAD}\n</follow_up_suggestions>",
+    f"```follow_up_suggestions\r\n{_PAYLOAD}\r\n```",
+    *[f"{' ' * indent}```follow_up_suggestions\n{_PAYLOAD}\n{' ' * indent}```"
+      for indent in (1, 2, 3)],
 ]
 
 
@@ -79,7 +82,7 @@ async def test_metadata_is_structured_without_polluting_reply_or_session_log(
 ):
     conn = _RecordingConnection()
     agent = _new_agent(
-        conn, _ReplyModel(f"已完成。\n{block}\n补充说明。", character_chunks=character_chunks), tmp_path,
+        conn, _ReplyModel(f"已完成。\n{block}\r\n补充说明。", character_chunks=character_chunks), tmp_path,
     )
     try:
         session = await agent.new_session(**acp_params(SimpleNamespace(
@@ -94,7 +97,7 @@ async def test_metadata_is_structured_without_polluting_reply_or_session_log(
             update.content.text for update in conn.updates
             if getattr(update, "sessionUpdate", None) == "agent_message_chunk"
         )
-        assert visible.replace("\n", "") == "已完成。补充说明。"
+        assert visible.replace("\r", "").replace("\n", "") == "已完成。补充说明。"
         suggestions = [
             update.rawOutput["suggestions"] for update in conn.updates
             if getattr(update, "sessionUpdate", None) == "tool_call_update"
@@ -109,14 +112,47 @@ async def test_metadata_is_structured_without_polluting_reply_or_session_log(
             and update.rawOutput.get("type") == "llm_output"
         ]
         assert snapshots, "the host's full-output fallback must also be exercised"
-        assert all(text.replace("\n", "") == "已完成。补充说明。" for text in snapshots)
+        assert all(text.replace("\r", "").replace("\n", "") == "已完成。补充说明。" for text in snapshots)
         state = agent._sessions[session.sessionId]
         assert state.follow_up_suggestions_task is None
         for messages in (state.agent.messages, state.agent.session_log.replay().messages):
             assistant_text = "".join(
                 str(message.content) for message in messages if message.role == "assistant"
             )
-            assert assistant_text.replace("\n", "") == "已完成。补充说明。"
+            assert assistant_text.replace("\r", "").replace("\n", "") == "已完成。补充说明。"
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("character_chunks", [False, True])
+async def test_inline_html_example_stays_in_acp_reply_and_session_log(tmp_path, character_chunks):
+    reply = 'Example: <code>\nfollow_up_suggestions\n{"suggestions":["Example"]}\n</code>'
+    conn = _RecordingConnection()
+    agent = _new_agent(conn, _ReplyModel(reply, character_chunks=character_chunks), tmp_path)
+    try:
+        session = await agent.new_session(**acp_params(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={"follow_up_suggestions": True},
+        )))
+        await agent.prompt(**acp_params(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "Show the example"}],
+        )))
+        visible = "".join(
+            update.content.text for update in conn.updates
+            if getattr(update, "sessionUpdate", None) == "agent_message_chunk"
+        )
+        assert visible == reply
+        for update in conn.updates:
+            raw = getattr(update, "rawOutput", None)
+            if isinstance(raw, dict) and raw.get("type") == "llm_output":
+                assert raw["content"] == reply
+            if isinstance(raw, dict) and raw.get("type") == "follow_up_suggestions":
+                assert raw["suggestions"] == []
+        state = agent._sessions[session.sessionId]
+        for messages in (state.agent.messages, state.agent.session_log.replay().messages):
+            assert "".join(
+                str(message.content) for message in messages if message.role == "assistant"
+            ) == reply
     finally:
         await agent.aclose()
 

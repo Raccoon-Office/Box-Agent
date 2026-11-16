@@ -321,7 +321,7 @@ image_refs 的字段：`imageId` 必填，`contentRef,sha256,media_type,messageS
 
 `follow_up_suggestions` 的模型内联格式仍首选同名 Markdown 围栏。ACP 也兼容独占一行的裸名称后接建议 JSON、`<follow_up_suggestions>` XML 包裹，以及裸名称或围栏开头配 XML 结束标签的混合形式。确认后的元数据在进入正文事件和会话历史前被提取，建议沿用上表的结构化事件发送，最多保留 3 条、每条 160 字符；不增加 ACP 方法或字段。JSON 字符串中的反引号、花括号和标签不作为结束符。
 
-标记须精确匹配，普通提及、相似名称、外层 Markdown 围栏和 HTML `pre` / `code` 示例保留原文；未确认、无效或超限的裸候选同样保留。解析结果不依赖流式分块位置。显式元数据与普通文本的处理边界由 `tests/test_follow_up_suggestions.py` 覆盖；真实 ACP 适配路径、取消及 Session Log 断言见 `tests/test_follow_up_metadata_integration.py`。
+标记须精确匹配，元数据围栏支持 Markdown 有效的 0–3 个前导空格及 LF / CRLF 换行。普通提及、相似名称、四空格缩进示例、外层 Markdown 围栏和 HTML `pre` / `code` 示例（包括正文同行或嵌套容器）保留原文；未确认、无效或超限的裸候选同样保留。解析结果不依赖流式分块位置。显式元数据与普通文本的处理边界由 `tests/test_follow_up_suggestions.py` 覆盖；真实 ACP 适配路径、取消及 Session Log 断言见 `tests/test_follow_up_metadata_integration.py`。
 
 宿主仍只从结构化事件更新输入框推荐。历史正文的显示清理属于客户端兼容处理，不回写会话记录、不重新激活旧建议；复制、导出和语音摘要应与显示正文保持一致。模型在块前写出的普通引导语仍属于正文。
 

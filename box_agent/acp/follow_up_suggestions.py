@@ -19,10 +19,12 @@ _BLOCK_FENCE = "```"
 _BARE_START = "follow_up_suggestions"
 _XML_START = "<follow_up_suggestions>"
 _XML_END = "</follow_up_suggestions>"
-_OPENERS = (_BLOCK_START, _XML_START, _BARE_START)
-_METADATA_START = re.compile(r"(?m)^(?:```follow_up_suggestions|<follow_up_suggestions>|follow_up_suggestions)")
+_OPENERS = tuple(" " * indent + _BLOCK_START for indent in range(4)) + (_XML_START, _BARE_START)
+_METADATA_START = re.compile(r"(?m)^(?: {0,3}```follow_up_suggestions|<follow_up_suggestions>|follow_up_suggestions)")
 _BARE_HEADER = re.compile(r"follow_up_suggestions[ \t]*\r?\n\s*")
-_FENCED_HEADER = re.compile(r"```follow_up_suggestions[ \t]*(?:\r?\n\s*|(?=\{))")
+_FENCED_HEADER = re.compile(r" {0,3}```follow_up_suggestions[ \t]*(?:\r?\n\s*|(?=\{))")
+_CLOSING_FENCE = re.compile(r"`{3,}[ \t]*(?=\r?\n|\r?$)")
+_PENDING_CLOSING_FENCE = re.compile(r"`{3,}[ \t]*\r?$")
 _MARKDOWN_INDENT = re.compile(r"[ \t]*")
 _MARKDOWN_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _MARKDOWN_FENCE_PREFIX = re.compile(r" {0,3}(?:`{0,2}|~{1,2}|`{3,}[^`]*|~{3,}.*)")
@@ -31,7 +33,7 @@ _MARKDOWN_LIST_ITEM = re.compile(_MARKDOWN_LIST_MARKER + r" {1,4}(?=[`~])")
 _MARKDOWN_LIST_PREFIX = re.compile(
     rf"{_MARKDOWN_LIST_MARKER} {{0,4}}| {{0,3}}[0-9]{{1,9}}"
 )
-_HTML_CODE_TAG = re.compile(r"<(/?)(pre|code)(?:\s[^<>]*)?>", re.IGNORECASE)
+_HTML_CODE_TAG = re.compile(r"<(/?)(pre|code)(?:\s.*)?>", re.IGNORECASE | re.DOTALL)
 _HTML_CODE_PREFIXES = ("<pre", "<code", "</pre", "</code")
 _MAX_BARE_BLOCK_CHARS = 16_384
 _MAX_SUGGESTIONS = 3
@@ -140,11 +142,13 @@ class FollowUpSuggestionsStreamExtractor:
         self._markdown_fence = ""
         self._markdown_indent = 0
         self._markdown_line: str | None = ""
-        self._html_containers: set[str] = set()
+        self._html_containers: dict[str, int] = {}
         self._html_tag = ""
-        self._html_line_start = True
-        self._html_quoted = False
+        self._html_tag_quote = ""
+        self._html_quote = ""
         self._html_escaped = False
+        self._inline_code_ticks = 0
+        self._inline_tick_run = 0
 
     @property
     def suggestions(self) -> list[str]:
@@ -197,20 +201,31 @@ class FollowUpSuggestionsStreamExtractor:
         # these tags, including split attributes, without parsing general HTML.
         if self._markdown_fence:
             self._html_tag = ""
-            self._html_line_start = text.endswith("\n")
+            self._inline_code_ticks = 0
+            self._inline_tick_run = 0
             return
         for char in text:
             if self._html_tag:
                 self._html_tag += char
                 lower = self._html_tag.lower()
-                if char == ">":
+                if self._html_tag_quote:
+                    if char == self._html_tag_quote:
+                        self._html_tag_quote = ""
+                elif char in "\"'":
+                    self._html_tag_quote = char
+                elif char == ">":
                     tag = _HTML_CODE_TAG.fullmatch(self._html_tag)
                     if tag is not None:
                         closing, name = tag.groups()
+                        name = name.lower()
                         if closing:
-                            self._html_containers.discard(name.lower())
+                            remaining = self._html_containers.get(name, 0) - 1
+                            if remaining > 0:
+                                self._html_containers[name] = remaining
+                            else:
+                                self._html_containers.pop(name, None)
                         else:
-                            self._html_containers.add(name.lower())
+                            self._html_containers[name] = self._html_containers.get(name, 0) + 1
                     self._html_tag = ""
                 elif len(self._html_tag) > _MAX_BARE_BLOCK_CHARS or not any(
                     prefix.startswith(lower)
@@ -218,23 +233,38 @@ class FollowUpSuggestionsStreamExtractor:
                     for prefix in _HTML_CODE_PREFIXES
                 ):
                     self._html_tag = ""
-            elif self._html_containers and self._html_quoted:
+                    self._html_tag_quote = ""
+                if len(self._html_tag) > _MAX_BARE_BLOCK_CHARS:
+                    self._html_tag = ""
+                    self._html_tag_quote = ""
+            elif self._html_escaped:
+                self._html_escaped = False
+            elif self._html_containers and self._html_quote:
                 # Quoted JSON/code examples can themselves explain these HTML
                 # tags. Their literal closing tags must not end the container.
-                if self._html_escaped:
-                    self._html_escaped = False
-                elif char == "\\":
+                if char == "\\":
                     self._html_escaped = True
-                elif char == '"' or char in "\r\n":
-                    self._html_quoted = False
-            elif self._html_containers and char == '"':
-                self._html_quoted = True
-            elif char == "<" and (self._html_containers or self._html_line_start):
-                self._html_tag = char
-            if char == "\n":
-                self._html_line_start = True
-            elif not char.isspace():
-                self._html_line_start = False
+                elif char == self._html_quote or (char in "\r\n" and self._html_quote != "`"):
+                    self._html_quote = ""
+            elif self._html_containers:
+                if char in "\"'`":
+                    self._html_quote = char
+                elif char == "<":
+                    self._html_tag = char
+            elif char == "`":
+                self._inline_tick_run += 1
+            else:
+                if self._inline_tick_run:
+                    if not self._inline_code_ticks:
+                        self._inline_code_ticks = self._inline_tick_run
+                    elif self._inline_code_ticks == self._inline_tick_run:
+                        self._inline_code_ticks = 0
+                    self._inline_tick_run = 0
+                if not self._inline_code_ticks:
+                    if char == "\\":
+                        self._html_escaped = True
+                    elif char == "<":
+                        self._html_tag = char
 
     def _markdown_prefix(self, line: str) -> bool:
         if self._markdown_indent:
@@ -339,9 +369,9 @@ class FollowUpSuggestionsStreamExtractor:
             return padding + len(_XML_END)
         bare = self._awaiting_close == _BARE_START
         if not bare and tail.startswith(_BLOCK_FENCE):
-            fence = re.match(r"`{3,}[ \t]*(?=\r?\n|$)", tail)
+            fence = _CLOSING_FENCE.match(tail)
             if fence is not None:
-                if fence.end() == len(tail) and not final:
+                if not final and tail[fence.end():] in ("", "\r") and len(tail) < _MAX_BARE_BLOCK_CHARS:
                     return 0
                 return padding + fence.end()
         closers = (_XML_END,) if bare else (_XML_END, _BLOCK_FENCE)
@@ -451,13 +481,19 @@ def _explicit_end(
         elif text.startswith(_XML_END, index):
             return index + len(_XML_END), (depth, in_string, escaped)
         elif text.startswith(_BLOCK_FENCE, index):
-            tail = text[index + len(_BLOCK_FENCE):]
-            if re.match(r"[ \t]*\r?\n", tail) or (final and not tail.strip(" \t\r")):
-                return index + len(_BLOCK_FENCE), (depth, in_string, escaped)
+            fence = _CLOSING_FENCE.match(text, index)
+            if fence is not None and (
+                final or text[fence.end():] not in ("", "\r")
+                or fence.end() - index >= _MAX_BARE_BLOCK_CHARS
+            ):
+                return fence.end(), (depth, in_string, escaped)
     return 0, (depth, in_string, escaped)
 
 
 def _partial_closer_len(text: str) -> int:
+    fence = _PENDING_CLOSING_FENCE.search(text)
+    if fence is not None:
+        return len(text) - fence.start()
     for size in range(min(len(text), len(_XML_END) - 1), 0, -1):
         if any(closer.startswith(text[-size:]) for closer in (_XML_END, _BLOCK_FENCE)):
             return size
