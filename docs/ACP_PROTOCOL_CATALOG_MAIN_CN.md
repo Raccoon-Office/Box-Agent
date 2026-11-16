@@ -319,6 +319,12 @@ image_refs 的字段：`imageId` 必填，`contentRef,sha256,media_type,messageS
 | 子代理失败 `sub_agent_delegation_error` | code,message,retryable及诊断字段 | `{"type":"sub_agent_delegation_error","code":"<实际错误码>","message":"执行失败","retryable":false}` | 保留，不把诊断当最终助手正文 |
 | 图片路径处理 `structured_image_attachment_result` | 包装图片解析结果，见附录构造 | `{"type":"structured_image_attachment_result"}`（完整结构见附录） | 图片准备已迁共享层；标准image仍保留 |
 
+`follow_up_suggestions` 的模型内联格式仍首选同名 Markdown 围栏。ACP 也兼容独占一行的裸名称后接建议 JSON、`<follow_up_suggestions>` XML 包裹，以及裸名称或围栏开头配 XML 结束标签的混合形式。确认后的元数据在进入正文事件和会话历史前被提取，建议沿用上表的结构化事件发送，最多保留 3 条、每条 160 字符；不增加 ACP 方法或字段。JSON 字符串中的反引号、花括号和标签不作为结束符。
+
+标记须精确匹配，普通提及、相似名称、外层 Markdown 围栏和 HTML `pre` / `code` 示例保留原文；未确认、无效或超限的裸候选同样保留。解析结果不依赖流式分块位置。显式元数据与普通文本的处理边界由 `tests/test_follow_up_suggestions.py` 覆盖；真实 ACP 适配路径、取消及 Session Log 断言见 `tests/test_follow_up_metadata_integration.py`。
+
+宿主仍只从结构化事件更新输入框推荐。历史正文的显示清理属于客户端兼容处理，不回写会话记录、不重新激活旧建议；复制、导出和语音摘要应与显示正文保持一致。模型在块前写出的普通引导语仍属于正文。
+
 tokenUsage为promptTokens/completionTokens/totalTokens/calls，缓存报告有效时带cachedTokens。tools项为name/count，mcp项为server/tool/name/count；current可为 `{type:tool,name}`、`{type:mcp,name,server,tool}` 或 `{type:skill,name}`，这些是嵌套判别值，不是新的ACP方法。
 
 sub_agent_progress.event 已知：step_start(step,max_steps)、tool_start(tool_name)、tool_result(tool_name,success,可选file_changes)、artifact(artifact完整对象)、error(message)、agent_progress(step,content)、llm_output(模型快照字段)。其他内部事件可用类名兜底，宿主保留未知详情，不能因未识别而丢失父工具终态。
