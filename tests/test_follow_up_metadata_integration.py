@@ -77,13 +77,15 @@ def _new_agent(conn, model, tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("block", _BLOCKS)
 @pytest.mark.parametrize("character_chunks", [False, True])
+@pytest.mark.parametrize("before", ["已完成。", "Example: <code>don't</code>"])
 async def test_metadata_is_structured_without_polluting_reply_or_session_log(
-    tmp_path, block, character_chunks,
+    tmp_path, block, character_chunks, before,
 ):
     conn = _RecordingConnection()
     agent = _new_agent(
-        conn, _ReplyModel(f"已完成。\n{block}\r\n补充说明。", character_chunks=character_chunks), tmp_path,
+        conn, _ReplyModel(f"{before}\n{block}\r\n补充说明。", character_chunks=character_chunks), tmp_path,
     )
+    expected = before + "补充说明。"
     try:
         session = await agent.new_session(**acp_params(SimpleNamespace(
             cwd=str(tmp_path),
@@ -97,7 +99,7 @@ async def test_metadata_is_structured_without_polluting_reply_or_session_log(
             update.content.text for update in conn.updates
             if getattr(update, "sessionUpdate", None) == "agent_message_chunk"
         )
-        assert visible.replace("\r", "").replace("\n", "") == "已完成。补充说明。"
+        assert visible.replace("\r", "").replace("\n", "") == expected
         suggestions = [
             update.rawOutput["suggestions"] for update in conn.updates
             if getattr(update, "sessionUpdate", None) == "tool_call_update"
@@ -112,22 +114,25 @@ async def test_metadata_is_structured_without_polluting_reply_or_session_log(
             and update.rawOutput.get("type") == "llm_output"
         ]
         assert snapshots, "the host's full-output fallback must also be exercised"
-        assert all(text.replace("\r", "").replace("\n", "") == "已完成。补充说明。" for text in snapshots)
+        assert all(text.replace("\r", "").replace("\n", "") == expected for text in snapshots)
         state = agent._sessions[session.sessionId]
         assert state.follow_up_suggestions_task is None
         for messages in (state.agent.messages, state.agent.session_log.replay().messages):
             assistant_text = "".join(
                 str(message.content) for message in messages if message.role == "assistant"
             )
-            assert assistant_text.replace("\r", "").replace("\n", "") == "已完成。补充说明。"
+            assert assistant_text.replace("\r", "").replace("\n", "") == expected
     finally:
         await agent.aclose()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("character_chunks", [False, True])
-async def test_inline_html_example_stays_in_acp_reply_and_session_log(tmp_path, character_chunks):
-    reply = 'Example: <code>\nfollow_up_suggestions\n{"suggestions":["Example"]}\n</code>'
+@pytest.mark.parametrize("reply", [
+    'Example: <code>\nfollow_up_suggestions\n{"suggestions":["Example"]}\n</code>',
+    'Example: `\nfollow_up_suggestions\n{"suggestions":["Example"]}\n`',
+])
+async def test_inline_code_example_stays_in_acp_reply_and_session_log(tmp_path, character_chunks, reply):
     conn = _RecordingConnection()
     agent = _new_agent(conn, _ReplyModel(reply, character_chunks=character_chunks), tmp_path)
     try:

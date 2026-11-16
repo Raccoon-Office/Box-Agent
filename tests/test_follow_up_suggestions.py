@@ -518,6 +518,52 @@ def test_extractor_does_not_open_code_containers_from_attributes_or_comments(pre
     _assert_extraction_at_every_split(text, prefix, ["Next"])
 
 
+@pytest.mark.parametrize("tag", ["pre", "code"])
+@pytest.mark.parametrize("word", ["don't", "users'"])
+def test_extractor_does_not_treat_apostrophes_in_html_code_as_quoted_strings(tag, word):
+    prefix = f'Example: <{tag}>{word}</{tag}>\n'
+    text = prefix + '```follow_up_suggestions\n{"suggestions":["Next"]}\n```'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+@pytest.mark.parametrize("ticks", ["`", "``"])
+def test_extractor_preserves_metadata_inside_closed_multiline_inline_code(ticks):
+    example = 'Example: ' + ticks + '\nfollow_up_suggestions\n{"suggestions":["Example"]}\n' + ticks + '\n'
+    text = example + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, example, ["Next"])
+
+
+@pytest.mark.parametrize("ticks", ["`", "``"])
+@pytest.mark.parametrize("fenced", [False, True])
+def test_extractor_accepts_metadata_after_unmatched_inline_backticks(ticks, fenced):
+    prefix = 'An unmatched ' + ticks + ' is ordinary text.\n'
+    metadata = 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    text = prefix + ('```' + metadata + '\n```' if fenced else metadata)
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+def test_extractor_confirms_inline_closing_run_at_end_of_response():
+    example = 'Example: ``\nfollow_up_suggestions\n{"suggestions":["Explain ` ticks"]}\n``'
+    _assert_extraction_at_every_split(example, example, [])
+
+
+def test_extractor_bounds_waiting_for_an_unmatched_inline_code_span():
+    prefix = 'Example: `\n'
+    metadata = 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    suffix = '\n' + 'x' * 17_000
+    text = prefix + metadata + suffix
+    chunkings = [[text], [text[:16_384], text[16_384:]], [text[i:i + 97] for i in range(0, len(text), 97)]]
+    for chunks in chunkings:
+        extractor = FollowUpSuggestionsStreamExtractor()
+        visible = []
+        for chunk in chunks:
+            visible.extend(extractor.push(chunk))
+            assert len(extractor._buffer) <= 16_384
+        visible.extend(extractor.finish())
+        assert ''.join(visible) == prefix + suffix
+        assert extractor.suggestions == ["Next"]
+
+
 @pytest.mark.parametrize("closing", ["``` ", "````\t\r"])
 def test_extractor_recovers_from_oversized_truncated_metadata_with_padded_closer(closing):
     text = '回答。\n```follow_up_suggestions\n{"suggestions":["' + "x" * 17_000 + '\n' + closing + '\n后续正文。'

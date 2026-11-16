@@ -149,8 +149,10 @@ class FollowUpSuggestionsStreamExtractor:
         self._html_comment_tail = ""
         self._html_quote = ""
         self._html_escaped = False
+        self._html_previous_char = ""
         self._inline_code_ticks = 0
         self._inline_tick_run = 0
+        self._inline_code_at_line_start = False
 
     @property
     def suggestions(self) -> list[str]:
@@ -188,9 +190,10 @@ class FollowUpSuggestionsStreamExtractor:
         *lines, tail = text.split("\n")
         for line in lines:
             self._track_html_code(line + "\n")
-            if self._markdown_line is not None:
+            if self._markdown_line is not None and not self._inline_code_at_line_start:
                 self._track_markdown_line(_markdown_line_for_fence(self._markdown_line + line))
             self._markdown_line = ""
+            self._inline_code_at_line_start = bool(self._inline_code_ticks)
         self._track_html_code(tail)
         if self._markdown_line is not None:
             line = self._markdown_line + tail
@@ -256,7 +259,9 @@ class FollowUpSuggestionsStreamExtractor:
                 elif char == self._html_quote or (char in "\r\n" and self._html_quote != "`"):
                     self._html_quote = ""
             elif self._html_containers:
-                if char in "\"'`":
+                if char in "\"`" or (
+                    char == "'" and not (self._html_previous_char.isalnum() or self._html_previous_char == "_")
+                ):
                     self._html_quote = char
                 elif char == "<":
                     self._html_tag = char
@@ -274,6 +279,7 @@ class FollowUpSuggestionsStreamExtractor:
                         self._html_escaped = True
                     elif char == "<":
                         self._html_tag = char
+            self._html_previous_char = char
 
     def _markdown_prefix(self, line: str) -> bool:
         if self._markdown_indent:
@@ -318,6 +324,8 @@ class FollowUpSuggestionsStreamExtractor:
             if fence[0] == "~" or "`" not in rest:
                 self._markdown_fence = fence
                 self._markdown_indent = indent
+                self._inline_code_ticks = 0
+                self._inline_tick_run = 0
 
     def _read_candidate(self, *, final: bool) -> tuple[int, list[str] | None]:
         """Return the consumed length (zero to wait), or None to retain text."""
@@ -455,8 +463,32 @@ class FollowUpSuggestionsStreamExtractor:
             if self._markdown_fence or self._html_containers or self._html_comment:
                 self._emit(output, len(opener))
             else:
+                if self._inline_code_ticks and not opener.lstrip().startswith(_BLOCK_START):
+                    # A code span is only confirmed by its matching closing
+                    # run. Hold the candidate, not the preceding prose, while
+                    # waiting; unmatched/oversized spans remain ordinary text.
+                    candidate = self._buffer[:_MAX_BARE_BLOCK_CHARS]
+                    close = _inline_code_end(
+                        candidate, self._inline_code_ticks,
+                        final=final and len(self._buffer) < _MAX_BARE_BLOCK_CHARS,
+                    )
+                    if close:
+                        self._emit(output, close)
+                        continue
+                    if not final and len(self._buffer) < _MAX_BARE_BLOCK_CHARS:
+                        break
+                self._inline_code_ticks = 0
+                self._inline_tick_run = 0
+                self._inline_code_at_line_start = False
                 self._holding = opener
         return output
+
+
+def _inline_code_end(text: str, ticks: int, *, final: bool) -> int:
+    for run in re.finditer(r"`+", text):
+        if len(run.group()) == ticks and (run.end() < len(text) or final):
+            return run.end()
+    return 0
 
 
 def _explicit_end(
