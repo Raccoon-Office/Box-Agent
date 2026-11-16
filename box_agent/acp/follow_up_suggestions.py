@@ -34,7 +34,7 @@ _MARKDOWN_LIST_PREFIX = re.compile(
     rf"{_MARKDOWN_LIST_MARKER} {{0,4}}| {{0,3}}[0-9]{{1,9}}"
 )
 _HTML_CODE_TAG = re.compile(r"<(/?)(pre|code)(?:\s.*)?>", re.IGNORECASE | re.DOTALL)
-_HTML_CODE_PREFIXES = ("<pre", "<code", "</pre", "</code")
+_HTML_TAG_PREFIX = re.compile(r"</?[a-z][a-z0-9:-]*(?:\s.*)?", re.IGNORECASE | re.DOTALL)
 _MAX_BARE_BLOCK_CHARS = 16_384
 _MAX_SUGGESTIONS = 3
 _MAX_SUGGESTION_CHARS = 160
@@ -145,6 +145,8 @@ class FollowUpSuggestionsStreamExtractor:
         self._html_containers: dict[str, int] = {}
         self._html_tag = ""
         self._html_tag_quote = ""
+        self._html_comment = False
+        self._html_comment_tail = ""
         self._html_quote = ""
         self._html_escaped = False
         self._inline_code_ticks = 0
@@ -205,10 +207,17 @@ class FollowUpSuggestionsStreamExtractor:
             self._inline_tick_run = 0
             return
         for char in text:
-            if self._html_tag:
+            if self._html_comment:
+                self._html_comment_tail = (self._html_comment_tail + char)[-3:]
+                if self._html_comment_tail == "-->":
+                    self._html_comment = False
+                    self._html_comment_tail = ""
+            elif self._html_tag:
                 self._html_tag += char
-                lower = self._html_tag.lower()
-                if self._html_tag_quote:
+                if self._html_tag == "<!--":
+                    self._html_comment = True
+                    self._html_tag = ""
+                elif self._html_tag_quote:
                     if char == self._html_tag_quote:
                         self._html_tag_quote = ""
                 elif char in "\"'":
@@ -227,10 +236,10 @@ class FollowUpSuggestionsStreamExtractor:
                         else:
                             self._html_containers[name] = self._html_containers.get(name, 0) + 1
                     self._html_tag = ""
-                elif len(self._html_tag) > _MAX_BARE_BLOCK_CHARS or not any(
-                    prefix.startswith(lower)
-                    or (lower.startswith(prefix) and lower[len(prefix):len(prefix) + 1].isspace())
-                    for prefix in _HTML_CODE_PREFIXES
+                elif (
+                    self._html_tag not in ("<", "</")
+                    and not "<!--".startswith(self._html_tag)
+                    and _HTML_TAG_PREFIX.fullmatch(self._html_tag) is None
                 ):
                     self._html_tag = ""
                     self._html_tag_quote = ""
@@ -286,7 +295,7 @@ class FollowUpSuggestionsStreamExtractor:
             self._markdown_indent = 0
 
     def _track_markdown_line(self, line: str) -> None:
-        if self._html_containers:
+        if self._html_containers or self._html_comment:
             return
         self._leave_dedented_list(line)
         if self._markdown_fence:
@@ -443,7 +452,7 @@ class FollowUpSuggestionsStreamExtractor:
             self._emit(output, match.start() - 1)
             opener = match.group()
             self._leave_dedented_list(opener)
-            if self._markdown_fence or self._html_containers:
+            if self._markdown_fence or self._html_containers or self._html_comment:
                 self._emit(output, len(opener))
             else:
                 self._holding = opener

@@ -507,6 +507,17 @@ def test_extractor_does_not_treat_quoted_or_escaped_tags_as_html_containers(pref
     _assert_extraction_at_every_split(text, prefix, ["继续"])
 
 
+@pytest.mark.parametrize("prefix", [
+    '<span title="<code>">Example</span>\n',
+    "<span title='<pre> > <code>'>Example</span>\n",
+    '<!-- <code> -->\n',
+    '<!-- > <pre> and <code> -->\n',
+])
+def test_extractor_does_not_open_code_containers_from_attributes_or_comments(prefix):
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
 @pytest.mark.parametrize("closing", ["``` ", "````\t\r"])
 def test_extractor_recovers_from_oversized_truncated_metadata_with_padded_closer(closing):
     text = '回答。\n```follow_up_suggestions\n{"suggestions":["' + "x" * 17_000 + '\n' + closing + '\n后续正文。'
