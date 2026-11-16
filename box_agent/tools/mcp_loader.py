@@ -110,7 +110,7 @@ from .browser_tool_names import (
     public_browser_tool_text,
 )
 from .mcp_bootstrap import is_default_hosted_search_url
-from .mcp_tool_catalog import get_mcp_tool_catalog
+from .mcp_tool_catalog import PUBLIC_WEB_MCP_TOOLS, get_mcp_tool_catalog
 from .mcp_sources import (
     McpConfigSource,
     ResolvedMcpServer,
@@ -169,10 +169,7 @@ def _public_mcp_tool_name(
         return _safe_mcp_tool_name(server_name, remote_name, mapped_name)
     # These are deliberate replacements for the native search/extract fallbacks,
     # not a general exemption for tools with matching names.
-    if not connector_id and (server_name, remote_name) in {
-        ("mcp-server-askecho-search-infinity", "web_search"),
-        ("box-agent-web-extract", "web_extract"),
-    }:
+    if not connector_id and (server_name, remote_name) in PUBLIC_WEB_MCP_TOOLS:
         return remote_name
     return _safe_mcp_tool_name(
         server_name, remote_name, f"mcp__{server_name}__{remote_name}",
@@ -2771,13 +2768,13 @@ async def load_mcp_tools_async(
     global _mcp_auth_file, _mcp_auth_token, _mcp_auth_fingerprint
     _mcp_loading = True
     catalog = get_mcp_tool_catalog()
-    catalog.mark_loading()
+    catalog.mark_loading(wait_for_web=True)
     # Remember the auth inputs so reconnect_mcp_server() can rebuild the same
     # dynamic bearer / Authorization headers it would have used on cold start.
     _mcp_auth_file = auth_file
     _mcp_auth_token = auth_token
-    _mcp_auth_fingerprint = _current_mcp_auth_fingerprint()
     try:
+        _mcp_auth_fingerprint = _current_mcp_auth_fingerprint()
         config_file = _resolve_mcp_config_path(config_path)
         if config_file is None and not any(
             os.environ.get(name, "").strip()
@@ -2852,16 +2849,21 @@ async def load_mcp_tools_async(
         for conn in connections:
             _record_status(conn.name, "connecting", transport=conn.transport_label)
 
-        results = await asyncio.gather(
-            *(conn.connect() for conn in connections),
-            return_exceptions=True,
-        )
+        public_web_servers = {server for server, _ in PUBLIC_WEB_MCP_TOOLS}
+        pending_web = {conn.name for conn in connections
+                       if conn.name in public_web_servers and not getattr(conn, "connector_id", None)}
+        if not pending_web:
+            catalog.mark_web_tools_ready()
 
-        for conn, success, epoch in zip(connections, results, epochs):
+        async def connect_and_publish(conn: MCPServerConnection, epoch: object) -> None:
+            success: bool | BaseException
+            try:
+                success = await conn.connect()
+            except (Exception, asyncio.CancelledError) as error:
+                success = error
             if _mcp_connection_epochs.get(conn.name) is not epoch:
                 await _close_obsolete_connection(conn)
-                continue
-            if isinstance(success, BaseException):
+            elif isinstance(success, BaseException):
                 _warn(f"✗ MCP server '{conn.name}' raised during connect: {success}")
                 _record_status(
                     conn.name, "failed",
@@ -2869,8 +2871,7 @@ async def load_mcp_tools_async(
                     error=str(success),
                     auth_status=_mcp_auth_status(success),
                 )
-                continue
-            if success and conn.last_error is None:
+            elif success and conn.last_error is None:
                 _mcp_connections.append(conn)
                 _replace_server_catalog(conn)
                 _record_status(
@@ -2886,6 +2887,12 @@ async def load_mcp_tools_async(
                     error=conn.last_error or "connect() returned False",
                     auth_status=conn.last_auth_status,
                 )
+            if conn.name in pending_web:
+                pending_web.remove(conn.name)
+                if not pending_web:
+                    catalog.mark_web_tools_ready()
+
+        await asyncio.gather(*(connect_and_publish(conn, epoch) for conn, epoch in zip(connections, epochs)))
 
         all_tools = get_all_mcp_tools()
         _warn(f"Total MCP tools loaded: {len(all_tools)}")

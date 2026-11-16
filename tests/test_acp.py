@@ -4093,6 +4093,79 @@ async def test_acp_seeds_negotiated_session_continuation_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("web_available", [True, False], ids=["online", "offline"])
+@pytest.mark.parametrize("cancel_first_prompt", [False, True], ids=["first-prompt", "cancel-and-retry"])
+async def test_cold_acp_prompt_offers_ready_web_tools_while_unrelated_mcp_is_still_connecting(
+    tmp_path, monkeypatch, web_available, cancel_first_prompt,
+):
+    from box_agent.tools import mcp_loader
+    from tests.test_mcp_tool_search import FakeMCPTool
+
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr("box_agent.agent.get_mcp_tool_catalog", lambda: catalog)
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    servers = {"mcp-server-askecho-search-infinity": "web_search", "box-agent-web-extract": "web_extract"}
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {
+        name: {"command": "fake", "alwaysLoad": True} for name in [*servers, "slow"]
+    }}), encoding="utf-8")
+    release_web = asyncio.Event()
+    release_other = asyncio.Event()
+    prompt_waiting = asyncio.Event()
+    wait_for_web = catalog.wait_for_initial_web_tools
+
+    async def observe_wait(*args, **kwargs):
+        prompt_waiting.set()
+        return await wait_for_web(*args, **kwargs)
+
+    async def connect(connection):
+        if connection.name == "slow":
+            await release_other.wait()
+            return False
+        await release_web.wait()
+        if web_available:
+            connection.tools = [FakeMCPTool(servers[connection.name], connection.name, always_load=True)]
+        return web_available
+
+    monkeypatch.setattr(catalog, "wait_for_initial_web_tools", observe_wait)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"), agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, mcp=MCPConfig(deferred_loading_enabled=True)),
+    )
+    load_task = asyncio.create_task(mcp_loader.load_mcp_tools_async(str(config_path)))
+    try:
+        agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system", mcp_task=load_task)
+        session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
+        prompt = asyncio.create_task(agent.prompt(**acp_params(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "你好"}], field_meta={},
+        ))))
+        await asyncio.wait_for(prompt_waiting.wait(), timeout=3)
+        log = agent._sessions[session.sessionId].agent.session_log
+        if cancel_first_prompt:
+            await agent.cancel(**acp_params(SimpleNamespace(sessionId=session.sessionId)))
+            assert (await asyncio.wait_for(prompt, timeout=3)).stopReason == "cancelled"
+            assert not list(log.events_of_type("request/header"))
+            prompt_waiting.clear()
+            prompt = asyncio.create_task(agent.prompt(**acp_params(SimpleNamespace(
+                sessionId=session.sessionId, prompt=[{"text": "请继续"}], field_meta={},
+            ))))
+            await asyncio.wait_for(prompt_waiting.wait(), timeout=3)
+        release_web.set()
+        assert (await asyncio.wait_for(prompt, timeout=3)).stopReason == "end_turn"
+        assert not load_task.done()
+        first = next(log.events_of_type("request/header"))["data"]["header"]["tools"]
+        offered = {tool["name"] for tool in first}
+        expected = set(servers.values()) if web_available else set()
+        assert offered.intersection(servers.values()) == expected
+    finally:
+        release_web.set()
+        release_other.set()
+        await load_task
+        await mcp_loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
 async def test_initial_mcp_catalog_ready_is_injected_into_active_turn(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),

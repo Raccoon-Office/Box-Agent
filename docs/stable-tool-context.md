@@ -6,6 +6,8 @@ Version 2 keeps the system prompt and provider-facing tool definitions stable du
 
 `tool_search` returns a tool's description, input schema and versioned `tool_ref`. Call discovered tools using `call_tool` with that reference and JSON arguments. The reference identifies the current definition and connection generation; it does not grant permission. Authorization and validation still apply at execution time. If a connection or definition changes, rediscover the tool. References from an earlier process must also be rediscovered after session restoration.
 
+Version 2 also offers the first-party `web_search` and `web_extract` by name in each root request where their MCP connections are available and permitted. On cold start the first request waits for the configured web services to finish connecting under their existing timeouts. Other servers continue loading in the background. The provider receives the full schemas of the available tools. Previously discovered references follow the same connection and authorization checks.
+
 Discovery returns bounded, complete schema entries. Oversized or omitted entries receive a notice rather than an executable reference. Required tool descriptions are delivered again after compaction removes them. Execution events, permission checks, budgets and hooks retain the real target's identity, while model history retains the original `call_tool` call and call ID.
 
 Ordinary MCP tools use `mcp__<server>__<tool>` model-facing names, including

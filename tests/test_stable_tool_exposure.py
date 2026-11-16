@@ -84,6 +84,139 @@ def test_always_load_ref_is_ineligible_until_description_acknowledged():
 
 
 @pytest.mark.asyncio
+async def test_first_request_and_followups_offer_and_execute_both_public_web_tools(tmp_path):
+    from box_agent.runtime import run_agent_loop
+    from box_agent.schema import LLMResponse
+    from box_agent.session_log import SessionLog
+    from tests.test_mcp_tool_search import FakeMCPTool, MockLLM
+
+    catalog, manager, search, _ = make()
+    web = FakeMCPTool(
+        "web_search", "mcp-server-askecho-search-infinity", always_load=True,
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    )
+    extract = FakeMCPTool(
+        "web_extract", "box-agent-web-extract", always_load=True,
+        parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    )
+    other = FakeMCPTool("lookup", "crm", always_load=True)
+    for tool in (web, extract, other):
+        catalog.replace_server(tool.server_name, [tool])
+    llm = MockLLM([
+        LLMResponse(content="", finish_reason="tool_use", tool_calls=[
+            ToolCall(id="search", type="function", function=FunctionCall(
+                name="web_search", arguments={"query": "Iceland glacier"},
+            )),
+            ToolCall(id="extract", type="function", function=FunctionCall(
+                name="web_extract", arguments={"url": "https://example.org/glacier"},
+            )),
+        ]),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+    log = SessionLog.create(tmp_path / "sessions", session_id="web", cwd=tmp_path)
+    try:
+        async for _ in run_agent_loop(
+            llm=llm, tools={"tool_search": search, "call_tool": CallTool()},
+            messages=[Message(role="user", content="Look up a glacier.")],
+            tool_exposure_manager=manager, session_log=log, session_turn=1, max_steps=2,
+        ):
+            pass
+        headers = [event["data"]["header"]["tools"] for event in log.events_of_type("request/header")]
+        assert len(headers) == 2
+        for schemas, offered in zip(headers, llm.offered_names, strict=True):
+            assert [schema["name"] for schema in schemas] == offered
+            assert set(offered) == {"web_search", "web_extract", "tool_search", "call_tool"}
+            assert {s["name"]: s["input_schema"] for s in schemas if s["name"].startswith("web_")} == {
+                "web_search": web.parameters, "web_extract": extract.parameters,
+            }
+        results = [event["data"]["result"]["success"] for event in log.events_of_type("tool/result")]
+        assert results == [True, True]
+        assert (web.calls, extract.calls, other.calls) == (1, 1, 0)
+    finally:
+        log.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_web_tools_respect_visibility_reconnection_and_child_scope():
+    from tests.test_mcp_tool_search import FakeMCPTool
+
+    catalog, manager, search, engine = make()
+    web = FakeMCPTool("web_search", "mcp-server-askecho-search-infinity", always_load=True)
+    other = FakeMCPTool("mcp__other__web_extract", "other", remote_name="web_extract", always_load=True)
+    catalog.replace_server(web.server_name, [web])
+    catalog.replace_server(other.server_name, [other])
+    denied = engine.prepare_tools(is_tool_visible=lambda name: name != "web_search")
+    assert "web_search" not in denied.targets
+    direct = engine.prepare_tools()
+    assert direct.validate_call("web_search") is None
+    assert other.name not in direct.targets
+    descriptions = manager.pending_bootstrap_descriptions()
+    assert [json.loads(text)["name"] for text in descriptions] == [other.name]
+    manager.ack_bootstrap_descriptions(descriptions)
+    call = ToolCall(id="lookup", type="function", function=FunctionCall(
+        name="call_tool", arguments={"tool_ref": json.loads(descriptions[0])["tool_ref"], "arguments_json": "{}"},
+    ))
+    resolved, routed, error = engine.prepare_tools().resolve_call(call)
+    assert routed and error is None and resolved.function.name == other.name
+
+    result = await search.execute(tool_names=["web_search"])
+    manager.record_search_result("search", result.content)
+    manager.acknowledge_search_results([Message(
+        role="tool", name="tool_search", tool_call_id="search", content=result.content,
+    )])
+    ref = json.loads(result.content)["activated"][0]["tool_ref"]
+    web_call = ToolCall(id="web", type="function", function=FunctionCall(
+        name="call_tool", arguments={"tool_ref": ref, "arguments_json": '{"query":"Iceland"}'},
+    ))
+    resolved, routed, error = engine.prepare_tools().resolve_call(web_call)
+    assert routed and error is None and resolved.function.name == "web_search"
+
+    child = manager.for_inherited_tools({})
+    assert "web_search" not in DefaultToolEngine(tools={}, tool_exposure=child).prepare_tools().targets
+    replacement = FakeMCPTool("web_search", web.server_name, always_load=True)
+    catalog.replace_server(web.server_name, [replacement])
+    assert direct.validate_call("web_search") is not None
+    refreshed = engine.prepare_tools()
+    assert refreshed.targets["web_search"] is replacement
+    assert refreshed.resolve_call(web_call)[2] is not None
+
+
+@pytest.mark.asyncio
+async def test_reconnected_web_tool_runs_only_after_its_schema_reaches_the_model(monkeypatch):
+    from box_agent.events import ToolCallResult
+    from box_agent.runtime import run_agent_loop
+    from box_agent.schema import LLMResponse
+    from tests.test_mcp_tool_search import FakeMCPTool, MockLLM
+
+    catalog, manager, search, _ = make()
+    original = FakeMCPTool("web_extract", "box-agent-web-extract", "Original extractor")
+    replacement = FakeMCPTool(original.name, original.server_name, "Updated extractor")
+    catalog.replace_server(original.server_name, [original])
+    acknowledge = manager.acknowledge_search_results
+
+    def reconnect_during_request_preparation(messages):
+        acknowledge(messages)
+        catalog.replace_server(replacement.server_name, [replacement])
+        monkeypatch.setattr(manager, "acknowledge_search_results", acknowledge)
+
+    monkeypatch.setattr(manager, "acknowledge_search_results", reconnect_during_request_preparation)
+    responses = []
+    for call_id in ("first", "retry"):
+        call = ToolCall(id=call_id, type="function", function=FunctionCall(
+            name=original.name, arguments={"url": "https://example.org/glacier"},
+        ))
+        responses.append(LLMResponse(content="", finish_reason="tool_use", tool_calls=[call]))
+    responses.append(LLMResponse(content="done", finish_reason="stop"))
+    llm = MockLLM(responses)
+    results = [event async for event in run_agent_loop(
+        llm=llm, tools={"tool_search": search, "call_tool": CallTool()},
+        tool_exposure_manager=manager, messages=[Message(role="user", content="Extract a page.")], max_steps=3,
+    ) if isinstance(event, ToolCallResult)]
+    assert [(event.tool_call_id, event.success) for event in results] == [("first", False), ("retry", True)]
+    assert (original.calls, replacement.calls) == (0, 1)
+
+
+@pytest.mark.asyncio
 async def test_eager_mcp_tool_order_preserves_discovered_refs_until_replacement():
     from tests.test_mcp_tool_search import FakeMCPTool
 

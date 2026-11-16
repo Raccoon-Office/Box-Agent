@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -133,6 +133,20 @@ class PreparedTools:
             normalized.append(execution_call)
         return normalized
 
+    def with_routes_from(self, refreshed: PreparedTools) -> PreparedTools:
+        """Bind newly acknowledged refs while preserving exactly the direct offer sent."""
+        return replace(
+            self,
+            route_refs=refreshed.route_refs,
+            routed_targets=refreshed.routed_targets,
+            routed_definitions=refreshed.routed_definitions,
+            mcp_generations={
+                **refreshed.mcp_generations,
+                **{name: generation for name, generation in self.mcp_generations.items()
+                   if name in self.targets},
+            },
+        )
+
     def resolve_call(self, call: ToolCall) -> tuple[ToolCall, bool, str | None]:
         """Resolve against the request snapshot without modifying provider history."""
         result = call.model_copy(deep=True)
@@ -226,6 +240,8 @@ class PreparedTools:
                 "Use tool_search and call an activated result on the next step."
             )
         generation = self.mcp_generations.get(name)
+        if generation is not None and self.route_visible is not None and not self.route_visible(name):
+            return f"Tool '{name}' is not available in this conversation."
         if self._tool_exposure is not None and getattr(self._tool_exposure, "stable_prefix", False) and not self._tool_exposure.is_current_target(name, target):
             return f"Tool '{name}' is no longer available."
         if self._tool_exposure is not None:

@@ -82,8 +82,21 @@ def prepare_tools(
             if isinstance(generation, int) and getattr(tool, "mcp_tool_id", None) is not None:
                 generations[tool.name] = generation
         targets = {name: pair[0] for name, pair in direct.items()}
+        definitions = [pair[1] for pair in direct.values()]
+        if tool_exposure._scope_parent is None:
+            local_names = build_tool_name_index(
+                tool for tool in offered if getattr(tool, "mcp_tool_id", None) is None
+            )
+            for entry in tool_exposure._catalog.snapshot():
+                if (entry.is_public_web_tool and not entry.name_conflict
+                        and entry.model_name not in local_names
+                        and tool_exposure._entry_is_allowed(entry)
+                        and (is_tool_visible is None or is_tool_visible(entry.tool))):
+                    targets[entry.model_name] = entry.tool
+                    definitions.append(ToolDefinitionView.from_tool(entry.tool))
+                    generations[entry.model_name] = entry.generation
         return PreparedTools(
-            definitions=tuple(pair[1] for pair in direct.values()), targets=targets,
+            definitions=tuple(definitions), targets=targets,
             call_names={name: tool.name for name, tool in build_tool_name_index(targets.values()).items()},
             mcp_generations=generations, routed_targets=routed_targets,
             routed_definitions=routed_definitions, route_refs=route_refs,

@@ -539,7 +539,7 @@ async def initialize_base_tools(
                 else Config.find_config_file(config.tools.mcp_config_path)
             )
         if mcp_config_path:
-            get_mcp_tool_catalog().mark_loading()
+            get_mcp_tool_catalog().mark_loading(wait_for_web=True)
             _out(f"{Colors.BRIGHT_CYAN}Loading MCP tools in background (from: {mcp_config_path})...{Colors.RESET}")
             _out(
                 f"{Colors.DIM}  MCP timeouts: connect={mcp_config.connect_timeout}s, "
