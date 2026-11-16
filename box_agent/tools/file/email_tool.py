@@ -169,7 +169,7 @@ class ExtractEmailAttachmentTool(_EmailFileTool):
             async with destination_lock(target):
                 if self._resolve_file_path(output_path).resolve() != target:
                     raise ValueError("Attachment output path changed; retry with a stable path.")
-                for error in (_blocked_device_error(target), builtin_skill_write_error(target)):
+                for error in (_blocked_device_error(target), builtin_skill_write_error(target, self._builtin_skills_dir)):
                     if error:
                         return ToolResult(success=False, error=error)
                 if isinstance(context, FileWriteInvocationContext) and context.validate_write_target:

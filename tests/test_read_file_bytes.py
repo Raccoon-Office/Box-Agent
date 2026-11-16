@@ -21,6 +21,23 @@ def fragment_text(content):
     return content.split("\n", 1)[1].rsplit("\n[Hint: ", 1)[0]
 
 
+@pytest.mark.parametrize("relative,pinned", [
+    ("method/SKILL.md", True), ("method/references/contract.md", True),
+    ("method/workflows/export.md", True), ("method/scripts/helper.py", False),
+    ("../outside/SKILL.md", False),
+])
+async def test_managed_reads_pin_instructions_without_a_skills_directory_name(tmp_path, relative, pinned):
+    root = tmp_path / "downloaded-methods"
+    root.mkdir()
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("method body")
+    result = await ReadTool(str(tmp_path), builtin_skills_dir=root).execute(str(path))
+    assert result.success, result.error
+    expected = "instruction_pinned" if pinned else "reconstructable"
+    assert result.raw_output["context_resource"]["resource_class"] == expected
+
+
 @pytest.mark.parametrize("block_size", [4, 7, 17, 65536])
 @pytest.mark.parametrize("offset,limit", [(1, 20), (3, 2), (100, 1)])
 def test_bounded_scanning_preserves_existing_line_and_hash_semantics(monkeypatch, block_size, offset, limit):

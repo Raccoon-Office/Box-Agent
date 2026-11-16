@@ -21,6 +21,7 @@ from .env_context import EnvContext, build_env_context_prompt
 from .experts import ExpertSessionContext
 from .execution_profile import FAST_OPTIONAL_SKILLS
 from .tools.permissions import CapabilityPolicy
+from .skill_paths import managed_builtin_skills_dir
 from .tools.runtime import (
     SkillRuntimeContext, build_skill_runtime_context, build_skill_runtime_prompt,
 )
@@ -282,7 +283,10 @@ async def prepare_tools(resources: SessionResources) -> None:
         grant_store = grant_store if grant_store is not None else GrantStore()
         policy = (CapabilityPolicy.from_config(config)
                   if getattr(config.officev3, "_present", False)
-                  else CapabilityPolicy(session_workspace_root=str(context.workspace)))
+                  else CapabilityPolicy(
+                      session_workspace_root=str(context.workspace),
+                      builtin_skills_dir=managed_builtin_skills_dir(config),
+                  ))
         if not policy.session_workspace_root:
             policy = policy.model_copy(update={"session_workspace_root": str(context.workspace)})
         permission_engine = build_permission_engine(
@@ -911,7 +915,8 @@ def create_application_runtime():
 
 def build_session_permission_policy(config, workspace, permission_mode, filesystem_policy):
     """Compose normalized host filesystem context with configured capabilities."""
-    policy = CapabilityPolicy.from_config(config) if getattr(config.officev3, "_present", False) else CapabilityPolicy()
+    policy = (CapabilityPolicy.from_config(config) if getattr(config.officev3, "_present", False)
+              else CapabilityPolicy(builtin_skills_dir=managed_builtin_skills_dir(config)))
     if permission_mode == "default":
         policy = policy.with_filesystem_overrides(
             session_workspace_root=str(workspace), allowed_directories=[],

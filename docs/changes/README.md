@@ -6,6 +6,27 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## Desktop-managed builtin Skill sources (PR #269)
+
+- [PR #269](https://github.com/Raccoon-Office/Box-Agent/pull/269) adds
+  `BOX_AGENT_BUILTIN_SKILLS_DIR` as a process-local builtin source override.
+  Unset hosts retain legacy config/package resolution. Explicit `BOX_AGENT_HOME`
+  profiles retain source containment; no shared config or user-directory migration
+  is required. See the [Skill source contract](../design/skill-engine.md#21-desktop-managed-builtin-skill-sources).
+- A regular manifest with `desktopManaged: true` opts into additional shared Tool
+  read-only protection. This extends the independent Skill guard retained by
+  [PR #264](#product-directory-defaults-and-bash-traversal-pr-264), without changing
+  its product-directory permissions. Move sources and destinations use possible
+  post-cd directories even with an absolute destination. Managed instruction reads
+  use the resolved source root rather than depending on directory names.
+- Proof anchors: `tests/test_builtin_skill_read_only.py`, `test_read_file_bytes.py`,
+  `test_tools.py`, `test_skill_loader.py` and `test_isolated_profile.py`. These are
+  regression entry points, not a statement that a specific Head or runtime passed.
+- The paired desktop must prepare/publish the source and pass the environment.
+  Its runtime must declare `builtin_skills_env_version: 1`; build, install, restart
+  and fresh live-task verification remain separate release checks. Rollback restores
+  the prior runtime and paired host source selection; existing user files remain.
+
 ## Product directory defaults and Bash traversal (PR #264)
 
 - [PR #264](https://github.com/Raccoon-Office/Box-Agent/pull/264) changes the

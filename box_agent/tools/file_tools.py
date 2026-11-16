@@ -766,6 +766,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
         allow_full_access: bool = True,
         permission_engine: PermissionEngine | None = None,
         relative_root_dir: str | None = None,
+        builtin_skills_dir: Path | None = None,
     ):
         """Initialize WriteTool with workspace directory.
 
@@ -781,6 +782,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
         )
         self.allow_full_access = allow_full_access
         self._perm = permission_engine
+        self._builtin_skills_dir = builtin_skills_dir
         self._pending: dict[Path, _PendingTextWrite] = {}
         self._committed: dict[Path, _CommittedTextWrite] = {}
 
@@ -850,7 +852,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
         ).resolve(strict=False)
 
     def _permission_error(self, target: Path) -> ToolResult | None:
-        if error := builtin_skill_write_error(target):
+        if error := builtin_skill_write_error(target, self._builtin_skills_dir):
             return ToolResult(success=False, error=error)
         if self._perm:
             decision = self._perm.check(
@@ -1408,6 +1410,7 @@ class AppendTool(FileChangeReceiptMixin, Tool):
         allow_full_access: bool = True,
         permission_engine: PermissionEngine | None = None,
         relative_root_dir: str | None = None,
+        builtin_skills_dir: Path | None = None,
     ):
         """Initialize AppendTool with workspace directory."""
         self.workspace_dir = Path(workspace_dir).absolute()
@@ -1416,6 +1419,7 @@ class AppendTool(FileChangeReceiptMixin, Tool):
         )
         self.allow_full_access = allow_full_access
         self._perm = permission_engine
+        self._builtin_skills_dir = builtin_skills_dir
 
     @property
     def name(self) -> str:
@@ -1462,7 +1466,7 @@ class AppendTool(FileChangeReceiptMixin, Tool):
                 relative_root_dir=self.relative_root_dir,
             )
 
-            if error := builtin_skill_write_error(file_path):
+            if error := builtin_skill_write_error(file_path, self._builtin_skills_dir):
                 return ToolResult(success=False, error=error)
 
             if self._perm:
@@ -1530,6 +1534,7 @@ class EditTool(FileChangeReceiptMixin, Tool):
         allow_full_access: bool = True,
         permission_engine: PermissionEngine | None = None,
         relative_root_dir: str | None = None,
+        builtin_skills_dir: Path | None = None,
     ):
         """Initialize EditTool with workspace directory.
 
@@ -1545,6 +1550,7 @@ class EditTool(FileChangeReceiptMixin, Tool):
         )
         self.allow_full_access = allow_full_access
         self._perm = permission_engine
+        self._builtin_skills_dir = builtin_skills_dir
 
     @property
     def name(self) -> str:
@@ -1596,7 +1602,7 @@ class EditTool(FileChangeReceiptMixin, Tool):
                     file_path = workspace_candidate
 
             # Path validation
-            if error := builtin_skill_write_error(file_path):
+            if error := builtin_skill_write_error(file_path, self._builtin_skills_dir):
                 return ToolResult(success=False, error=error)
             if self._perm:
                 decision = self._perm.check(

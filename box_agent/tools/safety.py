@@ -25,10 +25,21 @@ TRASH_DIR = state_path('trash')
 BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 
-def builtin_skill_write_error(path: Path, skills_root: Path | None = None) -> str | None:
-    """Bundled skills are executable runtime resources, never task output."""
-    root = skills_root or BUILTIN_SKILLS_ROOT
-    if path.resolve().is_relative_to(root.resolve()):
+def builtin_skill_write_error(
+    path: Path, skills_root: Path | None = None, *, include_ancestors: bool = False,
+) -> str | None:
+    """Packaged and host-managed Skills are runtime resources, never task output."""
+    resolved = path.resolve()
+    bundled_root = BUILTIN_SKILLS_ROOT.resolve()
+    managed_root = skills_root.resolve() if skills_root is not None else None
+    contains_managed_source = (
+        include_ancestors and managed_root is not None
+        and managed_root != bundled_root and managed_root.is_relative_to(resolved)
+    )
+    if (resolved.is_relative_to(bundled_root)
+            or (managed_root is not None and resolved.is_relative_to(managed_root))
+            or contains_managed_source
+            or (include_ancestors and bundled_root.is_relative_to(resolved))):
         return (
             "BUILTIN_SKILL_READ_ONLY: bundled Skill files cannot be changed by task tools. "
             "Write presentation artifacts in the task workspace. If a bundled script fails, "
@@ -38,7 +49,8 @@ def builtin_skill_write_error(path: Path, skills_root: Path | None = None) -> st
 
 
 def builtin_skill_command_write_error(
-    command: str, workspace: Path | None, *, environment: Mapping[str, str] | None = None,
+    command: str, workspace: Path | None, skills_root: Path | None = None, *,
+    environment: Mapping[str, str] | None = None,
 ) -> str | None:
     """Reject direct shell/inline-code mutations of bundled Skill resources.
 
@@ -85,7 +97,7 @@ def builtin_skill_command_write_error(
             directories = tuple(possible)
         return directories
 
-    skills_root = BUILTIN_SKILLS_ROOT.resolve()
+    skills_root = (skills_root or BUILTIN_SKILLS_ROOT).resolve()
     events = sorted(
         (*inspection.invocations, *inspection.redirections),
         key=lambda event: event.sequence_index,
@@ -107,7 +119,7 @@ def builtin_skill_command_write_error(
                 pattern = pattern if pattern.is_absolute() else cwd / pattern
                 targets = glob.glob(str(pattern)) if event.glob_target else []
                 for target in targets or [str(destination)]:
-                    if error := builtin_skill_write_error(Path(target)):
+                    if error := builtin_skill_write_error(Path(target), skills_root):
                         return error
             continue
         invocation = event
@@ -120,13 +132,13 @@ def builtin_skill_command_write_error(
         copy_sources: list[str] = []
         copy_source_indices: list[int] = []
         protect_ancestors = True
-        if name in {"cp", "install"} and args:
+        if name in {"cp", "install", "mv", "copy-item", "move-item"} and args:
             operands: list[str] = []
             operand_indices: list[int] = []
             explicit_target: str | None = None
             explicit_target_index = 0
             no_target_directory = False
-            protect_ancestors = False
+            protect_ancestors = name in {"mv", "move-item"}
             options = iter(enumerate(args))
             for option_index, option in options:
                 if option == "--":
@@ -138,6 +150,27 @@ def builtin_skill_command_write_error(
                     operands.append(option)
                     operand_indices.append(option_index)
                     continue
+                if name in {"copy-item", "move-item"}:
+                    parameter, has_value, value = option.lower().partition(":")
+                    parameter = next((
+                        known for known in ("-path", "-literalpath", "-destination", "-recurse")
+                        if len(parameter) > 1 and known.startswith(parameter)
+                    ), parameter)
+                    if parameter in {"-pspath", "-lp"}:
+                        parameter = "-literalpath"
+                    if parameter in {"-path", "-literalpath", "-destination"}:
+                        value_index, value = (
+                            (option_index, option.partition(":")[2]) if has_value
+                            else next(options, (option_index, ""))
+                        )
+                        if parameter == "-destination":
+                            explicit_target_index, explicit_target = value_index, value
+                        else:
+                            operands.append(value)
+                            operand_indices.append(value_index)
+                    elif parameter == "-recurse":
+                        protect_ancestors = True
+                    continue
                 long_option, has_value, value = option.partition("=")
                 is_long_option = long_option.startswith("--") and len(long_option) > 2
                 if name == "cp" and is_long_option and any(
@@ -145,10 +178,13 @@ def builtin_skill_command_write_error(
                 ):
                     protect_ancestors = True
                     continue
+                if option.lower() == "-recurse":
+                    protect_ancestors = True
+                    continue
                 if option == "--no-target-directory":
                     no_target_directory = True
                     continue
-                if option == "-t":
+                if option == "-t" or option.lower() == "-destination":
                     explicit_target_index, explicit_target = next(options, (option_index, ""))
                     continue
                 if is_long_option and "--target-directory".startswith(long_option):
@@ -219,7 +255,7 @@ def builtin_skill_command_write_error(
                             break
             targets = tuple(operands[-1:])
             target_indices = tuple(operand_indices[-1:])
-        elif name in {"mv", "rm", "rmdir", "tee", "chmod", "chown", "touch"}:
+        elif name in {"rm", "rmdir", "remove-item", "tee", "chmod", "chown", "touch"}:
             targets = args
             target_indices = tuple(range(len(args)))
         elif name == "sed" and any(arg.startswith("-i") for arg in args):
@@ -245,8 +281,14 @@ def builtin_skill_command_write_error(
             tuple(invocation.expand_argument(index, target) for index, target in zip(target_indices, targets))
             if target_indices else tuple(invocation.expand_known_parameters(target) for target in targets)
         )
+        expanded_sources = tuple(
+            invocation.expand_argument(index, source)
+            for source, index in zip(copy_sources, copy_source_indices)
+        )
+        # A relative source still depends on earlier cd commands when the
+        # destination is absolute (including mv/Move-Item source protection).
         directories = (
-            (initial_cwd,) if all(Path(target).expanduser().is_absolute() for target in expanded_targets)
+            (initial_cwd,) if all(Path(path).expanduser().is_absolute() for path in (*expanded_targets, *expanded_sources))
             else working_directories(invocation.directory_changes)
         )
         if directories is None:
@@ -255,7 +297,7 @@ def builtin_skill_command_write_error(
         for cwd in directories:
             candidates = expanded_targets
             stable_copy_directory: Path | None = None
-            if name in {"cp", "install", "rsync", "mv", "rm", "rmdir", "tee", "chmod", "chown", "touch", "sed"}:
+            if name in {"cp", "install", "copy-item", "move-item", "rsync", "mv", "rm", "rmdir", "remove-item", "tee", "chmod", "chown", "touch", "sed"}:
                 # Shell destination patterns can themselves name a protected
                 # file/link. Check every match, including directory-form copies.
                 target_matches: list[str] = []
@@ -266,7 +308,7 @@ def builtin_skill_command_write_error(
                     pattern = pattern if pattern.is_absolute() else cwd / pattern
                     target_matches.extend(glob.glob(str(pattern)) or [literal])
                 candidates = tuple(target_matches)
-            if name in {"cp", "install"} and not no_target_directory:
+            if name in {"cp", "install", "mv", "copy-item", "move-item"} and not no_target_directory:
                 destinations = candidates
                 for destination_value in destinations:
                     destination = Path(destination_value).expanduser()
@@ -282,20 +324,48 @@ def builtin_skill_command_write_error(
                         matches = glob.glob(str(source_pattern)) or [str(source_path)]
                         candidates += tuple(str(destination / Path(match).name) for match in matches)
                         candidates += (str(destination / source_path.name),)
-                        if source in {".", ".."} or source.rstrip("/").endswith("/."):
+                        copy_contents = name in {"cp", "copy-item"} and (
+                            source in {".", ".."} or source.rstrip("/\\").endswith(("/.", "\\."))
+                            or (sys.platform == "darwin" and protect_ancestors and source.endswith("/"))
+                        )
+                        if copy_contents:
+                            if source_path.is_dir() and destination.is_dir():
+                                candidates += tuple(str(destination / child.name) for child in source_path.iterdir())
+                            stable_copy_directory = None
+                        if not source_path.exists() or any(
+                            arg.startswith("--") and len(arg) > 2
+                            and "--parents".startswith(arg.partition("=")[0]) for arg in args
+                        ):
                             stable_copy_directory = None
                         if glob.has_magic(source_pattern.name):
                             # The source or destination directory may be created
                             # before the copy; inspect existing target entries too.
                             candidates += tuple(str(match) for match in destination.glob(source_pattern.name))
+            if name in {"mv", "move-item"}:
+                for source, source_index in zip(copy_sources, copy_source_indices):
+                    source_path = Path(invocation.expand_argument(source_index, source)).expanduser()
+                    source_path = source_path if source_path.is_absolute() else cwd / source_path
+                    source_pattern = Path(invocation.expand_argument(source_index, source, glob_pattern=True)).expanduser()
+                    source_pattern = source_pattern if source_pattern.is_absolute() else cwd / source_pattern
+                    for source_target in glob.glob(str(source_pattern)) or [str(source_path)]:
+                        if error := builtin_skill_write_error(Path(source_target), skills_root, include_ancestors=True):
+                            return error
+                        candidates += (source_target,)
             for candidate_index, target in enumerate(candidates):
                 if target.startswith("-") and name not in {"cp", "install", "rsync"}:
                     continue
                 path = Path(target).expanduser()
                 path = path if path.is_absolute() else cwd / path
-                if protect_ancestors and skills_root.is_relative_to(path.resolve()):
-                    path = skills_root
-                if error := builtin_skill_write_error(path, skills_root):
+                container = (
+                    candidate_index < len(expanded_targets)
+                    and stable_copy_directory is not None
+                    and path.resolve(strict=False) == stable_copy_directory
+                    and skills_root != BUILTIN_SKILLS_ROOT.resolve()
+                    and not BUILTIN_SKILLS_ROOT.resolve().is_relative_to(path.resolve())
+                )
+                if error := builtin_skill_write_error(
+                    path, skills_root, include_ancestors=protect_ancestors and not container,
+                ):
                     return error
                 if (
                     candidate_index < len(expanded_targets)

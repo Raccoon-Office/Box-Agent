@@ -27,9 +27,11 @@ from box_agent.tools.safety import builtin_skill_write_error
 class PublishArtifactTool(Tool):
     """Record intentional delivery without inferring it from a tool result."""
 
-    def __init__(self, workspace_dir: str | Path, permission_engine: PermissionEngine | None = None):
+    def __init__(self, workspace_dir: str | Path, permission_engine: PermissionEngine | None = None,
+                 builtin_skills_dir: Path | None = None):
         self.workspace_dir = Path(workspace_dir).resolve()
         self._perm = permission_engine
+        self._builtin_skills_dir = builtin_skills_dir
         self._pending: dict[str, tuple[Path, Path]] = {}
 
     @property
@@ -93,7 +95,7 @@ class PublishArtifactTool(Tool):
         if isinstance(context, FileWriteInvocationContext) and context.validate_write_target:
             if error := context.validate_write_target(target):
                 return error
-        if error := builtin_skill_write_error(target):
+        if error := builtin_skill_write_error(target, self._builtin_skills_dir):
             return ToolResult(success=False, error=error)
         if self._perm:
             decision = self._perm.check(capability="filesystem.write",
