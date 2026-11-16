@@ -142,3 +142,98 @@ def test_direct_trace_write_omits_private_data_and_preserves_event_ids(tmp_path)
     assert private["step"] == 2 and private["llm_call_id"] == "llm" and private["tool_call_id"] == "tool"
     assert ordinary["data"] == payload
     assert payload == {"content": "PRIVATE-TRACE-CANARY"}
+
+
+async def test_failed_command_retains_diagnostics_without_changing_result(tmp_path):
+    from box_agent.tools.bash_tool import BashTool
+    from box_agent.tools.engine.results import ToolResultPipelineInput, process_tool_result
+    from box_agent.tool_result_storage import ToolResultStorage
+
+    tool = BashTool(workspace_dir=str(tmp_path))
+    writer = SessionTraceWriter(session_id="failed", acp_session_id="acp", enabled=True,
+                                trace_dir=tmp_path / "trace")
+    token = set_session_trace_writer(writer, turn_id="fixture")
+    try:
+        with private_payload_scope():
+            result = await tool.execute(command="python -c \"import sys; sys.stderr.write('missing fixture'); sys.exit(7)\"")
+            outcome = process_tool_result(ToolResultPipelineInput(
+                messages=[], tool_call_id="failed", tool_name="bash", result=result,
+                arguments={"command": "private"}, visible_content=result.content,
+                visible_error=result.error, result_storage=ToolResultStorage(tmp_path),
+            ))
+    finally:
+        reset_session_trace_writer(token)
+    data = json.loads(writer.file_path.read_text())["data"]
+    assert data["exit_code"] == 7
+    assert "missing fixture" in data["error"]
+    assert not outcome.events[0].success
+    assert data["error"] == outcome.events[0].error
+    assert "arguments" not in data
+    assert "content" not in data
+
+
+def test_command_trace_retains_safe_metadata_and_redacts_credentials(tmp_path):
+    writer = SessionTraceWriter(session_id="failed", acp_session_id="acp", enabled=True,
+                                trace_dir=tmp_path / "trace")
+    with private_payload_scope():
+        writer.write("tool.response", data={
+            "tool_name": "bash", "success": False, "duration_ms": 10,
+            "exit_code": 2, "error": "Command failed with exit code 2\nAuthorization: Bearer fake-token",
+        })
+    data = json.loads(writer.file_path.read_text())["data"]
+    assert data["success"] is False
+    assert data["exit_code"] == 2
+    assert data["duration_ms"] == 10
+    assert "fake-token" not in data["error"]
+
+
+@pytest.mark.parametrize("error", [
+    "Command failed with exit code 9009\r\n不是内部或外部命令，也不是可运行的程序",
+    "Command failed with exit code 127\n/bin/bash: fixture: command not found",
+])
+def test_command_error_preserves_platform_diagnostics(tmp_path, error):
+    writer = SessionTraceWriter(session_id="platform", acp_session_id="acp", enabled=True,
+                                trace_dir=tmp_path)
+    with private_payload_scope():
+        writer.write("tool.response", data={"tool_name": "bash", "success": False, "error": error})
+    data = json.loads(writer.file_path.read_text())["data"]
+    assert data["error"] == error
+    assert data["exit_code"] in (9009, 127)
+
+
+@pytest.mark.parametrize("credentials", [
+    "api_key='fixture-key'", "Authorization: Basic fixture-basic",
+    "cookie: a=fixture-cookie; b=other", "secret=fixture-secret",
+    "https://user:fixture-password@host", "-----BEGIN KEY-----fixture-key-----END KEY-----",
+])
+def test_credentials_are_removed_from_command_errors(tmp_path, credentials):
+    writer = SessionTraceWriter(session_id="credentials", acp_session_id="acp", enabled=True,
+                                trace_dir=tmp_path)
+    with private_payload_scope():
+        writer.write("tool.response", data={"tool_name": "bash", "success": False,
+                                           "error": "Permission denied: " + credentials})
+    data = json.loads(writer.file_path.read_text())["data"]
+    assert "Permission denied" in data["error"]
+    assert "fixture-" not in data["error"]
+
+
+def test_successful_tool_output_stays_private(tmp_path):
+    writer = SessionTraceWriter(session_id="success", acp_session_id="acp", enabled=True,
+                                trace_dir=tmp_path)
+    with private_payload_scope():
+        writer.write("tool.response", data={"tool_name": "bash", "success": True,
+                                           "content": "secret"})
+    data = json.loads(writer.file_path.read_text())["data"]
+    assert data["success"] is True
+    assert "content" not in data
+
+
+def test_large_error_keeps_the_end(tmp_path):
+    writer = SessionTraceWriter(session_id="large", acp_session_id="acp", enabled=True,
+                                trace_dir=tmp_path)
+    with private_payload_scope():
+        writer.write("tool.response", data={"tool_name": "bash", "success": False,
+            "error": "Command failed with exit code 1\n" + "x" * 20000 + "\nPermission denied"})
+    data = json.loads(writer.file_path.read_text())["data"]
+    assert data["error"].endswith("Permission denied")
+    assert len(data["error"]) < 9000

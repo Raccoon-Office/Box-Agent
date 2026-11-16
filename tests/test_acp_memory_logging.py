@@ -8,6 +8,26 @@ from box_agent.payload_privacy import private_payload_scope, private_payloads
 
 
 @pytest.mark.parametrize("log_format", ["json", "text"])
+def test_command_failure_is_useful_in_private_logs(tmp_path, monkeypatch, log_format):
+    monkeypatch.setenv("BOX_AGENT_LOG_LEVEL", "info")
+    monkeypatch.setenv("BOX_AGENT_LOG_FORMAT", log_format)
+    logfile = tmp_path / "agent.log"
+    monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(logfile))
+    logger = ACPDebugLogger()
+    try:
+        with private_payload_scope():
+            logger.warn("tool/fail", tool_name="bash", error="Command failed with exit code 4\nPermission denied\n" + "x" * 500,
+                        arguments={"command": "private"})
+        output = logfile.read_text()
+        assert "Permission denied" in output
+        assert "exit_code" in output
+        assert "private" not in output
+        assert "x" * 500 in output
+    finally:
+        logger.close()
+
+
+@pytest.mark.parametrize("log_format", ["json", "text"])
 async def test_inject_preserves_instruction_but_logs_only_metadata(tmp_path, monkeypatch, capsys, log_format):
     from types import SimpleNamespace
 
