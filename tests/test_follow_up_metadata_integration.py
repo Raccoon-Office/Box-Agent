@@ -77,7 +77,10 @@ def _new_agent(conn, model, tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("block", _BLOCKS)
 @pytest.mark.parametrize("character_chunks", [False, True])
-@pytest.mark.parametrize("before", ["已完成。", "Example: <code>don't</code>"])
+@pytest.mark.parametrize("before", [
+    "已完成。", "Example: <code>don't</code>", 'Example: <code>"</code>',
+    "<code>\n`</code>`", "<pre>\n`</pre>`",
+])
 async def test_metadata_is_structured_without_polluting_reply_or_session_log(
     tmp_path, block, character_chunks, before,
 ):
@@ -85,7 +88,7 @@ async def test_metadata_is_structured_without_polluting_reply_or_session_log(
     agent = _new_agent(
         conn, _ReplyModel(f"{before}\n{block}\r\n补充说明。", character_chunks=character_chunks), tmp_path,
     )
-    expected = before + "补充说明。"
+    expected = before.replace("\r", "").replace("\n", "") + "补充说明。"
     try:
         session = await agent.new_session(**acp_params(SimpleNamespace(
             cwd=str(tmp_path),
@@ -131,6 +134,8 @@ async def test_metadata_is_structured_without_polluting_reply_or_session_log(
 @pytest.mark.parametrize("reply", [
     'Example: <code>\nfollow_up_suggestions\n{"suggestions":["Example"]}\n</code>',
     'Example: `\nfollow_up_suggestions\n{"suggestions":["Example"]}\n`',
+    'Example: <code>`</code>`\nfollow_up_suggestions\n{"suggestions":["Example"]}\n</code>',
+    'Example: <code>\\</code>\nfollow_up_suggestions\n{"suggestions":["Example"]}\n</code>',
 ])
 async def test_inline_code_example_stays_in_acp_reply_and_session_log(tmp_path, character_chunks, reply):
     conn = _RecordingConnection()

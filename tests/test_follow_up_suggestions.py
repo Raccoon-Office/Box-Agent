@@ -452,10 +452,10 @@ def test_extractor_ignores_html_tags_inside_markdown_code_examples():
 
 
 @pytest.mark.parametrize("literal", [
-    '{"suggestions":["解释 </pre> 和 </code> 的作用"]}',
-    '{"suggestions":["解释 \\"</pre>\\" 和 </code> 的作用"]}',
+    '{"suggestions":["解释 &lt;/pre&gt; 和 &lt;/code&gt; 的作用"]}',
+    '{"suggestions":["解释 \\"&lt;/pre&gt;\\" 和 &lt;/code&gt; 的作用"]}',
 ])
-def test_extractor_preserves_quoted_html_closers_inside_code_containers(literal):
+def test_extractor_preserves_encoded_html_closers_inside_code_containers(literal):
     block = 'follow_up_suggestions\n{"suggestions":["继续"]}'
     example = '<pre><code>\n' + literal + '\n' + block + '\n</code></pre>\n'
     _assert_extraction_at_every_split(example + block, example, ["继续"])
@@ -487,8 +487,8 @@ def test_extractor_preserves_indented_and_nested_fence_examples(example):
     ('Example: <pre class="example"><code>', "</code></pre>"),
     ("<div><pre>", "</pre></div>"),
     ("<code><code>inner</code>", "</code>"),
-    ("<code>\nconst tag = '</code>';", "</code>"),
-    ("<code>\nconst tag = `</code>`;", "</code>"),
+    ("<code>\nconst tag = '&lt;/code&gt;';", "</code>"),
+    ("<code>\nconst tag = `&lt;/code&gt;`;", "</code>"),
     ('<pre data-title="a > </pre> b">', "</pre>"),
 ])
 def test_extractor_preserves_html_code_after_inline_prose(opening, closing):
@@ -524,6 +524,73 @@ def test_extractor_does_not_treat_apostrophes_in_html_code_as_quoted_strings(tag
     prefix = f'Example: <{tag}>{word}</{tag}>\n'
     text = prefix + '```follow_up_suggestions\n{"suggestions":["Next"]}\n```'
     _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+def test_extractor_honors_real_html_closers_after_an_unmatched_quote(quote):
+    prefix = 'Example: <code>' + quote + '</code>\n'
+    text = prefix + '```follow_up_suggestions\n{"suggestions":["Next"]}\n```'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_extractor_honors_html_closers_even_between_paired_text_quotes(quote):
+    prefix = '<code>' + quote + '</code>' + quote + '\n'
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+def test_extractor_keeps_a_code_container_without_a_real_closing_tag(quote):
+    example = '<code>' + quote + '\nfollow_up_suggestions\n{"suggestions":["Example"]}'
+    _assert_extraction_at_every_split(example, example, [])
+
+
+def test_extractor_preserves_a_multiline_template_string_containing_an_encoded_tag():
+    example = (
+        '<code>const template = `literal &lt;/code&gt;\n'
+        'follow_up_suggestions\n{"suggestions":["Example"]}\n'
+        '`;\n</code>\n'
+    )
+    text = example + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, example, ["Next"])
+
+
+def test_extractor_closes_nested_code_containers_with_their_ancestor():
+    prefix = '<pre><code>Example</pre>\n'
+    text = prefix + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, prefix, ["Next"])
+
+
+def test_extractor_ignores_html_closers_without_a_matching_container():
+    example = '<pre>Example </code>\nfollow_up_suggestions\n{"suggestions":["Example"]}\n</pre>\n'
+    text = example + 'follow_up_suggestions\n{"suggestions":["Next"]}'
+    _assert_extraction_at_every_split(text, example, ["Next"])
+
+
+@pytest.mark.parametrize("tag", ["code", "pre"])
+@pytest.mark.parametrize("wrapper", ["`", "``", "\\"])
+@pytest.mark.parametrize("raw", [False, True])
+def test_extractor_matches_renderer_markdown_context_around_html_closers(tag, wrapper, raw):
+    prefix = f'<{tag}>\n' if raw else f'Example: <{tag}>'
+    closing = wrapper + f'</{tag}>' + ("" if wrapper == "\\" else wrapper)
+    metadata = 'follow_up_suggestions\n{"suggestions":["Example"]}'
+    text = prefix + closing + '\n' + metadata + f'\n</{tag}>'
+    expected = prefix + closing + f'\n\n</{tag}>' if raw else text
+    _assert_extraction_at_every_split(text, expected, ["Example"] if raw else [])
+
+
+@pytest.mark.parametrize("prefix, raw", [
+    ('<code>', False),
+    ('Example:\n<code>\n', False),
+    ('Example:\n\n<code>\n', True),
+])
+def test_extractor_starts_raw_code_blocks_only_at_paragraph_boundaries(prefix, raw):
+    closing = '`</code>`\n'
+    metadata = 'follow_up_suggestions\n{"suggestions":["Example"]}'
+    text = prefix + closing + metadata + '\n</code>'
+    expected = prefix + closing + '\n</code>' if raw else text
+    _assert_extraction_at_every_split(text, expected, ["Example"] if raw else [])
 
 
 @pytest.mark.parametrize("ticks", ["`", "``"])

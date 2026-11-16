@@ -323,6 +323,8 @@ image_refs 的字段：`imageId` 必填，`contentRef,sha256,media_type,messageS
 
 标记须精确匹配，元数据围栏支持 Markdown 有效的 0–3 个前导空格及 LF / CRLF 换行。普通提及、相似名称、四空格缩进示例、外层 Markdown 围栏和 HTML `pre` / `code` 示例（包括正文同行或嵌套容器）保留原文；未确认、无效或超限的裸候选同样保留。解析结果不依赖流式分块位置。显式元数据与普通文本的处理边界由 `tests/test_follow_up_suggestions.py` 覆盖；真实 ACP 适配路径、取消及 Session Log 断言见 `tests/test_follow_up_metadata_integration.py`。
 
+HTML 代码容器按客户端实际渲染的标签边界结束：正文中的普通引号不会转义 `</pre>` / `</code>`；外层容器结束时，其内部代码容器也结束。Markdown 内联上下文中的代码跨度和反斜杠转义仍可保留标签字面量，原始 HTML 块中的反引号和反斜杠则没有此作用。也可以使用 `&lt;/pre&gt;` / `&lt;/code&gt;` 或普通 Markdown 代码围栏显示标签字面量。标签属性中的引号、HTML 注释及实体仍按各自语法处理，不将其中的标签字样当成新的代码容器。
+
 宿主仍只从结构化事件更新输入框推荐。历史正文的显示清理属于客户端兼容处理，不回写会话记录、不重新激活旧建议；复制、导出和语音摘要应与显示正文保持一致。模型在块前写出的普通引导语仍属于正文。
 
 tokenUsage为promptTokens/completionTokens/totalTokens/calls，缓存报告有效时带cachedTokens。tools项为name/count，mcp项为server/tool/name/count；current可为 `{type:tool,name}`、`{type:mcp,name,server,tool}` 或 `{type:skill,name}`，这些是嵌套判别值，不是新的ACP方法。

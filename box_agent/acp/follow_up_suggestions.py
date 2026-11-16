@@ -142,17 +142,23 @@ class FollowUpSuggestionsStreamExtractor:
         self._markdown_fence = ""
         self._markdown_indent = 0
         self._markdown_line: str | None = ""
-        self._html_containers: dict[str, int] = {}
+        self._html_containers: list[str] = []
         self._html_tag = ""
         self._html_tag_quote = ""
         self._html_comment = False
         self._html_comment_tail = ""
-        self._html_quote = ""
         self._html_escaped = False
-        self._html_previous_char = ""
         self._inline_code_ticks = 0
         self._inline_tick_run = 0
         self._line_has_text = False
+        self._inline_html_stack: list[str] | None = None
+        self._raw_html_block = ""
+        self._raw_pre_closed = False
+        self._raw_code_candidate = False
+        self._html_line_prefix: str | None = ""
+        self._html_line_blank = True
+        self._html_paragraph_open = False
+        self._html_tag_at_line_start = False
 
     @property
     def suggestions(self) -> list[str]:
@@ -191,8 +197,7 @@ class FollowUpSuggestionsStreamExtractor:
         for line in lines:
             self._track_html_code(line + "\n")
             if not self._line_has_text and not line.strip():
-                self._inline_code_ticks = 0
-                self._inline_tick_run = 0
+                self._resolve_inline_code(matched=False)
             if self._markdown_line is not None:
                 self._track_markdown_line(_markdown_line_for_fence(self._markdown_line + line))
             self._markdown_line = ""
@@ -205,15 +210,70 @@ class FollowUpSuggestionsStreamExtractor:
             self._leave_dedented_list(fence_line)
             self._markdown_line = line if self._markdown_prefix(fence_line) else None
 
-    def _track_html_code(self, text: str) -> None:
-        # The host renders raw pre/code containers as code examples. Track just
-        # these tags, including split attributes, without parsing general HTML.
-        if self._markdown_fence:
+    def _resolve_inline_code(self, *, matched: bool) -> None:
+        if self._inline_html_stack is not None:
+            if not matched:
+                self._html_containers = self._inline_html_stack
+            self._inline_html_stack = None
             self._html_tag = ""
-            self._inline_code_ticks = 0
-            self._inline_tick_run = 0
-            return
+            self._html_tag_quote = ""
+            self._html_comment = False
+            self._html_comment_tail = ""
+        self._inline_code_ticks = 0
+        self._inline_tick_run = 0
+
+    def _track_html_line(self, char: str) -> None:
+        if char == "\n":
+            ended_raw = self._raw_pre_closed or (
+                self._raw_html_block == "code" and self._html_line_blank
+            )
+            if ended_raw:
+                self._raw_html_block = ""
+                self._raw_pre_closed = False
+            elif self._raw_code_candidate and not self._raw_html_block:
+                self._resolve_inline_code(matched=False)
+                self._raw_html_block = "code"
+            self._html_paragraph_open = not (
+                self._html_line_blank or self._raw_html_block or ended_raw
+            )
+            self._raw_code_candidate = False
+            self._html_line_prefix = ""
+            self._html_line_blank = True
+        else:
+            self._html_line_blank = self._html_line_blank and char.isspace()
+            if self._html_line_prefix is not None:
+                if char == " " and len(self._html_line_prefix) < 3:
+                    self._html_line_prefix += char
+                else:
+                    self._html_line_prefix = None
+
+    def _track_html_code(self, text: str) -> None:
+        # Markdown is still active around inline HTML. Only line-start pre
+        # blocks and standalone code tags after a paragraph boundary are raw.
         for char in text:
+            if self._raw_code_candidate and char not in " \t\r\n":
+                self._raw_code_candidate = False
+            if self._markdown_fence:
+                self._html_tag = ""
+                self._resolve_inline_code(matched=False)
+                self._track_html_line(char)
+                self._html_paragraph_open = False
+                continue
+            markdown = not self._raw_html_block and (
+                self._inline_html_stack is not None or not (self._html_tag or self._html_comment)
+            )
+            if markdown:
+                if self._inline_tick_run and char != "`":
+                    if not self._inline_code_ticks:
+                        self._inline_code_ticks = self._inline_tick_run
+                        self._inline_html_stack = self._html_containers.copy()
+                    elif self._inline_code_ticks == self._inline_tick_run:
+                        self._resolve_inline_code(matched=True)
+                    self._inline_tick_run = 0
+                if char == "`" and not self._html_escaped:
+                    self._inline_tick_run += 1
+                    self._track_html_line(char)
+                    continue
             if self._html_comment:
                 self._html_comment_tail = (self._html_comment_tail + char)[-3:]
                 if self._html_comment_tail == "-->":
@@ -234,14 +294,22 @@ class FollowUpSuggestionsStreamExtractor:
                     if tag is not None:
                         closing, name = tag.groups()
                         name = name.lower()
+                        if not closing and self._html_tag_at_line_start and not self._raw_html_block:
+                            if name == "pre":
+                                self._resolve_inline_code(matched=False)
+                                self._raw_html_block = "pre"
+                            elif not self._html_paragraph_open:
+                                self._raw_code_candidate = True
+                        stack = self._inline_html_stack if self._inline_html_stack is not None else self._html_containers
                         if closing:
-                            remaining = self._html_containers.get(name, 0) - 1
-                            if remaining > 0:
-                                self._html_containers[name] = remaining
-                            else:
-                                self._html_containers.pop(name, None)
+                            for index in range(len(stack) - 1, -1, -1):
+                                if stack[index] == name:
+                                    del stack[index:]
+                                    break
+                            if name == "pre" and self._raw_html_block == "pre":
+                                self._raw_pre_closed = True
                         else:
-                            self._html_containers[name] = self._html_containers.get(name, 0) + 1
+                            stack.append(name)
                     self._html_tag = ""
                 elif (
                     self._html_tag not in ("<", "</")
@@ -255,35 +323,12 @@ class FollowUpSuggestionsStreamExtractor:
                     self._html_tag_quote = ""
             elif self._html_escaped:
                 self._html_escaped = False
-            elif self._html_containers and self._html_quote:
-                # Quoted JSON/code examples can themselves explain these HTML
-                # tags. Their literal closing tags must not end the container.
-                if char == "\\":
-                    self._html_escaped = True
-                elif char == self._html_quote or (char in "\r\n" and self._html_quote != "`"):
-                    self._html_quote = ""
-            elif self._html_containers:
-                if char in "\"`" or (
-                    char == "'" and not (self._html_previous_char.isalnum() or self._html_previous_char == "_")
-                ):
-                    self._html_quote = char
-                elif char == "<":
-                    self._html_tag = char
-            elif char == "`":
-                self._inline_tick_run += 1
-            else:
-                if self._inline_tick_run:
-                    if not self._inline_code_ticks:
-                        self._inline_code_ticks = self._inline_tick_run
-                    elif self._inline_code_ticks == self._inline_tick_run:
-                        self._inline_code_ticks = 0
-                    self._inline_tick_run = 0
-                if not self._inline_code_ticks:
-                    if char == "\\":
-                        self._html_escaped = True
-                    elif char == "<":
-                        self._html_tag = char
-            self._html_previous_char = char
+            elif char == "\\" and not self._raw_html_block and self._inline_html_stack is None:
+                self._html_escaped = True
+            elif char == "<":
+                self._html_tag = char
+                self._html_tag_at_line_start = self._html_line_prefix is not None
+            self._track_html_line(char)
 
     def _markdown_prefix(self, line: str) -> bool:
         if self._markdown_indent:
@@ -328,8 +373,8 @@ class FollowUpSuggestionsStreamExtractor:
             if fence[0] == "~" or "`" not in rest:
                 self._markdown_fence = fence
                 self._markdown_indent = indent
-                self._inline_code_ticks = 0
-                self._inline_tick_run = 0
+                self._resolve_inline_code(matched=False)
+                self._html_paragraph_open = False
 
     def _read_candidate(self, *, final: bool) -> tuple[int, list[str] | None]:
         """Return the consumed length (zero to wait), or None to retain text."""
@@ -464,25 +509,25 @@ class FollowUpSuggestionsStreamExtractor:
             self._emit(output, match.start() - 1)
             opener = match.group()
             self._leave_dedented_list(opener)
+            if self._inline_code_ticks and not self._markdown_fence and not self._raw_html_block:
+                # Confirm inline spans before deciding whether their HTML tags
+                # or apparent metadata are literal. Unmatched spans apply only
+                # the bounded tag-state snapshot, never replaying source text.
+                candidate = self._buffer[:_MAX_BARE_BLOCK_CHARS]
+                close = _inline_code_end(
+                    candidate, self._inline_code_ticks,
+                    final=final and len(self._buffer) < _MAX_BARE_BLOCK_CHARS,
+                )
+                if close:
+                    self._emit(output, close)
+                    continue
+                if close == 0 and not final and len(self._buffer) < _MAX_BARE_BLOCK_CHARS:
+                    break
+                self._resolve_inline_code(matched=False)
             if self._markdown_fence or self._html_containers or self._html_comment:
                 self._emit(output, len(opener))
             else:
-                if self._inline_code_ticks and not opener.lstrip().startswith(_BLOCK_START):
-                    # A code span is only confirmed by its matching closing
-                    # run. Hold the candidate, not the preceding prose, while
-                    # waiting; unmatched/oversized spans remain ordinary text.
-                    candidate = self._buffer[:_MAX_BARE_BLOCK_CHARS]
-                    close = _inline_code_end(
-                        candidate, self._inline_code_ticks,
-                        final=final and len(self._buffer) < _MAX_BARE_BLOCK_CHARS,
-                    )
-                    if close:
-                        self._emit(output, close)
-                        continue
-                    if close == 0 and not final and len(self._buffer) < _MAX_BARE_BLOCK_CHARS:
-                        break
-                self._inline_code_ticks = 0
-                self._inline_tick_run = 0
+                self._resolve_inline_code(matched=False)
                 self._holding = opener
         return output
 
