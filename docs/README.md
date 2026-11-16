@@ -19,6 +19,8 @@ contracts.
 | Review change history | [Change index](changes/README.md) | Same document |
 | Current published/unreleased state | [Release State](RELEASE_STATE.md) | Same document |
 | Third-party model API behavior | [Third-party API Compatibility](THIRD_PARTY_API_COMPATIBILITY.md) | Same document |
+| DSH migration capability inventory (design, not implemented) | — | [现有能力盘点与 DSH 迁移表](DSH_MIGRATION_INVENTORY_CN.md) |
+| Cross-engine behavior contracts (Box source baseline executed) | — | [首批行为集成测试基线](DSH_BEHAVIOR_BASELINE_CN.md) |
 
 ## Core runtime behavior
 
