@@ -695,18 +695,25 @@ class OpenAIClient(LLMClientBase):
             params.update(stream=True, stream_options={"include_usage": True})
         if tools:
             params["tools"] = self._convert_tools(tools)
-        from .reasoning import unified_thinking_params
+        from .reasoning import normalize_raccoon_thinking, unified_thinking_params
         unified = unified_thinking_params(self, thinking_enabled)
         if unified is not None:
             if unified:
                 # SDK merges this into the HTTP top level (no nested extra_body).
                 params["extra_body"] = unified
         else:
+            capability = normalize_raccoon_thinking(
+                getattr(self, "raccoon_thinking_models", {}).get(self.model)
+            )
+            unmanaged = capability is not None and capability.get("managed") is False
             _apply_thinking_params(
                 params, model=self.model,
-                # A unified preference never becomes native thinking when an
-                # auto/child model has no catalog capability (e.g. a special route).
-                thinking_enabled=thinking_enabled and getattr(self, "raccoon_thinking_level", None) is None,
+                # Explicitly unmanaged models retain native policy even with a
+                # saved unified preference. Unknown auto/child routes must not
+                # turn that preference into native thinking.
+                thinking_enabled=thinking_enabled and (
+                    unmanaged or getattr(self, "raccoon_thinking_level", None) is None
+                ),
                 reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
                 reasoning_effort=getattr(self, "reasoning_effort", None),
             )

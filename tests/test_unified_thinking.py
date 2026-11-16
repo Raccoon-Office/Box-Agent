@@ -282,22 +282,50 @@ async def test_http_capability_conflict_reaches_acp_with_structured_code_without
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_unmanaged_catalog_keeps_existing_native_wire(stream, enabled):
+@pytest.mark.parametrize("preference", [None, "level_5", "off"])
+async def test_unmanaged_catalog_keeps_existing_native_wire(stream, enabled, preference):
     async with wire_client(model="sn-glm-5-3") as (base, calls):
-        async def send():
+        async def send(client):
             messages = [Message(role="user", content="hello")]
             if stream:
-                _ = [event async for event in base.generate_stream(messages, thinking_enabled=enabled)]
+                _ = [event async for event in client.generate_stream(messages, thinking_enabled=enabled)]
             else:
-                await base.generate(messages, thinking_enabled=enabled)
-        await send()
+                await client.generate(messages, thinking_enabled=enabled)
+        await send(base)
         previous = calls[-1]
         base._client.raccoon_thinking_models = {base.model: {
             "managed": False, "supported": False, "can_disable": False, "display_levels": [],
         }}
-        await send()
+        await send(SessionBoundLLM(base, raccoon_thinking_level=preference))
         assert calls[-1] == previous
         assert "raccoon_thinking_level" not in calls[-1]
+
+
+@pytest.mark.parametrize("preference", ["level_5", "off"])
+@pytest.mark.parametrize("capability,expected", [
+    ({"managed": False, "supported": False, "can_disable": False, "display_levels": []}, "max"),
+    (None, "low"),
+    ({"managed": False}, "low"),
+])
+async def test_switch_to_native_model_preserves_preference_and_respects_catalog(capability, expected, preference):
+    async with wire_client(model="parent") as (base, calls):
+        base._client.raccoon_thinking_models = {"parent": CAPABILITY}
+        if capability is not None:
+            base._client.raccoon_thinking_models["sn-glm-5-3"] = capability
+        session = SessionBoundLLM(base, raccoon_thinking_level=preference)
+        messages = [Message(role="user", content="hello")]
+        child = session.for_model("sn-glm-5-3")
+        await child.generate(messages, thinking_enabled=True)
+        assert calls[-1]["reasoning_effort"] == expected
+        assert "raccoon_thinking_level" not in calls[-1]
+        session.bind(base.for_model("sn-glm-5-3"))
+        await session.generate(messages, thinking_enabled=True)
+        assert calls[-1]["reasoning_effort"] == expected
+        assert "raccoon_thinking_level" not in calls[-1]
+        session.bind(base.for_model("parent"))
+        await session.generate(messages, thinking_enabled=True)
+        assert calls[-1]["raccoon_thinking_level"] == preference
+        assert "reasoning_effort" not in calls[-1]
 
 
 @pytest.mark.parametrize("preference_key,initial,next_value", [
