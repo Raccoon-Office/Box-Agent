@@ -18,6 +18,9 @@ _BLOCK_START = "```follow_up_suggestions"
 _BLOCK_FENCE = "```"
 _BARE_START = "follow_up_suggestions"
 _BARE_HEADER = re.compile(r"follow_up_suggestions[ \t]*\r?\n\s*")
+_BARE_BOUNDARY = re.compile(r"(?m)^(?:```)?follow_up_suggestions")
+_MARKDOWN_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_MARKDOWN_FENCE_PREFIX = re.compile(r" {0,3}(?:`{0,2}|~{1,2}|`{3,}[^`]*|~{3,}.*)")
 _MAX_BARE_BLOCK_CHARS = 16_384
 _MAX_SUGGESTIONS = 3
 _MAX_SUGGESTION_CHARS = 160
@@ -99,6 +102,13 @@ def parse_follow_up_suggestions_response(text: str) -> list[str]:
     return normalize_follow_up_suggestions(decoded.get("suggestions"))
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
+_BARE_DECODER = json.JSONDecoder(parse_constant=_reject_json_constant)
+
+
 class FollowUpSuggestionsStreamExtractor:
     """Suppress complete suggestion blocks while preserving normal text streaming."""
 
@@ -108,6 +118,8 @@ class FollowUpSuggestionsStreamExtractor:
         self._holding_block = False
         self._holding_bare = False
         self._previous_char = "\n"
+        self._markdown_fence = ""
+        self._markdown_line: str | None = ""
 
     @property
     def suggestions(self) -> list[str]:
@@ -120,7 +132,7 @@ class FollowUpSuggestionsStreamExtractor:
         return self._drain()
 
     def finish(self) -> list[str]:
-        output = self._drain()
+        output = self._drain(final=True)
         if self._holding_block:
             # A partial metadata block must never leak into visible chat text.
             self._buffer = ""
@@ -128,47 +140,78 @@ class FollowUpSuggestionsStreamExtractor:
         elif self._buffer:
             output.append(self._buffer)
             self._buffer = ""
-        self._holding_bare = False
         return output
 
     def _emit(self, output: list[str], length: int) -> None:
         text = self._buffer[:length]
         if text:
             output.append(text)
-            self._previous_char = text[-1]
-            self._buffer = self._buffer[length:]
+            self._track_markdown(text)
+            self._consume(length)
 
-    def _drain(self) -> list[str]:
+    def _consume(self, length: int) -> None:
+        self._previous_char = self._buffer[length - 1]
+        self._buffer = self._buffer[length:]
+
+    def _track_markdown(self, text: str) -> None:
+        # Ordinary code fences are visible. Only keep a partial line that can
+        # still open or close one, so ordinary prose can stream immediately.
+        *lines, tail = text.split("\n")
+        for line in lines:
+            if self._markdown_line is not None:
+                match = _MARKDOWN_FENCE.fullmatch(self._markdown_line + line.rstrip("\r"))
+                if match:
+                    fence, rest = match.groups()
+                    if not self._markdown_fence:
+                        if fence[0] == "~" or "`" not in rest:
+                            self._markdown_fence = fence
+                    elif (
+                        fence[0] == self._markdown_fence[0]
+                        and len(fence) >= len(self._markdown_fence)
+                        and not rest.strip(" \t\r")
+                    ):
+                        self._markdown_fence = ""
+            self._markdown_line = ""
+        if self._markdown_line is not None:
+            line = self._markdown_line + tail
+            self._markdown_line = line if _MARKDOWN_FENCE_PREFIX.fullmatch(line.rstrip("\r")) else None
+
+    def _read_bare(self, *, final: bool) -> tuple[int, list[str] | None]:
+        """Return the consumed length (zero to wait) and any valid suggestions."""
+        candidate = self._buffer[:_MAX_BARE_BLOCK_CHARS]
+        may_wait = not final and len(candidate) < _MAX_BARE_BLOCK_CHARS
+        header = _BARE_HEADER.match(candidate)
+        if header is None:
+            partial_header = not candidate[len(_BARE_START):].strip(" \t\r")
+            return (0 if may_wait and partial_header else 1), None
+
+        start = header.end()
+        if start == len(candidate) or candidate[start] != "{":
+            return (0 if may_wait and start == len(candidate) else 1), None
+        try:
+            decoded, end = _BARE_DECODER.raw_decode(candidate, start)
+        except (ValueError, RecursionError):
+            # A partial number can fail decoding before a later chunk completes
+            # it. A marker on a later line cannot be part of valid JSON.
+            return (0 if may_wait and not _BARE_BOUNDARY.search(candidate, start) else 1), None
+        suggestions = decoded.get("suggestions")
+        if isinstance(suggestions, list):
+            return end, normalize_follow_up_suggestions(suggestions)
+        return end, None
+
+    def _drain(self, *, final: bool = False) -> list[str]:
         output: list[str] = []
         while self._buffer:
             if self._holding_bare:
-                header = _BARE_HEADER.match(self._buffer)
-                if header is None:
-                    remainder = self._buffer[len(_BARE_START):]
-                    if not remainder.strip(" \t\r") and len(self._buffer) <= _MAX_BARE_BLOCK_CHARS:
-                        break
-                    self._holding_bare = False
-                    self._emit(output, 1)
-                    continue
-                payload = self._buffer[header.end():]
-                try:
-                    decoded, end = json.JSONDecoder().raw_decode(payload)
-                except json.JSONDecodeError:
-                    # Wait for split JSON, but do not indefinitely buffer prose.
-                    if (
-                        (not payload or payload.startswith("{"))
-                        and len(self._buffer) <= _MAX_BARE_BLOCK_CHARS
-                    ):
-                        break
-                    self._holding_bare = False
-                    self._emit(output, 1)
-                    continue
-                if isinstance(decoded, dict) and isinstance(decoded.get("suggestions"), list):
-                    self._suggestions = normalize_follow_up_suggestions(decoded["suggestions"])
-                    self._previous_char = self._buffer[header.end() + end - 1]
-                    self._buffer = self._buffer[header.end() + end:]
+                length, suggestions = self._read_bare(final=final)
+                if not length:
+                    break
+                if suggestions is None:
+                    self._emit(output, length)
                 else:
-                    self._emit(output, header.end() + end)
+                    self._suggestions = suggestions
+                    self._consume(length)
+                    self._markdown_line = None
                 self._holding_bare = False
                 continue
             if not self._holding_block:
@@ -177,7 +220,10 @@ class FollowUpSuggestionsStreamExtractor:
                 bare_start = bare.start() - 1 if bare else -1
                 if bare_start >= 0 and (start == -1 or bare_start < start):
                     self._emit(output, bare_start)
-                    self._holding_bare = True
+                    if self._markdown_fence:
+                        self._emit(output, len(_BARE_START))
+                    else:
+                        self._holding_bare = True
                     continue
                 if start == -1:
                     keep = _partial_block_start_len(self._buffer, self._previous_char)
@@ -195,8 +241,8 @@ class FollowUpSuggestionsStreamExtractor:
 
             block_end = close + len(_BLOCK_FENCE)
             self._suggestions = _parse_suggestions_block(self._buffer[:block_end])
-            self._previous_char = self._buffer[block_end - 1]
-            self._buffer = self._buffer[block_end:]
+            self._consume(block_end)
+            self._markdown_line = None
             self._holding_block = False
         return output
 

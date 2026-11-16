@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from box_agent.acp import BoxACPAgent
+from box_agent.acp import follow_up_suggestions as suggestions_module
 from box_agent.acp.follow_up_suggestions import (
     FollowUpSuggestionsStreamExtractor,
     build_follow_up_suggestions_generation_system_prompt,
@@ -30,6 +31,7 @@ class _RecordingConn:
 
 class _FollowUpLLM:
     fenced = True
+    prefix = "已完成方案。\n"
 
     async def generate(self, messages, tools=None):
         return LLMResponse(content="完成。", finish_reason="stop")
@@ -38,7 +40,7 @@ class _FollowUpLLM:
         yield StreamEvent(
             type="text",
             delta=(
-                "已完成方案。\n" + ("```" if self.fenced else "") + "follow_up_suggestions\n"
+                self.prefix + ("```" if self.fenced else "") + "follow_up_suggestions\n"
                 '{"suggestions":["把方案拆成'
             ),
         )
@@ -213,6 +215,81 @@ def test_extractor_releases_oversized_unconfirmed_bare_text() -> None:
         assert extractor.suggestions == []
 
 
+@pytest.mark.parametrize("candidate", ["{bad json}", '{"suggestions":["未完成'])
+def test_extractor_recovers_fenced_suggestions_after_bad_bare_candidate(candidate):
+    visible = f"回答。\nfollow_up_suggestions\n{candidate}\n"
+    fenced = '```follow_up_suggestions\n{"suggestions":["继续"]}\n```'
+    extractor = FollowUpSuggestionsStreamExtractor()
+    chunks = extractor.push(visible)
+    for char in fenced:
+        chunks.extend(extractor.push(char))
+    assert "".join(chunks) == visible
+    assert extractor.suggestions == ["继续"]
+    assert extractor.finish() == []
+
+
+def test_extractor_applies_bare_limit_independently_of_chunk_size():
+    prefix = 'follow_up_suggestions\n{"suggestions":["继续"],"extra":"'
+    limit = 16_384
+    for size in (limit, limit + 1):
+        text = prefix + "x" * (size - len(prefix) - 2) + '"}'
+        for split in (0, limit - 1, limit, len(text)):
+            extractor = FollowUpSuggestionsStreamExtractor()
+            chunks = extractor.push(text[:split]) + extractor.push(text[split:]) + extractor.finish()
+            assert "".join(chunks) == ("" if size == limit else text)
+            assert extractor.suggestions == (["继续"] if size == limit else [])
+
+
+@pytest.mark.parametrize("opening, closing", [
+    ("```text", "```"),
+    ("  ~~~~json", "  ~~~~~  "),
+    ("````text\r\n```", "````"),
+])
+def test_extractor_preserves_markdown_examples_at_every_split(opening, closing):
+    example = (
+        f"示例：\r\n{opening}\r\n"
+        'follow_up_suggestions\r\n{"suggestions":["示例"]}\r\n'
+        f"{closing}\r\n"
+    )
+    text = example + 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    for split in range(len(text) + 1):
+        extractor = FollowUpSuggestionsStreamExtractor()
+        chunks = extractor.push(text[:split]) + extractor.push(text[split:]) + extractor.finish()
+        assert "".join(chunks) == example, split
+        assert extractor.suggestions == ["继续"], split
+
+
+@pytest.mark.parametrize("extra", [
+    pytest.param("9" * 5000, id="oversized-integer"),
+    pytest.param("NaN", id="invalid-constant"),
+])
+def test_extractor_preserves_bare_payload_on_decoder_errors(extra):
+    text = 'follow_up_suggestions\n{"suggestions":["继续"],"extra":' + extra + '}\n后续正文。'
+    extractor = FollowUpSuggestionsStreamExtractor()
+    assert "".join(extractor.push(text) + extractor.finish()) == text
+    assert extractor.suggestions == []
+
+
+def test_extractor_preserves_bare_payload_if_decoder_hits_recursion_limit(monkeypatch):
+    def decode(*args):
+        raise RecursionError
+
+    # The native decoder's recursion limit varies by Python version and platform.
+    monkeypatch.setattr(suggestions_module._BARE_DECODER, "raw_decode", decode)
+    text = 'follow_up_suggestions\n{"suggestions":["继续"]}'
+    extractor = FollowUpSuggestionsStreamExtractor()
+    assert "".join(extractor.push(text) + extractor.finish()) == text
+    assert extractor.suggestions == []
+
+
+def test_extractor_waits_for_split_number_that_completes_as_a_float():
+    prefix = 'follow_up_suggestions\n{"suggestions":["继续"],"extra":' + "9" * 5000
+    extractor = FollowUpSuggestionsStreamExtractor()
+    assert extractor.push(prefix) == []
+    assert extractor.push("e-5000}") + extractor.finish() == []
+    assert extractor.suggestions == ["继续"]
+
+
 def test_extractor_bare_json_handles_escaped_quotes_braces_and_empty_suggestions() -> None:
     extractor = FollowUpSuggestionsStreamExtractor()
     text = 'follow_up_suggestions\n{"suggestions":["解释 } 和 \\"引号\\"", "次へ", "Continue"]}'
@@ -246,13 +323,22 @@ def test_prompt_requires_a_structured_follow_up_block_only_after_completion() ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("judge_enabled", [False, True])
-@pytest.mark.parametrize("fenced", [False, True])
+@pytest.mark.parametrize("fenced, invalid_bare", [
+    (False, ""),
+    (True, ""),
+    pytest.param(
+        True,
+        'follow_up_suggestions\n{"suggestions":["忽略"],"extra":' + "9" * 5000 + '}\n后续正文。\n',
+        id="fenced-after-decoder-error",
+    ),
+])
 async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(
-    tmp_path, judge_enabled, fenced,
+    tmp_path, judge_enabled, fenced, invalid_bare,
 ) -> None:
     conn = _RecordingConn()
     llm = _JudgedFollowUpLLM() if judge_enabled else _FollowUpLLM()
     llm.fenced = fenced
+    llm.prefix += invalid_bare
     agent = BoxACPAgent(
         conn,
         Config(
@@ -282,8 +368,7 @@ async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(
         for update in conn.updates
         if getattr(update.update, "sessionUpdate", None) == "agent_message_chunk"
     )
-    assert visible_text == "已完成方案。\n"
-    assert "follow_up_suggestions" not in visible_text
+    assert visible_text == "已完成方案。\n" + invalid_bare
     suggestion_updates = [
         update.update.rawOutput
         for update in conn.updates

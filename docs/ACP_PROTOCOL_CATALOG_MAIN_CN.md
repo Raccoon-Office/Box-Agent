@@ -319,7 +319,7 @@ image_refs 的字段：`imageId` 必填，`contentRef,sha256,media_type,messageS
 | 子代理失败 `sub_agent_delegation_error` | code,message,retryable及诊断字段 | `{"type":"sub_agent_delegation_error","code":"<实际错误码>","message":"执行失败","retryable":false}` | 保留，不把诊断当最终助手正文 |
 | 图片路径处理 `structured_image_attachment_result` | 包装图片解析结果，见附录构造 | `{"type":"structured_image_attachment_result"}`（完整结构见附录） | 图片准备已迁共享层；标准image仍保留 |
 
-`follow_up_suggestions` 的模型内联格式仍首选同名三反引号围栏。为兼容模型漏写围栏，ACP 也识别独占一行的 `follow_up_suggestions`，后接合法 JSON 对象且 `suggestions` 为数组；支持 LF/CRLF、空行和流式分片。确认后的标签与 JSON 不进入可见正文，建议沿用上表的结构化事件发送，最多保留 3 条、每条 160 字符。裸标签未匹配合法载荷时保留原文；未完成候选最多缓冲 16,384 字符，超限释放，避免持续阻塞正文。普通句子内提到标签不会被提取。
+`follow_up_suggestions` 的模型内联格式仍首选同名三反引号围栏。为兼容模型漏写围栏，ACP 也识别独占一行的 `follow_up_suggestions`，后接合法 JSON 对象且 `suggestions` 为数组；支持 LF/CRLF、空行和流式分片。确认后的标签与 JSON 不进入可见正文，建议沿用上表的结构化事件发送，最多保留 3 条、每条 160 字符。裸标签和 JSON 合计最多 16,384 字符；超限、无效或未完成的候选保留原文，后续有效围栏仍可提取。普通句子和 Markdown 代码围栏内的裸标签保持原文。
 
 宿主可将建议展示为空输入框提示，采用建议不等于发送消息，也不要求弹出决策窗口。模型在元数据前写出的引导语（如“后续建议如下”）仍属于正文；已经发出的历史正文不会被补生成建议回写清理。
 
