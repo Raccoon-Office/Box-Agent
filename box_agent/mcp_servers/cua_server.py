@@ -49,7 +49,10 @@ Use set_value to replace a writable plain-text field, including filename and pat
 native Open/Save/Go to Folder dialogs. Use type_text to insert at the cursor, or paste for
 clipboard input into a focused control. Choose according to the control and operation.
 After setting a field, observe its value and verify the subsequent Open/Save/navigation result;
-setting a value does not itself submit the dialog. Do not use set_value to rewrite rich-text documents."""
+setting a value does not itself submit the dialog or commit application settings. A confirmed
+AXValue readback proves only the control value. Observe the resulting application state.
+If the value reverted or did not apply, click the field and use keyboard editing, then verify.
+Do not assume untargeted Return commits the field. Do not use set_value to rewrite rich-text documents."""
 
 _APP = {"type": "string", "description": "App reference passed to get_app."}
 _TARGET = {
@@ -60,6 +63,9 @@ _TARGET = {
     ],
 }
 _POINT = {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
+_MAX_DEPTH = {"type": "integer", "minimum": 1,
+              "description": "Optional AX traversal depth; get_state requires ax=true. Omitted by default. "
+                             "Use 3 for shallow dialog controls; deeper controls may be omitted."}
 
 
 def _tool(name: str, description: str, properties: dict[str, Any], required: list[str]) -> Tool:
@@ -81,13 +87,14 @@ TOOLS = [
         "get_app",
         "Bind to a running app or launch it once in the background, wait for its first window, "
         "and return its current AX state. Does not create or erase documents. " + INSTRUCTIONS,
-        {"app": {"type": "string", "description": "App name, bundle ID or absolute .app path."}},
+        {"app": {"type": "string", "description": "App name, bundle ID or absolute .app path."},
+         "max_depth": _MAX_DEPTH},
         ["app"],
     ),
     _tool(
         "list_windows",
         "List the app's visible windows (id, title, bounds, layer, isActive). Read-only; "
-        "a new supplemental window is verified once, which invalidates earlier element IDs.",
+        "uses the Driver window inventory.",
         {"app": _APP},
         ["app"],
     ),
@@ -95,13 +102,18 @@ TOOLS = [
         "get_state",
         "Observe the current app surface: active menu, attached sheet or current window. "
         "Subsequent calls return diffs (~ replaced line, + added line, removed IDs). "
-        "screenshot=true returns one window screenshot without activating it; "
-        "ax=false returns only the screenshot and keeps existing element IDs.",
+        "screenshot=true returns the main window screenshot without activating it, plus labeled "
+        "context images of overlapping app-owned floating windows when present. "
+        "Floating images have separate origins; address them using click.window_id. "
+        "ax=false returns only the screenshot and keeps existing element IDs. "
+        "For shallow dialog controls (for example Open/Save buttons), max_depth=3 avoids "
+        "walking deep file lists. Deeper controls may be omitted; omit max_depth for default traversal.",
         {
             "app": _APP,
             "screenshot": {"type": "boolean", "default": False},
             "ax": {"type": "boolean", "default": True},
             "disable_diffing": {"type": "boolean", "default": False},
+            "max_depth": _MAX_DEPTH,
         },
         ["app"],
     ),
@@ -112,6 +124,7 @@ TOOLS = [
         {
             "app": _APP,
             "target": _TARGET,
+            "window_id": {"type": "integer", "description": "Optional ID from a floating context image. Uses that image's [x,y] coordinates; requires explicit foreground delivery and supports only a single left click."},
             "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
             "click_count": {"type": "integer", "minimum": 1, "default": 1},
             "action": {"type": "string", "enum": ["press", "show_menu", "pick", "confirm", "cancel", "open"], "default": "press"},
@@ -139,6 +152,8 @@ TOOLS = [
         "set_value",
         "Replace the whole value of a writable plain-text control, including fields in native "
         "Open/Save/Go to Folder dialogs and sheets. Use a current element ID and observe the result. "
+        "A confirmed result covers the control value only, not application commit. Observe again. "
+        "If the value reverted or did not apply, click the field and use keyboard editing, then verify. "
         "This does not submit the dialog or insert text at the cursor; do not use it to rewrite rich-text documents.",
         {"app": _APP, "element": {"type": "integer", "minimum": 0}, "value": {"type": "string"}},
         ["app", "element", "value"],
@@ -158,7 +173,9 @@ TOOLS = [
     ),
     _tool(
         "press_key",
-        "Press a key or combination, e.g. Return, Escape, cmd+s, cmd+shift+g.",
+        "Press a key or combination, e.g. Return, Escape, cmd+s, cmd+shift+g. "
+        "For text-field editing shortcuts such as Cmd+A, pass the current field element ID "
+        "so the shortcut targets that editor rather than an application menu command.",
         {"app": _APP, "key": {"type": "string"}, "element": {"type": "integer", "minimum": 0}},
         ["app", "key"],
     ),
@@ -167,10 +184,15 @@ TOOLS = [
 # Explicit foreground is available after observation proves a background action
 # did not land. It is never inferred from an unverifiable result alone.
 for _definition in TOOLS:
-    if _definition.name in {"click", "type_text", "press_key", "paste"}:
+    if _definition.name in {"click", "drag", "scroll", "type_text", "press_key", "paste"}:
         _definition.inputSchema["properties"]["delivery_mode"] = {
-            "type": "string", "enum": ["background", "foreground"], "default": "background",
-            "description": "Prefer background. Use foreground only when observation confirms the background action was ineffective or unavailable; may interrupt user input.",
+            "type": "string", "enum": ["background", "foreground"],
+            "default": "foreground" if _definition.name == "drag" else "background",
+            "description": (
+                "Drag defaults to foreground; request background to try Driver background delivery. "
+                if _definition.name == "drag" else "Prefer background-first delivery. "
+            ) + "Known pre-delivery refusals may use verified foreground fallback. "
+                "Explicit foreground may interrupt user input; observe before retrying an unverified effect.",
         }
 
 _SCREENSHOT_ONLY = "getScreenshot"
@@ -210,7 +232,9 @@ class CuaService:
                 item for item in event["result"].get("content", [])
                 if item.get("type") != "image"
             ]
-        self._events.append(copy.deepcopy(cua_structured_payload(event)))
+        # The payload cleaner already rebuilds every JSON dict/list; another
+        # deepcopy would traverse the entire AX result a second time.
+        self._events.append(cua_structured_payload(event))
 
     def invalidate_after_cancellation(self) -> None:
         """Called only by the owner worker, after abandoned work settles."""
@@ -219,7 +243,6 @@ class CuaService:
             self.adapter.invalidate()
             for state in self.adapter.handles.values():
                 clear_image(state)
-            self.adapter.panel_focus.close()
 
     def call_result(self, name: str, args: dict[str, Any]) -> CallToolResult:
         items, is_error = self.call(name, args)
@@ -264,7 +287,7 @@ class CuaService:
             self._error_category = "backend_error"
             detail = json.dumps(
                 {k: v for k, v in data(failure.result).items()
-                 if k in {"effect", "status", "error", "reason", "refusal", "message", "code", "foreground_attempted", "clipboard_may_have_changed"}},
+                 if k in {"effect", "status", "error", "reason", "refusal", "message", "code", "foreground_attempted", "clipboard_may_have_changed", "hint", "path", "delivered_chars", "escalation"}},
                 ensure_ascii=False,
             )
             texts = [c.get("text", "") for c in failure.result.get("content", []) if c.get("type") == "text"]
@@ -293,7 +316,8 @@ class CuaService:
             return [_text(json.dumps(control("listApps"), ensure_ascii=False))]
         if name == "get_app":
             app = args.get("app")
-            value = control("getApp", None, {"app": app})
+            value = control("getApp", None, {"app": app,
+                            **({"maxDepth": args["max_depth"]} if "max_depth" in args else {})})
             self.apps[app] = value["handle"]
             self.requires_requery.discard(app)
             return [_text(value["state"])]
@@ -307,7 +331,10 @@ class CuaService:
                 raise ValueError("get_state needs ax or screenshot")
             method = ("getAXStateAndScreenshot" if ax and screenshot else
                       "getAXState" if ax else _SCREENSHOT_ONLY)
-            value = control(method, handle, {"disableDiffing": args.get("disable_diffing", False)})
+            value = control(method, handle, {
+                "disableDiffing": args.get("disable_diffing", False),
+                **({"maxDepth": args["max_depth"]} if "max_depth" in args else {}),
+            })
             if ax:
                 self.requires_requery.discard(args.get("app"))
             content = [_text(value["state"])] if value.get("state") else []
@@ -315,20 +342,26 @@ class CuaService:
                 content.append(value["image"])
             elif screenshot and ax:
                 content.append(_text("Screenshot unavailable; do not choose coordinates."))
+            content.extend(value.get("context_content", []))
             return content
         if args.get("app") in self.requires_requery:
             raise ValueError("RequiresRequery: a previous call was cancelled after dispatch; "
                              "call get_state with ax=true before continuing. Do not replay blindly.")
         if name == "click":
             options = {"mouseButton": args.get("button", "left"), "clickCount": args.get("click_count", 1), "action": args.get("action", "press")}
-            value = control("click", handle, {"target": args.get("target"), "options": options,
+            if "window_id" in args and options != {"mouseButton": "left", "clickCount": 1, "action": "press"}:
+                raise ValueError("Floating windows support only a single left click")
+            value = control("clickFloating" if "window_id" in args else "click", handle, {"target": args.get("target"), "options": options,
+                **({"windowId": args["window_id"]} if "window_id" in args else {}),
                 **({"deliveryMode": args["delivery_mode"]} if "delivery_mode" in args else {})})
         elif name == "drag":
-            value = control("drag", handle, {"from": args.get("from"), "to": args.get("to")})
+            value = control("drag", handle, {"from": args.get("from"), "to": args.get("to"),
+                **({"deliveryMode": args["delivery_mode"]} if "delivery_mode" in args else {})})
         elif name == "scroll":
             value = control("scroll", handle, {
                 "target": args.get("target"), "direction": args.get("direction"),
-                "pages": args.get("pages", 1)})
+                "pages": args.get("pages", 1),
+                **({"deliveryMode": args["delivery_mode"]} if "delivery_mode" in args else {})})
         elif name == "set_value":
             value = control("setValue", handle, {"target": args.get("element"), "value": args.get("value")})
         elif name == "type_text":
@@ -346,8 +379,12 @@ class CuaService:
         else:
             raise ValueError(f"Unknown tool: {name}")
         effect = value.get("effect")
+        if name == "set_value":
+            return [_text("Control value write returned (driver effect: " + str(effect) +
+                          "). Application commit is unverified; observe before continuing."),
+                    _text(json.dumps(value, ensure_ascii=False))]
         return [_text(f"Done (driver effect: {effect}). Observe to verify." if effect
-                      else "Done. Observe to verify.")]
+                      else "Done. Observe to verify."), *([_text(json.dumps(value, ensure_ascii=False))] if value.keys() - {"effect"} else [])]
 
     def close(self) -> None:
         adapter, self.adapter = self.adapter, None

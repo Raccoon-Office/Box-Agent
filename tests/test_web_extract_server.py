@@ -173,3 +173,98 @@ async def test_verification_handoff_survives_mcp_and_agent_wrapper(monkeypatch):
         assert wrapped.success is False
         assert "WEB_VERIFICATION_REQUIRED:" in wrapped.error
         assert "take over" in wrapped.error
+
+
+@pytest.mark.asyncio
+async def test_summary_requests_keep_isolated_parent_sessions(monkeypatch):
+    import asyncio
+    from box_agent.llm.base import LLMClientBase
+    from mcp.types import RequestParams
+
+    headers = []
+
+    class Delegate:
+        model = "summary-model"
+        max_output_tokens = 1000
+
+        def for_model(self, model, **kwargs):
+            return self
+
+        async def generate(self, messages, tools=None, **kwargs):
+            await asyncio.sleep(0)
+            headers.append(LLMClientBase._agent_headers(
+                session_id=kwargs.get("session_id", ""),
+            ))
+            return SimpleNamespace(content="summary", finish_reason="stop")
+
+    class Extractor(web_extract_server.WebExtractTool):
+        async def execute(self, **kwargs):
+            summary, error = await self._summarize(
+                url="https://example.com", content="page", requested_model=None,
+                requested_max_output_tokens=None,
+            )
+            return ToolResult(success=error is None, content=summary or "", error=error)
+
+    extractor = Extractor(Delegate())
+    monkeypatch.setattr(web_extract_server, "_extractor", lambda: extractor)
+    def context(session_id):
+        return SimpleNamespace(request_context=SimpleNamespace(
+            meta=RequestParams.Meta.model_validate({"box_agent_session_id": session_id}),
+        ))
+
+    await asyncio.gather(*(
+        web_extract_server.web_extract("https://example.com", ctx=context(sid))
+        for sid in ("session-a", "session-b")
+    ))
+    await web_extract_server.web_extract("https://example.com")
+    assert headers == [
+        {"X-RACCOON-Session-ID": "session-a"},
+        {"X-RACCOON-Session-ID": "session-b"},
+        {},
+    ]
+    assert isinstance(extractor.llm, Delegate)
+
+
+@pytest.mark.asyncio
+async def test_runtime_scopes_session_id_to_tool_execution(monkeypatch):
+    from box_agent import runtime
+    from box_agent.tools.model_tool_context import current_model_tool_context
+
+    async def loop(**kwargs):
+        assert current_model_tool_context().session_id == "host-session"
+        yield "event"
+
+    monkeypatch.setattr(runtime, "_run_agent_loop", loop)
+    events = runtime.run_agent_loop(
+        llm=SimpleNamespace(model="model", max_output_tokens=1000),
+        session_id="host-session",
+    )
+    assert await anext(events) == "event"
+    assert current_model_tool_context() is None
+    await events.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override,expected", [({}, "parent"), ({"session_id": "other"}, "other"), ({"session_id": ""}, "")])
+async def test_nested_runtime_inherits_session_unless_explicitly_overridden(monkeypatch, override, expected):
+    from box_agent import runtime
+    from box_agent.tools.model_tool_context import (
+        current_model_tool_context, set_model_tool_context, reset_model_tool_context,
+    )
+
+    async def loop(**kwargs):
+        assert current_model_tool_context().session_id == expected
+        yield "event"
+
+    monkeypatch.setattr(runtime, "_run_agent_loop", loop)
+    token = set_model_tool_context(model="parent-model", max_output_tokens=1000, session_id="parent")
+    try:
+        events = runtime.run_agent_loop(
+            llm=SimpleNamespace(model="child-model", max_output_tokens=100), **override,
+        )
+        assert await anext(events) == "event"
+        assert current_model_tool_context().session_id == "parent"
+        await events.aclose()
+    finally:
+        reset_model_tool_context(token)
+    assert current_model_tool_context() is None

@@ -1612,6 +1612,22 @@ async def test_literal_path_to_dangerous_program_still_requires_approval(tmp_pat
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell syntax")
 @pytest.mark.asyncio
+async def test_nested_double_quoted_disk_operation_requires_approval_before_launch(tmp_path):
+    tool = BashTool(workspace_dir=str(tmp_path), non_interactive=True)
+    # Both launch APIs are mocked so a detector regression cannot run diskutil.
+    with (
+        unittest.mock.patch("asyncio.create_subprocess_exec", new_callable=unittest.mock.AsyncMock) as launch_exec,
+        unittest.mock.patch("asyncio.create_subprocess_shell", new_callable=unittest.mock.AsyncMock) as launch_shell,
+    ):
+        result = await tool.execute(command='OP=eraseDisk; bash -c "diskutil $OP APFS Scratch disk4"')
+    assert result.permission_request is not None
+    assert "diskutil erase" in result.error
+    launch_exec.assert_not_called()
+    launch_shell.assert_not_called()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell syntax")
+@pytest.mark.asyncio
 async def test_literal_executable_path_still_checks_outside_workspace(tmp_path):
     from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
 

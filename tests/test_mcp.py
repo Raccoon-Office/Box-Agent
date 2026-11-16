@@ -9,8 +9,11 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import anyio
 import httpx
 import pytest
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage, JSONRPCRequest
 
 from box_agent.tools import mcp_loader
 from box_agent.tools.browser_runtime_scope import (
@@ -56,7 +59,7 @@ def test_public_mcp_tool_name_sanitizes_provider_invalid_remote_name():
 
     public_name = _public_mcp_tool_name("pkulaw", remote_name)
 
-    assert public_name.startswith("mcp-law-search-service_search_article__")
+    assert public_name.startswith("mcp__pkulaw__mcp-law-search-service_search_article")
     assert len(public_name) <= 64
     assert all(
         character.isascii() and (character.isalnum() or character in "_-")
@@ -290,9 +293,20 @@ async def test_streamable_http_mcp1_passes_transport_configuration(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch):
+@pytest.mark.parametrize("private,host,attaches_session", [
+    (False, "example.com", False),
+    (False, "pre.xiaohuanxiong.com", True),
+    (True, "example.com", False),
+    (True, "pre.xiaohuanxiong.com", False),
+])
+async def test_streamable_http_mcp2_uses_preconfigured_http_client(
+    monkeypatch, private, host, attaches_session,
+):
+    url = f"https://{host}/mcp"
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", f"https://{host}")
     captured = {}
-    fake_http_client = object()
+    fake_http_client = SimpleNamespace(follow_redirects=True, event_hooks={})
 
     @asynccontextmanager
     async def managed_http_client():
@@ -321,7 +335,7 @@ async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch):
     conn = MCPServerConnection(
         name="mcp2",
         connection_type="streamable_http",
-        url="https://example.com/mcp",
+        url=url,
         headers={"X-Test": "two"},
         connect_timeout=13,
         sse_read_timeout=17,
@@ -341,9 +355,124 @@ async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch):
         "write": 13,
         "pool": 13,
     }
-    assert captured["url"] == "https://example.com/mcp"
+    assert captured["url"] == url
     assert captured["http_client"] is fake_http_client
     assert captured["auth"] is not conn.auth
+    assert fake_http_client.follow_redirects is not private
+    assert bool(fake_http_client.event_hooks.get("request")) is attaches_session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connection_type", ["sse", "streamable_http"])
+@pytest.mark.parametrize("status,location", [
+    (302, "/untrusted"),
+    (307, "/untrusted"),
+    (302, "https://outside.example/untrusted"),
+    (307, "https://outside.example/untrusted"),
+])
+async def test_private_mcp_transport_does_not_forward_redirected_requests(
+    monkeypatch, connection_type, status, location,
+):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(status, headers={"location": location})
+        return httpx.Response(400)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    conn = MCPServerConnection(
+        name="private-redirect", connection_type=connection_type,
+        url="https://tenant.example/office/mcp",
+        auth=DynamicBearerAuth(explicit_token="private-token"), connect_timeout=1,
+    )
+    try:
+        assert await conn.connect() is False
+    finally:
+        try:
+            await conn.disconnect()
+        except RuntimeError as error:
+            # MCP 1.x can surface its background HTTP error again on close.
+            assert mcp_loader._http_statuses_from_exception(error) == {status}
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://tenant.example/office/mcp"
+    assert requests[0].headers["Authorization"] == "Bearer private-token"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private,endpoint,allowed", [
+    (True, "/office/messages", True),
+    (True, "/office%2Fmessages", False),
+    (True, "/office%2fmessages", False),
+    (True, "/%6Fffice/messages", True),
+    (True, "/office/part%2Fmessages", True),
+    (True, "/other/messages", False),
+    (True, "/office;untrusted", False),
+    (False, "/office;untrusted", True),
+    (False, "/office%2Fmessages", True),
+])
+async def test_sse_endpoint_respects_private_service_boundary(
+    monkeypatch, private, endpoint, allowed,
+):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    requests = []
+    post_received = asyncio.Event()
+
+    class Events(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield f"event: endpoint\ndata: {endpoint}\n\n".encode()
+            await anyio.sleep_forever()
+
+    def handler(request):
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=Events(),
+            )
+        post_received.set()
+        return httpx.Response(202)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    conn = MCPServerConnection(
+        name="private-sse-boundary", connection_type="sse",
+        url="https://tenant.example/office/mcp", headers={"X-Api-Key": "static-key"},
+        auth=DynamicBearerAuth(explicit_token="dynamic-token"), connect_timeout=1,
+    )
+    conn.exit_stack = AsyncExitStack()
+    message = SessionMessage(JSONRPCMessage(JSONRPCRequest(
+        jsonrpc="2.0", id=1, method="tools/call",
+        params={"name": "example", "arguments": {"value": "example-content"}},
+    )))
+    with anyio.fail_after(5):
+        try:
+            _, write = await conn._connect_sse()
+            await write.send(message)
+            if allowed:
+                await post_received.wait()
+            else:
+                # The SDK closes its writer after the rejected first POST.
+                with pytest.raises((anyio.BrokenResourceError, anyio.ClosedResourceError)):
+                    await write.send(message)
+        finally:
+            await conn.exit_stack.aclose()
+
+    assert len(requests) == (2 if allowed else 1)
+    assert post_received.is_set() is allowed
+    assert requests[0].headers["X-Api-Key"] == "static-key"
+    if private:
+        assert requests[0].headers["Authorization"] == "Bearer dynamic-token"
+    if allowed:
+        assert str(requests[1].url) == f"https://tenant.example{endpoint}"
+        assert requests[1].headers["X-Api-Key"] == "static-key"
+        if private:
+            assert requests[1].headers["Authorization"] == "Bearer dynamic-token"
+        assert b"example-content" in requests[1].content
 
 
 class NamedDummyTool(Tool):
@@ -662,7 +791,8 @@ class TestMCPToolExecution:
         class FakeSession:
             arguments = None
 
-            async def call_tool(self, name, arguments):
+            async def call_tool(self, name, arguments, meta=None):
+                assert meta == {"box_agent_session_id": "parent-session"}
                 assert name == "web_extract"
                 self.arguments = arguments
                 return SimpleNamespace(content=[], isError=False)
@@ -678,6 +808,7 @@ class TestMCPToolExecution:
         token = set_model_tool_context(
             model=model,
             max_output_tokens=max_output_tokens,
+            session_id="parent-session",
         )
         try:
             result = await tool.execute(
@@ -1555,7 +1686,7 @@ async def test_mcp_tool_execution():
         # Try to find and test create_entities (from memory server)
         create_tool = None
         for tool in tools:
-            if tool.name == "create_entities":
+            if tool.remote_name == "create_entities":
                 create_tool = tool
                 break
 
@@ -1673,3 +1804,38 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+@pytest.mark.parametrize('error,expected', [
+    (None, None), ('', None), (False, None), ('  failed  ', 'failed'),
+    ({'message': '  detail  ', 'code': 500}, 'detail'),
+    ({'code': 500}, 'Tool returned error'), ({'type': 'failed'}, 'Tool returned error'),
+    ({'message': ' ', 'code': None}, None), ([], None),
+])
+def test_mcp_error_envelope_matches_for_text_and_decoded_object(error, expected):
+    from box_agent.tools.mcp_loader import _structured_mcp_error_message
+    payload = {'error': error, 'elements': [{'element_token': 's1:1'}]}
+    assert _structured_mcp_error_message(payload) == expected
+    assert _structured_mcp_error_message(json.dumps(payload)) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('error', [None, {'message': 'backend failure'}])
+async def test_mcp_decoded_result_error_check_does_not_serialize_whole_payload(monkeypatch, error):
+    from box_agent.tools import mcp_loader
+    payload = {'error': error, 'elements': [{'element_token': f's1:{i}'} for i in range(1000)]}
+    original = json.dumps
+    def dumps(value, *args, **kwargs):
+        assert value is not payload, 'already decoded result was unnecessarily serialized'
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(mcp_loader.json, 'dumps', dumps)
+    class Session:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(content=[SimpleNamespace(text='Result')],
+                                   structuredContent=payload, isError=False)
+    tool = MCPTool(name='query', description='query', parameters={'type': 'object'}, session=Session())
+    result = await tool.execute()
+    assert result.success is (error is None)
+    assert result.raw_output['mcp_structured_content'] is payload
+    if error is not None:
+        assert result.error == 'backend failure'

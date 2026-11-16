@@ -124,6 +124,8 @@ class Tool:
     # Trusted interactive tools may stop the current Agent turn after a
     # successful invocation. Dynamic/MCP and ordinary tools inherit False.
     ends_turn_on_success: bool = False
+    # In-call host approval waits must stay outside timed parallel batches.
+    may_require_user_input: bool = False
     # Explicit opt-in for the transient Tool -> next-model-request seam. MCP and
     # ordinary tools remain unable to inject request-only user content.
     transient_followup_allowed: bool = False
@@ -133,6 +135,10 @@ class Tool:
     # recoverable text to the persistence seam through
     # ``ToolResult.persistence_content``.
     max_result_size_chars: float | None = None
+
+    def invocation_may_require_user_input(self, arguments: dict[str, Any]) -> bool:
+        """Classify an invocation before scheduling a potentially interactive batch."""
+        return self.may_require_user_input
 
     def compaction_state(self) -> tuple[str, str] | None:
         """Return trusted read-only runtime state for history compaction."""
@@ -256,8 +262,12 @@ def build_tool_name_index(tools: Iterable[Tool]) -> dict[str, Tool]:
 
     offered_tools = list(tools)
     index: dict[str, Tool] = {}
+    implicit_mcp_aliases: dict[str, list[Tool]] = {}
 
     for tool in offered_tools:
+        existing = index.get(tool.name)
+        if existing is not None and existing is not tool:
+            raise ValueError(f"Tool name '{tool.name}' conflicts with another tool")
         index[tool.name] = tool
 
     for tool in offered_tools:
@@ -270,6 +280,12 @@ def build_tool_name_index(tools: Iterable[Tool]) -> dict[str, Tool]:
             seen_aliases.add(alias)
 
         for declared_name in (tool.name, *tool.aliases):
+            if declared_name == tool.name and getattr(tool, "mcp_tool_id", None) is not None:
+                # MCP identifiers are exact. A synthesized hyphen alias must not
+                # make distinct server/tool names collide or shadow native aliases.
+                for call_name in tool_call_name_variants(declared_name)[1:]:
+                    implicit_mcp_aliases.setdefault(call_name, []).append(tool)
+                continue
             for call_name in tool_call_name_variants(declared_name):
                 existing = index.get(call_name)
                 if existing is not None and existing is not tool:
@@ -279,6 +295,9 @@ def build_tool_name_index(tools: Iterable[Tool]) -> dict[str, Tool]:
                     )
                 index[call_name] = tool
 
+    for name, targets in implicit_mcp_aliases.items():
+        if len(targets) == 1 and name not in index:
+            index[name] = targets[0]
     return index
 
 

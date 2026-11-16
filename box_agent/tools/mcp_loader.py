@@ -22,27 +22,59 @@ from typing import Any, Literal
 import httpx
 
 
-# Python 3.10 compatibility: asyncio.timeout was added in 3.11
-if sys.version_info >= (3, 11):
-    _timeout = asyncio.timeout
-else:
+class _MCPDeadline:
+    """Identify a timeout's own cancellation across nested MCP deadlines."""
 
-    @asynccontextmanager
-    async def _timeout(delay: float):  # type: ignore[misc]
-        """Minimal asyncio.timeout shim for Python 3.10."""
-        task = asyncio.current_task()
-        loop = asyncio.get_running_loop()
-        handle = loop.call_later(delay, task.cancel)  # type: ignore[union-attr]
-        try:
-            yield
-        except asyncio.CancelledError:
-            raise TimeoutError(f"Timed out after {delay}s")
-        finally:
-            handle.cancel()
+
+@asynccontextmanager
+async def _timeout_compat(delay: float) -> AsyncIterator[None]:
+    """Apply a Python 3.10 deadline in the task that owns the MCP contexts."""
+    task = asyncio.current_task()
+    assert task is not None
+    deadline = _MCPDeadline()
+    caller_cancelled = False
+    original_cancel = task.cancel
+    default_cancel = original_cancel == type(task).cancel.__get__(task)
+
+    def track_cancel(msg: object = None) -> bool:
+        nonlocal caller_cancelled
+        # Python 3.10 lacks Task.cancelling() and can drop cancellation messages
+        # while forwarding through Task or gather. Track caller requests at the
+        # task boundary for the lifetime of this deadline.
+        if not isinstance(msg, _MCPDeadline):
+            caller_cancelled = True
+        return original_cancel(msg)
+
+    task.cancel = track_cancel  # type: ignore[method-assign]
+    handle = asyncio.get_running_loop().call_later(delay, original_cancel, deadline)
+    try:
+        yield
+    except asyncio.CancelledError as error:
+        if not caller_cancelled:
+            current: BaseException | None = error
+            seen: set[BaseException] = set()
+            while isinstance(current, asyncio.CancelledError) and current not in seen:
+                if current.args == (deadline,):
+                    raise TimeoutError(f"Timed out after {delay}s") from error
+                if current.args:
+                    break
+                seen.add(current)
+                current = current.__context__
+        raise
+    finally:
+        handle.cancel()
+        if default_cancel:
+            del task.cancel
+        else:
+            task.cancel = original_cancel  # type: ignore[method-assign]
+
+
+_timeout = asyncio.timeout if sys.version_info >= (3, 11) else _timeout_compat
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import get_default_environment, stdio_client
+from mcp.shared.exceptions import McpError
 
 try:
     from mcp.client.streamable_http import (
@@ -53,9 +85,15 @@ except ImportError:
     # MCP <= 1.19 exports the same client without the separator.
     from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
 
-    create_mcp_http_client = None
+    from mcp.shared._httpx_utils import create_mcp_http_client
 
-from box_agent.auth import request_auth_headers, resolve_auth_token, should_attach_auth_header
+from box_agent.auth import (
+    is_private_service_url,
+    request_auth_headers,
+    resolve_auth_token,
+    should_attach_auth_header,
+)
+from box_agent.client_info import should_attach_client_headers
 from box_agent.config import MCPConfig
 
 from .base import Tool, ToolInvocationContext, ToolResult
@@ -71,6 +109,7 @@ from .browser_tool_names import (
     public_browser_tool_parameters,
     public_browser_tool_text,
 )
+from .mcp_bootstrap import is_default_hosted_search_url
 from .mcp_tool_catalog import get_mcp_tool_catalog
 from .mcp_sources import (
     McpConfigSource,
@@ -86,6 +125,7 @@ from .mcp_result_hooks import (
     adapt_mcp_result_context,
     allowed_mcp_result_adapters,
     persist_mcp_image_references,
+    mcp_result_processing_scope,
 )
 from .playwright_session_pool import (
     BrowserSessionLimitError,
@@ -106,17 +146,46 @@ def _warn(msg: str) -> None:
     sys.stderr.write(msg + "\n")
 
 
+def _legacy_public_mcp_tool_name(
+    server_name: str,
+    remote_name: str,
+    connector_id: str | None = None,
+) -> str:
+    """Reconstruct pre-namespace names for lookup of installed tools and history."""
+    mapped_name = public_browser_tool_name(server_name, remote_name)
+    if connector_id and mapped_name == remote_name:
+        mapped_name = f"mcp__{server_name}__{remote_name}"
+    return _safe_mcp_tool_name(server_name, remote_name, mapped_name)
+
+
 def _public_mcp_tool_name(
     server_name: str,
     remote_name: str,
     connector_id: str | None = None,
 ) -> str:
-    """Return a stable provider-safe name while preserving the MCP name separately."""
+    """Namespace ordinary MCP tools; retain explicit first-party public contracts."""
     mapped_name = public_browser_tool_name(server_name, remote_name)
-    if connector_id and mapped_name == remote_name:
-        mapped_name = f"mcp__{server_name}__{remote_name}"
+    if mapped_name != remote_name:
+        return _safe_mcp_tool_name(server_name, remote_name, mapped_name)
+    # These are deliberate replacements for the native search/extract fallbacks,
+    # not a general exemption for tools with matching names.
+    if not connector_id and (server_name, remote_name) in {
+        ("mcp-server-askecho-search-infinity", "web_search"),
+        ("box-agent-web-extract", "web_extract"),
+    }:
+        return remote_name
+    return _safe_mcp_tool_name(
+        server_name, remote_name, f"mcp__{server_name}__{remote_name}",
+        # Avoid ambiguous server/tool boundaries, e.g. a__b/c vs a/b__c.
+        force_hash="__" in server_name or server_name.endswith("_"),
+    )
+
+
+def _safe_mcp_tool_name(
+    server_name: str, remote_name: str, mapped_name: str, *, force_hash: bool = False,
+) -> str:
     if (
-        len(mapped_name) <= _MODEL_TOOL_NAME_MAX_LENGTH
+        not force_hash and len(mapped_name) <= _MODEL_TOOL_NAME_MAX_LENGTH
         and not _INVALID_MODEL_TOOL_NAME_CHARACTER.search(mapped_name)
     ):
         return mapped_name
@@ -151,10 +220,10 @@ def _replace_server_catalog(connection: "MCPServerConnection") -> None:
         )
 
 
-def _structured_mcp_error_message(content: str) -> str | None:
+def _structured_mcp_error_message(content: str | dict[str, Any]) -> str | None:
     """Recover error envelopes from servers that forget MCP ``isError=true``."""
     try:
-        payload = json.loads(content)
+        payload = content if isinstance(content, dict) else json.loads(content)
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(payload, dict) or "error" not in payload:
@@ -849,6 +918,8 @@ class MCPTool(Tool):
         connector_name: str | None = None,
         concurrency_limiter: asyncio.Semaphore | None = None,
         session_lease: SessionLease | None = None,
+        server_url: str = "",
+        legacy_names: tuple[str, ...] = (),
     ):
         """
         ``session`` is the fixed ClientSession shared by every caller (classic
@@ -862,6 +933,8 @@ class MCPTool(Tool):
         self._name = name
         self._remote_name = remote_name or name
         self._server_name = server_name
+        self._server_url = server_url
+        self._session_header_enabled = _should_attach_mcp_session_header(server_url)
         self._fixed_arguments = dict(fixed_arguments or {})
         self._session_lease = session_lease
         self._description = description
@@ -873,6 +946,7 @@ class MCPTool(Tool):
         self._connector_name = connector_name
         self._concurrency_limiter = concurrency_limiter
         self._mcp_generation = 0
+        self._legacy_names = legacy_names
 
     @property
     def name(self) -> str:
@@ -893,6 +967,11 @@ class MCPTool(Tool):
     def remote_name(self) -> str:
         """Name used when calling the backing MCP server."""
         return self._remote_name
+
+    @property
+    def mcp_legacy_names(self) -> tuple[str, ...]:
+        """Compatibility lookup names, never advertised as additional tools."""
+        return self._legacy_names
 
     @property
     def mcp_tool_id(self) -> str:
@@ -1128,8 +1207,13 @@ class MCPTool(Tool):
                             and call_arguments[local_name] == ""
                         )
                     }
+                call_options = {}
+                model_context = current_model_tool_context()
+                if model_context and model_context.session_id and (
+                    (is_web_extract and not self._server_url) or self._session_header_enabled
+                ):
+                    call_options["meta"] = {"box_agent_session_id": model_context.session_id}
                 if is_web_extract:
-                    model_context = current_model_tool_context()
                     if model_context is not None:
                         call_arguments["model"] = model_context.model
                         call_arguments["max_output_tokens"] = (
@@ -1153,11 +1237,15 @@ class MCPTool(Tool):
                         result = await leased_session.call_tool(
                             self._remote_name,
                             arguments=call_arguments,
+                            **call_options,
                         )
+                elif self._is_hosted_web_search and self._server_url:
+                    result = await self._call_hosted_search(call_arguments, call_options)
                 else:
                     result = await self._session.call_tool(
                         self._remote_name,
                         arguments=call_arguments,
+                        **call_options,
                     )
 
             # MCP tool results are a list of content items
@@ -1181,8 +1269,10 @@ class MCPTool(Tool):
             if not isinstance(structured_content, dict):
                 structured_content = None
             if structured_content is not None:
+                # MCP already decoded this object. Inspect its error envelope
+                # directly instead of encoding/parsing the entire AX result.
                 structured_error = structured_error or _structured_mcp_error_message(
-                    json.dumps(structured_content, ensure_ascii=False),
+                    structured_content,
                 )
             context = adapt_mcp_result_context(
                 server_name=self._server_name, remote_name=self._remote_name,
@@ -1200,17 +1290,18 @@ class MCPTool(Tool):
                     server_name=self._server_name, remote_name=self._remote_name,
                 ) if inline_images else ()
             )
-            image_references = persist_mcp_image_references(
-                server_name=self._server_name, remote_name=self._remote_name,
-                inline_images=inline_images, adapters=result_adapters,
-            )
-            image_content, image_source = (
-                adapt_mcp_image_context(
+            with mcp_result_processing_scope():
+                image_references = persist_mcp_image_references(
                     server_name=self._server_name, remote_name=self._remote_name,
-                    inline_images=inline_images, arguments=call_arguments,
-                    structured_content=structured_content,
-                ) if not (is_error or structured_error) else (None, None)
-            )
+                    inline_images=inline_images, adapters=result_adapters,
+                )
+                image_content, image_source = (
+                    adapt_mcp_image_context(
+                        server_name=self._server_name, remote_name=self._remote_name,
+                        inline_images=inline_images, arguments=call_arguments,
+                        structured_content=structured_content,
+                    ) if not (is_error or structured_error) else (None, None)
+                )
             raw_output: dict[str, Any] = {}
             if structured_content is not None:
                 raw_output["mcp_structured_content"] = structured_content
@@ -1312,6 +1403,113 @@ class MCPTool(Tool):
             if browser_runtime_acquired and release_browser_runtime_after_call:
                 await release_browser_runtime_for_current_turn()
 
+    def _current_search_session(self) -> ClientSession:
+        # Agent registries may still hold a tool from before a hot reconnect.
+        for tool in get_mcp_tools_for_server(self._server_name):
+            if tool.mcp_tool_id == self.mcp_tool_id and tool._session is not None:
+                return tool._session
+        if self._mcp_generation or self._session is None:
+            raise RuntimeError("WebSearch MCP connection is unavailable")
+        return self._session
+
+    async def _call_hosted_search(self, arguments: dict[str, Any], options: dict[str, Any]):
+        lock = _mcp_reconnect_locks.setdefault(self._server_name, asyncio.Lock())
+        # Only read-only hosted search is replayed, once, within execute's
+        # original timeout. Concurrent callers reuse the replacement.
+        for attempt in range(2):
+            async with lock:
+                session = self._current_search_session()
+                connection = next((conn for conn in _mcp_connections if conn.session is session), None)
+                if connection is not None:
+                    connection._active_search_calls += 1
+                    connection._search_calls_drained.clear()
+            try:
+                try:
+                    return await session.call_tool(self._remote_name, arguments=arguments, **options)
+                finally:
+                    if connection is not None:
+                        connection._active_search_calls -= 1
+                        if connection._active_search_calls == 0:
+                            connection._search_calls_drained.set()
+            except McpError as error:
+                expired = (
+                    error.error.code in (32600, -32000)
+                    and error.error.message == "Session terminated"
+                )
+                if attempt or not expired:
+                    raise
+                _warn(f"[mcp] search session expired; reconnecting server={self._server_name!r}")
+                outcome = await reconnect_mcp_server(
+                    self._server_name, expected_session=session,
+                )
+                if not outcome.get("success"):
+                    raise RuntimeError(
+                        f"WebSearch MCP session recovery failed: {outcome.get('error', 'connection superseded')}"
+                    ) from error
+
+
+def _private_mcp_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """Keep every private MCP request within the configured service boundary."""
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    async def check_url(request: httpx.Request) -> None:
+        # SSE endpoint events can change the POST URL without an HTTP redirect.
+        if not is_private_service_url(str(request.url)):
+            raise httpx.RequestError(
+                "MCP request is outside the private service boundary", request=request
+            )
+
+    client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    client.follow_redirects = False
+    client.event_hooks["request"].append(check_url)
+    return client
+
+
+def _should_attach_mcp_session_header(url: str) -> bool:
+    return (
+        os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") != "true"
+        and should_attach_client_headers(url)
+    )
+
+
+async def _attach_mcp_session_header(request) -> None:
+    """Read correlation from the message, since MCP sends in a background task."""
+    header = "X-RACCOON-Session-ID"
+    request.headers.pop(header, None)
+    if not _should_attach_mcp_session_header(str(request.url)) or request.method != "POST":
+        return
+    try:
+        payload = json.loads(await request.aread())
+    except (ValueError, UnicodeDecodeError):
+        return
+    if not isinstance(payload, dict) or payload.get("method") != "tools/call":
+        return
+    params = payload.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    session_id = meta.get("box_agent_session_id") if isinstance(meta, dict) else None
+    if isinstance(session_id, str):
+        session_id = session_id.strip()
+        if session_id and session_id.isascii() and all(32 <= ord(c) < 127 for c in session_id):
+            request.headers[header] = session_id
+
+
+def _session_mcp_http_client(**kwargs):
+    client = create_mcp_http_client(**kwargs)
+    client.event_hooks.setdefault("request", []).append(_attach_mcp_session_header)
+    return client
+
+
+def _mcp_http_client_options(url: str | None) -> dict:
+    if is_private_service_url(url or ""):
+        return {"httpx_client_factory": _private_mcp_http_client}
+    if _should_attach_mcp_session_header(url or ""):
+        return {"httpx_client_factory": _session_mcp_http_client}
+    return {}
+
 
 async def _open_streamable_http(
     exit_stack: AsyncExitStack,
@@ -1367,6 +1565,10 @@ async def _open_streamable_http(
             auth=transport_auth,
         )
         http_client = await exit_stack.enter_async_context(http_client_context)
+        if is_private_service_url(url or ""):
+            http_client.follow_redirects = False
+        if _should_attach_mcp_session_header(url or ""):
+            http_client.event_hooks.setdefault("request", []).append(_attach_mcp_session_header)
         streams = await exit_stack.enter_async_context(
             streamable_http_client(url=url, http_client=http_client)
         )
@@ -1380,6 +1582,7 @@ async def _open_streamable_http(
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
                 auth=auth,
+                **_mcp_http_client_options(url),
             )
         )
     read_stream, write_stream = streams[:2]
@@ -1430,6 +1633,9 @@ class MCPServerConnection:
         self.connector_id = connector_id
         self.connector_name = connector_name
         self._web_search_concurrency_limiter: asyncio.Semaphore | None = None
+        self._active_search_calls = 0
+        self._search_calls_drained = asyncio.Event()
+        self._search_calls_drained.set()
         # Connection state
         self.last_error: str | None = None
         self.last_auth_status: int | None = None
@@ -1671,10 +1877,14 @@ class MCPServerConnection:
                     tool.name,
                     self.connector_id,
                 )
+                legacy_name = _legacy_public_mcp_tool_name(
+                    self.name, tool.name, self.connector_id,
+                )
                 fixed_arguments = browser_tool_fixed_arguments(self.name, parameters)
                 parameters = public_browser_tool_parameters(parameters, fixed_arguments)
                 mcp_tool = MCPTool(
                     name=public_name,
+                    legacy_names=(legacy_name,) if legacy_name != public_name else (),
                     remote_name=tool.name,
                     description=public_browser_tool_description(
                         self.name,
@@ -1683,6 +1893,7 @@ class MCPServerConnection:
                     parameters=parameters,
                     session=session,
                     server_name=self.name,
+                    server_url=self.url or "",
                     fixed_arguments=fixed_arguments,
                     execute_timeout=execute_timeout,
                     always_load=_mcp_tool_always_load(self.name, tool, self.always_load),
@@ -1835,10 +2046,20 @@ class MCPServerConnection:
         @playwright/mcp) can create working directories without hitting
         permission errors on protected paths like ``C:\\Program Files\\``.
         """
+        env = self._build_stdio_env()
+        if self.name == "box-agent-web-extract":
+            # MCP 默认环境不继承私有配置；登录后以当前进程的地址为准。
+            env = dict(env or {})
+            for key in ("RACCOON_PRIVATE_DEPLOYMENT", "RACCOON_PRIVATE_OFFICE_URL"):
+                for existing_key in list(env):
+                    if existing_key.upper() == key:
+                        del env[existing_key]
+                if key in os.environ:
+                    env[key] = os.environ[key]
         server_params = StdioServerParameters(
             command=self.command,
             args=self.args,
-            env=self._build_stdio_env(),
+            env=env or None,
             cwd=tempfile.gettempdir(),
         )
         return await self.exit_stack.enter_async_context(stdio_client(server_params))
@@ -1855,6 +2076,7 @@ class MCPServerConnection:
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
                 auth=self.auth,
+                **_mcp_http_client_options(self.url),
             )
         )
 
@@ -2446,6 +2668,20 @@ def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer
     for conflict in resolved.conflicts:
         _warn(f"Skipping conflicting MCP server: {conflict}")
     servers = dict(resolved.servers)
+    if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+        search = servers.get(HOSTED_WEB_SEARCH_SERVER_NAME)
+        # 同名 MCP 可能已换成私有地址或来自客户配置，不能只按名称删除。
+        if (
+            search is not None
+            and (
+                search.owner == "system"
+                or (search.owner == "user" and search.managed_default)
+            )
+            and is_default_hosted_search_url(search.config.get("url"))
+            # 宿主声明的私有服务优先，即使复用官方域名和搜索路径也保留。
+            and not is_private_service_url(search.config["url"])
+        ):
+            servers.pop(HOSTED_WEB_SEARCH_SERVER_NAME)
     if _cua_service is not None:
         name = _cua_service.name
         config = _cua_service.server_config
@@ -2704,11 +2940,24 @@ async def cleanup_mcp_connections():
     get_mcp_tool_catalog().clear()
 
 
-async def reconnect_mcp_server(name: str) -> dict:
+async def reconnect_mcp_server(
+    name: str, *, expected_session: ClientSession | None = None,
+) -> dict:
     """Serialize hot reconnects for one server name."""
     global _mcp_server_definitions
     lock = _mcp_reconnect_locks.setdefault(name, asyncio.Lock())
     async with lock:
+        if expected_session is not None:
+            current = next((conn for conn in _mcp_connections if conn.name == name), None)
+            if current is None:
+                return {"success": False, "error": "MCP server is no longer connected"}
+            if current.session is not expected_session:
+                return {"success": current.session is not None}
+            # Let every in-flight search receive its response before closing
+            # the SDK streams. New calls wait on this same reconnect lock.
+            await current._search_calls_drained.wait()
+            if current not in _mcp_connections:
+                return {"success": False, "error": "MCP connection was removed during recovery"}
         if _mcp_config_path:
             try:
                 # Reading another server's new credential version does not mean
@@ -2717,6 +2966,11 @@ async def reconnect_mcp_server(name: str) -> dict:
                 if name in current:
                     _mcp_server_definitions[name] = current[name]
                 else:
+                    if name in _mcp_server_definitions or any(c.name == name for c in _mcp_connections):
+                        # 过滤或删除配置后先撤销旧连接/工具，再移除定义，避免先重连时遗留可用工具。
+                        retired = await disconnect_mcp_server(name)
+                        if not retired.get("success"):
+                            return retired
                     _mcp_server_definitions.pop(name, None)
             except Exception as error:
                 return {"success": False, "error": str(error)}
@@ -2998,7 +3252,13 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
         _record_status(name, "connecting", transport=transport_label)
         try:
             conn = _build_connection(definition)
+            if old_conn is not None:
+                conn._web_search_concurrency_limiter = getattr(old_conn, "_web_search_concurrency_limiter", None)
             success = await conn.connect()
+        except asyncio.CancelledError:
+            if not obsolete():
+                _record_status(name, "failed", transport=transport_label, error="MCP reconnection cancelled")
+            raise
         except Exception as e:
             if obsolete():
                 if conn is not None:

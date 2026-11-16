@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -9,6 +10,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Iterator
 from urllib.parse import urlparse
+
+from .auth import is_private_service_url
 
 
 _MAX_HEADER_VALUE_LENGTH = 256
@@ -19,7 +22,9 @@ _CURRENT_CLIENT_INFO: ContextVar[ClientInfo | None] = ContextVar(
 
 
 def should_attach_client_headers(url: str) -> bool:
-    """Limit product metadata to the Raccoon domain and its subdomains."""
+    """Limit metadata to the selected private service or the default Raccoon domain."""
+    if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+        return is_private_service_url(url)
     try:
         parsed = urlparse(url)
         hostname = (parsed.hostname or "").lower().rstrip(".")

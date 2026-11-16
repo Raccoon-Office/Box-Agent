@@ -1,6 +1,7 @@
 """Exercise MCP lifecycle ownership with the real SDK and in-memory transport."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -24,10 +25,11 @@ def sdk_connection(monkeypatch):
 
     @server.call_tool()
     async def call_tool(name, arguments):
+        state.calls.append((name, arguments))
         return [types.TextContent(type="text", text="ok")]
 
     state = SimpleNamespace(scopes=[], owners=[], exits=[], transports=0, stall=None,
-                            closing=None, release_close=None, close_error=False)
+                            closing=None, release_close=None, close_error=False, calls=[])
 
     class ObservedSession(ClientSession):
         async def __aenter__(self):
@@ -73,6 +75,46 @@ def sdk_connection(monkeypatch):
     monkeypatch.setattr(mcp_loader.MCPServerConnection, "_connect_stdio", open_transport)
     conn = mcp_loader.MCPServerConnection("lifecycle-test", command="unused", connect_timeout=1)
     return conn, state
+
+
+async def test_installed_config_loads_namespaced_tools_without_rewriting_config_or_wire_names(
+    sdk_connection, monkeypatch, tmp_path,
+):
+    _, state = sdk_connection
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {
+        name: {"command": "installed-command", "args": ["--existing"],
+               "env": {"EXAMPLE_KEY": "test-credential"}}
+        for name in ("first", "second")
+    }}))
+    before = config.read_bytes()
+    catalog = MCPToolCatalog()
+    for name, value in {
+        "_mcp_connections": [], "_mcp_status": {}, "_mcp_config_path": None,
+        "_mcp_reconnect_locks": {}, "_cua_service": None, "_mcp_loading": False,
+        "_mcp_auth_file": "", "_mcp_auth_token": "", "_mcp_auth_fingerprint": "",
+        "_mcp_server_definitions": {}, "_mcp_sources": (), "_mcp_source_overrides": {},
+        "_mcp_runtime_credentials": {}, "_mcp_runtime_credential_versions": {},
+    }.items():
+        monkeypatch.setattr(mcp_loader, name, value)
+    for source in ("USER", "SYSTEM", "CONNECTOR"):
+        monkeypatch.delenv(f"BOX_AGENT_{source}_MCP_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("BOX_AGENT_RESERVED_MCP_SERVER_NAMES", raising=False)
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    try:
+        tools = await mcp_loader.load_mcp_tools_async(str(config))
+        assert {tool.name for tool in tools} == {"mcp__first__echo", "mcp__second__echo"}
+        assert all(tool.mcp_legacy_names == ("echo",) for tool in tools)
+        for conn in mcp_loader._mcp_connections:
+            assert conn.command == "installed-command" and conn.args == ["--existing"]
+            assert conn.env["EXAMPLE_KEY"] == "test-credential"
+        results = [await tool.invoke({}) for tool in tools]
+        assert all(result.success for result in results)
+        assert state.calls == [("echo", {}), ("echo", {})]
+        assert config.read_bytes() == before
+    finally:
+        await mcp_loader.cleanup_mcp_connections()
+    assert state.transports == 0
 
 
 async def test_repeated_cross_task_disconnect_closes_real_sdk_scopes(sdk_connection, monkeypatch):

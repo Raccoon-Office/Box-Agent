@@ -91,6 +91,12 @@ including superseded, cancelled and tail records. The declared contract must
 cover every column: required/nullable, text, integer, finite decimal with bounds
 and scale, date, boolean or explicit enum values.
 
+Source fingerprinting checks file identity, size and modification time across
+the open handle and path, and retains change-time checks between handle reads.
+On Windows, handle/path comparisons omit `ctime` because the two APIs can expose
+change time and creation time respectively; macOS/Linux retain that comparison.
+Full-file SHA-256 checks still reject changed input contents.
+
 User supplements received during a run add their explicitly referenced inputs to
 the same gate without discarding earlier receipts or relaxing the locked purpose.
 Quoted and Markdown paths are matched as whole paths, not as extra bare filenames.

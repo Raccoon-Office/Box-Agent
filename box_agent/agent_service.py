@@ -49,6 +49,7 @@ class AgentService:
         session: Any,
         options: Any | None = None,
         delivery_options: RunDeliveryOptions | None = None,
+        control: RunControl | None = None,
     ) -> AgentRunHandle:
         """Start one protocol-neutral run over an existing AgentSession.
 
@@ -71,7 +72,8 @@ class AgentService:
                 or getattr(session, "_active_run_task", None) is not None
                 or getattr(session, "_preparing_input", False)):
             raise RuntimeError("session already has an active run")
-        control = RunControl()
+        if control is None:
+            control = RunControl()
         if options is None:
             options = session.build_run_options(
                 session_id=request.session_id,

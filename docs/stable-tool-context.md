@@ -8,6 +8,49 @@ Version 2 keeps the system prompt and provider-facing tool definitions stable du
 
 Discovery returns bounded, complete schema entries. Oversized or omitted entries receive a notice rather than an executable reference. Required tool descriptions are delivered again after compaction removes them. Execution events, permission checks, budgets and hooks retain the real target's identity, while model history retains the original `call_tool` call and call ID.
 
+Ordinary MCP tools use `mcp__<server>__<tool>` model-facing names, including
+user-installed servers without connector metadata. Provider-invalid, long or
+ambiguous separator names receive a deterministic hash suffix. Existing browser
+public names and the explicit hosted `web_search`/`web_extract` replacements keep
+their public contracts. Native tools and tools from different MCP servers can
+therefore share an upstream name without replacing or hiding each other.
+
+Installed MCP configuration, credentials and upstream `tools/call` names do not
+change. `tool_search` accepts original names and previous public names/IDs;
+ambiguous short names require `server_name` or a qualified ID such as
+`mcp:seko/generate_image`. Version 1 additionally accepts an old direct-call name
+only when its target is unique, currently offered, and does not shadow any
+registered native name/alias or current MCP name. Hidden and unactivated tools
+still participate in direct-call ambiguity checks. New definitions advertise
+only the canonical name; permission and connection-generation checks still apply.
+
+Restored sessions keep their protocol version and historical calls/results.
+A runtime notice requests rediscovery using the server and original tool name;
+completed historical calls are not replayed. Version 2 requires fresh references
+and does not accept legacy direct-call aliases. Custom Skills/scripts should use
+qualified names (or server-scoped discovery) when a short name is ambiguous.
+The new naming takes effect when connections are created by the updated runtime;
+existing live tool objects are not renamed in place.
+
+After a successful connector hit, `tool_search` also returns `connector_catalogs`:
+the exact model-facing names and short purposes of that connector's discoverable
+tools, including tools on its other MCP servers. This metadata does not activate
+sibling tools or issue their schemas or references; use `tool_names` to discover
+the tools needed for later steps. Authorization, visibility and name-conflict
+filters apply before building the catalog. Tools without a connector ID do not
+trigger this expansion.
+
+Purposes are whitespace-normalized and limited to 160 characters. Catalogs share
+an 8,000-character JSON budget per search, separate from the existing schema
+budget. `tool_count` gives the eligible total, `omitted_count` reports tools
+omitted from a group, and `connector_catalogs_omitted_count` reports whole groups
+omitted for size. Omitted tools remain searchable. An unchanged catalog is sent
+once per session; connection-generation or visibility changes allow an update.
+Version 2 also permits redelivery on the next matching search if compaction or
+projection removes the catalog from the model's history. Catalogs are not eagerly
+restored, nor inserted into the system prompt or top-level tool definitions.
+Version 1 retains session-level deduplication without history-based redelivery.
+
 Skill recommendations are bounded runtime messages, not system prompt changes. They are snapshots of the current visible recommendations, and later snapshots supersede earlier ones. Use `list_skills` for the full catalog and `get_skill` for the chosen Skill's instructions. Skill metadata and instructions do not grant tools or permissions. Selected or restored guidance is delivered as durable runtime messages or bounded reading instructions; long guidance can require paged reading.
 
 Compaction does not promote discoveries into the system prompt or top-level tool definitions. It restores complete, acknowledged tool descriptions (including schemas and existing refs) at the message tail when missing. Current definition, visibility, permission and connection-generation checks still apply; stale or unacknowledged discoveries are not restored. Required/always-load descriptions also retain their existing recovery path. Compaction alone does not disconnect MCP or issue new references.

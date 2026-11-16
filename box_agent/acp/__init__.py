@@ -191,6 +191,7 @@ from box_agent.session_trace import (
 from box_agent.session_log import SessionLog, run_session_io
 from box_agent.api.input import UserInput
 from box_agent.input_preparation import prepare_user_input, resource_image_paths
+from box_agent.input_images import MAX_INPUT_IMAGES
 from box_agent.task_context import TaskContext, normalize_task_id
 from box_agent.session_continuation import import_continuation_images, parse_session_continuation
 from box_agent.session_history import prompt_fingerprint, revision_request, revise_agent_history
@@ -263,7 +264,7 @@ from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryErr
 
 from .debug_logger import acp_logger as log
 
-from box_agent.user_paths import configured_box_agent_home, state_path
+from box_agent.user_paths import browser_cache_path, configured_box_agent_home, state_path
 
 # Keep stdlib logger for backward compat with existing log calls
 logger = logging.getLogger(__name__)
@@ -2011,7 +2012,7 @@ class BoxACPAgent:
             ),
         )
 
-        # Build PermissionEngine via policy composition if officev3 block is configured
+        # Use the shared engine for restricted sessions and configured legacy policies.
         perm_engine = None
         grant_store = GrantStore()
         effective_policy: CapabilityPolicy | None = None
@@ -2050,7 +2051,7 @@ class BoxACPAgent:
 
         if (
             permission_mode not in elevated_permission_modes
-            and (self._has_officev3_policy() or permission_mode == "default")
+            and (self._has_officev3_policy() or not session_allow_full_access)
         ):
             try:
                 # officev3_permissions_override is DEPRECATED — kept for parsing only.
@@ -2500,8 +2501,18 @@ class BoxACPAgent:
     async def resume_session(
         self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,
     ) -> ResumeSessionResponse:
-        """Restore context for the next prompt without replaying history."""
+        """Restore context, optionally replaying from an inclusive turn cursor."""
+        replay_requested = "replayFromTurnId" in meta
+        replay_from = meta.pop("replayFromTurnId", None)
+        if replay_requested and (not isinstance(replay_from, str) or not replay_from.strip()):
+            raise RequestError(-32602, "replayFromTurnId must be a non-empty string",
+                               {"code": "INVALID_REPLAY_CURSOR"})
         response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
+        if replay_from is not None:
+            await self._replay_session_history(session_id, replay_from_turn_id=replay_from)
+            return ResumeSessionResponse(field_meta={
+                **(response.field_meta or {}), "replayed": True, "replayFromTurnId": replay_from,
+            })
         return ResumeSessionResponse(field_meta=response.field_meta)
 
     async def load_session(
@@ -2509,9 +2520,30 @@ class BoxACPAgent:
     ) -> LoadSessionResponse:
         """Open and replay existing facts; never create a missing session or run tools."""
         response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
+        await self._replay_session_history(session_id)
+        return LoadSessionResponse(field_meta={**(response.field_meta or {}), "replayed": True})
+
+    async def _replay_session_history(
+        self, session_id: str, *, replay_from_turn_id: str | None = None,
+    ) -> None:
+        """Send retained history using the same wire format for load and resume."""
         state = self._sessions[session_id]
         state._prompt_in_progress = True
         try:
+            history = state.agent.session_log.history_messages()
+            if replay_from_turn_id is not None:
+                # Resolve against effective display history, not physical log records:
+                # revised/reset turns must never become valid replay anchors again.
+                starts = [index for index, (_, message, _) in enumerate(history)
+                          if message.role == "user" and message.source == "user"
+                          and message.input_facts
+                          and message.input_facts.get("kind") != "user_supplement"
+                          and message.input_facts.get("id") == replay_from_turn_id]
+                if len(starts) != 1:
+                    raise RequestError(-32602, "REPLAY_CURSOR_NOT_FOUND", {
+                        "code": "REPLAY_CURSOR_NOT_FOUND", "turnId": replay_from_turn_id,
+                    })
+                history = history[starts[0]:]
             replay_status = {}
             bound_turn = None
             for event in state.agent.session_log._active_events():
@@ -2521,7 +2553,7 @@ class BoxACPAgent:
                     replay_status[bound_turn] = {"completed": "complete", "aborted": "cancelled",
                                                  "error": "error"}.get(event["data"].get("reason", {}).get("kind"), "interrupted")
             replay_turn_id = None
-            for seq, message, saved_data in state.agent.session_log.history_messages():
+            for seq, message, saved_data in history:
                 if message.input_facts and message.input_facts.get("kind") != "user_supplement":
                     replay_turn_id = message.input_facts["id"]
                 updates = []
@@ -2577,7 +2609,6 @@ class BoxACPAgent:
             raise
         finally:
             state._prompt_in_progress = False
-        return LoadSessionResponse(field_meta={**(response.field_meta or {}), "replayed": True})
 
     def _filesystem_access_prompt(self, workspace, policy):
         from box_agent.session_assembly import _filesystem_access_prompt
@@ -2605,7 +2636,7 @@ class BoxACPAgent:
     ) -> _ImageAttachmentContext | None:
         """Adapt the shared preparation's genuine tool results to ACP updates."""
         from box_agent.input_images import prepare_image_attachments
-        paths = _meta_string_list(prompt_meta, "image_attachment_paths", "imageAttachmentPaths", limit=6)
+        paths = _meta_string_list(prompt_meta, "image_attachment_paths", "imageAttachmentPaths", limit=MAX_INPUT_IMAGES)
         trace = getattr(state, "trace_writer", None)
 
         async def started(call_id, name, arguments):
@@ -3219,7 +3250,7 @@ class BoxACPAgent:
         attachment_meter_token = start_token_meter()
         resource_paths = resource_image_paths(prepared_input) if prepared_input else []
         if resource_paths:
-            legacy_paths = _meta_string_list(prompt_meta, "image_attachment_paths", "imageAttachmentPaths", limit=6)
+            legacy_paths = _meta_string_list(prompt_meta, "image_attachment_paths", "imageAttachmentPaths", limit=MAX_INPUT_IMAGES)
             prompt_meta = {**prompt_meta, "image_attachment_paths": list(dict.fromkeys([*legacy_paths, *resource_paths]))}
         try:
             image_attachment_context = await self._run_image_attachment_tool(
@@ -5228,16 +5259,35 @@ class BoxACPAgent:
             set_session_trace_writer(observer.trace_writer, turn_id=turn_id)
             if observer.trace_writer is not None else None
         )
+        from box_agent.tools.billing import confirmation
+        from box_agent.acp.billing import BillingConfirmation
+        from box_agent.llm.request_context import scoped_request_context
+        from box_agent.run_control import RunControl
+
+        control = RunControl()
+        billing_turn_id = turn_id or state.current_turn_id
+        billing_token = confirmation.set(BillingConfirmation(
+            self._conn, session_id, billing_turn_id,
+            lambda: not state.cancelled and state.current_turn_id == billing_turn_id,
+            control=control,
+        ))
         try:
-            protocol_handle = await AgentService().start(
-                RunRequest(
-                    run_id=turn_id or state.current_turn_id or f"acp-run-{uuid4().hex}",
-                    session_id=session_id,
-                ),
-                session=state,
-                options=run_options,
-            )
+            with scoped_request_context(
+                session_id=billing_session_id or state.upstream_session_id or session_id,
+                turn_id=billing_turn_id,
+                title=state.upstream_title,
+            ):
+                protocol_handle = await AgentService().start(
+                    RunRequest(
+                        run_id=turn_id or state.current_turn_id or f"acp-run-{uuid4().hex}",
+                        session_id=session_id,
+                    ),
+                    session=state,
+                    options=run_options,
+                    control=control,
+                )
         finally:
+            confirmation.reset(billing_token)
             if trace_token is not None:
                 reset_session_trace_writer(trace_token)
         run_handle = protocol_handle
@@ -6267,12 +6317,11 @@ async def run_acp_server(config: Config | None = None) -> None:
     # ~/.box-agent/browsers/ directory — same location `box-agent install-browser`
     # populates — so CLI installs are reusable from ACP.
     import os as _os
-    _os.environ.setdefault(
-        "PLAYWRIGHT_BROWSERS_PATH",
-        str(state_path('browsers')),
-    )
-    if configured_box_agent_home() is not None:
-        _os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(state_path("browsers", _os.environ["PLAYWRIGHT_BROWSERS_PATH"]))
+    # Browser binaries are a relocatable tool cache, not owned session/config data.
+    # In particular, a Windows junction to another drive must not prevent ACP
+    # startup. Keep host overrides (including Playwright's special "0" value)
+    # and leave browser availability/preparation to the browser tooling.
+    _os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_cache_path()
 
     # ── Stdout guard ────────────────────────────────────────
     # ACP protocol owns stdout exclusively.  Redirect sys.stdout to

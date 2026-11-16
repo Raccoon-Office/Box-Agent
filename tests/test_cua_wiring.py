@@ -166,3 +166,20 @@ def test_enabled_plugin_activates_its_mcp_server_through_existing_exposure():
     binding.install_agent(agent)
     assert agent.mcp_tool_exposure.calls == ["cua"]
     binding.close()
+
+
+def test_model_context_projects_adaptor_queries_but_preserves_raw_envelope():
+    import copy
+    import json
+    binding = build_cua_bindings(llm=object(), config=CuaConfig(server_name='desktop'))
+    payload = {'schema_version': 1, 'output': {'state': 'final-state'},
+               'backend_events': [{'phase': 'result', 'tool': 'list_apps',
+                                   'result': {'structuredContent': {'apps': ['diagnostic-only']}}}]}
+    original = copy.deepcopy(payload)
+    text = binding.result_context(server_name='desktop', remote_name='get_state',
+                                  arguments={'app': 'TextEdit'}, structured_content=payload)
+    model = json.loads(text.removeprefix('CUA structured result: '))['structuredContent']
+    assert model['output']['state'] == 'final-state'
+    assert model['backend_query_counts'] == {'list_apps': 1}
+    assert 'diagnostic-only' not in text
+    assert payload == original

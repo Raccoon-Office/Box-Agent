@@ -93,3 +93,40 @@ async def test_llm_org_header_tracks_team_switch_and_personal_identity(tmp_path)
             await client._auth_headers()
     finally:
         await client.client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("api_base,api_key,hosted", [
+    ("http://tenant.internal:5591/api/web/llm/v2", "box-agent-auth-json", True),
+    ("http://tenant.internal:5591/api/web/llm/v2", "custom-key", False),
+    ("http://tenant.internal:5592/api/web/llm/v2", "box-agent-auth-json", False),
+    ("https://xiaohuanxiong.com/api/web/llm/v2", "box-agent-auth-json", False),
+])
+async def test_private_llm_wire_headers_use_only_the_current_deployment(
+    tmp_path, monkeypatch, stream, api_base, api_key, hosted,
+):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "http://tenant.internal:5591")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "private-token", "office_identity": "team-one"}))
+    requests = []
+    def handler(request):
+        requests.append(request)
+        if stream:
+            chunk = {"id": "test", "object": "chat.completion.chunk", "created": 0, "model": "test", "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+        return httpx.Response(200, json={"id": "test", "object": "chat.completion", "created": 0, "model": "test", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]})
+    client = OpenAIClient(api_key=api_key, api_base=api_base, model="test", auth_file=str(auth_file))
+    await client.client.close()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client.client = client.client.with_options(http_client=http_client)
+        if stream:
+            _ = [event async for event in client.generate_stream([Message(role="user", content="hi")])]
+        else:
+            await client.generate([Message(role="user", content="hi")])
+    assert len(requests) == 1
+    assert (requests[0].headers.get("Authorization") == "Bearer private-token") is hosted
+    assert requests[0].headers.get("X-Org-Code") == ("team-one" if hosted else None)
+    if api_key == "custom-key":
+        assert requests[0].headers["Authorization"] == "Bearer custom-key"

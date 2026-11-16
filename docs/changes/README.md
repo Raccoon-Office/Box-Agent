@@ -6,6 +6,56 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## Product directory defaults and Bash traversal (PR #264)
+
+- [PR #264](https://github.com/Raccoon-Office/Box-Agent/pull/264) changes the
+  shared filesystem default: actual Box-Agent package/data/runtime roots and
+  trusted host-provided client installation/data roots are read/write.
+  `BOX_AGENT_RUNTIME_ROOT`, `BOX_AGENT_CLIENT_ROOT` and
+  `BOX_AGENT_CLIENT_DATA_ROOT` carry absolute runtime facts. Filesystem roots,
+  the user home itself and its ancestors are not inferred product roots.
+- The maintainer explicitly accepts Bash access through logical product paths
+  and product symlinks to external files, including writes to application code
+  and data. This supersedes the physical-containment assumption for Bash
+  product-directory access. File tools retain canonical-target checks; the
+  existing bounded bundled Skill write guard and dangerous-command approval
+  remain separate. Read together with the
+  [Filesystem Policy](../FILESYSTEM_POLICY_PROTOCOL.md).
+- Restricted ACP sessions initialize the shared permission engine and default a
+  missing session workspace root to the actual workspace. CLI/ACP do not keep
+  separate copies of this filesystem policy.
+- Proof anchors: `tests/test_permissions.py`,
+  `tests/test_builtin_skill_read_only.py`, `tests/test_shell_inspection.py`,
+  `tests/test_acp.py` and `tests/test_session_adapter_assembly.py`. They cover
+  literal/variable/glob destinations (including destination links), directory copy/sync, env wrapper facts,
+  child shell scopes, outer double-quote versus child parameter expansion,
+  dangerous-command approval before launch, substitution timing and normal product writes. Exact-head
+  CI and review results belong to the PR; these anchors do not certify a later
+  commit or an installed client.
+- Client path propagation is a paired desktop change awaiting integration.
+  Source tests and Python sdist/wheel builds do not prove a native runtime
+  rebuild, installation, host restart or fresh live task. Old hosts retain
+  existing session grants and the Agent-owned default roots. No data migration
+  is required. Roll back this PR and, if integrated, the paired host startup
+  environment change.
+
+## MCP session correlation and redirect boundary (PR #238)
+
+- MCP tool calls propagate the active session ID in message metadata to Raccoon
+  endpoints and to the bundled web extractor; child runs inherit their parent
+  session ID unless explicitly overridden. SSE and Streamable HTTP attach the
+  session header only to eligible Raccoon `tools/call` POST requests. Private
+  deployment disables automatic remote MCP correlation.
+- Direct third-party MCP calls omit automatic correlation, but a cross-domain
+  307 or 308 redirect can forward the original POST body and its session
+  metadata even though the correlation header is omitted on that hop.
+- Runtime and bundled web-extract process must both be updated and restarted.
+  Reverting the change requires restoring the previous runtime and extractor.
+  Hosted downstream forwarding and installed-runtime behavior require separate
+  verification. See [host progress events](../integration/host-progress-events.md)
+  and `tests/test_mcp_session_header.py`, `tests/test_web_extract_server.py`,
+  and `tests/test_sub_agent_tool.py` for the contract and regression anchors.
+
 ## Structured input and selection ownership (PR #246)
 
 - Agent validates and projects `input_context`, `selection_context`, and `database_context` for normal prompts, history edits, and injections. Source facts are data, not tool authorization; selection guidance distinguishes questions from requested edits.
@@ -241,6 +291,7 @@ decision, read those entries together.
 
 | Area | Affected paths or keywords | Current effective decision | Relationship | Details |
 | --- | --- | --- | --- | --- |
+| Product directory access | `PermissionEngine`, `shell_inspection.py`, `BOX_AGENT_CLIENT_ROOT`, `BOX_AGENT_CLIENT_DATA_ROOT`, restricted ACP | Actual product roots default to read/write; Bash product symlink traversal is accepted while canonical file checks and recognized builtin Skill write guards remain. | Supersedes physical containment for Bash product access; paired desktop path propagation and runtime rollout remain separate. | [PR #264](#product-directory-defaults-and-bash-traversal-pr-264) |
 | ACP structured input | `input_context.py`, `selection_context`, `database_context`, history edit, `_inject` | Agent validates and projects host facts; semantic context participates in idempotency without granting tool access. | Paired host contract; prompts without new context retain their fingerprint. | [PR #246](#structured-input-and-selection-ownership-pr-246) |
 | Session/output directories | `params.cwd`, `artifact_mode`, `artifact_root_dir`, `BOX_AGENT_OUTPUT_DIR`, artifact scan, PPT, research | Session cwd is stable; legacy path selectors warn and are ignored; General-mode task folders are model-created file organization only. | Supersedes fixed per-session output-root behavior. | [2026-09-09 cwd-owned task organization](#2026-09-09--cwd-owned-task-organization-and-legacy-output-root-deprecation) |
 | Artifact transaction inputs and truncated replies | `artifact_publication.py`, `tools/engine/artifact_results.py`, `publish_artifact_tool.py`, `.box-agent-staging`, `loop_guards.py`, `truncation_continuation_text` | Root staging inputs never become deliverables; final committed paths use normal ownership rules. Runtime user-role continuation follows the received tail; complete last-line ASCII markers/paths suppress normal-stop truncation retries. | Hardens existing publication and truncation recovery; explicit length recovery remains unchanged. | [PR #212 boundaries and proof](#2026-10-14--transaction-staging-and-truncation-continuation-pr-212) |

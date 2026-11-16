@@ -40,7 +40,13 @@ _USER_DECISION_FULL = (
     '需要用户在选项中选择时使用 `request_user_decision`。Skill 要求人工选择则不设默认或倒计时，等回复。'
     '否则低风险、可逆且保持用户意图的选择可设推荐默认项（`default_option_id`）并请求 30 秒倒计时。**若已给出 '
     '`default_option_id`，超时或自动提交时必须采用该默认项，不得改选其他偏好。'
-    '** 已授权操作直接继续，不重复确认；新增未授权的敏感事项须等待用户选择，不得自动提交。'
+    '** 已授权操作直接继续，不重复确认；其他新增未授权的敏感事项须等待用户选择，不得自动提交。'
+)
+
+_RUNTIME_APPROVAL_GUIDANCE = (
+    '命令执行及图片生成/编辑：意图和参数明确时（含用户明确要求继续），直接调用对应工具，'
+    '由运行时处理权限、危险操作和费用确认，不要用决策卡或普通文字重复询问授权。'
+    '必要的内容、对象和范围仍可澄清；拒绝后本轮不得重试或绕过。'
 )
 
 # Only an actually assembled source-discovery suffix replaces the template rule.
@@ -271,7 +277,8 @@ def resolve_capability_placeholders(text: str, tools: Collection[str] | None, *,
         text = text.replace(CODE_SEARCH_TOOLS_PLACEHOLDER, render_code_search_tools(tools))
     replacements = {
         "{USER_DECISION}": (_USER_DECISION_FULL if _has(tools, "request_user_decision") else
-            "需要用户选择或新增敏感事项授权时，直接询问并等待回复；已授权操作继续执行，不重复确认，不得绕过拒绝。"),
+            "需要用户选择或新增敏感事项授权时，直接询问并等待回复；已授权操作继续执行，不重复确认，不得绕过拒绝。")
+            + (_RUNTIME_APPROVAL_GUIDANCE if _has(tools, "bash") or _has(tools, "generate_image") else ""),
         "{FILE_OPERATIONS}": _render_file_operations(tools),
         "{CODE_DIRECTORY_INSPECTION}": (_CODE_DIRECTORY_FULL if _has(tools, "bash") else
             "当前会话没有 shell 执行能力；目录和版本状态仅依据已有上下文及已注册读取工具确认，无法检查时明确说明。"),

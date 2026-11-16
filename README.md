@@ -154,6 +154,7 @@ the current file, not a snapshot; existing model-context budgets still apply.
 
 ### More
 
+- **Image inputs**: Each message and `inspect_images` call accepts up to 20 images. Existing file-size, total-byte, pixel, permission, and model-context budgets still apply; model vision support is required to inspect image contents.
 - **MCP Tools**: Connect to any [MCP server](https://github.com/modelcontextprotocol/servers) — web search, knowledge graphs, databases
 - **Claude Skills**: 12 built-in runtime, Office, and artifact skills, plus on-demand marketplace skill sources
 - **ACP Protocol**: Embed Box Agent in Electron apps, Zed Editor, or any ACP-compatible host via JSON-RPC over stdio
@@ -430,7 +431,7 @@ box-agent install-browser   # downloads Chromium and flips the entry to enabled
 
 Requires Node.js ≥ 18 on `PATH`. Chromium lands in `~/.box-agent/browsers/` (shared by CLI and ACP runtime) and `mcpServers.playwright.disabled` in `~/.box-agent/config/mcp.json` is set to `false`.
 
-**ACP embedders**: no env-var plumbing required — `box-agent-acp` defaults `PLAYWRIGHT_BROWSERS_PATH` to the same `~/.box-agent/browsers/` path. To point at a different cache, export `PLAYWRIGHT_BROWSERS_PATH=<your path>` before spawning `box-agent-acp` (our setdefault won't override it).
+**ACP embedders**: no env-var plumbing required — `box-agent-acp` defaults `PLAYWRIGHT_BROWSERS_PATH` to `BOX_AGENT_HOME/browsers` when an explicit profile is configured, or `~/.box-agent/browsers/` otherwise. To point at a different cache, export `PLAYWRIGHT_BROWSERS_PATH=<your path>` before spawning `box-agent-acp`. With an explicit profile, ordinary relative overrides are anchored to `BOX_AGENT_HOME` before tool subprocesses change their working directory; Playwright's special `0` value is preserved. Browser caches may live outside the profile, including through Windows directory junctions; this does not relax the path checks for configuration, sessions, or memory. ACP startup does not require the browser cache to exist or download a browser.
 
 **Web access routing** is shared by CLI, ACP and child agents through the
 capability-gated `Web Access Routing` prompt. Explicit browser/tab/reader choices

@@ -48,22 +48,29 @@ def _open_regular(path: Path):
         os.close(descriptor)
 
 
-def _stamp(value: os.stat_result) -> tuple[int, ...]:
-    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+def _stamp(value: os.stat_result, *, include_ctime: bool = True) -> tuple[int, ...]:
+    stamp = value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+    return (*stamp, value.st_ctime_ns) if include_ctime else stamp
 
 
 def fingerprint(path: Path, cancelled: Callable[[], bool] = lambda: False) -> tuple[str, tuple[int, ...]]:
     """Hash the complete regular file, rejecting changes during the read."""
     digest = hashlib.sha256()
     with _open_regular(path) as stream:
-        before = _stamp(os.fstat(stream.fileno()))
+        before_stat = os.fstat(stream.fileno())
+        before = _stamp(before_stat)
         while True:
             _check_cancelled(cancelled)
             block = stream.read(64 * 1024)
             if not block:
                 break
             digest.update(block)
-        if before != _stamp(os.fstat(stream.fileno())) or before != _stamp(path.stat()):
+        # Windows stat(path) can expose creation time as ctime while fstat()
+        # exposes change time. Keep ctime for handle-to-handle comparisons.
+        compare_path_ctime = os.name != "nt"
+        if (before != _stamp(os.fstat(stream.fileno()))
+                or _stamp(before_stat, include_ctime=compare_path_ctime)
+                != _stamp(path.stat(), include_ctime=compare_path_ctime)):
             raise ValueError("Table source changed during validation")
     return digest.hexdigest(), before
 

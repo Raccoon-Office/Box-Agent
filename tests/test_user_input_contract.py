@@ -17,7 +17,40 @@ def link(path):
 
 
 @pytest.mark.asyncio
-async def test_resource_image_preparation_result_is_durable_and_replayed_without_execution(tmp_path):
+@pytest.mark.parametrize("kind", ["linked", "inline", "mixed"])
+async def test_twenty_images_reach_model_and_twenty_one_are_rejected_before_history(tmp_path, kind):
+    import base64
+    images = []
+    for index in range(21):
+        block = image_block()
+        if kind == "inline" or (kind == "mixed" and index % 2 == 0):
+            images.append({"type": "image", "mimeType": block["media_type"], "data": block["data"]})
+        else:
+            picture = tmp_path / f"image-{index}.png"
+            picture.write_bytes(base64.b64decode(block["data"]))
+            images.append({**link(picture), "mimeType": "image/png"})
+    llm = CaptureLLM()
+    llm.capabilities = {"image_input": True}
+    host = adapter(tmp_path, llm)
+    try:
+        session = await host.new_session(str(tmp_path), session_id=f"twenty-{kind}")
+        await host.prompt(session.session_id, images[:20], turn_id="accepted")
+        projected = [block for message in llm.requests[-1] if isinstance(message.content, list)
+                     for block in message.content if block.get("type") == "input_image"]
+        assert len(projected) == 20
+        log = host._sessions[session.session_id].agent.session_log
+        original, calls = log.path.read_bytes(), len(llm.requests)
+        with pytest.raises(Exception, match="INVALID_INPUT_IMAGE_COUNT"):
+            await host.prompt(session.session_id, images, turn_id="rejected")
+        assert len(llm.requests) == calls
+        assert log.path.read_bytes() == original
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('method', ['load_session', 'resume_session'])
+async def test_resource_image_preparation_result_is_durable_and_replayed_without_execution(tmp_path, method):
     import base64
     picture = tmp_path / "图片.png"
     picture.write_bytes(base64.b64decode(image_block()["data"]))
@@ -41,7 +74,8 @@ async def test_resource_image_preparation_result_is_durable_and_replayed_without
     restored._conn.session_update = update
     calls = len(llm.requests)
     try:
-        await restored.load_session(str(tmp_path), created.session_id)
+        meta = {'replayFromTurnId': 'image-turn'} if method == 'resume_session' else {}
+        await getattr(restored, method)(str(tmp_path), created.session_id, **meta)
         tool = [item for item in updates if item.get("toolCallId") == result["toolCallId"]]
         assert [item["sessionUpdate"] for item in tool] == ["tool_call", "tool_call_update"]
         assert tool[-1]["status"] == "completed"

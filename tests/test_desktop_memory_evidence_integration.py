@@ -6,7 +6,7 @@ import json
 from box_agent.agent_service import AgentService
 from box_agent.agent_session import AgentSession
 from box_agent.api import RunRequest
-from box_agent.schema import Message
+from box_agent.schema import FunctionCall, Message, ToolCall
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_log import SessionLog
 from box_agent.turn_hints import with_turn_hints
@@ -26,6 +26,9 @@ async def test_repeated_user_message_does_not_handoff_unfinished_previous_tool_r
     try:
         user = "Repeat this task"
         session.agent.add_user_message(with_turn_hints(user))
+        session.agent.messages.append(Message(role="assistant", content="", tool_calls=[
+            ToolCall(id="old", type="function", function=FunctionCall(name="run_check", arguments={})),
+        ]))
         session.agent._persist_unlogged_messages(turn=1, step=None)
         log.append("tool/call", {"callId": "old", "name": "run_check", "arguments": {}})
         session.agent.messages.append(Message(role="tool", tool_call_id="old", content="OLD_TURN_RESULT"))

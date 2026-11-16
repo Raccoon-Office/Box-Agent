@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from box_agent.llm.capabilities import image_input_support
+from box_agent.input_images import MAX_INPUT_IMAGES
 from box_agent.llm.image_payload import RequestBodyTooLargeError
 from box_agent.llm.task_budgets import (
     LONG_TASK_MAX_OUTPUT_TOKENS, SMALL_TASK_MAX_OUTPUT_TOKENS,
@@ -32,7 +33,7 @@ _MAX_TOTAL_IMAGE_PIXELS = 80_000_000
 _MAX_LONG_EDGE_PX = 1568
 _RETRY_LONG_EDGE_PX = 1024
 _IMAGE_TIMEOUT_RETRIES = 1
-_MAX_IMAGES = 6
+_MAX_IMAGES = MAX_INPUT_IMAGES
 _JPEG_QUALITY = 85
 _IMAGE_INSPECTION_TIMEOUT = 120.0
 _MAX_MODEL_CONTEXT_CHARS = 24_000
@@ -92,7 +93,7 @@ class ImageInspectionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Inspect 1-6 local PNG, JPEG, or WebP images (first frame for animated WebP). "
+            f"Inspect 1-{_MAX_IMAGES} local PNG, JPEG, or WebP images (first frame for animated WebP). "
             "proxy returns a vision model's "
             "written analysis; native shows image pixels to you under the session's "
             "image-context retention policy. Omit strategy to use native when the "
@@ -394,25 +395,25 @@ class ImageInspectionTool(Tool):
         remaining_bytes: int,
         max_long_edge: int = _MAX_LONG_EDGE_PX,
     ) -> dict[str, Any]:
-        file_path = self._resolve_readable_path(path)
-        if not file_path.exists():
-            raise ValueError(f"image file not found: {path}")
-        if not file_path.is_file():
-            raise ValueError(f"image path is not a file: {path}")
+        from .mcp_result_hooks import read_persisted_mcp_image
 
-        try:
-            source_size = file_path.stat().st_size
-        except OSError as exc:
-            raise ValueError(f"failed to inspect image: {path}: {exc}") from None
-        if source_size > _MAX_IMAGE_BYTES:
-            raise ValueError(f"image is too large: {path}")
-        if source_size > remaining_bytes:
-            raise ValueError("combined image size exceeds the image inspection limit")
-
-        try:
-            raw = file_path.read_bytes()
-        except OSError as exc:
-            raise ValueError(f"failed to read image: {path}: {exc}") from None
+        file_path = self._resolve_from_active_root(path).absolute()
+        raw = read_persisted_mcp_image(file_path)
+        if raw is None:
+            file_path = self._resolve_readable_path(path)
+            if not file_path.exists():
+                raise ValueError(f"image file not found: {path}")
+            if not file_path.is_file():
+                raise ValueError(f"image path is not a file: {path}")
+            try:
+                source_size = file_path.stat().st_size
+                if source_size > _MAX_IMAGE_BYTES:
+                    raise ValueError(f"image is too large: {path}")
+                if source_size > remaining_bytes:
+                    raise ValueError("combined image size exceeds the image inspection limit")
+                raw = file_path.read_bytes()
+            except OSError as exc:
+                raise ValueError(f"failed to read image: {path}: {exc}") from None
         if len(raw) > _MAX_IMAGE_BYTES:
             raise ValueError(f"image is too large: {path}")
         if len(raw) > remaining_bytes:

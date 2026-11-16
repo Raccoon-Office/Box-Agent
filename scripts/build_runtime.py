@@ -185,7 +185,6 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
         "box_agent.mcp_servers.web_extract",
         "box_agent.mcp_servers.web_extract_server",
         "box_agent.mcp_servers.cua_adapter",
-        "box_agent.mcp_servers.cua_panel_keyboard",
         "box_agent.mcp_servers.cua_server",
         "box_agent.retry",
         "box_agent.schema",
@@ -267,6 +266,9 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
 def pyinstaller_collect_args(*, external_python_sandbox: bool = False) -> list[str]:
     """Return flattened PyInstaller collect args for the ACP runtime build."""
     collect_groups = [
+        # The bounded panel helper compiles this package's native Swift source
+        # at runtime; Python module discovery alone does not bundle that file.
+        ("--collect-data", "box_agent.mcp_servers"),
         ("--collect-all", "tiktoken"),
         ("--collect-all", "tiktoken_ext"),
         ("--collect-all", "jupyter_client"),
@@ -700,7 +702,6 @@ def build_runtime(
     datas = [
         (str(project_root / "box_agent" / "config"), "box_agent/config"),
         (str(project_root / "box_agent" / "skills"), "box_agent/skills"),
-        (str(project_root / "box_agent" / "mcp_servers" / "native"), "box_agent/mcp_servers/native"),
     ]
     datas_args = []
     for src, dst in datas:

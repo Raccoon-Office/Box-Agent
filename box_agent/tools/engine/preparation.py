@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 from ..base import Tool, build_tool_name_index
+from ..mcp_tool_catalog import legacy_mcp_call_names
 from .contracts import PreparedTools, ToolDefinitionView
 
 if TYPE_CHECKING:
@@ -90,7 +91,8 @@ def prepare_tools(
             _tool_exposure=tool_exposure,
             _registered_names=frozenset(tool_exposure._stable_candidates),
         )
-    registered_names = frozenset(tool.name for tool in offered)
+    registered = list(offered)
+    registered_names = frozenset(tool.name for tool in registered)
     generations: dict[str, int] = {}
     if tool_exposure is not None:
         exposure = tool_exposure.prepare_tools(offered)
@@ -107,10 +109,15 @@ def prepare_tools(
         offered = [tool for tool in offered if is_tool_visible(tool)]
     name_index = build_tool_name_index(offered)
     targets = {tool.name: tool for tool in offered}
+    available = [*registered, *offered]
+    if tool_exposure is not None:
+        available.extend(entry.tool for entry in tool_exposure._catalog.snapshot())
+    call_names = legacy_mcp_call_names(available, offered)
+    call_names.update({name: tool.name for name, tool in name_index.items()})
     return PreparedTools(
         definitions=tuple(ToolDefinitionView.from_tool(tool) for tool in offered),
         targets=targets,
-        call_names={name: tool.name for name, tool in name_index.items()},
+        call_names=call_names,
         mcp_generations={
             name: generation
             for name, generation in generations.items()

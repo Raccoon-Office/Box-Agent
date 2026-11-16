@@ -46,6 +46,9 @@ class RequestUserDecisionTool(Tool):
             "materially change the deliverable, scope, format, or other user-facing "
             "outcome. Do not use this for internal implementation choices: choose those "
             "yourself. Do not use it for missing facts; use request_user_input instead. "
+            "Do not use this tool for command-execution or image-generation/editing authorization; "
+            "call the operation tool and let its runtime handle approval. "
+            "Clarify unresolved content, targets, or scope only. "
             "Provide 2-6 concise options with stable IDs. You may request a timeout default "
             "only when it preserves the user's stated intent, is low-risk, and is reversible. "
             "Prefer progress over waiting: when one option safely continues the user's explicit "
@@ -159,7 +162,7 @@ class RequestUserDecisionTool(Tool):
         risk_level: str | None = None,
         reversible: bool | None = None,
         preserves_user_intent: bool | None = None,
-        allow_freeform: bool = False,
+        allow_freeform: bool = True,
         reason: str = "",
     ) -> ToolResult:
         normalized_question = str(question).strip()

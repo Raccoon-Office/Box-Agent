@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from copy import copy
 from functools import lru_cache
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.tools import Tool as MCPFunctionTool
 
 from box_agent.config import Config
 from box_agent.llm import LLMClient
+from box_agent.llm.llm_wrapper import SessionBoundLLM
 from box_agent.mcp_servers.web_extract import WebExtractTool
 from box_agent.retry import RetryConfig
 from box_agent.schema import LLMProvider
@@ -51,9 +53,21 @@ async def web_extract(
     url: str,
     model: str | None = None,
     max_output_tokens: int | None = None,
+    ctx: Context = None,
 ) -> str:
     """Fetch one URL and return extracted text or an LLM summary."""
-    result = await _extractor().execute(
+    extractor = _extractor()
+    if ctx is not None:
+        try:
+            meta = ctx.request_context.meta
+        except ValueError:
+            meta = None
+        session_id = getattr(meta, "box_agent_session_id", None)
+        if isinstance(session_id, str) and session_id.strip():
+            extractor = copy(extractor)
+            extractor.llm = SessionBoundLLM(extractor.llm)
+            extractor.llm.set_request_context(session_id=session_id)
+    result = await extractor.execute(
         url=url,
         model=model,
         max_output_tokens=max_output_tokens,

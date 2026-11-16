@@ -35,8 +35,11 @@ BOX_AGENT_HOME="$BOX_PREVIEW_ROOT" uv run --no-sync --offline python -m box_agen
 | 用户 Skills / hooks | `skills/`、`hooks/` |
 | Python sandbox 与运行时安装包 | `sandbox/`、`runtime-packages/` |
 | 自管理 Node、Office 稳定运行时回退位置 | `runtimes/node/`、`box-agent-runtime/` |
-| Skill 子进程缓存 / 浏览器缓存 / 删除备份 | `skill-tools/`、`browsers/`、`trash/` |
+| Skill 子进程缓存 / 删除备份 | `skill-tools/`、`trash/` |
+| 可移动浏览器程序缓存 | 默认 `browsers/`；允许宿主覆盖到 profile 外或通过目录链接移动 |
 | CLI 历史与 Goal 元数据 | `.history`、`goals/` |
+
+浏览器程序缓存不承载配置、会话或记忆的权限，不使用自有数据的越界检查。`PLAYWRIGHT_BROWSERS_PATH` 为空时回退到默认缓存；显式 profile 下的普通相对路径以 profile 为根。含 `..` 的覆盖路径先按文件系统语义解析，再交给 Playwright 拼接版本目录；解析失败回退默认缓存，不导致 ACP 退出。普通缓存路径和目录链接不额外解析目标。特殊值 `0` 原样交给 Playwright 表示包内缓存，CLI 不为它建目录，Skill 不扫描工作目录中的 `0`；宿主显式提供的浏览器可执行文件仍可使用。配置、会话、记忆及其他自有状态的保护保持不变。
 
 统一解析由 `box_agent/user_paths.py` 提供。原权限引擎的“引擎内部数据”例外只指向当前 profile，不同时授予旧 `~/.box-agent` 的访问例外。用户显式指定的 session 工作区、项目内 `.box-agent` task registry/scratch、普通文件路径的 `~` 语义不被改写，仍由原工作区/权限逻辑控制。
 

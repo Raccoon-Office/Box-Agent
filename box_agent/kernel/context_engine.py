@@ -20,6 +20,7 @@ from ..schema.schema import RequestUsageSnapshot
 from ..session_log import SessionLog
 from ..tools.base import Tool, ToolResult
 from .context_types import CompactionOutcome
+from .tool_messages import InvalidToolHistory, tool_message_groups
 
 
 _log = logging.getLogger("box_agent.core")
@@ -656,21 +657,10 @@ def _recent_message_groups(
 ) -> list[list[int]]:
     """Group assistant tool calls with their contiguous tool results."""
 
-    groups: list[list[int]] = []
-    index = start
-    while index < len(messages):
-        message = messages[index]
-        if _is_compaction_metadata(message):
-            index += 1
-            continue
-        group = [index]
-        index += 1
-        if message.role == "assistant" and message.tool_calls:
-            while index < len(messages) and messages[index].role == "tool":
-                group.append(index)
-                index += 1
-        groups.append(group)
-    return groups
+    return [
+        list(group) for group in tool_message_groups(messages, start)
+        if not _is_compaction_metadata(messages[group.start])
+    ]
 
 
 def _select_recent_messages(
@@ -809,7 +799,13 @@ async def _maybe_summarize(
         )
 
     latest_user_index = user_indices[-1]
-    retained_messages, retained_indices = _select_recent_messages(messages)
+    try:
+        retained_messages, retained_indices = _select_recent_messages(messages)
+    except InvalidToolHistory as exc:
+        return CompactionOutcome(
+            None, estimated, estimated, mode="blocked", error=str(exc),
+            trigger_source=trigger_source,
+        )
     if latest_user_index not in retained_indices:
         retained_indices.add(latest_user_index)
         retained_messages = [messages[index] for index in sorted(retained_indices)]

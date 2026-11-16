@@ -497,8 +497,99 @@ def test_tool_pipeline_offers_evidence_only_after_a_successful_changed_retry(mgr
         )))
     assert not any(isinstance(event, ProgressEvent) for out in outcomes[:2] for event in out.events)
     assert not any(isinstance(event, ProgressEvent) for event in outcomes[2].events)
-    assert "verification_id" in messages[-1].content
+    assert [message.role for message in messages] == ["tool", "tool", "tool"]
+    assert [outcome.correction_notice is not None for outcome in outcomes] == [False, False, True]
+    assert outcomes[-1].correction_notice.verification_id
     assert mgr.list_corrections(include_inactive=True) == []
+
+
+@pytest.mark.parametrize(("name", "original", "other", "change"), [
+    ("inspect_images", {"image_paths": ["a.png"], "instruction": "check layout", "strategy": "proxy"},
+     {"image_paths": ["b.png"], "instruction": "check layout", "strategy": "native"},
+     {"strategy": "native"}),
+    ("inspect_images", {"image_paths": ["a.png"], "instruction": "check layout", "strategy": "proxy"},
+     {"image_paths": ["a.png"], "instruction": "read caption", "strategy": "native"},
+     {"strategy": "native"}),
+    ("search_files", {"path": ".", "pattern": "contract"}, {"path": ".", "pattern": "invoice"},
+     {"limit": 10}),
+])
+def test_correction_matches_the_operation_even_when_other_failures_interleave(name, original, other, change):
+    curator = CorrectionCurator()
+    subject = CorrectionSubject("tool", name)
+    for call_id, arguments in enumerate((original, other, original), 1):
+        assert curator.observe_result(
+            scope="run", subject=subject, call_id=str(call_id), arguments=arguments,
+            success=False, error="operation timed out",
+        ) is None
+    assert curator.observe_result(
+        scope="run", subject=subject, call_id="different", arguments=other, success=True,
+    ) is None
+    assert curator.observe_result(
+        scope="run", subject=subject, call_id="same",
+        arguments={**original, **change}, success=True,
+    ) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel", [False, True])
+async def test_correction_notice_follows_the_full_tool_batch_and_stays_out_of_history(mgr, tmp_path, parallel):
+    from box_agent.agent import Agent
+    from box_agent.kernel.tool_messages import validate_tool_history
+    from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+    from box_agent.session_log import SessionLog
+    from box_agent.tools.base import Tool, ToolResult
+
+    class FixtureTool(Tool):
+        name = "fixture"
+        description = "Perform a fixture operation"
+        parameters = {"type": "object", "properties": {
+            "path": {"type": "string"}, "mode": {"type": "string"},
+        }}
+        parallel_safe = parallel
+
+        async def execute(self, path, mode):
+            if mode == "broken":
+                return ToolResult(success=False, content="", error="fixture failed")
+            return ToolResult(success=True, content=f"result for {path}")
+
+    class FixtureLLM:
+        model = "test-model"
+        max_output_tokens = 1024
+
+        def __init__(self):
+            self.requests = []
+
+        async def generate_stream(self, *, messages, **kwargs):
+            self.requests.append(list(messages))
+            step = len(self.requests)
+            if step <= 3:
+                items = (("a", "broken"),) if step < 3 else (("a", "fixed"), ("b", "fixed"))
+                calls = [
+                    ToolCall(id=f"call-{step}-{index}", type="function",
+                             function=FunctionCall(name="fixture", arguments={"path": path, "mode": mode}))
+                    for index, (path, mode) in enumerate(items)
+                ]
+                yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=calls)
+            else:
+                yield StreamEvent(type="text", delta="Completed.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    log = SessionLog.create(tmp_path / "sessions", session_id="correction-batch", cwd=tmp_path)
+    llm = FixtureLLM()
+    agent = Agent(llm_client=llm, system_prompt="system", tools=[FixtureTool()],
+                  workspace_dir=str(tmp_path), session_log=log, deferred_mcp_loading_enabled=False)
+    options = replace(agent.default_run_options(), memory_manager=mgr, artifact_detection_enabled=False)
+    try:
+        agent.add_user_message("Run the fixture operations.")
+        _ = [event async for event in agent.run_events(options=options)]
+        next_request = llm.requests[3]
+        validate_tool_history(next_request)
+        assert [message.role for message in next_request[-4:]] == ["assistant", "tool", "tool", "user"]
+        assert {message.tool_call_id for message in next_request[-3:-1]} == {"call-3-0", "call-3-1"}
+        assert "verification_id" in next_request[-1].content
+        assert all("verification_id" not in str(message.content) for message in log.replay().messages)
+    finally:
+        log.close()
 
 
 def test_memory_manager_lazy_correction_curator(mgr: MemoryManager):

@@ -13,7 +13,7 @@ description: "通过 Box-Agent 的 CUA MCP 工具操作 macOS 应用，使用 AX
 {"app":"TextEdit"}
 ```
 
-它绑定已运行的应用，或启动应用并返回初始 AX 状态。读完返回状态后继续操作；后续调用沿用完全相同的 `app` 字符串。同一个应用的文档、菜单和弹窗共用这个引用。
+它绑定已运行的应用，或启动应用并返回初始 AX 状态。读完返回状态后继续操作；后续调用沿用完全相同的 `app` 字符串。同一个应用的文档、菜单和弹窗共用这个引用。应用运行但没有可见窗口时，可通过应用菜单或快捷键打开窗口。
 
 ## 工具与参数
 
@@ -26,8 +26,8 @@ description: "通过 Box-Agent 的 CUA MCP 工具操作 macOS 应用，使用 AX
 | `list_windows` | `app` | 返回窗口的 `id`、`title`、`bounds`、`layer`、`isActive`，以及可用时的 `isFocused`。`isActive` 表示 adaptor 选定的交互窗口。该调用用于查看窗口，不切换窗口；发现新的附加窗口并读取 AX 时可能使旧元素编号失效。 |
 | `get_state` | `app`, `ax?`, `screenshot?`, `disable_diffing?` | 观察当前窗口、菜单或附加弹窗。默认 `ax=true`、`screenshot=false`、`disable_diffing=false`。返回 AX 文本，并按请求附带一张窗口截图。 |
 | `click` | `app`, `target`, `button?`, `click_count?`, `action?`, `delivery_mode?` | `target` 是 AX 整数编号或截图像素坐标 `[x,y]`。`button` 为 `left`／`right`／`middle`，默认 `left`；`click_count` 默认为 `1`。`action` 默认 `press`，其他动作见下文。 |
-| `drag` | `app`, `from`, `to` | 从截图坐标 `from:[x,y]` 拖到 `to:[x,y]`，使用前台投递。 |
-| `scroll` | `app`, `target`, `direction`, `pages?` | `target` 是 AX 编号或截图坐标；`direction` 为 `up`／`down`／`left`／`right`。`pages` 为 1–50 的整数，默认 1，表示 Driver 的翻页步数，不是精确视口高度。 |
+| `drag` | `app`, `from`, `to`, `delivery_mode?` | 从截图坐标 `from:[x,y]` 拖到 `to:[x,y]`，默认后台投递。 |
+| `scroll` | `app`, `target`, `direction`, `pages?`, `delivery_mode?` | `target` 是 AX 编号或截图坐标；`direction` 为 `up`／`down`／`left`／`right`。`pages` 为 1–50 的整数，默认 1，表示 Driver 的翻页步数，不是精确视口高度。 |
 | `set_value` | `app`, `element`, `value` | 用字符串 `value` 替换可写纯文本控件的完整值。`element` 为当前 AX 编号，可用于可写的文件名或路径字段。 |
 | `type_text` | `app`, `text`, `element?`, `delivery_mode?` | 输入字符串 `text`，在当前光标或选区处插入／替换。可用 `element` 指定当前 AX 控件。 |
 | `paste` | `app`, `text`, `element?`, `delivery_mode?` | 将纯文本写入系统剪贴板并发送 Cmd+V。可用 `element` 指定当前 AX 控件；文本会留在剪贴板上。 |
@@ -69,7 +69,7 @@ AX 与截图观察不主动激活应用。AX 文本标题标明当前窗口及�
 
 ## 点击与 AX 动作
 
-`click(target=编号)` 默认执行控件点击。单次左键点击的元素若未声明 AXPress，adaptor 会尝试读取截图并根据可见控件边框定位中心点。编号点击也支持 `button="left", click_count=2` 的双击。
+`click(target=编号)` 默认将当前元素交给 Driver 执行语义点击；未声明 AXPress 的集合项也由 Driver 解析可用动作。编号点击也支持 `button="left", click_count=2` 的双击。
 
 `action` 还可指定 `show_menu`、`pick`、`confirm`、`cancel`、`open`。这些动作使用元素编号、`button="left"` 和 `click_count=1`，要求当前元素声明相应动作。例如观察显示编号 12 的元素具有 `show menu`，可以调用 `click`：
 
@@ -99,11 +99,15 @@ AX 与截图观察不主动激活应用。AX 文本标题标明当前窗口及�
 
 `press_key` 的组合键用 `+` 连接，修饰键在前、普通键在后。修饰键支持 `cmd`、`ctrl`、`shift`、`option`、`fn`；也接受 `super`→`cmd`、`control`→`ctrl`、`alt`→`option`。常用别名包括 `enter`→`return`、`esc`→`escape`、`backspace`→`delete`。
 
+附加弹窗的元素可能从父窗口的 AX 树中读取。对这类文本框指定 `element` 并发送后台 Return 时，只有控件声明了 `AXConfirm`，才会通过 Driver 执行该控件的语义确认。其他无法安全定位的元素键盘输入会在发送前拒绝；不要用前台模式重试同一个父窗口 token。路径填写仍使用 `set_value`，确认后重新观察文件面板。
+
 ## 输入投递与窗口
 
 adaptor 自动选择当前交互窗口、菜单或已识别的附加弹窗。需要切换文档时，使用应用自身的菜单或快捷键，再观察新的界面。
 
-`click`、`type_text`、`paste`、`press_key` 的 `delivery_mode` 默认为 `background`。adaptor 会尝试后台路径；符合既有回退条件的明确拒绝可进入前台路径。观察确认后台输入无效或不可用时，可对相应调用指定 `delivery_mode:"foreground"`。前台输入可能激活应用或改变用户焦点。
+`click`、`drag`、`scroll`、`type_text`、`paste`、`press_key` 默认先尝试后台投递。显式指定 `delivery_mode:"background"` 时不自动转前台；未指定时，仅同一活动窗口的明确未发送拒绝、且 Driver 未建议其他路线时可回退前台。Driver 的 `px`／`page` 等路线建议会原样返回，不自动执行。部分输入或未知效果不得自动重放。观察确认后台输入无效或不可用时，可指定 `delivery_mode:"foreground"`；仍由 Driver 向指定窗口投递，可能激活应用或改变用户焦点。
+
+`window_not_key`、`target_focus_unconfirmed`、同进程键盘目标歧义和无法解析的窗口均要求重新观察，不会自动切到前台。只有同一交互窗口明确报告 `background_unavailable` 且未发送输入时，才保留自动前台回退。
 
 应用是否处于系统前台，与其内部 AX 焦点窗口是不同状态。后台应用也可能有可操作的 AX 控件；是否能完成动作取决于当前控件和实际投递结果。
 

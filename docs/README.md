@@ -43,7 +43,8 @@ wire contract:
 - [Structured input and selection policy](integration/acp-sdk-0.12.md#2a输入事实与-agent-职责): `input_context`,
   `selection_context`, `database_context`, projection and idempotency.
 - [Host progress events](integration/host-progress-events.md): sub-agent, plan,
-  todo, goal, and other structured tool activity.
+  todo, goal, and other structured tool activity; session correlation for model
+  requests and MCP tool calls.
 - [Artifact protocol](ARTIFACT_PROTOCOL.md): generated file discovery and host
   rendering.
 - [Action Hint protocol](ACTION_HINT_PROTOCOL.md): model-generated navigation

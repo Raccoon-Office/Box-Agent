@@ -998,6 +998,24 @@ def test_skill_execution_env_prefers_managed_tools_and_shared_browser(tmp_path: 
     assert "BOX_AGENT_OUTPUT_DIR" not in env
 
 
+def test_zero_browser_cache_skips_cwd_scan_but_preserves_host_executable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fake = tmp_path / "0/chromium-9999/chrome-win64/chrome.exe"
+    _make_executable(fake)
+    env = {"BOX_AGENT_HOME": str(tmp_path / "profile"), "PLAYWRIGHT_BROWSERS_PATH": "0"}
+    ctx = build_skill_runtime_context(sandbox_mode=False, env_context={"runtimes": {}})
+    result = build_skill_execution_env(ctx, base_env=env, platform_name="win32")
+    assert result["PLAYWRIGHT_BROWSERS_PATH"] == "0"
+    assert "BOX_AGENT_BROWSER_EXECUTABLE_PATH" not in result
+    assert "AGENT_BROWSER_EXECUTABLE_PATH" not in result
+    host = tmp_path / "host-chrome.exe"
+    _make_executable(host)
+    env["BOX_AGENT_BROWSER_EXECUTABLE_PATH"] = str(host)
+    result = build_skill_execution_env(ctx, base_env=env, platform_name="win32")
+    assert result["BOX_AGENT_BROWSER_EXECUTABLE_PATH"] == str(host)
+    assert result["AGENT_BROWSER_EXECUTABLE_PATH"] == str(host)
+
+
 def test_skill_execution_env_uses_windows_global_bin_layout(tmp_path: Path) -> None:
     node_dir = tmp_path / "managed-node"
     python_dir = tmp_path / "managed-python"

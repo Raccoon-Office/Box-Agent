@@ -86,6 +86,7 @@ class ToolResultPipelineOutcome:
     web_search_duplicate_results: int = 0
     web_search_labels: tuple[str, ...] = ()
     web_search_inspected: bool = False
+    correction_notice: CorrectionNotice | None = None
 
 
 def _failure_preview(value: str | None) -> str:
@@ -311,20 +312,6 @@ def process_tool_result(
     )
 
     events: list[AgentEvent] = [result_event]
-    if correction_notice is not None:
-        import json
-        evidence = json.dumps({"verification_id": correction_notice.verification_id,
-                               "subject_kind": correction_notice.subject_kind,
-                               "subject_name": correction_notice.subject_name,
-                               "error_fingerprint": correction_notice.error_fingerprint}, ensure_ascii=False)
-        pipeline_input.messages.append(Message(
-            role="user", source="runtime",
-            content=("A matching tool operation succeeded after a recorded change and repeated failures. This is candidate evidence, "
-                     "not proof of a general remedy. If the repair is reusable, propose its specific "
-                     "steps and applicability with memory_write_correction and this verification_id. "
-                     "Do not invent a fix, store secrets, or save one-time setup repairs. "
-                     "The memory tool validates this evidence before activation; no user draft approval is needed. Evidence data: " + evidence),
-        ))
     if result.success and pipeline_input.user_visible:
         web_search_payload = _extract_web_search_payload(
             pipeline_input.tool_name,
@@ -359,4 +346,5 @@ def process_tool_result(
         web_search_duplicate_results=duplicate_count,
         web_search_labels=tuple(new_labels),
         web_search_inspected=inspected,
+        correction_notice=correction_notice,
     )

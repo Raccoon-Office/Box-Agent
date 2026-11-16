@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -11,6 +12,9 @@ import pytest
 
 from box_agent.config import Config, ImageGenerationConfig, Officev3Config, ToolsConfig
 from box_agent.llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
+from box_agent.llm.request_context import scoped_request_context
+from box_agent.tools.base import bind_tool_cancellation
+from box_agent.tools.billing import confirmation
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.setup import (
     add_workspace_tools,
@@ -32,7 +36,7 @@ def patch_async_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:
     monkeypatch.setattr(
         httpx,
         "AsyncClient",
-        lambda **_: original(transport=httpx.MockTransport(handler)),
+        lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs),
     )
 
 
@@ -1144,6 +1148,12 @@ def test_image_generation_service_is_box_agent_configured_for_cli_and_acp() -> N
     assert "CLI 与 ACP 共用" in prompt
     assert "不由宿主 `env_context` 控制" in prompt
     assert "优先调用 `generate_image`" in prompt
+    assert "文生图、图生图、改图" in prompt
+    assert "HTML/PPT" in prompt
+    description = GenerateImageTool().description
+    assert "call this tool directly" in description
+    assert "runtime handles billing" in description
+    assert "explicit request to continue" in description
 
 
 def test_image_generation_service_accepts_cli_environment_override() -> None:
@@ -1247,6 +1257,102 @@ def test_workspace_image_endpoint_follows_hosted_session_only_for_default_preset
 
     tool = next(tool for tool in tools if tool.name == "generate_image")
     assert tool.endpoint == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", [
+    "https://tenant.example",
+    "https://tenant.example:8443/office",
+])
+async def test_private_managed_image_requests_use_host_configured_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: str,
+) -> None:
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", base)
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((str(request.url), await request.aread()))
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode()}]})
+
+    patch_async_client(monkeypatch, handler)
+
+    class ToolConfig:
+        tools = ToolsConfig(enable_bash=False, enable_file_tools=False, enable_todo=False, enable_sub_agent=False)
+        image_generation = ImageGenerationConfig(
+            endpoint=f"{base}/api/web/llm/v2/images/gen",
+            api_key="synthetic-key",
+        )
+        officev3 = Officev3Config(use_default_image_generation_preset=True)
+
+    class SessionLlm:
+        api_base = f"{base}/api/web/llm/v2"
+
+    tools = []
+    add_workspace_tools(tools, ToolConfig(), tmp_path, llm=SessionLlm(), output=lambda *_: None)
+    tool = next(tool for tool in tools if tool.name == "generate_image")
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(PNG_BYTES)
+    await tool._request_image(prompt="sample prompt", size="1024x1024", style=None, negative_prompt=None)
+    await tool._request_image_edit(
+        prompt="sample edit", size="1024x1024", style=None, negative_prompt=None,
+        reference_paths=[reference],
+    )
+    assert [url for url, _ in requests] == [
+        f"{base}/api/web/llm/v2/images/gen",
+        f"{base}/api/web/llm/v2/images/edits",
+    ]
+    assert b"sample prompt" in requests[0][1]
+    assert b"sample edit" in requests[1][1]
+    assert PNG_BYTES in requests[1][1]
+
+
+@pytest.mark.parametrize("endpoint,llm_base,private_base", [
+    ("https://code-test.xiaohuanxiong.com/api/web/llm/v2/images/gen", "https://other.example/api/web/llm/v2", "https://tenant.example/office"),
+    ("https://code-test.xiaohuanxiong.com/api/web/llm/v2/images/gen", "https://tenant.example/office/api/web/llm/v2", "https://tenant.example/office"),
+    ("https://other.example/custom", "https://tenant.example/office/api/web/llm/v2", "https://tenant.example/office"),
+    ("https://tenant.example/office/images/gen", "https://tenant.example/office/images/gen", "https://tenant.example/office/images/gen"),
+])
+@pytest.mark.parametrize("endpoint_in_config", [True, False])
+def test_private_managed_image_untrusted_or_unknown_endpoint_is_not_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str, llm_base: str, private_base: str,
+    endpoint_in_config: bool,
+) -> None:
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", private_base)
+    monkeypatch.setenv("BOX_AGENT_IMAGE_GENERATION_ENDPOINT", endpoint)
+
+    class ToolConfig:
+        tools = ToolsConfig(enable_bash=False, enable_file_tools=False, enable_todo=False, enable_sub_agent=False)
+        image_generation = ImageGenerationConfig(endpoint=endpoint if endpoint_in_config else "")
+        officev3 = Officev3Config(use_default_image_generation_preset=True)
+
+    class SessionLlm:
+        api_base = llm_base
+
+    tools = []
+    add_workspace_tools(tools, ToolConfig(), tmp_path, llm=SessionLlm(), output=lambda *_: None)
+    assert all(tool.name != "generate_image" for tool in tools)
+
+
+def test_private_explicit_custom_image_service_remains_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+
+    class ToolConfig:
+        tools = ToolsConfig(enable_bash=False, enable_file_tools=False, enable_todo=False, enable_sub_agent=False)
+        image_generation = ImageGenerationConfig(endpoint="https://custom.example/v1/images/generations")
+        officev3 = Officev3Config(use_default_image_generation_preset=False)
+
+    class SessionLlm:
+        api_base = "https://tenant.example/office/api/web/llm/v2"
+
+    tools = []
+    add_workspace_tools(tools, ToolConfig(), tmp_path, llm=SessionLlm(), output=lambda *_: None)
+    tool = next(tool for tool in tools if tool.name == "generate_image")
+    assert tool.endpoint == "https://custom.example/v1/images/generations"
 
 
 def test_default_image_endpoint_is_pinned_for_each_session(tmp_path: Path) -> None:
@@ -1681,7 +1787,8 @@ async def test_intermediate_image_failure_does_not_publish_artifact(
 @pytest.mark.parametrize("scenario", [
     "expired", "near_expiry", "401", "200003", "200003_string", "rejected_twice",
     "refresh_401", "refresh_503", "missing_refresh", "missing_login",
-    "explicit_key", "custom_host", "environment", "server_error", "download_401",
+    "explicit_key", "custom_host", "environment", "environment_ip", "isolated_ip",
+    "server_error", "download_401",
 ])
 async def test_image_requests_handle_hosted_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit: bool, scenario: str,
@@ -1691,16 +1798,18 @@ async def test_image_requests_handle_hosted_auth(
         return f"header.{payload}.signature"
 
     monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
     now = int(time.time())
     old_token = jwt(now - 60 if scenario == "expired" else now + 60 if scenario == "near_expiry" else now + 3600)
     new_token = jwt(now + 7200)
-    state = {"access_token": old_token, "refresh_token": "refresh-secret"}
+    state = {"access_token": old_token, "refresh_token": "refresh-secret", "office_identity": "team-one"}
     if scenario == "missing_refresh":
         state.pop("refresh_token")
-    if scenario in {"missing_login", "environment"}:
+    if scenario in {"missing_login", "environment", "environment_ip", "isolated_ip"}:
         state = {}
-    if scenario == "environment":
+    if scenario in {"environment", "environment_ip"}:
         monkeypatch.delenv("BOX_AGENT_HOME")
+    if scenario in {"environment", "environment_ip", "isolated_ip"}:
         monkeypatch.setenv("BOX_AGENT_AUTH_TOKEN", "environment-token")
     auth_file = tmp_path / "auth.json"
     auth_file.write_text(json.dumps(state))
@@ -1719,6 +1828,11 @@ async def test_image_requests_handle_hosted_auth(
             calls.append("download")
             return httpx.Response(401)
         calls.append("image")
+        expected_org = None if scenario == "explicit_key" else state.get("office_identity")
+        assert request.headers.get("X-Org-Code") == expected_org
+        assert request.headers["X-RACCOON-Session-ID"] == "billing-session"
+        assert request.headers["X-RACCOON-Turn-ID"] == "billing-turn"
+        assert dict(request.headers.raw)[b"X-RACCOON-Title"] == "生成测试图片".encode("utf-8")
         assert request.url.path.endswith("/images/edits" if edit else "/images/generations")
         bodies.append(request.content)
         authorizations.append(request.headers.get("Authorization", ""))
@@ -1733,17 +1847,25 @@ async def test_image_requests_handle_hosted_auth(
         return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
 
     patch_async_client(monkeypatch, handler)
+    origin = {
+        "custom_host": "https://image.example.test",
+        "environment_ip": "http://10.158.136.99:9000",
+        "isolated_ip": "http://10.158.136.99:9000",
+    }.get(scenario, "https://image.xiaohuanxiong.com")
     tool = GenerateImageTool(
         workspace_dir=str(tmp_path), allow_full_access=False,
-        endpoint="https://image.example.test/v1/images/generations" if scenario == "custom_host" else "https://image.xiaohuanxiong.com/v1/images/generations",
+        endpoint=f"{origin}/v1/images/generations",
         auth_file=str(auth_file), api_key="dedicated-key" if scenario == "explicit_key" else "",
     )
     (tmp_path / "reference.png").write_bytes(PNG_BYTES)
-    result = await tool.execute(
-        prompt="draw a tree", output_path="result.png", watermark=False,
-        reference_images=["reference.png"] if edit else None,
-        image_mode="image_to_image" if edit else "text_to_image",
-    )
+    with scoped_request_context(
+        session_id="billing-session", turn_id="billing-turn", title="生成测试图片",
+    ):
+        result = await tool.execute(
+            prompt="draw a tree", output_path="result.png", watermark=False,
+            reference_images=["reference.png"] if edit else None,
+            image_mode="image_to_image" if edit else "text_to_image",
+        )
     success = scenario in {"expired", "near_expiry", "401", "200003", "200003_string"}
     assert result.success == success, result.error
     if scenario in {"expired", "near_expiry"}:
@@ -1768,11 +1890,73 @@ async def test_image_requests_handle_hosted_auth(
         assert "重新登录" in result.error
     if scenario == "explicit_key":
         assert authorizations == ["Bearer dedicated-key"]
-    if scenario == "custom_host":
+    if scenario in {"custom_host", "isolated_ip"}:
         assert authorizations == [""]
-    if scenario == "environment":
+    if scenario in {"environment", "environment_ip"}:
         assert authorizations == ["Bearer environment-token"]
     assert (tmp_path / "result.png").exists() == success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("phase", ["before_first_post", "before_retry"])
+async def test_cancel_during_auth_refresh_prevents_next_image_post(tmp_path, monkeypatch, edit, phase):
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "false")
+    expiry = int(time.time()) + (10 if phase == "before_first_post" else 3600)
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({
+        "access_token": f"header.{claims}.signature", "refresh_token": "refresh", "office_identity": "team",
+    }))
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    cancelled = asyncio.Event()
+    image_posts = []
+
+    async def handler(request):
+        if request.url.path.endswith("/auth/v1/refresh"):
+            refresh_started.set()
+            await release_refresh.wait()
+            new_claims = base64.urlsafe_b64encode(
+                json.dumps({"exp": int(time.time()) + 7200}).encode(),
+            ).decode().rstrip("=")
+            return httpx.Response(200, json={"data": {"access_token": f"header.{new_claims}.signature"}})
+        image_posts.append(request)
+        return httpx.Response(401)
+
+    async def approve(_capability):
+        return True
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), endpoint="https://image.xiaohuanxiong.com/v1/images/generations",
+        auth_file=str(auth_file), api_key="",
+    )
+    reference = tmp_path / "ref.png"
+    reference.write_bytes(PNG_BYTES)
+    billing = confirmation.set(approve)
+    try:
+        with bind_tool_cancellation(cancelled.is_set):
+            task = asyncio.create_task(tool.execute(
+                prompt="draw", output_path="result.png",
+                reference_images=[str(reference)] if edit else None,
+            ))
+            try:
+                await asyncio.wait_for(refresh_started.wait(), 2)
+                cancelled.set()
+                release_refresh.set()
+                result = await asyncio.wait_for(task, 2)
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    finally:
+        confirmation.reset(billing)
+    assert not result.success
+    assert "cancelled" in result.error
+    assert len(image_posts) == (0 if phase == "before_first_post" else 1)
+    assert not (tmp_path / "result.png").exists()
 
 
 @pytest.mark.asyncio
@@ -1826,3 +2010,151 @@ async def test_labeling_failure_does_not_publish_or_overwrite(tmp_path, monkeypa
             assert not target.exists()
         else:
             assert target.read_bytes() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("status", [307, 308])
+@pytest.mark.parametrize("location", ["/untrusted", "https://outside.example/untrusted"])
+@pytest.mark.parametrize("explicit_key", [False, True])
+async def test_private_image_requests_do_not_forward_redirects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    edit: bool, status: int, location: str, explicit_key: bool,
+) -> None:
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "host-login-token"}))
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path.startswith("/office/"):
+            expected = "dedicated-key" if explicit_key else "host-login-token"
+            assert request.headers["authorization"] == f"Bearer {expected}"
+            return httpx.Response(status, headers={"Location": location})
+        return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        endpoint="https://tenant.example/office/v1/images/generations",
+        auth_file=str(auth_file), api_key="dedicated-key" if explicit_key else "",
+    )
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(PNG_BYTES)
+    result = await tool.execute(
+        prompt="private prompt", output_path="result.png", watermark=False,
+        reference_images=["reference.png"] if edit else None,
+        image_mode="image_to_image" if edit else "text_to_image",
+    )
+    assert not result.success
+    assert len(calls) == 1  # 重定向目标不能收到令牌、提示词或参考图片。
+    assert calls[0].url.path.endswith("/images/edits" if edit else "/images/generations")
+    assert not (tmp_path / "result.png").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("status", [307, 308])
+@pytest.mark.parametrize("private_mode", [False, True])
+async def test_non_private_image_services_keep_redirect_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    edit: bool, status: int, private_mode: bool,
+) -> None:
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true" if private_mode else "false")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    origin = "https://custom.example" if private_mode else "https://image.xiaohuanxiong.com"
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        assert request.headers["authorization"] == "Bearer dedicated-key"
+        if request.url.path != "/final":
+            return httpx.Response(status, headers={"Location": "/final"})
+        return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), endpoint=f"{origin}/v1/images/generations",
+        api_key="dedicated-key",
+    )
+    (tmp_path / "reference.png").write_bytes(PNG_BYTES)
+    result = await tool.execute(
+        prompt="draw", output_path="result.png", watermark=False,
+        reference_images=["reference.png"] if edit else None,
+        image_mode="image_to_image" if edit else "text_to_image",
+    )
+    assert result.success, result.error
+    assert len(calls) == 2
+    assert calls[0].content == calls[1].content
+
+
+@pytest.mark.asyncio
+async def test_private_image_edit_auth_uses_actual_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = "https://tenant.example/office/images/generations"
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", endpoint)
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "host-login-token"}))
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        assert request.url.path == "/office/images/edits"
+        assert "authorization" not in request.headers
+        return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint=endpoint, auth_file=str(auth_file), api_key="")
+    (tmp_path / "reference.png").write_bytes(PNG_BYTES)
+
+    async def reject(_capability):
+        pytest.fail("A custom edit endpoint does not request hosted billing")
+
+    billing = confirmation.set(reject)
+    try:
+        assert tool.invocation_may_require_user_input({"image_mode": "image_to_image"}) is False
+        result = await tool.execute(
+            prompt="edit", reference_images=["reference.png"], image_mode="image_to_image",
+            output_path="result.png", watermark=False,
+        )
+    finally:
+        confirmation.reset(billing)
+    assert result.success, result.error
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+async def test_private_image_service_accepts_successful_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit: bool,
+) -> None:
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "host-login-token"}))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/office/v1/images/{'edits' if edit else 'generations'}"
+        assert request.headers["authorization"] == "Bearer host-login-token"
+        return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), endpoint="https://tenant.example/office/v1/images/generations",
+        auth_file=str(auth_file),
+    )
+    (tmp_path / "reference.png").write_bytes(PNG_BYTES)
+    result = await tool.execute(
+        prompt="draw", output_path="result.png", watermark=False,
+        reference_images=["reference.png"] if edit else None,
+        image_mode="image_to_image" if edit else "text_to_image",
+    )
+    assert result.success, result.error
+    assert (tmp_path / "result.png").read_bytes() == PNG_BYTES

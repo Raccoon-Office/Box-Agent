@@ -1,10 +1,15 @@
 """Whole-source validation, independent of the model's calculation/filtering."""
 
+from contextlib import contextmanager
 import csv
+import hashlib
+import os
+from types import SimpleNamespace
 
 import pytest
 
-from box_agent.tools.file.table_validation import scan_table
+from box_agent.tools.file import table_validation
+from box_agent.tools.file.table_validation import fingerprint, scan_table
 
 
 FIELDS = {
@@ -28,6 +33,108 @@ def write_table(path, rows, *, delimiter=","):
 def row(index, **changes):
     values = dict(zip(FIELDS, [f"T{index}", "1", "1.25", "paid", "2026-10-31", "false", "note,\nline"]))
     return [changes.get(key, value) for key, value in values.items()]
+
+
+@pytest.fixture
+def windows_table_stat(monkeypatch):
+    # Isolate the platform simulation from pathlib and pytest's own os module.
+    simulated_os = SimpleNamespace(**vars(os))
+    simulated_os.name = "nt"
+
+    def fstat(descriptor):
+        value = os.fstat(descriptor)
+        return SimpleNamespace(
+            **{name: getattr(value, name) for name in (
+                "st_mode", "st_dev", "st_ino", "st_size", "st_mtime_ns",
+            )},
+            st_ctime_ns=value.st_ctime_ns + 1,
+        )
+
+    simulated_os.fstat = fstat
+    monkeypatch.setattr(table_validation, "os", simulated_os)
+    return simulated_os
+
+
+def test_stable_windows_table_validates_despite_handle_and_path_ctime_difference(tmp_path, windows_table_stat):
+    path = tmp_path / "input.csv"
+    write_table(path, [row(1), row(2)])
+    expected_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = scan_table(path, FIELDS)
+    assert result.complete and result.valid and result.records == 2
+    assert result.source_sha256 == expected_hash
+
+
+def test_posix_path_ctime_difference_still_blocks_validation(tmp_path, windows_table_stat):
+    windows_table_stat.name = "posix"
+    path = tmp_path / "input.csv"
+    write_table(path, [row(1)])
+    with pytest.raises(ValueError, match="Table source changed during validation"):
+        fingerprint(path)
+
+
+def test_windows_handle_ctime_change_during_read_still_blocks_validation(tmp_path, windows_table_stat):
+    path = tmp_path / "input.csv"
+    write_table(path, [row(1)])
+    original_fstat = windows_table_stat.fstat
+    reading = False
+
+    def fstat(descriptor):
+        value = original_fstat(descriptor)
+        value.st_ctime_ns += int(reading)
+        return value
+
+    def begin_read():
+        nonlocal reading
+        reading = True
+        return False
+
+    windows_table_stat.fstat = fstat
+    with pytest.raises(ValueError, match="Table source changed during validation"):
+        fingerprint(path, cancelled=begin_read)
+
+
+@pytest.mark.parametrize("change", ["append", "same_size_edit"])
+def test_source_modified_during_read_is_rejected(tmp_path, change):
+    path = tmp_path / "input.csv"
+    path.write_bytes(b"id\n1\n")
+    original = path.stat()
+    checks = 0
+
+    def modify_after_first_read():
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            path.write_bytes(b"id\n1\n2\n" if change == "append" else b"id\n2\n")
+            os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000_000))
+        return False
+
+    with pytest.raises(ValueError, match="Table source changed during validation"):
+        fingerprint(path, cancelled=modify_after_first_read)
+
+
+def test_replaced_source_with_identical_bytes_and_mtime_is_rejected_before_parsing(tmp_path, monkeypatch):
+    path = tmp_path / "input.csv"
+    replacement = tmp_path / "replacement.csv"
+    write_table(path, [row(1)])
+    replacement.write_bytes(path.read_bytes())
+    original_stat = path.stat()
+    os.utime(replacement, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert replacement.stat().st_ino != original_stat.st_ino
+    open_regular = table_validation._open_regular
+    opens = 0
+
+    @contextmanager
+    def replace_before_parsing(source):
+        nonlocal opens
+        opens += 1
+        if opens == 2:
+            replacement.replace(path)
+        with open_regular(source) as stream:
+            yield stream
+
+    monkeypatch.setattr(table_validation, "_open_regular", replace_before_parsing)
+    with pytest.raises(ValueError, match="Table source changed before parsing"):
+        scan_table(path, FIELDS)
 
 
 def test_tail_old_and_cancelled_records_are_validated_before_filtering(tmp_path):

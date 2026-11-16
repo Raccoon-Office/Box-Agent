@@ -26,6 +26,32 @@ class _McpStdoutProxy:
         return getattr(self._stream, name)
 
 
+def _preload_frozen_acp_schema() -> None:
+    """Avoid source inspection for ACP field documentation in Windows binaries."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+
+    from importlib import import_module
+    from pydantic._internal import _fields
+
+    extract_docstrings = _fields.extract_docstrings_from_cls
+
+    def extract_runtime_docstrings(cls, *args, **kwargs):
+        # SDK 0.12.1 enables use_attribute_docstrings on all ACP models.
+        # Frozen modules have no source; Pydantic repeatedly scans frames and
+        # modules looking for it. Field descriptions are optional metadata.
+        if cls.__module__ == "acp.schema":
+            return {}
+        return extract_docstrings(cls, *args, **kwargs)
+
+    _fields.extract_docstrings_from_cls = extract_runtime_docstrings
+    try:
+        import_module("acp.schema")
+    finally:
+        # Keep other models and subsequent imports on Pydantic's normal path.
+        _fields.extract_docstrings_from_cls = extract_docstrings
+
+
 def main() -> None:
     if sys.argv[1:] == [BOOTSTRAP_MCP_CONFIG_ARG]:
         from box_agent.tools.mcp_bootstrap import (
@@ -86,6 +112,7 @@ def main() -> None:
     sys.stdout = sys.stderr
 
     # Now safe to import and run
+    _preload_frozen_acp_schema()
     import asyncio
     from box_agent.acp import run_acp_server
     asyncio.run(run_acp_server())

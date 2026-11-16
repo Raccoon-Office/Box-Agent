@@ -22,7 +22,7 @@ from .tools.engine.execution import (
     stream_tool_permission_chain,
 )
 from .tools.engine.scheduler import ToolEngineProgress, ToolInvocationCompleted
-from .tools.model_tool_context import scoped_model_tool_context
+from .tools.model_tool_context import current_model_tool_context, scoped_model_tool_context
 
 
 @wraps(_run_agent_loop)
@@ -30,10 +30,14 @@ def run_agent_loop(**kwargs: Any) -> AsyncIterator[AgentEvent]:
     """Run the kernel with shared model-tool context composed in."""
     llm = kwargs.get("llm")
     events = _run_agent_loop(**kwargs)
+    parent_context = current_model_tool_context()
     return scoped_model_tool_context(
         events,
         model=getattr(llm, "model", ""),
         max_output_tokens=getattr(llm, "max_output_tokens", 0),
+        session_id=kwargs.get(
+            "session_id", parent_context.session_id if parent_context is not None else "",
+        ),
     )
 
 

@@ -4542,12 +4542,22 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
         [],
         "system",
     )
+    # The test runner may live outside the workspace (for example in Conda).
+    # Authorize its executable directory without granting broad filesystem access.
     session = await agent.new_session(
-        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+        **acp_params(SimpleNamespace(cwd=None, field_meta={
+            "session_mode": "general",
+            "filesystem_policy": {
+                "allowed_directories": [str(Path(sys.executable).resolve().parent)],
+            },
+        }))
     )
     bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
 
     try:
+        assert bash_tool._perm is not None
+        assert bash_tool.allow_full_access is False
+        assert bash_tool.bypass_dangerous_command_approval is False
         response = await agent.prompt(
             **acp_params(SimpleNamespace(
                 sessionId=session.sessionId,
@@ -7659,6 +7669,269 @@ async def test_acp_invalid_session(acp_agent):
     prompt = SimpleNamespace(sessionId="missing", prompt=[{"text": "?"}])
     response = await agent.prompt(**acp_params(prompt))
     assert response.stopReason == "end_turn"
+
+
+@pytest.fixture
+def acp_permission_layout(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    home = root / "os-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    profile = root / "mnt/user/box-agent-home"
+    skill = profile / "skills/cloud/qa-cloud-actions"
+    (skill / "references/nested").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: qa-cloud-actions\ndescription: Synthetic meeting action formatting\n---\n"
+        "Read references/style.txt and references/nested/check.txt before formatting.\n",
+        encoding="utf-8",
+    )
+    (skill / "references/style.txt").write_text("STYLE_PROOF=owned-reference\n", encoding="utf-8")
+    (skill / "references/nested/check.txt").write_text("NESTED_PROOF=owned-nested\n", encoding="utf-8")
+    workspace = root / "mnt/user/workspaces/RaccoonCloudWork/session-test"
+    workspace.mkdir(parents=True)
+    (workspace / "input.txt").write_text("WORKSPACE_PROOF\n", encoding="utf-8")
+    outside = root / "unrelated"
+    outside.mkdir()
+    (outside / "private.txt").write_text("PRIVATE_OUTSIDE\n", encoding="utf-8")
+    sibling = profile.with_name("box-agent-home-other")
+    sibling.mkdir()
+    (sibling / "private.txt").write_text("PRIVATE_SIBLING\n", encoding="utf-8")
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    return SimpleNamespace(profile=profile, skill=skill, workspace=workspace,
+                           outside=outside, sibling=sibling)
+
+
+def _acp_permission_config(layout, *, full_access=False, officev3=None):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(layout.profile / "workspace"), max_steps=1,
+                          enable_memory=False, enable_memory_extraction=False),
+        tools=ToolsConfig(allow_full_access=full_access, enable_mcp=False,
+                          enable_sub_agent=False, enable_plan=False, enable_todo=False),
+    )
+    if officev3 is not None:
+        config.officev3 = officev3
+    return config
+
+
+@pytest.mark.asyncio
+async def test_acp_implicit_restricted_mode_reads_owned_skill_references(acp_permission_layout):
+    layout = acp_permission_layout
+    tools, loader = create_skill_tools(sources=[(layout.profile / "skills", "user")])
+    adapter = BoxACPAgent(DummyConn(), _acp_permission_config(layout), DoneLLM(),
+                          tools, "system", skill_loader=loader)
+    try:
+        session = await adapter.new_session(
+            **acp_params(SimpleNamespace(cwd=str(layout.workspace), field_meta={})),
+        )
+        tools = adapter._sessions[session.sessionId].agent.tools
+        loaded = await tools["get_skill"].execute(skill_name="qa-cloud-actions")
+        assert loaded.success, loaded.error
+        assert "references/style.txt" in loaded.content
+        reader = tools["read_file"]
+        for target, proof in (
+            (layout.skill / "SKILL.md", "Synthetic meeting action formatting"),
+            (layout.skill / "references/style.txt", "STYLE_PROOF=owned-reference"),
+            (layout.skill / "references/nested/check.txt", "NESTED_PROOF=owned-nested"),
+            (layout.workspace / "input.txt", "WORKSPACE_PROOF"),
+        ):
+            result = await reader.execute(path=str(target))
+            assert result.success, result.error
+            assert proof in result.content
+        assert reader._perm is not None
+        assert reader._perm is tools["write_file"]._perm is tools["bash"]._perm
+        assert reader.allow_full_access is False
+        for directory in (layout.outside, layout.sibling):
+            result = await reader.execute(path=str(directory / "private.txt"))
+            assert not result.success
+            assert result.error.startswith("Access denied:")
+            assert "PRIVATE_" not in result.content
+            target = directory / "must-not-exist.txt"
+            result = await tools["write_file"].execute(path=str(target), content="not authorized")
+            assert not result.success
+            assert not target.exists()
+        missing = await reader.execute(path=str(layout.skill / "references/missing.txt"))
+        assert not missing.success
+        assert missing.error.startswith("File not found:")
+        for target in (layout.profile / "owned-note.txt", layout.workspace / "result.txt"):
+            result = await tools["write_file"].execute(path=str(target), content="written by assembled tool")
+            assert result.success, result.error
+            assert target.read_text(encoding="utf-8") == "written by assembled tool"
+        result = await tools["bash"].execute(command=f'rm "{layout.workspace / "must-not-run.txt"}"')
+        assert not result.success
+        assert result.permission_request is not None
+        assert result.permission_request["scope"] == "safety"
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission_mode", [None, "default"])
+async def test_acp_restricted_mode_reads_and_writes_runtime_and_client_directories(
+    acp_permission_layout, monkeypatch, permission_mode,
+):
+    layout = acp_permission_layout
+    roots = {
+        "BOX_AGENT_RUNTIME_ROOT": layout.outside / "box-agent-runtime",
+        "BOX_AGENT_CLIENT_ROOT": layout.outside / "client",
+        "BOX_AGENT_CLIENT_DATA_ROOT": layout.outside / "client-data",
+    }
+    for name, root in roots.items():
+        root.mkdir()
+        monkeypatch.setenv(name, str(root))
+    adapter = BoxACPAgent(DummyConn(), _acp_permission_config(layout), DoneLLM(), [], "system")
+    try:
+        meta = {"permission_mode": permission_mode} if permission_mode else {}
+        session = await adapter.new_session(
+            **acp_params(SimpleNamespace(cwd=str(layout.workspace), field_meta=meta)),
+        )
+        tools = adapter._sessions[session.sessionId].agent.tools
+        for root in (layout.profile, *roots.values()):
+            target = root / "product-file.txt"
+            saved = await tools["write_file"].execute(path=str(target), content="product fixture")
+            assert saved.success, saved.error
+            read = await tools["read_file"].execute(path=str(target))
+            assert read.success and "product fixture" in read.content, read.error
+        unrelated = await tools["read_file"].execute(path=str(layout.outside / "private.txt"))
+        assert not unrelated.success
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_acp_implicit_restricted_mode_reads_persisted_tool_output(acp_permission_layout):
+    from box_agent.schema import Message
+
+    layout = acp_permission_layout
+    adapter = BoxACPAgent(DummyConn(), _acp_permission_config(layout), DoneLLM(), [], "system")
+    try:
+        session = await adapter.new_session(
+            **acp_params(SimpleNamespace(cwd=str(layout.workspace), field_meta={})),
+        )
+        agent = adapter._sessions[session.sessionId].agent
+        receipt = agent.tool_result_storage.process_message(
+            Message(role="tool", content="TOOL_OUTPUT_MARKER\n" + "row\n" * 100000,
+                    tool_call_id="call-persisted-output", name="bash"),
+            tool=None, session_id=session.sessionId,
+        )
+        assert "Full output saved to:" in receipt.content
+        persisted = list((layout.profile / "sessions" / session.sessionId / "tool-results").glob("*.txt"))
+        assert len(persisted) == 1
+        assert str(persisted[0]) in receipt.content
+        result = await agent.tools["read_file"].execute(path=str(persisted[0]), limit=1)
+        assert result.success, result.error
+        assert "TOOL_OUTPUT_MARKER" in result.content
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_acp_implicit_restricted_mode_rejects_owned_skill_symlink_escape(acp_permission_layout):
+    layout = acp_permission_layout
+    link = layout.skill / "references/linked.txt"
+    try:
+        link.symlink_to(layout.outside / "private.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("creating symbolic links is not supported in this environment")
+    adapter = BoxACPAgent(DummyConn(), _acp_permission_config(layout), DoneLLM(), [], "system")
+    try:
+        session = await adapter.new_session(
+            **acp_params(SimpleNamespace(cwd=str(layout.workspace), field_meta={})),
+        )
+        reader = adapter._sessions[session.sessionId].agent.tools["read_file"]
+        result = await reader.execute(path=str(link))
+        assert reader._perm is not None
+        assert not result.success
+        assert result.error.startswith("Access denied:")
+        assert "PRIVATE_OUTSIDE" not in result.content
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_access", [False, True])
+async def test_acp_missing_mode_preserves_explicit_officev3_policy(acp_permission_layout, full_access):
+    layout = acp_permission_layout
+    declared = layout.outside / "declared-root"
+    allowed = layout.outside / "allowed"
+    declared.mkdir()
+    allowed.mkdir()
+    target = allowed / "visible.txt"
+    target.write_text("CONFIGURED_ALLOWANCE", encoding="utf-8")
+    officev3 = Officev3Config(
+        permissions=Officev3Permissions(filesystem=FilesystemPermissions(
+            scope="custom", allowed_directories=[str(allowed)],
+        )),
+        paths=Officev3Paths(session_workspace_root=str(declared)),
+    )
+    officev3._present = True
+    adapter = BoxACPAgent(DummyConn(), _acp_permission_config(
+        layout, full_access=full_access, officev3=officev3,
+    ), DoneLLM(), [], "system")
+    try:
+        session = await adapter.new_session(
+            **acp_params(SimpleNamespace(cwd=str(layout.workspace), field_meta={})),
+        )
+        reader = adapter._sessions[session.sessionId].agent.tools["read_file"]
+        assert reader._perm is not None
+        assert reader._perm.policy.filesystem_scope == "custom"
+        assert reader._perm.policy.allowed_directories == (str(allowed),)
+        assert reader._perm.policy.session_workspace_root == str(declared)
+        result = await reader.execute(path=str(target))
+        assert result.success and "CONFIGURED_ALLOWANCE" in result.content
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_acp_missing_mode_preserves_global_full_access(acp_permission_layout):
+    layout = acp_permission_layout
+    adapter = BoxACPAgent(DummyConn(), _acp_permission_config(layout, full_access=True),
+                          DoneLLM(), [], "system")
+    try:
+        session = await adapter.new_session(
+            **acp_params(SimpleNamespace(cwd=str(layout.workspace), field_meta={})),
+        )
+        tools = adapter._sessions[session.sessionId].agent.tools
+        assert tools["read_file"]._perm is None
+        assert tools["read_file"].allow_full_access is True
+        result = await tools["read_file"].execute(path=str(layout.outside / "private.txt"))
+        assert result.success and "PRIVATE_OUTSIDE" in result.content
+        result = await tools["write_file"].execute(path=str(layout.outside / "full-access.txt"), content="allowed")
+        assert result.success, result.error
+        assert (layout.outside / "full-access.txt").read_text(encoding="utf-8") == "allowed"
+        result = await tools["bash"].execute(command=f'rm "{layout.workspace / "must-not-run.txt"}"')
+        assert not result.success
+        assert result.permission_request is not None
+        assert result.permission_request["scope"] == "safety"
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_acp_missing_mode_applies_host_filesystem_context(acp_permission_layout):
+    layout = acp_permission_layout
+    adapter = BoxACPAgent(DummyConn(), _acp_permission_config(layout), DoneLLM(), [], "system")
+    try:
+        session = await adapter.new_session(**acp_params(SimpleNamespace(
+            cwd=str(layout.workspace), field_meta={"filesystem_policy": {
+                "session_workspace_root": str(layout.workspace),
+                "filesystem_scope": "custom",
+                "allowed_directories": [str(layout.outside)],
+            }},
+        )))
+        reader = adapter._sessions[session.sessionId].agent.tools["read_file"]
+        result = await reader.execute(path=str(layout.outside / "private.txt"))
+        assert result.success, result.error
+        assert "PRIVATE_OUTSIDE" in result.content
+        assert reader._perm.policy.filesystem_scope == "custom"
+        assert reader._perm.policy.allowed_directories == (str(layout.outside),)
+        result = await reader.execute(path=str(layout.sibling / "private.txt"))
+        assert not result.success
+    finally:
+        await adapter.aclose()
 
 
 @pytest.mark.asyncio

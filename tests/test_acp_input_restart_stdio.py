@@ -10,8 +10,11 @@ from tests.acp_host.probe import AcpHostProbe
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["session/load", "session/resume"])
-async def test_sdk_restart_restores_history_with_method_specific_replay(method):
+@pytest.mark.parametrize("method, replay_meta", [
+    ("session/load", {}), ("session/resume", {}),
+    ("session/resume", {"replayFromTurnId": "original-turn"}),
+])
+async def test_sdk_restart_restores_history_with_method_specific_replay(method, replay_meta):
     repository = Path(__file__).resolve().parents[1]
     workspace = repository / 'workspace'
     workspace.mkdir(exist_ok=True)
@@ -30,6 +33,7 @@ async def test_sdk_restart_restores_history_with_method_specific_replay(method):
             initialized = await first.initialize()
             assert initialized['agentCapabilities']['loadSession'] is True
             identifier = await first.session_new(cwd=str(cwd))
+            await first.session_prompt(identifier, 'earlier turn', meta={'turn_id': 'earlier-turn'})
             await first.session_prompt(identifier, [{'type': 'text', 'text': 'fixture:file_inputs'},
                 {'type': 'resource_link', 'uri': file.as_uri(), 'name': file.name}], meta={'turn_id': 'original-turn'})
             lifecycle = [json.loads(line) for line in (root / 'lifecycle.jsonl').read_text().splitlines()]
@@ -47,15 +51,21 @@ async def test_sdk_restart_restores_history_with_method_specific_replay(method):
                         if json.loads(line)['event'] in {'file_model_input', 'file_read_result'}]
             before = calls()
             for _ in range(2):
-                result = await second.request(method, {'sessionId': identifier, 'cwd': str(cwd), 'mcpServers': []})
+                result = await second.request(method, {
+                    'sessionId': identifier, 'cwd': str(cwd), 'mcpServers': [], '_meta': replay_meta,
+                })
                 updates = [note['params']['update'] for note in second.drain_notifications()
                            if note.get('method') == 'session/update']
-                if method == 'session/resume':
+                if method == 'session/resume' and not replay_meta:
                     assert result['_meta']['history_revision_id']
                     assert 'replayed' not in result['_meta']
                     assert updates == [] and calls() == before
                     continue
                 assert updates and all(update['_meta']['replay'] for update in updates)
+                assert result['_meta']['replayed'] is True
+                if replay_meta:
+                    assert result['_meta']['replayFromTurnId'] == 'original-turn'
+                    assert {update['_meta']['turnId'] for update in updates} == {'original-turn'}
                 assert len({update['_meta']['eventId'] for update in updates}) == len(updates)
                 types = [update['sessionUpdate'] for update in updates]
                 assert 'user_message_chunk' in types and 'tool_call' in types and 'tool_call_update' in types

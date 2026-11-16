@@ -689,9 +689,9 @@ class Agent:
         """Restore durable session facts without writing new history."""
         self._pending_skill_restore = []
         self.messages[:] = [self.messages[0], *projection.messages]
-        self._pending_tool_restore_notice = self.stable_prefix and any(
+        self._pending_tool_restore_notice = self.mcp_tool_exposure is not None and any(
             message.name == "tool_descriptions" or
-            any(call.function.name == "call_tool" for call in message.tool_calls or ())
+            bool(message.tool_calls)
             for message in self.messages
         )
         self.image_context.reset()
@@ -1370,9 +1370,13 @@ class Agent:
         if self._pending_tool_restore_notice:
             self.messages.append(Message(
                 role="user", source="runtime", name="tool_context",
-                content="The session was restored. Earlier tool_ref values have expired. "
-                        "Use tool_search to rediscover capabilities, or use the fresh tool descriptions "
-                        "delivered by the runtime. Historical tool results remain conversation facts.",
+                content="The session was restored. "
+                        + ("Earlier tool_ref values have expired. " if self.stable_prefix else "")
+                        + "MCP tool names may now be server-qualified. Use tool_search with "
+                        "server_name and the original tool name to rediscover MCP tools, or use "
+                        "fresh runtime tool descriptions. A bare native tool name still targets "
+                        "the native tool; do not use it to call a same-named MCP tool. "
+                        "Historical tool results remain conversation facts; do not replay completed calls.",
             ))
             self._pending_tool_restore_notice = False
         if self.session_log is not None:

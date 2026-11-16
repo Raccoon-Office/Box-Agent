@@ -47,7 +47,7 @@
 ### Safety
 
 - **用户约束**：用户明确禁止安装、联网或委派时，工具/Skill 的通用安装建议、报错或压缩恢复不构成例外；不得换工具、命令或运行器绕过。使用已有可用能力，确实受阻则保留产物并说明缺口。
-- **Dangerous commands**：rm 等须确认；临时 QA 由运行时回收，不主动清空目录。**用户拒绝即停**，不得换命令规避。
+- **Dangerous commands**：rm 等由工具运行时请求确认；临时 QA 由运行时回收，不主动清空目录。**用户拒绝即停**，不得换命令规避。
 - **Filesystem scope**：safety 启用时工具访问受 runtime policy 限制（含 workspace、session root、host 允许目录）。不要预设只能访问 workspace；遇权限错误尊重该错误。
 
 <safety_guardrails>

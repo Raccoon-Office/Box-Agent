@@ -4,7 +4,9 @@
 
 ## 当前分支：CLI 安装与双宿主模式
 
-独立 CLI 使用 `box-agent install-cua` 下载并安装固定的 CuaDriver 0.28.2，不需要 sudo 或模型 API 配置。安装成功会打印驱动绝对路径；macOS 按输出提示执行 `"<驱动绝对路径>" permissions grant`，完成授权后重新启动 `box-agent`。
+独立 CLI 使用 `box-agent install-cua` 下载并安装固定的 CuaDriver 0.38.0，不需要 sudo 或模型 API 配置。安装成功会打印驱动绝对路径；macOS 按输出提示执行 `"<驱动绝对路径>" permissions grant`，完成授权后重新启动 `box-agent`。
+
+本仓库的版本固定只控制 CLI 安装器。桌面客户端使用其自身随包的 `runtimeResources.manifest.json` 选择下载版本；更新 Box-Agent 不会更新客户端清单。客户端必须同步升级 Driver 并重新连接，才能使用本次 0.38 adaptor；共享资源目录不代表版本配置会自动同步。
 
 安装命令支持 macOS arm64/x64、Windows arm64/x64、Linux arm64/x64；Windows/Linux 的真实桌面操作仍需实机验收。
 

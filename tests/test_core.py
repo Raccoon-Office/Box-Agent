@@ -6450,7 +6450,9 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
     msgs = [
         Message(role="system", content="sys"),
         Message(role="user", content="old request"),
-        Message(role="assistant", content="A" * 50_000),
+        Message(role="assistant", content="A" * 50_000, tool_calls=[
+            ToolCall(id="t1", type="function", function=FunctionCall(name="bash", arguments={"command": "pwd"})),
+        ]),
         Message(role="tool", content="B" * 50_000, tool_call_id="t1", name="bash"),
         Message(role="user", content="please do X"),
     ]
@@ -6859,7 +6861,9 @@ async def test_provider_prompt_pressure_uses_one_shot_summary_and_retains_recent
     msgs = [
         Message(role="system", content="sys"),
         latest_user,
-        Message(role="assistant", content="current execution"),
+        Message(role="assistant", content="current execution", tool_calls=[
+            ToolCall(id="t1", type="function", function=FunctionCall(name="bash", arguments={"command": "pwd"})),
+        ]),
         Message(role="tool", content="recent output", name="bash", tool_call_id="t1"),
     ]
     llm = _FakeSummaryLLM("current execution summarized")
@@ -7306,8 +7310,8 @@ def test_cleanup_removes_empty_assistant_turn():
     assert msgs[-1].role == "user"
 
 
-def test_cleanup_removes_partial_tool_call_turn():
-    """Assistant has 2 tool_calls but only 1 tool response → incomplete."""
+def test_cleanup_preserves_completed_result_in_partial_tool_call_turn():
+    """Keep the recorded result and close only the interrupted call."""
     from box_agent.core import _cleanup_incomplete_messages
     msgs = [
         Message(role="system", content="sys"),
@@ -7318,9 +7322,10 @@ def test_cleanup_removes_partial_tool_call_turn():
         ]),
         Message(role="tool", content="result1", tool_call_id="t1", name="echo"),
     ]
-    n = _cleanup_incomplete_messages(msgs)
-    assert n == 2  # removed assistant + 1 tool
-    assert msgs[-1].role == "user"
+    assert _cleanup_incomplete_messages(msgs) == 0
+    assert [m.tool_call_id for m in msgs if m.role == "tool"] == ["t1", "t2"]
+    assert msgs[-2].content == "result1"
+    assert "no result recorded" in msgs[-1].content
 
 
 def test_cleanup_keeps_complete_tool_call_turn():

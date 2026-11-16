@@ -10,6 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .mcp_bootstrap import (
+    HOSTED_SEARCH_SERVER_NAME,
+    MANAGED_MCP_SCHEMA_KEY,
+    MANAGED_MCP_SCHEMA_VERSION,
+    MANAGED_SEARCH_DEFAULT_KEY,
+    is_managed_search_default,
+)
+
 
 McpOwner = Literal["system", "connector", "user"]
 _CONNECTOR_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -31,6 +39,7 @@ class ResolvedMcpServer:
     connector_name: str | None
     source_path: str
     fingerprint: str
+    managed_default: bool = False
 
 
 @dataclass(frozen=True)
@@ -63,22 +72,34 @@ def configured_mcp_sources(primary_path: str) -> tuple[McpConfigSource, ...]:
     return tuple(sources)
 
 
-def _read_servers(source: McpConfigSource) -> dict[str, dict]:
+def _read_servers(source: McpConfigSource) -> tuple[dict[str, dict], set[str]]:
     try:
         payload = json.loads(source.path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        return {}, set()
     if not isinstance(payload, dict):
         raise ValueError(f"MCP config must be an object: {source.path}")
     raw_servers = payload.get("mcpServers", {})
     if not isinstance(raw_servers, dict):
         raise ValueError(f"mcpServers must be an object: {source.path}")
     servers: dict[str, dict] = {}
+    managed_defaults: set[str] = set()
     for name, config in raw_servers.items():
         if not isinstance(name, str) or not name.strip() or not isinstance(config, dict):
             raise ValueError(f"Invalid MCP server entry in {source.path}")
         servers[name] = dict(config)
-    return servers
+        if (
+            os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true"
+            and source.owner == "user"
+            and name == HOSTED_SEARCH_SERVER_NAME
+            and is_managed_search_default(
+                config, payload.get(MANAGED_MCP_SCHEMA_KEY) == MANAGED_MCP_SCHEMA_VERSION,
+                payload.get(MANAGED_SEARCH_DEFAULT_KEY),
+            )
+        ):
+            # 单文件的 user 表示物理来源，旧的程序默认项仍需保留托管身份。
+            managed_defaults.add(name)
+    return servers, managed_defaults
 
 
 def _copy_servers(raw_servers: object, source_label: str) -> dict[str, dict]:
@@ -158,13 +179,14 @@ def resolve_mcp_sources(
     resolved: dict[str, ResolvedMcpServer] = {}
     conflicts: list[str] = []
     for source in sources:
+        managed_defaults: set[str] = set()
         if source_server_overrides is not None and source.owner in source_server_overrides:
             servers = _copy_servers(
                 source_server_overrides[source.owner],
                 str(source.path),
             )
         else:
-            servers = _read_servers(source)
+            servers, managed_defaults = _read_servers(source)
         for name, config in servers.items():
             if source.owner == "user" and name in reserved_names:
                 conflicts.append(f"user:{name} uses a protected server name")
@@ -194,5 +216,6 @@ def resolve_mcp_sources(
                 connector_name=connector_name,
                 source_path=str(source.path),
                 fingerprint=_fingerprint(source, config_id, config, credential_version),
+                managed_default=name in managed_defaults,
             )
     return ResolvedMcpSources(sources=sources, servers=resolved, conflicts=tuple(conflicts))

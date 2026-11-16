@@ -78,8 +78,11 @@ from .stream_controller import (
     stream_with_activity as _kernel_stream_with_activity,
 )
 from .tool_messages import (
+    InvalidToolHistory,
     _cleanup_incomplete_messages,
     _sanitize_dangling_tool_calls,
+    valid_tool_call_ids,
+    validate_tool_history,
 )
 from ..logger import AgentLogger
 from ..session_log import SessionLogReplayError
@@ -796,7 +799,6 @@ async def _run_agent_loop_impl(
     result_storage.set_context_token_limit(
         initial_context_transition.previous_token_limit if initial_context_transition else token_limit,
     )
-    result_storage.initialize_history(messages)
     tool_call_limits = {
         WEB_SEARCH_TOOL_NAME: effective_tool_limits.web_search.total_calls,
     }
@@ -839,7 +841,21 @@ async def _run_agent_loop_impl(
     # Defensive: heal any dangling assistant.tool_calls from a prior interrupted
     # turn (process crash, SIGKILL) before the first LLM request, so the
     # protocol-state precondition holds.
-    healed = _sanitize_dangling_tool_calls(messages)
+    restored_messages = list(messages)
+    healed = _sanitize_dangling_tool_calls(restored_messages)
+    try:
+        validate_tool_history(restored_messages)
+    except InvalidToolHistory as exc:
+        _log.warning("invalid_tool_history: %s", exc)
+        msg = "会话中的工具调用和结果无法配对，已停止本轮请求。"
+        if hook_mgr.hooks:
+            await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+            await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
+        yield ErrorEvent(message=msg, is_fatal=True, error_code="HISTORY_TOOL_PAIR_INVALID")
+        yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+        return
+    messages[:] = restored_messages
+    result_storage.initialize_history(messages)
     if healed:
         _log.warning(
             "Healed %d dangling assistant tool_call(s) on loop entry — "
@@ -993,6 +1009,7 @@ async def _run_agent_loop_impl(
     pending_transient_followup_tokens = 0
     request_overlay_tokens = 0
     request_context_messages: list[Message] = []
+    correction_messages: list[Message] = []
     tool_list: list[Any] = []
 
     # Per-turn guard for tools that can be repeatedly requested by the model
@@ -1405,6 +1422,7 @@ async def _run_agent_loop_impl(
             for message in (auto_memory_context_message,)
             if message is not None
         ]
+        request_context_messages.extend(correction_messages)
         transient_message = (
             Message(
                 role="user",
@@ -2141,7 +2159,8 @@ async def _run_agent_loop_impl(
         # persisted when we plan to retry — feeding a half-baked tool_call
         # back to the model just teaches it to keep producing them. Build the
         # message here, then append only in the branches that keep it.
-        if (callable(on_response_received)
+        invalid_tool_ids = not valid_tool_call_ids(response.tool_calls or ())
+        if (callable(on_response_received) and not invalid_tool_ids
                 and response.finish_reason not in {"provider_stale", "length", "max_tokens"}
                 and not (response.truncated_tool_calls or response.stream_dropped_mid_tool or response.oversized_tool_calls)
                 and ((response.content or "").strip() or response.tool_calls)):
@@ -2160,7 +2179,7 @@ async def _run_agent_loop_impl(
             request_only_input_tokens=request_only_input_tokens,
             tool_calls=(
                 [tool_call.model_copy(deep=True) for tool_call in response.tool_calls]
-                if response.tool_calls
+                if response.tool_calls and not invalid_tool_ids
                 else None
             ),
         )
@@ -2295,14 +2314,9 @@ async def _run_agent_loop_impl(
             yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
             return
 
-        # ── Output truncated by provider token limit ────────
-        # The finish reason, not best-effort JSON parseability, determines
-        # whether a response is complete enough to execute. A parseable tool
-        # call that arrived with length/max_tokens is still only a discarded
-        # attempt. Both parseable and broken attempts receive the same hidden
-        # user recovery instruction and no tool result, because no ToolCall
-        # was admitted into executable conversation history.
-        if response.finish_reason in ("length", "max_tokens"):
+        # A truncated response or a batch with unusable IDs cannot be executed.
+        # Keep any visible text and use the same bounded regeneration path.
+        if response.finish_reason in ("length", "max_tokens") or invalid_tool_ids:
             stream_dropped = getattr(response, "stream_dropped_mid_tool", False)
             has_broken_tool_call = bool(response.truncated_tool_calls)
             visible_text = (response.content or "").strip()
@@ -2330,24 +2344,33 @@ async def _run_agent_loop_impl(
                             thinking=response.thinking,
                         )
                     )
-                if truncated_tool_call_retries < max_truncated_tool_call_retries:
+                if (truncated_tool_call_retries < max_truncated_tool_call_retries
+                        and (not invalid_tool_ids or step + 1 < max_steps)):
                     truncated_tool_call_retries += 1
-                    repair_text = (
-                        _OUTPUT_LENGTH_WRITE_FILE_RECOVERY
-                        if "write_file" in tool_names
-                        else _OUTPUT_LENGTH_TOOL_RECOVERY
-                    )
+                    if invalid_tool_ids:
+                        repair_text = (
+                            "The previous response had missing or repeated tool call IDs. "
+                            "None of its tools were executed. Continue the original task "
+                            "with a distinct, nonempty ID for each tool call."
+                        )
+                    else:
+                        repair_text = (
+                            _OUTPUT_LENGTH_WRITE_FILE_RECOVERY
+                            if "write_file" in tool_names
+                            else _OUTPUT_LENGTH_TOOL_RECOVERY
+                        )
                     yield MessageInjection(
                         InjectionKind.OUTPUT_RECOVERY, repair_text,
                     ).apply(messages)
                     _log.warning(
-                        "discarded output-length tool attempt %d/%d: tools=%s "
-                        "parseable=%s broken=%s stream_dropped=%s request_id=%s",
+                        "discarded invalid tool attempt %d/%d: tools=%s "
+                        "parseable=%s broken=%s invalid_ids=%s stream_dropped=%s request_id=%s",
                         truncated_tool_call_retries,
                         max_truncated_tool_call_retries,
                         sorted(tool_names),
                         bool(response.tool_calls),
                         has_broken_tool_call,
+                        invalid_tool_ids,
                         stream_dropped,
                         provider_request_id,
                     )
@@ -2366,21 +2389,25 @@ async def _run_agent_loop_impl(
                     )
                     continue
 
-                msg = "工具调用因输出长度限制未执行；分块重试仍未完成。"
+                msg = ("模型返回的工具调用编号为空或重复，未执行这批工具调用。"
+                       if invalid_tool_ids else "工具调用因输出长度限制未执行；分块重试仍未完成。")
+                reason = StopReason.ERROR if invalid_tool_ids else StopReason.MAX_TOKENS
                 _log.error(
-                    "output-length tool recovery exhausted: tools=%s request_id=%s",
+                    "tool call recovery exhausted: tools=%s invalid_ids=%s request_id=%s",
                     sorted(tool_names),
+                    invalid_tool_ids,
                     provider_request_id,
                 )
                 _cleanup_incomplete_messages(messages)
                 if hook_mgr.hooks:
                     await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
                     await hook_mgr.fire_done(
-                        stop_reason=StopReason.MAX_TOKENS,
+                        stop_reason=reason,
                         final_content=msg,
                     )
-                yield ErrorEvent(message=msg, is_fatal=True)
-                yield DoneEvent(stop_reason=StopReason.MAX_TOKENS, final_content=msg)
+                yield ErrorEvent(message=msg, is_fatal=True,
+                                 error_code="LLM_INVALID_TOOL_CALL_IDS" if invalid_tool_ids else None)
+                yield DoneEvent(stop_reason=reason, final_content=msg)
                 return
 
             # No tool attempt: preserve the existing text continuation and
@@ -2930,6 +2957,11 @@ async def _run_agent_loop_impl(
             yield MessageInjection(
                 InjectionKind.TOOL_FEEDBACK, tool_summary.search_guidance,
             ).apply(messages)
+
+        correction_messages.extend(
+            Message(role="user", source="runtime", content=format_runtime_context_update(notice.prompt()))
+            for notice in tool_summary.correction_notices
+        )
 
         if (
             visible_tool_call_total > final_summary_after_calls
