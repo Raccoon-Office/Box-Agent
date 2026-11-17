@@ -63,6 +63,10 @@ the model can receive the failed tool result even if the conservative bound stil
 does not fit. A subsequent explicit read is checked again before it can qualify
 a write. Further read failures do not repeatedly force compaction in the same turn.
 Turn reset clears recovery state; unavailable core reads do not request recovery.
+Compaction reserves room for projected request-only input and treats additional
+headroom as a summary target. Once the rebuilt history fits its budget, the loop
+rechecks the complete ordinary request at the original model input limit.
+Request-only input and capability guards still apply.
 Budget serialization excludes the persisted `host_connector_status` metadata;
 snapshots projected into message content remain counted, including after recovery.
 

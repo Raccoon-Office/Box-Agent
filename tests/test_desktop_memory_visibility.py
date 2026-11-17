@@ -378,7 +378,10 @@ async def test_failed_core_read_revokes_grant_without_blocking_ordinary_projecti
 
 
 @pytest.mark.parametrize("summary_fails", [False, True])
-async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_or_repeat_compaction(summary_fails):
+# The longer history misses the recovery headroom target while leaving room
+# for the summary request's own instructions within the full model budget.
+@pytest.mark.parametrize("user_chars", [32_000, 56_400])
+async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_or_repeat_compaction(summary_fails, user_chars):
     from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent, ToolCallResult
     from box_agent.runtime import run_agent_loop
     from box_agent.schema import FunctionCall, StreamEvent, ToolCall
@@ -411,9 +414,12 @@ async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_o
                 self.summary_calls += 1
                 if summary_fails:
                     raise RuntimeError("synthetic summary unavailable")
-                yield StreamEvent(type="text", delta="<summary>retained intent</summary>")
+                yield StreamEvent(type="text", delta="<summary>Memory read failed: CORE_CONTEXT_TOO_LARGE.</summary>")
             else:
                 self.normal_calls += 1
+                assert any(message.role == "user" and message.content == "x" * user_chars for message in messages)
+                if self.normal_calls > 1:
+                    assert any("CORE_CONTEXT_TOO_LARGE" in str(message.content) for message in messages)
                 if self.normal_calls <= 2:
                     yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
                         id=f"read-{self.normal_calls}", type="function",
@@ -426,10 +432,13 @@ async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_o
     provider = Provider()
     events = [event async for event in run_agent_loop(
         llm=provider, tools={"memory_read": Reader()}, memory_manager=lookup, token_limit=30000, max_steps=3, logger=None,
-        messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * 32000)])]
-    assert provider.summary_calls == 1 and provider.normal_calls == 3
-    assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
+        messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * user_chars)])]
     assert not [event.message for event in events if isinstance(event, ErrorEvent)]
+    assert provider.summary_calls == 1 and provider.normal_calls == 3
+    compactions = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert len(compactions) == 1
+    if user_chars > 32000:
+        assert 30000 - REQUEST_INPUT_HEADROOM_TOKENS < compactions[0].estimated_after <= 30000
     failures = [event for event in events if isinstance(event, ToolCallResult) and not event.success]
     assert len(failures) == 2 and all(event.error == "CORE_CONTEXT_TOO_LARGE" for event in failures)
     assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
