@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import secrets
 from collections import OrderedDict
-from collections.abc import Callable, Coroutine, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .base import Tool, ToolResult, build_tool_name_index
 from .mcp_tool_catalog import MCPToolCatalog, MCPToolEntry, _normalize
@@ -630,11 +630,6 @@ class MCPToolExposureManager:
         search_tool.max_result_size_chars = float("inf")
         search_tool._local_tools_provider = lambda: tuple(self._stable_candidates.values())
 
-    def pending_initial_tools_wait(self) -> Callable[[], Coroutine[Any, Any, None]] | None:
-        if self._scope_parent is None and self._catalog.initial_web_tools_pending:
-            return self._catalog.wait_for_initial_web_tools
-        return None
-
     def is_discoverable(self, tool: Tool) -> bool:
         return (tool.name not in {"tool_search", "call_tool"}
                 and tool.name not in (self._stable_direct or {})
@@ -783,8 +778,7 @@ class MCPToolExposureManager:
                 text = render(name, tool.description, tool, 0)
                 queue(text)
         for entry in self._catalog.snapshot():
-            if (entry.is_public_web_tool or not entry.always_load or entry.name_conflict
-                    or not self._entry_is_allowed(entry) or not self.is_discoverable(entry.tool)):
+            if not entry.always_load or entry.name_conflict or not self._entry_is_allowed(entry) or not self.is_discoverable(entry.tool):
                 continue
             text = render(entry.model_name, entry.description, entry.tool, entry.generation)
             queue(text)

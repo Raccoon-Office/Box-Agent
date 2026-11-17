@@ -1402,19 +1402,10 @@ async def _run_agent_loop_impl(
         # projection first so the compaction decision is based on the same
         # request that would otherwise reach the provider. If compaction
         # changes durable history, prepare the request again before sending it.
-        stable_tool_context = bool(getattr(tool_exposure_manager, "stable_prefix", False))
-        wait_for_tools = (
-            tool_exposure_manager.pending_initial_tools_wait()
-            if stable_tool_context and step == 0 else None
-        )
-        if wait_for_tools is not None:
-            if run_control is None:
-                await wait_for_tools()
-            else:
-                await run_control.run_until_cancelled(wait_for_tools, cancelled_result=None)
         prepared_tools = _services.tool_engine.prepare_tools(
             is_tool_visible=browser_intent_policy.is_tool_visible,
         )
+        stable_tool_context = bool(getattr(tool_exposure_manager, "stable_prefix", False))
 
         def append_tool_descriptions(history):
             if stable_tool_context:
@@ -1695,12 +1686,11 @@ async def _run_agent_loop_impl(
                 and message.name == "tool_descriptions" and isinstance(message.content, str)
             )
             # A result delivered in this request can be used by its response.
-            # A catalog may reconnect during context preparation. Keep the exact
-            # direct definitions/targets projected above and refresh only refs.
-            refreshed_tools = _services.tool_engine.prepare_tools(
+            # Refresh only execution routes; provider definitions are frozen in
+            # the session manager. A same-response search cannot expand them.
+            prepared_tools = _services.tool_engine.prepare_tools(
                 is_tool_visible=browser_intent_policy.is_tool_visible,
             )
-            prepared_tools = prepared_tools.with_routes_from(refreshed_tools)
             offered_tools_by_name = {**prepared_tools.targets, **prepared_tools.routed_targets}
 
         if session_log is not None and session_turn is not None:

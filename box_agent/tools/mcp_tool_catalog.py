@@ -16,12 +16,6 @@ from threading import RLock
 from .base import Tool, tool_call_name_variants
 
 
-PUBLIC_WEB_MCP_TOOLS = frozenset({
-    ("mcp-server-askecho-search-infinity", "web_search"),
-    ("box-agent-web-extract", "web_extract"),
-})
-
-
 def legacy_mcp_call_names(
     available: Iterable[Tool], offered: Iterable[Tool],
 ) -> dict[str, str]:
@@ -103,10 +97,6 @@ class MCPToolEntry:
     remote_name: str | None = None
     name_conflict: bool = False
 
-    @property
-    def is_public_web_tool(self) -> bool:
-        return self.connector_id is None and (self.server_name, self.model_name) in PUBLIC_WEB_MCP_TOOLS
-
 
 class MCPToolCatalog:
     """Thread-safe current snapshot of connected MCP tools."""
@@ -118,7 +108,6 @@ class MCPToolCatalog:
         self._loading = False
         self._refreshing_servers: set[str] = set()
         self._ready_event: asyncio.Event | None = None
-        self._web_tools_ready: asyncio.Event | None = None
 
     def _has_pending_discovery(self) -> bool:
         return self._loading or bool(self._refreshing_servers)
@@ -127,11 +116,9 @@ class MCPToolCatalog:
         if self._ready_event is None or self._ready_event.is_set():
             self._ready_event = asyncio.Event()
 
-    def mark_loading(self, *, wait_for_web: bool = False) -> None:
+    def mark_loading(self) -> None:
         """Mark initial discovery as incomplete without resetting live waiters."""
         with self._lock:
-            if wait_for_web and self._web_tools_ready is None:
-                self._web_tools_ready = asyncio.Event()
             if self._loading:
                 return
             was_pending = self._has_pending_discovery()
@@ -139,32 +126,10 @@ class MCPToolCatalog:
             if not was_pending:
                 self._ensure_pending_event()
 
-    def mark_web_tools_ready(self) -> None:
-        """Release first requests once configured public web connections have settled."""
-        with self._lock:
-            event = self._web_tools_ready
-            self._web_tools_ready = None
-        if event is not None:
-            event.set()
-
-    @property
-    def initial_web_tools_pending(self) -> bool:
-        with self._lock:
-            return self._web_tools_ready is not None
-
-    async def wait_for_initial_web_tools(self) -> None:
-        with self._lock:
-            event = self._web_tools_ready
-        if event is not None:
-            # Each connection uses its configured timeout. Failure releases the
-            # same barrier as success and does not withhold other working tools.
-            await event.wait()
-
     def mark_ready(self) -> None:
         """Publish discovery completion and release pending catalog searches."""
         with self._lock:
             self._loading = False
-            self.mark_web_tools_ready()
             ready_event = (
                 self._ready_event if not self._has_pending_discovery() else None
             )
@@ -261,7 +226,6 @@ class MCPToolCatalog:
             self._entries.clear()
             self._server_generations.clear()
             self._loading = False
-            self.mark_web_tools_ready()
             self._refreshing_servers.clear()
             ready_event = self._ready_event
             self._ready_event = None

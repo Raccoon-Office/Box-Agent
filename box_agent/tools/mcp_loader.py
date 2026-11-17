@@ -110,7 +110,7 @@ from .browser_tool_names import (
     public_browser_tool_text,
 )
 from .mcp_bootstrap import is_default_hosted_search_url
-from .mcp_tool_catalog import PUBLIC_WEB_MCP_TOOLS, get_mcp_tool_catalog
+from .mcp_tool_catalog import get_mcp_tool_catalog
 from .mcp_sources import (
     McpConfigSource,
     ResolvedMcpServer,
@@ -169,7 +169,10 @@ def _public_mcp_tool_name(
         return _safe_mcp_tool_name(server_name, remote_name, mapped_name)
     # These are deliberate replacements for the native search/extract fallbacks,
     # not a general exemption for tools with matching names.
-    if not connector_id and (server_name, remote_name) in PUBLIC_WEB_MCP_TOOLS:
+    if not connector_id and (server_name, remote_name) in {
+        ("mcp-server-askecho-search-infinity", "web_search"),
+        ("box-agent-web-extract", "web_extract"),
+    }:
         return remote_name
     return _safe_mcp_tool_name(
         server_name, remote_name, f"mcp__{server_name}__{remote_name}",
@@ -337,6 +340,13 @@ def _hosted_web_search_wire_name(name: str) -> str:
     """Convert model-facing snake_case fields to the hosted service's PascalCase."""
     return "".join(part.capitalize() for part in name.split("_"))
 
+
+HOSTED_WEB_SEARCH_DESCRIPTION = (
+    "Search the web or images. Use lowercase snake_case parameters: "
+    "query (required, 1–100 characters), count (1–50; image max 5), "
+    "search_type (web or image), time_range (relative preset or "
+    "YYYY-MM-DD..YYYY-MM-DD), and auth_level (0 or 1)."
+)
 
 HOSTED_WEB_SEARCH_PARAMETERS: dict[str, Any] = {
     "type": "object",
@@ -993,12 +1003,7 @@ class MCPTool(Tool):
     @property
     def description(self) -> str:
         if self._is_hosted_web_search:
-            return (
-                "Search the web or images. Use lowercase snake_case parameters: "
-                "query (required, 1–100 characters), count (1–50; image max 5), "
-                "search_type (web or image), time_range (relative preset or "
-                "YYYY-MM-DD..YYYY-MM-DD), and auth_level (0 or 1)."
-            )
+            return HOSTED_WEB_SEARCH_DESCRIPTION
         return self._description
 
     @property
@@ -2236,6 +2241,8 @@ class McpServerStatus:
 
 _mcp_status: dict[str, McpServerStatus] = {}
 _mcp_loading: bool = False
+_mcp_initial_connections: dict[str, asyncio.Task[None]] = {}
+_mcp_initial_connections_ready: asyncio.Event | None = None
 _mcp_config_path: str | None = None
 _mcp_sources: tuple[McpConfigSource, ...] = ()
 _mcp_server_definitions: dict[str, ResolvedMcpServer] = {}
@@ -2261,6 +2268,29 @@ def _current_mcp_auth_fingerprint() -> str:
 
 def is_mcp_loading() -> bool:
     return _mcp_loading or get_mcp_tool_catalog().loading
+
+
+def prepare_mcp_loading() -> None:
+    """Publish background discovery before its task first gets to run."""
+    global _mcp_initial_connections_ready
+    if _mcp_initial_connections_ready is None or _mcp_initial_connections_ready.is_set():
+        _mcp_initial_connections_ready = asyncio.Event()
+        _mcp_initial_connections.clear()
+    get_mcp_tool_catalog().mark_loading()
+
+
+async def wait_for_mcp_server(name: str) -> None:
+    """Wait only when a caller needs this server, keeping shared startup alive."""
+    ready = _mcp_initial_connections_ready
+    if ready is not None:
+        await ready.wait()
+    connection = _mcp_initial_connections.get(name)
+    if connection is not None:
+        await asyncio.shield(connection)
+    reconnect = _mcp_reconnect_locks.get(name)
+    if reconnect is not None:
+        async with reconnect:
+            pass
 
 
 def get_mcp_config_path() -> str | None:
@@ -2768,7 +2798,8 @@ async def load_mcp_tools_async(
     global _mcp_auth_file, _mcp_auth_token, _mcp_auth_fingerprint
     _mcp_loading = True
     catalog = get_mcp_tool_catalog()
-    catalog.mark_loading(wait_for_web=True)
+    prepare_mcp_loading()
+    connections_ready = _mcp_initial_connections_ready
     # Remember the auth inputs so reconnect_mcp_server() can rebuild the same
     # dynamic bearer / Authorization headers it would have used on cold start.
     _mcp_auth_file = auth_file
@@ -2849,14 +2880,7 @@ async def load_mcp_tools_async(
         for conn in connections:
             _record_status(conn.name, "connecting", transport=conn.transport_label)
 
-        public_web_servers = {server for server, _ in PUBLIC_WEB_MCP_TOOLS}
-        pending_web = {conn.name for conn in connections
-                       if conn.name in public_web_servers and not getattr(conn, "connector_id", None)}
-        if not pending_web:
-            catalog.mark_web_tools_ready()
-
         async def connect_and_publish(conn: MCPServerConnection, epoch: object) -> None:
-            success: bool | BaseException
             try:
                 success = await conn.connect()
             except (Exception, asyncio.CancelledError) as error:
@@ -2887,12 +2911,17 @@ async def load_mcp_tools_async(
                     error=conn.last_error or "connect() returned False",
                     auth_status=conn.last_auth_status,
                 )
-            if conn.name in pending_web:
-                pending_web.remove(conn.name)
-                if not pending_web:
-                    catalog.mark_web_tools_ready()
 
-        await asyncio.gather(*(connect_and_publish(conn, epoch) for conn, epoch in zip(connections, epochs)))
+        tasks = {
+            conn.name: asyncio.create_task(
+                connect_and_publish(conn, epoch), name=f"mcp-connect:{conn.name}",
+            )
+            for conn, epoch in zip(connections, epochs)
+        }
+        _mcp_initial_connections.update(tasks)
+        if connections_ready is not None:
+            connections_ready.set()
+        await asyncio.gather(*tasks.values())
 
         all_tools = get_all_mcp_tools()
         _warn(f"Total MCP tools loaded: {len(all_tools)}")
@@ -2907,6 +2936,8 @@ async def load_mcp_tools_async(
         return []
 
     finally:
+        if connections_ready is not None:
+            connections_ready.set()
         _mcp_loading = False
         catalog.mark_ready()
 
@@ -2944,6 +2975,9 @@ async def cleanup_mcp_connections():
     _mcp_source_overrides.clear()
     _mcp_credential_targets.clear()
     _mcp_status.clear()
+    _mcp_initial_connections.clear()
+    if _mcp_initial_connections_ready is not None:
+        _mcp_initial_connections_ready.set()
     get_mcp_tool_catalog().clear()
 
 

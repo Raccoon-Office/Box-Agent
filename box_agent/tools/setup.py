@@ -47,11 +47,11 @@ from box_agent.tools.jupyter_tool import (
 )
 from box_agent.tools.mcp_loader import (
     load_mcp_tools_async,
+    prepare_mcp_loading,
     set_mcp_timeout_config,
     set_playwright_isolation_config,
 )
 from box_agent.tools.mcp_bootstrap import bootstrap_managed_mcp_config
-from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
 from box_agent.tools.memory_tool import (
     create_memory_tools,
     MemoryDeleteCorrectionTool,
@@ -82,6 +82,7 @@ from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
 from box_agent.tools.image_inspection_tool import ImageInspectionTool
 from box_agent.tools.video_tool import ReadVideoTool
+from box_agent.tools.web_tools import create_web_tools
 
 from box_agent.user_paths import configured_box_agent_home, state_path
 
@@ -539,7 +540,8 @@ async def initialize_base_tools(
                 else Config.find_config_file(config.tools.mcp_config_path)
             )
         if mcp_config_path:
-            get_mcp_tool_catalog().mark_loading(wait_for_web=True)
+            prepare_mcp_loading()
+            tools.extend(create_web_tools(str(mcp_config_path)))
             _out(f"{Colors.BRIGHT_CYAN}Loading MCP tools in background (from: {mcp_config_path})...{Colors.RESET}")
             _out(
                 f"{Colors.DIM}  MCP timeouts: connect={mcp_config.connect_timeout}s, "
@@ -607,9 +609,10 @@ def register_mcp_tools(tool_map: dict[str, Tool], mcp_tools: list[Tool]) -> None
     """Register MCP tools, allowing them to override same-named fallback tools."""
     for tool in mcp_tools:
         existing = tool_map.get(tool.name)
-        if getattr(existing, "reserved_deferred_mcp_search", False):
+        if (getattr(existing, "reserved_deferred_mcp_search", False)
+                or getattr(existing, "reserved_mcp_entrypoint", False)):
             # A remote MCP tool cannot replace the session-bound discovery
-            # control entry after background loading completes.
+            # control or stable entry point after background loading completes.
             continue
         tool_map[tool.name] = tool
 
@@ -632,7 +635,8 @@ def sync_mcp_tools(
     fallback_tools.clear()
     for tool in mcp_tools:
         existing = tool_map.get(tool.name)
-        if getattr(existing, "reserved_deferred_mcp_search", False):
+        if (getattr(existing, "reserved_deferred_mcp_search", False)
+                or getattr(existing, "reserved_mcp_entrypoint", False)):
             continue
         if existing is not None and getattr(existing, "mcp_tool_id", None) is None:
             fallback_tools.setdefault(tool.name, existing)
@@ -649,7 +653,8 @@ def merge_mcp_tools(base_tools: list[Tool], mcp_tools: list[Tool]) -> None:
     for index, tool in enumerate(base_tools):
         replacement = mcp_by_name.get(tool.name)
         if replacement is not None:
-            base_tools[index] = replacement
+            if not getattr(tool, "reserved_mcp_entrypoint", False):
+                base_tools[index] = replacement
             replaced_names.add(tool.name)
 
     for tool in mcp_tools:
