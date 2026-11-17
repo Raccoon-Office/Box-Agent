@@ -29,7 +29,8 @@ def sdk_connection(monkeypatch):
         return [types.TextContent(type="text", text="ok")]
 
     state = SimpleNamespace(scopes=[], owners=[], exits=[], transports=0, stall=None,
-                            closing=None, release_close=None, close_error=False, calls=[])
+                            closing=None, release_close=None, close_error=False, calls=[],
+                            transport_failure=None)
 
     class ObservedSession(ClientSession):
         async def __aenter__(self):
@@ -52,11 +53,18 @@ def sdk_connection(monkeypatch):
     async def transport():
         request_send, request_receive = anyio.create_memory_object_stream(10)
         response_send, response_receive = anyio.create_memory_object_stream(10)
+
+        async def fail_transport():
+            await state.transport_failure.wait()
+            raise RuntimeError("remote transport returned HTTP 503")
+
         async with anyio.create_task_group() as group:
             async with request_send, request_receive, response_send, response_receive:
                 state.transports += 1
                 group.start_soon(server.run, request_receive, response_send,
                                  server.create_initialization_options())
+                if state.transport_failure is not None:
+                    group.start_soon(fail_transport)
                 try:
                     yield response_receive, request_send
                 finally:
@@ -215,7 +223,7 @@ async def test_close_timeout_retains_owner_until_cleanup_finishes(sdk_connection
     assert state.transports == 0
 
 
-async def test_cleanup_failure_is_reported_not_treated_as_success(sdk_connection, capsys):
+async def test_cleanup_failure_is_reported_once_and_connection_can_retry(sdk_connection, capsys):
     conn, state = sdk_connection
     assert await conn.connect()
     state.close_error = True
@@ -223,6 +231,58 @@ async def test_cleanup_failure_is_reported_not_treated_as_success(sdk_connection
         await conn.disconnect()
     assert "transport cleanup failed" in capsys.readouterr().err
     assert state.transports == 0
+    state.close_error = False
+    await conn.disconnect()
+    assert await conn.connect()
+    await conn.disconnect()
+    assert state.transports == 0
+
+
+async def test_reconnect_after_transport_failure_replaces_closed_connection(
+    sdk_connection, monkeypatch, capsys,
+):
+    conn, state = sdk_connection
+    catalog = MCPToolCatalog()
+    definition = ResolvedMcpServer(conn.name, {"command": "unused"}, "user",
+                                   "test", None, None, "unused.json", "test")
+    for name, value in {
+        "_mcp_connections": [conn], "_mcp_status": {}, "_mcp_config_path": None,
+        "_mcp_reconnect_locks": {}, "_mcp_connection_epochs": {}, "_cua_service": None,
+        "_mcp_server_definitions": {conn.name: definition},
+    }.items():
+        monkeypatch.setattr(mcp_loader, name, value)
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    state.transport_failure = asyncio.Event()
+    assert await conn.connect()
+    mcp_loader._replace_server_catalog(conn)
+    owner = state.owners[0]
+    try:
+        state.transport_failure.set()
+        await asyncio.wait_for(asyncio.shield(owner), 2)
+        assert state.transports == 0
+        assert not catalog.snapshot()
+        assert mcp_loader._mcp_status[conn.name].state == "failed"
+        assert "disconnect:failed" in capsys.readouterr().err
+
+        state.transport_failure = None
+        result = await mcp_loader.reconnect_mcp_server(conn.name)
+        assert result["success"] is True
+        assert result["toolCount"] == 1
+        assert mcp_loader._mcp_status[conn.name].state == "connected"
+        replacement, = mcp_loader._mcp_connections
+        assert replacement is not conn
+        assert len(state.owners) == 2
+        assert state.transports == 1
+        assert catalog.snapshot()
+        response = await replacement.session.call_tool("echo", {})
+        assert response.content[0].text == "ok"
+    finally:
+        state.transport_failure = None
+        for connection in mcp_loader._mcp_connections:
+            if connection.session is not None:
+                await connection.disconnect()
+    assert state.transports == 0
+    assert not any(scope._active for scope in state.scopes)
 
 
 @pytest.mark.parametrize("cancel_via", ["asyncio", "anyio"])

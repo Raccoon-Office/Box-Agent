@@ -283,8 +283,9 @@ async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
         if images:
             assert images[0]["active"] is (capability is True and feed_screenshots)
         replay_text = [str(message.content) for message in session_log.replay().messages]
-        assert any("images/" in content for content in replay_text) is persist_images
-        assert bool(list((session_log.path.parent / "images").glob("*.png"))) is persist_images
+        image_dir = session_log.path.parent / "images"
+        assert any(str(image_dir) in content for content in replay_text) is persist_images
+        assert bool(list(image_dir.glob("*.png"))) is persist_images
         assert _image_b64() not in session_log.path.read_text()
         assert current_mcp_result_adapters() == ()
         assert "run_events" not in vars(session.agent)
