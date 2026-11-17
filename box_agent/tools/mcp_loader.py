@@ -1190,6 +1190,9 @@ class MCPTool(Tool):
                     raw_meta = call_arguments.get("_meta")
                     meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
                     meta.pop("box_agent_browser_binding", None)
+                    meta.pop("box_agent_screenshot_original", None)
+                    if self._remote_name == "browser_take_screenshot":
+                        meta["box_agent_screenshot_original"] = True
                     binding = current_browser_host_binding()
                     if binding is not None:
                         meta["box_agent_browser_binding"] = binding
@@ -1889,6 +1892,7 @@ class MCPServerConnection:
                     description=public_browser_tool_description(
                         self.name,
                         tool.description or "",
+                        tool.name,
                     ),
                     parameters=parameters,
                     session=session,

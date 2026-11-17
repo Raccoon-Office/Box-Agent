@@ -179,6 +179,13 @@ async def test_native_same_name_writes_have_distinct_connected_versions(tmp_path
 @pytest.mark.parametrize('screenshot', [False, True])
 async def test_browser_receipt_comes_from_persisted_payload(tmp_path, screenshot):
     data = b'image' if screenshot else b'page'
+    if screenshot:
+        import io
+        from PIL import Image
+
+        stream = io.BytesIO()
+        Image.new('RGB', (2, 2)).save(stream, format='PNG')
+        data = stream.getvalue()
     result = ToolResult(success=True, content='page', raw_output={'mcp_inline_images': [{'data': base64.b64encode(data).decode()}]})
     target = tmp_path / ('shot.png' if screenshot else 'page.md')
     adapter = _persist_browser_screenshot_output if screenshot else _persist_browser_snapshot_output

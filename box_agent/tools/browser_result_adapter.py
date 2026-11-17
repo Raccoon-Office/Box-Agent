@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..artifacts import artifact_scan_root as _artifact_scan_root
 from .base import ToolResult
@@ -94,12 +96,13 @@ def _prepare_browser_screenshot_output(
     arguments: dict[str, Any],
     workspace_dir: str | None,
 ) -> tuple[Path | None, str | None]:
-    """Request an inline Playwright screenshot for Box-Agent-managed persistence."""
+    """Resolve a session-local screenshot destination, independent of MCP cwd."""
     if tool_name != "managed_browser_take_screenshot":
         return None, None
     filename = arguments.get("filename")
     if not isinstance(filename, str) or not filename.strip():
-        return None, None
+        extension = "jpg" if arguments.get("type") == "jpeg" else "png"
+        filename = f"browser-screenshot-{uuid4().hex}.{extension}"
     supplied_path = Path(filename).expanduser()
     cwd_root = _artifact_scan_root(workspace_dir)
     if cwd_root is None:
@@ -125,7 +128,7 @@ def _persist_browser_screenshot_output(
     result: ToolResult,
     target_path: Path | None,
 ) -> ToolResult:
-    """Persist an inline MCP image; persistence failure remains advisory."""
+    """Persist negotiated original bytes and publish one readable local path."""
     if target_path is None or not result.success:
         return result
     raw_output = result.raw_output if isinstance(result.raw_output, dict) else {}
@@ -140,19 +143,39 @@ def _persist_browser_screenshot_output(
         return result.model_copy(update={"content": f"{content}\n\n{warning}".strip()})
     try:
         import base64
+        from PIL import Image
 
         payload = base64.b64decode(image["data"], validate=True)
+        with Image.open(io.BytesIO(payload)) as opened:
+            width, height = opened.size
+            opened.verify()
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(payload)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
         warning = (
             f"Could not persist browser screenshot at {target_path}: {exc}. "
             "Visual QA may be skipped."
         )
         return result.model_copy(update={"content": f"{content}\n\n{warning}".strip()})
-    saved = result.model_copy(
-        update={"content": f"{content}\n\nScreenshot persisted to {target_path}".strip()}
-    )
+    structured = raw_output.get("mcp_structured_content")
+    receipt = structured.get("raccoonScreenshot") if isinstance(structured, dict) else None
+    receipt = receipt if isinstance(receipt, dict) else {}
+    original = receipt.get("version") == 1 and receipt.get("inline") == "original"
+    quality = "original" if original else "preview (MCP did not confirm original resolution)"
+    saved = result.model_copy(update={
+        "content": (
+            f"Screenshot persisted to {target_path}\n"
+            f"Saved image: {width}x{height}; {quality}. Read this exact absolute path "
+            "with inspect_images or local image tools; MCP cache paths are not the session cwd. "
+            "Preview downsampling is not a page-layout constraint. Do not resize or redesign "
+            "the page, or repeat the same capture, merely to fit a preview. "
+            "For small details, inspect a crop of the saved image."
+        ),
+        "raw_output": {**raw_output, "browser_screenshot": {
+            "path": str(target_path), "width": width, "height": height,
+            "quality": "original" if original else "preview",
+        }},
+    })
     saved._written_file_sha256 = hashlib.sha256(payload).hexdigest()
     return saved
 

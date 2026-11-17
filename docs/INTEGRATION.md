@@ -119,6 +119,25 @@ ACP 连接不保存已完成的入站 RPC 正文、响应或异常历史；单�
 2. 后端 sanitize（绝对路径校验、长度限制等）后写入 system prompt 的"可用 CLI"清单。
 3. 模型不再说"你机器上没装"，而是直接通过 bash 工具调用绝对路径。
 
+### Playwright MCP 截图原图与本地路径
+
+Agent 对 `browser_take_screenshot` 的 MCP arguments 注入
+`_meta.box_agent_screenshot_original=true`。支持该协商的宿主适配器返回未经过
+MCP 预览缩放的 image content，并附带
+`structuredContent.raccoonScreenshot={version:1, inline:"original", mimeType:"image/png"}`
+（JPEG 使用 `image/jpeg`）。此元数据由执行适配器添加，不在模型工具参数中公开。
+未协商的普通 MCP 客户端仍获得上游原有的缩略图行为。
+显式配置 `imageResponses=omit` 优先于原图协商：服务不返回 inline 图片或原图回执，
+并说明禁用原因。Agent 没有收到图片时不宣称任务目录中的截图已保存。
+
+MCP 进程 cwd 与任务 cwd 可以不同。Agent 消费任务目录内的 `filename`，将返回的
+图像字节保存到该绝对路径；省略文件名时在任务 cwd 生成唯一文件名。保存结果的
+`raw_output.browser_screenshot` 提供 `path`、`width`、`height` 与 `quality`，
+供宿主检查；模型读取结果中明确给出的绝对路径，不自行拼接 MCP 缓存路径。
+旧服务没有原图回执时，`quality` 标记为 `preview`，不宣称它是原图。
+预览的像素限制不能作为改变页面版式、画布尺寸或重复相同截图的理由；细节检查
+应读取保存图或裁剪图像，不改动页面来适配预览。
+
 ---
 
 ## 安全约束（最低限度）

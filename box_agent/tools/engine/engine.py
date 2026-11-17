@@ -190,9 +190,11 @@ class DefaultToolEngine:
         snapshot, snapshot_error = _prepare_browser_snapshot_output(
             call.name, call.arguments, context.workspace_dir,
         )
-        screenshot, screenshot_error = _prepare_browser_screenshot_output(
-            call.name, call.arguments, context.workspace_dir,
-        )
+        screenshot, screenshot_error = (None, None)
+        if call.screenshot_target is None or "filename" in call.arguments:
+            screenshot, screenshot_error = _prepare_browser_screenshot_output(
+                call.name, call.arguments, context.workspace_dir,
+            )
         # The adapters consume a managed filename. Preserve that saved target
         # when rechecking unchanged arguments after a Hook, replace it if a Hook
         # explicitly supplies a new managed target.

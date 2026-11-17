@@ -5491,6 +5491,13 @@ def test_artifact_detect_csv_kind_from_mime(tmp_path, monkeypatch, mime, kind):
 
 
 def test_browser_screenshot_is_persisted_inside_session_cwd(tmp_path):
+    import base64
+    import io
+    from PIL import Image
+
+    stream = io.BytesIO()
+    Image.new("RGB", (1720, 1680)).save(stream, format="PNG")
+    payload = stream.getvalue()
     arguments = {"filename": "qa/slide-01.png"}
 
     target, error = core._prepare_browser_screenshot_output(
@@ -5504,7 +5511,7 @@ def test_browser_screenshot_is_persisted_inside_session_cwd(tmp_path):
             content="captured",
             raw_output={
                 "mcp_inline_images": [
-                    {"data": "aW1hZ2U=", "mime_type": "image/png"}
+                    {"data": base64.b64encode(payload).decode(), "mime_type": "image/png"}
                 ]
             },
         ),
@@ -5513,7 +5520,7 @@ def test_browser_screenshot_is_persisted_inside_session_cwd(tmp_path):
 
     assert error is None
     assert arguments == {}
-    assert (tmp_path / "qa/slide-01.png").read_bytes() == b"image"
+    assert (tmp_path / "qa/slide-01.png").read_bytes() == payload
     assert result.success is True
     assert "Screenshot persisted" in result.content
 

@@ -80,10 +80,18 @@ def public_browser_tool_name(server_name: str, remote_name: str) -> str:
 def public_browser_tool_description(
     server_name: str,
     description: str,
+    remote_name: str = "",
 ) -> str:
     """Add controller context and rewrite transport names for public tools."""
     if server_name == "playwright":
         rewritten = public_browser_tool_text(server_name, description)
+        if remote_name == "browser_take_screenshot":
+            rewritten += (
+                " Screenshots are saved in the session cwd (also when filename is omitted); "
+                "use the returned absolute path for local reads. Inline MCP previews can be "
+                "downsampled independently of the saved original. Never change page dimensions "
+                "or layout to satisfy a preview's pixel limit; inspect the saved image or a crop."
+            )
         return (
             "Managed browser controlled through Playwright MCP. "
             f"{rewritten}"

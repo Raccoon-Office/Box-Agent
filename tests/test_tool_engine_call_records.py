@@ -180,6 +180,13 @@ async def test_engine_persists_browser_outputs_under_cwd_with_legacy_root_ignore
 ):
     filename = "task/qa/page.md" if capture_kind == "snapshot" else "task/qa/page.png"
     expected = b"page contents" if capture_kind == "snapshot" else b"image"
+    if capture_kind == "screenshot":
+        import io
+        from PIL import Image
+
+        stream = io.BytesIO()
+        Image.new("RGB", (2, 2)).save(stream, format="PNG")
+        expected = stream.getvalue()
 
     class Capture(Tool):
         name = "managed_browser_snapshot" if capture_kind == "snapshot" else "managed_browser_take_screenshot"
@@ -188,10 +195,12 @@ async def test_engine_persists_browser_outputs_under_cwd_with_legacy_root_ignore
         parameters = {"type": "object", "properties": {"filename": {"type": "string"}}}
 
         async def execute(self, filename=None):
+            import base64
+
             assert filename is None
             return ToolResult(
                 success=True, content="page contents",
-                raw_output={"mcp_inline_images": [{"data": "aW1hZ2U=", "mime_type": "image/png"}]}
+                raw_output={"mcp_inline_images": [{"data": base64.b64encode(expected).decode(), "mime_type": "image/png"}]}
                 if capture_kind == "screenshot" else None,
             )
 
