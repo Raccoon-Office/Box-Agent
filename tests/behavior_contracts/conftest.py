@@ -13,10 +13,6 @@ import pytest
 from .harness import BoxEngine, ModelServer, record
 
 
-def pytest_addoption(parser):
-    parser.addoption('--contract-evidence-root', help='New directory for immutable baseline evidence')
-
-
 @pytest.fixture(scope='session')
 def evidence_root(request, tmp_path_factory):
     value = request.config.getoption('--contract-evidence-root')
