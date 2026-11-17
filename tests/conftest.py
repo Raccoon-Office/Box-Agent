@@ -19,6 +19,13 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--contract-evidence-root",
+        help="New directory for immutable baseline evidence",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolated_user_state(monkeypatch, tmp_path_factory):
     """Give each test its own default state without imposing profile restrictions."""
