@@ -54,12 +54,15 @@ Bash diagnostics can contain command text and are suppressed in the private scop
 
 ## Core-read context recovery
 
-When the current turn permits online core reads, `DesktopInputGuard` applies the
-same conservative complete-request budget to final model input and core-read
-admission. A final-input overflow returns `budget_blocked` to the existing shared
-compaction path: compact once, reproject, and stop if the request still does not
-fit. This also works without an optional preload block. Disabled, unavailable,
-offline and retired memory turns retain ordinary request budgeting.
+Ordinary requests retain the shared model-token budget, including long first
+messages when online memory is enabled. The conservative UTF-8 bound applies to
+optional preload reduction and core-read admission, not to ordinary dispatch.
+Only an actual `CORE_CONTEXT_TOO_LARGE` admission failure requests one shared
+compaction attempt per turn. That recovery signal is consumed before reprojecting;
+the model can receive the failed tool result even if the conservative bound still
+does not fit. A subsequent explicit read is checked again before it can qualify
+a write. Further read failures do not repeatedly force compaction in the same turn.
+Turn reset clears recovery state; unavailable core reads do not request recovery.
 Budget serialization excludes the persisted `host_connector_status` metadata;
 snapshots projected into message content remain counted, including after recovery.
 

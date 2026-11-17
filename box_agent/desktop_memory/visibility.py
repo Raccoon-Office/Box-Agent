@@ -145,13 +145,27 @@ class CoreVisibilityGuard(ModelInputGuard):
 
 
 class DesktopInputGuard(CoreVisibilityGuard):
-    """Bound preload and route complete-input overflow through shared compaction."""
+    """Bound memory input and request recovery only after a failed core read."""
 
     def __init__(self, notify: VisibilityCallback, content_builder: Callable[[int], str], *,
                  can_read: Callable[[], bool] = lambda: True) -> None:
         super().__init__(notify)
         self._content_builder = content_builder
         self._can_read = can_read
+        self._read_recovery_pending = False
+        self._read_recovery_attempted = False
+
+    def reset(self) -> None:
+        super().reset()
+        self._read_recovery_pending = self._read_recovery_attempted = False
+
+    def admit(self, read: CoreRead) -> None:
+        try:
+            super().admit(read)
+        except MemoryProxyError as exc:
+            if exc.code == "CORE_CONTEXT_TOO_LARGE" and not self._read_recovery_attempted:
+                self._read_recovery_pending = True
+            raise
 
     def _input_tokens(self, messages, definitions) -> int:
         # Nova and other hosted aliases do not expose a verified tokenizer.
@@ -171,21 +185,16 @@ class DesktopInputGuard(CoreVisibilityGuard):
         return max(request_input_tokens(messages, definitions), byte_bound)
 
     def prepare_context(self, projection: PreparedContext) -> PreparedContext:
-        context = self._context
-        if (not projection.blocked_reason and self._can_read()
-                and context is not None and context.prepared_tools is not None):
-            estimated = self._input_tokens(projection.messages, context.prepared_tools.definitions)
-            reserve = context._transient_reserve_tokens + 1024
-            if estimated + reserve > context._token_limit:
-                _log.warning("memory operation=model_input reason=request_over_budget budget=utf8_upper_bound "
-                             "estimated=%d limit=%d reserve=%d", estimated, context._token_limit, reserve)
-                # The shared loop compacts once and rebuilds this projection.
-                # Do not grant visibility until that final request succeeds.
+        if self._read_recovery_pending:
+            # Consume before the shared loop compacts/reprojects. A byte-bound
+            # failure must not become a permanent ban on model-valid input.
+            self._read_recovery_pending = False
+            self._read_recovery_attempted = True
+            if not projection.blocked_reason and self._can_read():
+                _log.info("memory operation=core_read reason=compaction_requested")
                 projection = replace(
                     projection, budget_blocked=True, on_committed=None, on_response=None,
-                    blocked_reason=("The conversation exceeds the safe input budget for desktop memory. "
-                                    "Start a shorter session if context compaction cannot make room, then "
-                                    "retry memory_read. Do not delete stored memories to reduce conversation history."),
+                    blocked_reason="Core memory read exceeded its admission budget. Compact context before retrying memory_read.",
                 )
         return super().prepare_context(projection)
 

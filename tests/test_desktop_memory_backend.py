@@ -587,8 +587,8 @@ async def test_emoji_full_read_cannot_use_character_division_as_token_capacity(h
         await manager.aclose()
 
 
-@pytest.mark.parametrize("mode", ["disabled", "offline", "unavailable", "legacy_read_only", "retired"])
-async def test_unavailable_core_reads_do_not_impose_desktop_budget_on_ordinary_requests(host, mode):
+@pytest.mark.parametrize("mode", ["cloud", "disabled", "offline", "unavailable", "legacy_read_only", "retired"])
+async def test_memory_turn_state_does_not_impose_desktop_budget_on_ordinary_requests(host, mode):
     host.automatic = mode != "disabled"
     host.online = mode != "offline"
     host.source = mode if mode in {"unavailable", "legacy_read_only"} else "cloud"
@@ -646,11 +646,15 @@ async def test_long_desktop_conversation_compacts_then_reads_and_mutates_core(ho
                 yield StreamEvent(type="finish", finish_reason="stop")
                 return
             self.normal_calls += 1
-            assert self.summary_calls == 1
-            if self.normal_calls == 1:
+            assert self.summary_calls == (0 if self.normal_calls == 1 else 1)
+            if self.normal_calls <= 2:
+                if self.normal_calls == 2:
+                    failed = next(message for message in messages if message.role == "tool" and message.name == "memory_read")
+                    assert "CORE_CONTEXT_TOO_LARGE" in failed.content
+                    assert not host.active
                 name, arguments = "memory_read", {"path": "memory.md"}
-            elif self.normal_calls == 2:
-                reply = next(message for message in messages if message.role == "tool" and message.name == "memory_read")
+            elif self.normal_calls == 3:
+                reply = next(message for message in reversed(messages) if message.role == "tool" and message.name == "memory_read")
                 data = json.loads(reply.content)
                 assert data["exists"] is exists
                 assert data["content"] == host.files.get("memory.md", "")
@@ -673,16 +677,18 @@ async def test_long_desktop_conversation_compacts_then_reads_and_mutates_core(ho
                    Message(role="user", content="remember NEW")]
         events = [event async for event in run_agent_loop(
             llm=provider, messages=history, tools={tool.name: tool for tool in create_memory_tools(manager)},
-            memory_manager=manager, max_steps=3, token_limit=810000, logger=None)]
+            memory_manager=manager, max_steps=4, token_limit=810000, logger=None)]
         assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
         assert not [event.message for event in events if isinstance(event, ErrorEvent)]
-        assert not [event.error for event in events if isinstance(event, ToolCallResult) and not event.success]
-        assert provider.normal_calls == 3
+        failures = [event for event in events if isinstance(event, ToolCallResult) and not event.success]
+        assert len(failures) == 1 and failures[0].tool_name == "memory_read"
+        assert "CORE_CONTEXT_TOO_LARGE" in failures[0].error
+        assert provider.normal_calls == 4
         assert "NEW" in host.files["memory.md"]
         if exists:
             assert '<mem time="2026-11-17 08:00:00" priority="0">KEEP</mem>' in host.files["memory.md"]
         operations = [operation for operation, _ in host.calls]
-        assert operations.count("core/read") == operations.count("core/mutate") == 1
+        assert operations.count("core/read") == 2 and operations.count("core/mutate") == 1
         assert operations.index("visibility/commit") < operations.index("core/mutate")
     finally:
         await manager.aclose()

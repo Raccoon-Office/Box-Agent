@@ -218,7 +218,47 @@ def test_conservative_history_budget_omission_is_diagnosable_without_payload(cap
 
 
 @pytest.mark.parametrize("preload", [False, True])
-def test_desktop_history_overflow_requests_shared_compaction_before_model_dispatch(preload, caplog):
+async def test_online_memory_does_not_block_a_long_first_message_without_a_core_read(preload):
+    from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
+    from box_agent.memory import place_memory_block
+    from box_agent.runtime import run_agent_loop
+    from box_agent.schema import StreamEvent
+
+    class Provider:
+        requests = []
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 2
+
+        async def generate_stream(self, messages, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                yield StreamEvent(type="text", delta="<summary>preserve the user's message</summary>")
+            else:
+                self.requests.append(messages)
+                yield StreamEvent(type="text", delta="received")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    guard = DesktopInputGuard(lambda *_: None, lambda size: "preload" if size and preload else "")
+    lookup = SimpleNamespace(model_input_guard=guard, auto_match_context=lambda _: [], correction_curator=None)
+    system = (place_memory_block("BASE", "--- MEMORY START ---\npreload\n--- MEMORY END ---", reserve=True)
+              if preload else "BASE")
+    content = "x" * 32000
+    history = [Message(role="system", content=system), Message(role="user", content=content)]
+    provider = Provider()
+    ordinary = DefaultContextEngine(llm=provider).prepare_request(
+        history, prepared_tools=prepare_tools([]), token_limit=30000)
+    assert ordinary.blocked_reason is None
+    events = [event async for event in run_agent_loop(
+        llm=provider, messages=history, tools={}, memory_manager=lookup, token_limit=30000, max_steps=1, logger=None)]
+    assert not [event.message for event in events if isinstance(event, ErrorEvent)]
+    assert not any(isinstance(event, SummarizationEvent) for event in events)
+    assert len(provider.requests) == 1
+    assert provider.requests[0][-1].content == content
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.parametrize("preload", [False, True])
+def test_only_a_failed_core_read_requests_one_compaction_per_turn(preload, caplog):
     from box_agent.memory import place_memory_block
 
     llm = SimpleNamespace(estimate_text_tokens=lambda text: len(text.encode("utf-8")) // 2)
@@ -234,9 +274,20 @@ def test_desktop_history_overflow_requests_shared_compaction_before_model_dispat
     ordinary = DefaultContextEngine(llm=llm).prepare_request(history, prepared_tools=tools, token_limit=810000)
     assert ordinary.blocked_reason is None
     request = engine.prepare_request(history, prepared_tools=tools, token_limit=810000)
-    assert request.budget_blocked and request.blocked_reason
-    assert request.on_committed is None and request.on_response is None
-    assert "operation=model_input reason=request_over_budget" in caplog.text
+    assert request.blocked_reason is None
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
+    recovery = engine.prepare_request(history, prepared_tools=tools, token_limit=810000)
+    assert recovery.budget_blocked and recovery.blocked_reason
+    assert recovery.on_committed is None and recovery.on_response is None
+    assert engine.prepare_request(history, prepared_tools=tools, token_limit=810000).blocked_reason is None
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
+    assert engine.prepare_request(history, prepared_tools=tools, token_limit=810000).blocked_reason is None
+    guard.reset()  # A new turn gets its own bounded recovery attempt.
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
+    assert engine.prepare_request(history, prepared_tools=tools, token_limit=810000).budget_blocked
     assert "PRIVATE_PRELOAD" not in caplog.text and "PRIVATE_HISTORY" not in caplog.text
     assert history[1].content == "PRIVATE_HISTORY " * 75000
 
@@ -298,12 +349,12 @@ def test_visible_connector_snapshot_still_counts_toward_desktop_budget():
     engine.bind_memory(SimpleNamespace(model_input_guard=guard))
     request = engine.prepare_request(history, prepared_tools=prepare_tools([]), token_limit=16000)
     assert snapshot in request.messages[-1].content
-    assert request.blocked_reason and request.budget_blocked
-    assert request.on_committed is None and request.on_response is None
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
     assert history[-1].content == "remember" and history[-1].host_connector_status == snapshot
 
 
-async def test_desktop_final_overflow_revokes_grant_before_shared_compaction():
+async def test_failed_core_read_revokes_grant_without_blocking_ordinary_projection():
     guard = DesktopInputGuard(lambda *_: None, lambda _: "")
     engine = DefaultContextEngine(llm=SimpleNamespace(estimate_text_tokens=lambda text: len(text) // 2))
     engine.bind_memory(SimpleNamespace(model_input_guard=guard))
@@ -315,21 +366,38 @@ async def test_desktop_final_overflow_revokes_grant_before_shared_compaction():
     delivered.on_committed()
     delivered.on_response()
     assert await guard.require(record.path) is record
-    blocked = project(engine, [*messages, Message(role="assistant", content="x" * 14000)], record)
-    assert blocked.budget_blocked
-    assert blocked.on_committed is None and blocked.on_response is None
+    ordinary = project(engine, [*messages, Message(role="assistant", content="x" * 14000)], record)
+    assert ordinary.blocked_reason is None
     with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
         await guard.require(record.path)
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
     delivered.on_response()
     with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
         await guard.require(record.path)
 
 
 @pytest.mark.parametrize("summary_fails", [False, True])
-async def test_desktop_irreducible_input_stops_after_one_compaction(summary_fails):
-    from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
+async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_or_repeat_compaction(summary_fails):
+    from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent, ToolCallResult
     from box_agent.runtime import run_agent_loop
-    from box_agent.schema import StreamEvent
+    from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+    from box_agent.tools.base import Tool, ToolResult
+
+    activations = []
+    guard = DesktopInputGuard(lambda *args: activations.append(args), lambda _: "")
+
+    class Reader(Tool):
+        name = "memory_read"
+        description = "Read core memory."
+        parameters = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+
+        async def execute(self, path):
+            try:
+                guard.admit(read_record(path=path))
+            except MemoryProxyError as exc:
+                return ToolResult(success=False, error=exc.code)
+            pytest.fail("The irreducible history must still fail conservative core-read admission")
 
     class Provider:
         summary_calls = 0
@@ -346,21 +414,25 @@ async def test_desktop_irreducible_input_stops_after_one_compaction(summary_fail
                 yield StreamEvent(type="text", delta="<summary>retained intent</summary>")
             else:
                 self.normal_calls += 1
-                yield StreamEvent(type="text", delta="must not dispatch")
+                if self.normal_calls <= 2:
+                    yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                        id=f"read-{self.normal_calls}", type="function",
+                        function=FunctionCall(name="memory_read", arguments={"path": "memory.md"}))])
+                    return
+                yield StreamEvent(type="text", delta="Cannot admit the memory read, but ordinary replies still work.")
             yield StreamEvent(type="finish", finish_reason="stop")
 
-    activations = []
-    guard = DesktopInputGuard(lambda *args: activations.append(args), lambda _: "")
     lookup = SimpleNamespace(model_input_guard=guard, auto_match_context=lambda _: [], correction_curator=None)
     provider = Provider()
     events = [event async for event in run_agent_loop(
-        llm=provider, tools={}, memory_manager=lookup, token_limit=30000, max_steps=3, logger=None,
-        messages=[Message(role="system", content="x" * 32000), Message(role="user", content="old request"),
-                  Message(role="assistant", content="old answer"), Message(role="user", content="remember")])]
-    assert provider.summary_calls == 1 and provider.normal_calls == 0
+        llm=provider, tools={"memory_read": Reader()}, memory_manager=lookup, token_limit=30000, max_steps=3, logger=None,
+        messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * 32000)])]
+    assert provider.summary_calls == 1 and provider.normal_calls == 3
     assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
-    assert any(isinstance(event, ErrorEvent) and "Start a shorter session" in event.message for event in events)
-    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.ERROR
+    assert not [event.message for event in events if isinstance(event, ErrorEvent)]
+    failures = [event for event in events if isinstance(event, ToolCallResult) and not event.success]
+    assert len(failures) == 2 and all(event.error == "CORE_CONTEXT_TOO_LARGE" for event in failures)
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
     assert not any(event[1] for event in activations)
 
 
