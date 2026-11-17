@@ -34,7 +34,11 @@ def prepare_tools(
                     server = getattr(tool, "server_name", None) or getattr(tool, "_server_name", "")
                     groups.setdefault(server, []).append(tool)
             existing = {entry.server_name for entry in tool_exposure._catalog.snapshot()}
-            for server in existing - groups.keys():
+            delegated_servers = {
+                tool.server_name for tool in offered
+                if getattr(tool, "reserved_mcp_entrypoint", False)
+            }
+            for server in existing - groups.keys() - delegated_servers:
                 tool_exposure._catalog.remove_server(server)
             for server, members in groups.items():
                 current = [entry.tool for entry in tool_exposure._catalog.snapshot() if entry.server_name == server]
