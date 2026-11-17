@@ -60,6 +60,8 @@ admission. A final-input overflow returns `budget_blocked` to the existing share
 compaction path: compact once, reproject, and stop if the request still does not
 fit. This also works without an optional preload block. Disabled, unavailable,
 offline and retired memory turns retain ordinary request budgeting.
+Budget serialization excludes the persisted `host_connector_status` metadata;
+snapshots projected into message content remain counted, including after recovery.
 
 Image content uses the shared pixel-token charge instead of base64 byte length;
 the image transport-size preflight remains authoritative for wire size. Full

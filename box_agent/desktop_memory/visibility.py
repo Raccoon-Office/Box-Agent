@@ -157,7 +157,10 @@ class DesktopInputGuard(CoreVisibilityGuard):
         # Nova and other hosted aliases do not expose a verified tokenizer.
         # Byte fallback is conservative for UTF-8/byte-fallback tokenizers and
         # avoids treating Chinese or emoji as chars/4. Never claim exact counts.
-        serialized = [message.model_dump(exclude_none=True) for message in messages]
+        # Connector recovery already projects the visible snapshot into content;
+        # its per-turn persistence metadata is never sent to the provider.
+        serialized = [message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+                      for message in messages]
         for message, data in zip(messages, serialized):
             if isinstance(message.content, list):
                 data["content"] = json.loads(_budget_content_json(message.content))

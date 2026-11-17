@@ -252,6 +252,57 @@ def test_desktop_image_budget_counts_pixels_without_counting_base64_as_text():
     assert message.content[0]["data"] == "A" * 200000
 
 
+@pytest.mark.parametrize("after_compaction", [False, True])
+async def test_connector_snapshot_metadata_does_not_block_desktop_request_or_core_read(after_compaction):
+    from box_agent.connector_context import append_connector_status
+
+    snapshot = "<connector-status>\n" + "\n".join(
+        f"service-{index}: synthetic knowledge connector connected" for index in range(120)
+    ) + "\n</connector-status>"
+    history = [Message(role="system", content="BASE")]
+    for index in range(12):
+        content = append_connector_status(history, f"question {index}", snapshot)
+        history.append(Message(role="user", content=content, host_connector_status=snapshot))
+    if after_compaction:
+        history = [history[0], *history[-4:]]  # The visible snapshot was compacted away.
+    before = [message.model_dump() for message in history]
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "")
+    engine = DefaultContextEngine()
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    tools = prepare_tools([])
+    request = engine.prepare_request(history, prepared_tools=tools, token_limit=16000)
+    assert request.blocked_reason is None
+    assert sum(snapshot in message.content for message in request.messages) == 1
+    without_metadata = [message.model_copy(update={"host_connector_status": None}) for message in request.messages]
+    assert guard._input_tokens(request.messages, []) == guard._input_tokens(without_metadata, [])
+    assert [message.model_dump() for message in history] == before
+
+    record = read_record()
+    guard.admit(record)
+    reply = Message(role="tool", name="memory_read", tool_call_id=record.read_id, content=record.model_content)
+    delivered = engine.prepare_request([*history, reply], prepared_tools=tools, token_limit=16000)
+    assert delivered.blocked_reason is None
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
+    delivered.on_committed()
+    delivered.on_response()
+    assert await guard.require(record.path) is record
+
+
+def test_visible_connector_snapshot_still_counts_toward_desktop_budget():
+    snapshot = "<connector-status>\n" + "synthetic connector connected\n" * 1000 + "</connector-status>"
+    history = [Message(role="system", content="BASE"),
+               Message(role="user", content="remember", host_connector_status=snapshot)]
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "")
+    engine = DefaultContextEngine()
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    request = engine.prepare_request(history, prepared_tools=prepare_tools([]), token_limit=16000)
+    assert snapshot in request.messages[-1].content
+    assert request.blocked_reason and request.budget_blocked
+    assert request.on_committed is None and request.on_response is None
+    assert history[-1].content == "remember" and history[-1].host_connector_status == snapshot
+
+
 async def test_desktop_final_overflow_revokes_grant_before_shared_compaction():
     guard = DesktopInputGuard(lambda *_: None, lambda _: "")
     engine = DefaultContextEngine(llm=SimpleNamespace(estimate_text_tokens=lambda text: len(text) // 2))
