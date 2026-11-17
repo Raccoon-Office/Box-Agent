@@ -87,6 +87,186 @@ async def test_search_returns_complete_schema_and_next_snapshot_resolves():
 
 
 @pytest.mark.asyncio
+async def test_recovery_context_only_repeats_delivered_current_visible_routes():
+    engine, search, target, tools = setup()
+    before = engine.prepare_tools()
+    result = await search.execute(tool_names=[target.name])
+    assert before.recovery_context(target.name) == ""
+    assert engine.prepare_tools().recovery_context(target.name) == ""
+    acknowledge(engine, result)
+    visible = True
+    prepared = engine.prepare_tools(is_tool_visible=lambda name: visible)
+    hint = prepared.recovery_context(f"Call {target.name} next.")
+    route = json.loads(hint.splitlines()[-1])
+    assert route == {
+        "target": target.name, "callable_function": "call_tool",
+        "tool_ref": json.loads(result.content)["activated"][0]["tool_ref"],
+        "input_schema": target.parameters,
+    }
+    assert prepared.resolve_call(call(route["tool_ref"], '{"value":"ok"}'))[2] is None
+    assert prepared.recovery_context("unknown_tool") == ""
+    assert prepared.recovery_context("plan_write_extra") == ""
+    visible = False
+    assert prepared.recovery_context(target.name) == ""
+    visible = True
+    tools[target.name] = Deferred()
+    assert prepared.recovery_context(target.name) == ""
+    assert engine.prepare_tools().recovery_context(target.name) == ""
+    assert [x.to_schema() for x in before.definitions] == [x.to_schema() for x in prepared.definitions]
+
+
+@pytest.mark.asyncio
+async def test_recovery_context_does_not_truncate_large_schemas_or_refresh_changed_routes():
+    engine, search, target, _ = setup()
+    target.parameters = {**target.parameters, "description": "x" * 6_001}
+    engine.prepare_tools()
+    result = await search.execute(tool_names=[target.name])
+    acknowledge(engine, result)
+    prepared = engine.prepare_tools()
+    assert prepared.recovery_context(target.name) == ""
+    target.parameters = {"type": "object", "properties": {}}
+    assert prepared.recovery_context(target.name) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_after_continuation", [False, True])
+async def test_wire_premature_stop_recovers_to_discovered_browser_call(empty_after_continuation):
+    """SDK -> wrapper -> recovery -> routed execution, including reasoning-only stop."""
+    import httpx
+    from openai import AsyncOpenAI
+
+    from box_agent.dsml_fallback import DsmlToolCallRecoveryHook
+    from box_agent.events import DoneEvent, ErrorEvent, StopReason, ToolCallResult
+    from box_agent.llm.llm_wrapper import LLMClient
+    from box_agent.retry import RetryConfig
+    from box_agent.runtime import run_agent_loop
+    from box_agent.schema import LLMProvider
+
+    effects = []
+
+    class LocalCheck(Deferred):
+        name = "execute_code"
+        _model_exposure_direct = True
+
+        async def execute(self, value):
+            effects.append("local")
+            return ToolResult(success=True, content="Local checks passed.")
+
+    class Browser(Deferred):
+        name = "managed_browser_navigate"
+        description = "Navigate the managed browser."
+        mcp_tool_id = "mcp:managed_browser/managed_browser_navigate"
+        server_name = "managed_browser"
+        parameters = {
+            "type": "object", "properties": {"url": {"type": "string"}},
+            "required": ["url"], "additionalProperties": False,
+        }
+
+        @property
+        def mcp_generation(self):
+            return self._mcp_generation
+
+        async def execute(self, url):
+            effects.append(url)
+            return ToolResult(success=True, content="Browser check passed.")
+
+    engine, search, _, tools = setup()
+    browser = Browser()
+    tools.update({browser.name: browser, "execute_code": LocalCheck()})
+    engine._tool_exposure._catalog.replace_server(browser.server_name, [browser])
+    engine.prepare_tools()
+    result = await search.execute(tool_names=[browser.name])
+    acknowledge(engine, result)
+    ref = json.loads(result.content)["activated"][0]["tool_ref"]
+    requests = []
+    stream_step = 0
+    judge_step = 0
+
+    def native_call(name, arguments, identifier):
+        encoded = json.dumps(arguments)
+        middle = len(encoded) // 2
+        return [
+            {"role": "assistant", "tool_calls": [{"index": 0, "id": identifier,
+                "type": "function", "function": {"name": name, "arguments": encoded[:middle]}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": encoded[middle:]}}]},
+        ]
+
+    def handle(request):
+        nonlocal stream_step, judge_step
+        body = json.loads(request.content)
+        common = {"id": "recovery-wire-fixture", "created": 0, "model": body["model"]}
+        if not body.get("stream"):
+            judge_step += 1
+            verdict = ({"continue": True, "next_action": f"Use {browser.name} to open https://example.test/check."}
+                       if judge_step == 1 else {"continue": False})
+            return httpx.Response(200, json={**common, "object": "chat.completion", "choices": [{
+                "index": 0, "finish_reason": "stop", "message": {
+                    "role": "assistant", "content": json.dumps(verdict),
+                },
+            }]})
+        requests.append(body)
+        step, stream_step = stream_step, stream_step + 1
+        finish = "stop"
+        if step == 0:
+            deltas = native_call("execute_code", {"value": "check"}, "local-check")
+            finish = "tool_calls"
+        elif step == 1:
+            deltas = [{"role": "assistant", "reasoning_content": "The browser check remains."},
+                      {"content": "Local checks passed. Next I will open the browser."}]
+        elif step == 2 and empty_after_continuation:
+            deltas = [{"role": "assistant", "reasoning_content": "Continue the browser check."}]
+        elif step == 2 + int(empty_after_continuation):
+            hint = body["messages"][-1]["content"]
+            assert '"tool_ref": "' + ref + '"' in hint
+            assert '"input_schema"' in hint and '"url"' in hint
+            assert "Do not call tools" not in hint
+            deltas = native_call("call_tool", {
+                "tool_ref": ref, "arguments_json": '{"url":"https://example.test/check"}',
+            }, "browser-check")
+            finish = "tool_calls"
+        elif step == 3 and not empty_after_continuation:
+            deltas = [{"reasoning_content": "All checks are complete."}]
+        else:
+            if not empty_after_continuation:
+                # Progress cleared the old action before final-answer recovery.
+                assert ref not in body["messages"][-1]["content"]
+            deltas = [{"content": "Local and browser checks completed."}]
+        chunks = [{**common, "object": "chat.completion.chunk", "choices": [{
+            "index": 0, "delta": delta, "finish_reason": None,
+        }]} for delta in deltas]
+        chunks.append({**common, "object": "chat.completion.chunk", "choices": [{
+            "index": 0, "delta": {}, "finish_reason": finish,
+        }]})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+            text="".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n")
+
+    llm = LLMClient(api_key="fixture", api_base="https://inference.example/v1",
+        provider=LLMProvider.OPENAI, model="fixture", retry_config=RetryConfig(enabled=False))
+    await llm._client.client.close()
+    llm._client.client = AsyncOpenAI(api_key="fixture", base_url="https://inference.example/v1",
+        max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+    messages = [Message(role="user", content="Run local checks, then check the browser page.")]
+    try:
+        events = [event async for event in run_agent_loop(
+            llm=llm, messages=messages, tools=tools, tool_exposure_manager=engine._tool_exposure,
+            hooks=[DsmlToolCallRecoveryHook(llm=llm)], max_steps=8, artifact_detection_enabled=False,
+        )]
+    finally:
+        await llm._client.client.close()
+    assert effects == ["local", "https://example.test/check"]
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert [event.tool_name for event in events if isinstance(event, ToolCallResult)] == [
+        "execute_code", browser.name,
+    ]
+    assert any(isinstance(event, DoneEvent) and event.stop_reason is StopReason.END_TURN for event in events)
+    assert all(body["tools"] == requests[0]["tools"] for body in requests)
+    assert '"tool_ref": "' + ref + '"' in requests[2]["messages"][-1]["content"]
+    routed_message = next(message for message in messages if message.role == "assistant"
+                          and message.tool_calls and message.tool_calls[0].id == "browser-check")
+    assert routed_message.tool_calls[0].function.name == "call_tool"
+
+
+@pytest.mark.asyncio
 async def test_ref_invalid_after_replacement_and_bad_json_is_rejected():
     engine, search, target, tools = setup()
     engine.prepare_tools()

@@ -3524,6 +3524,46 @@ async def test_single_visible_tool_empty_final_answer_retries_for_conclusion():
 
 
 @pytest.mark.asyncio
+async def test_empty_answer_recovery_preserves_unfinished_tool_work():
+    """An empty response between tools must not force a premature conclusion."""
+    remaining_call = ToolCall(
+        id="remaining-check",
+        type="function",
+        function=FunctionCall(name="echo", arguments={"text": "remaining check"}),
+    )
+    llm = CapturingStreamLLM(
+        [
+            LLMResponse(content="", tool_calls=_echo_tool_calls(1), finish_reason="tool"),
+            LLMResponse(content="", finish_reason="stop"),
+            LLMResponse(content="", tool_calls=[remaining_call], finish_reason="tool"),
+            LLMResponse(content="全部检查完成。", finish_reason="stop"),
+        ]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={"echo": EchoTool()},
+            max_steps=5,
+        )
+    )
+
+    recovery = llm.message_calls[2][-1].content
+    # This is the model-facing recovery contract, including deferred tools.
+    assert "If authorized work remains, continue it now" in recovery
+    assert "tool discovery" in recovery
+    assert "If the task is complete" in recovery
+    assert "Do not call tools" not in recovery
+    assert len([e for e in events if isinstance(e, InjectedMessageEvent)]) == 1
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert [e.content for e in results] == ["echo:0", "echo:remaining check"]
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done[-1].stop_reason == StopReason.END_TURN
+    assert done[-1].final_content == "全部检查完成。"
+
+
+@pytest.mark.asyncio
 async def test_repeated_empty_final_answer_after_tool_returns_error():
     """A bounded retry failure is explicit instead of a successful empty END_TURN."""
     llm = MockLLM(

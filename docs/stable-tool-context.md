@@ -10,6 +10,25 @@ Configured first-party `web_search` and `web_extract` have local, stable schemas
 
 Execution events and durable tool call/result records include the backend `tool_id` and `server_name`. These identifiers use the same MCP namespace as the backing tools and remain stable across reconnections.
 
+Both preloaded and searched descriptions identify `callable_function: "call_tool"`
+and include invocation guidance next to the capability's schema. The display `name`
+is not a directly callable function in version 2. Descriptions no longer supply the
+old unconditional `call_example` with empty arguments: `{}` is invalid for tools
+with required inputs. Build `arguments_json` from the actual `input_schema` and
+task inputs. Older descriptions and already-recorded calls remain readable; this
+metadata change does not alter reference admission or the `call_tool` schema.
+Version 2 also explains how to map workflow examples written for another runtime
+to currently available capabilities. This mapping preserves the workflow's business
+steps, user constraints, approvals and manual choices; it does not authorize a
+different task or make an unavailable API callable.
+
+If a turn stops after announcing an action, continuation can restate the current,
+already-delivered route and complete schema named by the continuation verdict.
+Hidden, changed or expired routes are excluded. This hint neither grants permission
+nor increases the retry budget. An empty response after tool use also permits
+remaining authorized work instead of forcing a premature final summary; completed
+actions must not be repeated.
+
 Discovery returns bounded, complete schema entries. Oversized or omitted entries receive a notice rather than an executable reference. Required tool descriptions are delivered again after compaction removes them. Execution events, permission checks, budgets and hooks retain the real target's identity, while model history retains the original `call_tool` call and call ID.
 
 Ordinary MCP tools use `mcp__<server>__<tool>` model-facing names, including

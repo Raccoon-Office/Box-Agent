@@ -28,6 +28,19 @@ _ACTIVATION_COMPANIONS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _tool_call_description(tool_ref: str, parameters: dict) -> dict:
+    """Pair a capability schema with its actual provider-facing entry point."""
+    return {
+        "tool_ref": tool_ref,
+        "input_schema": parameters,
+        "callable_function": "call_tool",
+        "invocation": (
+            "This capability is available now. Call call_tool with tool_ref and "
+            "arguments_json matching input_schema. Do not call the display name directly."
+        ),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ActivatedMCPTool:
     tool_id: str
@@ -455,8 +468,7 @@ class ToolSearchTool(Tool):
                         "already_active": already_active}
             if self._stable_manager is not None:
                 placeholder = "tool:v1:" + "x" * 32
-                preview = {**item, "tool_ref": placeholder, "input_schema": entry.tool.parameters,
-                           "call_example": {"tool_ref": placeholder, "arguments_json": "{}"}}
+                preview = {**item, **_tool_call_description(placeholder, entry.tool.parameters)}
                 size = len(json.dumps(preview, ensure_ascii=False)) + 2
                 if size > _DISCOVERY_ENTRY_BUDGET_CHARS:
                     oversized_count += 1
@@ -645,8 +657,7 @@ class MCPToolExposureManager:
         else:
             ref = "tool:v1:" + secrets.token_urlsafe(24)
             self._stable_refs[ref] = (tool, definition, generation)
-        return {"tool_ref": ref, "input_schema": definition.parameters,
-                "call_example": {"tool_ref": ref, "arguments_json": "{}"}}
+        return _tool_call_description(ref, definition.parameters)
 
     @staticmethod
     def _canonical_descriptor(item: dict) -> str:
@@ -759,9 +770,8 @@ class MCPToolExposureManager:
 
         def render(name: str, description: str, tool: Tool, generation: int | None) -> str:
             placeholder = "tool:v1:" + "x" * 32
-            preview = {"name": name, "description": description, "tool_ref": placeholder,
-                       "input_schema": tool.parameters,
-                       "call_example": {"tool_ref": placeholder, "arguments_json": "{}"}}
+            preview = {"name": name, "description": description,
+                       **_tool_call_description(placeholder, tool.parameters)}
             if len(json.dumps(preview, ensure_ascii=False)) > _DISCOVERY_ENTRY_BUDGET_CHARS:
                 return json.dumps({"name": name[:256], "error": "Tool schema exceeds the discovery size limit and cannot be delivered."}, ensure_ascii=False)
             return json.dumps({"name": name, "description": description,

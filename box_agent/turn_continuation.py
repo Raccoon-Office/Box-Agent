@@ -422,6 +422,7 @@ class TurnContinuationRequest:
     reason: str
     attempt: int
     max_attempts: int
+    evidence: str = ""
 
 
 class TurnContinuationController:
@@ -495,6 +496,7 @@ class TurnContinuationController:
             reason="announced_action_without_tool_call",
             attempt=self._continuations,
             max_attempts=self._max_continuations,
+            evidence=decision.next_action or _truncate_text(candidate, MAX_RESPONSE_CHARS),
         )
         log.info(
             "turn_continuation/injected session_id=%s reason=%s attempt=%d/%d",

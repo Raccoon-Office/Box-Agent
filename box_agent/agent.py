@@ -73,6 +73,15 @@ from box_agent.user_paths import state_path
 _log = logging.getLogger(__name__)
 _ACTIVE_SKILL_TOKEN_BUDGET = 32_000
 _DEFAULT_AGENT_CONFIG = AgentConfig()
+_DISCOVERED_WORKFLOW_GUIDANCE = (
+    "Workflow documents and Skills may describe tools or APIs from another environment. "
+    "Preserve their business steps, constraints, approvals and manual choices, but map the required "
+    "actions to the currently available capabilities and their actual invocation schemas. "
+    "A tool name or code example in a document does not make that API available here. "
+    "For a capability already delivered with a tool_ref, invoke its callable_function using that "
+    "reference and input_schema; do not search for an obsolete API name when an equivalent "
+    "available capability already covers the action. If no equivalent exists, identify the exact gap."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,6 +636,8 @@ class Agent:
                 "Search or call only connected connectors; do not reuse tools from "
                 "disabled or missing connectors."
             )
+            if self.stable_prefix:
+                system_prompt += "\n\n" + _DISCOVERED_WORKFLOW_GUIDANCE
 
         # Only this host knows the exact rules it appended after caller input.
         self._system_prompt_tail = system_prompt[len(caller_system_prompt.rstrip()):]
