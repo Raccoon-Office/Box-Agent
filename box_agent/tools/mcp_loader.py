@@ -1758,6 +1758,7 @@ class MCPServerConnection:
         task = self._connection_task
         if task is None:
             return
+        already_closed = task.done()
         try:
             # Never move SDK teardown into wait_for's helper task, or cancel it
             # halfway through unwinding its AnyIO scopes when a caller leaves.
@@ -1771,9 +1772,12 @@ class MCPServerConnection:
         except asyncio.CancelledError:
             if not task.cancelled():
                 raise
-        if self._close_error is not None:
-            raise RuntimeError(f"Failed to close MCP connection '{self.name}'") from self._close_error
         self._connection_task = None
+        error, self._close_error = self._close_error, None
+        # Completed owners have already logged cleanup failures. Retire them so
+        # a historical error cannot block reconnect; report failures from this wait.
+        if error is not None and not already_closed:
+            raise RuntimeError(f"Failed to close MCP connection '{self.name}'") from error
 
     async def _close_owned_connection(self) -> None:
         try:

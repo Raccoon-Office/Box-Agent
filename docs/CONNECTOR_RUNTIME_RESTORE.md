@@ -37,6 +37,13 @@ Reapplying unchanged configuration retries servers whose last connection failed,
 without restarting healthy or still-loading servers. The returned success value
 reflects that new attempt, including another failure.
 
+Reconnect retires an already-ended connection even if its cleanup logged an
+error, so a historical failure cannot prevent a fresh connection attempt. Cleanup
+still runs in the task that opened the SDK contexts. If that task is still closing,
+the caller waits up to 30 seconds; timeout or caller cancellation leaves the task
+available for a later retry. A cleanup error encountered during that wait is
+reported once, without permanently blocking subsequent attempts.
+
 Conversation connector authorization applies to eager and deferred tools,
 including child inheritance and calls after a selection is revoked. Catalog
 refreshes never add tools to utility sessions, including background discovery.
