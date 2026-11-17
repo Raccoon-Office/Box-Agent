@@ -66,6 +66,12 @@ class DesktopMemoryTool(Tool):
             return ToolResult(success=True, content=content, model_context=content,
                               raw_output=data if isinstance(data, dict) else {"results": data})
         except MemoryProxyError as exc:
+            if exc.code == "CORE_CONTEXT_TOO_LARGE":
+                return ToolResult(success=False, error=(
+                    "CORE_CONTEXT_TOO_LARGE: 当前会话历史、工具定义与本次记忆全文合计超过安全输入预算。"
+                    "这不等于记忆文件本身过大，也不代表云端读取失败；请先压缩会话或新建短会话，"
+                    "再重新 memory_read。不要据此要求用户删除记忆，也不要在上下文未改变时反复重试。"
+                ), raw_output={"code": exc.code, "outcome": exc.outcome})
             return ToolResult(success=False, error=exc.code, raw_output={"code": exc.code, "outcome": exc.outcome})
         except MemoryEditError as exc:
             return ToolResult(success=False, error=str(exc))

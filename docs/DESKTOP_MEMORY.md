@@ -52,6 +52,22 @@ The private diagnostic scope also suppresses raw core-loop and Hook diagnostics,
 
 Bash diagnostics can contain command text and are suppressed in the private scope as well. A Host `MEMORY_SESSION_RETIRED` rejection clears the session's preload and read qualifications. The Host also uses that code when an Experience job's source session is retired; since the response does not distinguish the two cases, this rejection conservatively clears memory for the current turn. After a full batch of three Experience claims, the producer schedules a bounded delayed scan even when every claim returned a job; unknown outcomes still stop advancement.
 
+## Core-read context recovery
+
+When the current turn permits online core reads, `DesktopInputGuard` applies the
+same conservative complete-request budget to final model input and core-read
+admission. A final-input overflow returns `budget_blocked` to the existing shared
+compaction path: compact once, reproject, and stop if the request still does not
+fit. This also works without an optional preload block. Disabled, unavailable,
+offline and retired memory turns retain ordinary request budgeting.
+
+Image content uses the shared pixel-token charge instead of base64 byte length;
+the image transport-size preflight remains authoritative for wire size. Full
+read delivery, successful-response qualification, revocation, protected entries
+and revision checks are unchanged. An oversized new read still fails explicitly,
+with guidance that a combined context overflow does not establish an oversized
+memory file. No tool or write is automatically replayed.
+
 ## Verification boundary
 
 Focused checks: `uv run pytest tests/test_desktop_memory_launch.py tests/test_desktop_memory_attempts.py tests/test_desktop_memory_backend.py tests/test_desktop_memory_inputs.py tests/test_desktop_memory_transport.py tests/test_desktop_memory_visibility.py tests/test_desktop_memory_evidence.py tests/test_desktop_memory_experience.py tests/test_desktop_memory_windows_files.py tests/test_cli_config.py -q`.

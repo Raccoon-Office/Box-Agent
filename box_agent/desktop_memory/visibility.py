@@ -10,7 +10,7 @@ from typing import Callable
 from uuid import uuid4
 
 from ..context_input import DefaultContextEngine, ModelInputGuard, PreparedContext
-from ..kernel.context_engine import request_input_tokens
+from ..kernel.context_engine import _budget_content_json, _budget_image_tokens, request_input_tokens
 from ..schema import Message
 from .transport import MemoryProxyError
 
@@ -145,20 +145,46 @@ class CoreVisibilityGuard(ModelInputGuard):
 
 
 class DesktopInputGuard(CoreVisibilityGuard):
-    """Reduce optional preload before it could block the ordinary model request."""
+    """Bound preload and route complete-input overflow through shared compaction."""
 
-    def __init__(self, notify: VisibilityCallback, content_builder: Callable[[int], str]) -> None:
+    def __init__(self, notify: VisibilityCallback, content_builder: Callable[[int], str], *,
+                 can_read: Callable[[], bool] = lambda: True) -> None:
         super().__init__(notify)
         self._content_builder = content_builder
+        self._can_read = can_read
 
     def _input_tokens(self, messages, definitions) -> int:
         # Nova and other hosted aliases do not expose a verified tokenizer.
         # Byte fallback is conservative for UTF-8/byte-fallback tokenizers and
         # avoids treating Chinese or emoji as chars/4. Never claim exact counts.
-        payload = {"messages": [message.model_dump(exclude_none=True) for message in messages],
+        serialized = [message.model_dump(exclude_none=True) for message in messages]
+        for message, data in zip(messages, serialized):
+            if isinstance(message.content, list):
+                data["content"] = json.loads(_budget_content_json(message.content))
+        payload = {"messages": serialized,
                    "tools": [tool.to_openai_schema() for tool in definitions]}
         byte_bound = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        byte_bound += sum(_budget_image_tokens(message.content) for message in messages)
         return max(request_input_tokens(messages, definitions), byte_bound)
+
+    def prepare_context(self, projection: PreparedContext) -> PreparedContext:
+        context = self._context
+        if (not projection.blocked_reason and self._can_read()
+                and context is not None and context.prepared_tools is not None):
+            estimated = self._input_tokens(projection.messages, context.prepared_tools.definitions)
+            reserve = context._transient_reserve_tokens + 1024
+            if estimated + reserve > context._token_limit:
+                _log.warning("memory operation=model_input reason=request_over_budget budget=utf8_upper_bound "
+                             "estimated=%d limit=%d reserve=%d", estimated, context._token_limit, reserve)
+                # The shared loop compacts once and rebuilds this projection.
+                # Do not grant visibility until that final request succeeds.
+                projection = replace(
+                    projection, budget_blocked=True, on_committed=None, on_response=None,
+                    blocked_reason=("The conversation exceeds the safe input budget for desktop memory. "
+                                    "Start a shorter session if context compaction cannot make room, then "
+                                    "retry memory_read. Do not delete stored memories to reduce conversation history."),
+                )
+        return super().prepare_context(projection)
 
     def project_messages(self, messages, *, tools, token_limit, tail=(), reserve_tokens=0):
         from ..memory import _MEMORY_START, _MEMORY_END, place_memory_block

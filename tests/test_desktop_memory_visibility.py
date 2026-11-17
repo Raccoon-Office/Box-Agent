@@ -217,6 +217,102 @@ def test_conservative_history_budget_omission_is_diagnosable_without_payload(cap
     assert "PRIVATE_PRELOAD" not in caplog.text and "PRIVATE_HISTORY" not in caplog.text
 
 
+@pytest.mark.parametrize("preload", [False, True])
+def test_desktop_history_overflow_requests_shared_compaction_before_model_dispatch(preload, caplog):
+    from box_agent.memory import place_memory_block
+
+    llm = SimpleNamespace(estimate_text_tokens=lambda text: len(text.encode("utf-8")) // 2)
+    guard = DesktopInputGuard(lambda *_: None, lambda size: "PRIVATE_PRELOAD" if size and preload else "")
+    engine = DefaultContextEngine(llm=llm)
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    system = (place_memory_block("BASE", "--- MEMORY START ---\nPRIVATE_PRELOAD\n--- MEMORY END ---", reserve=True)
+              if preload else "BASE")
+    history = [Message(role="system", content=system),
+               Message(role="assistant", content="PRIVATE_HISTORY " * 75000),
+               Message(role="user", content="remember")]
+    tools = prepare_tools([])
+    ordinary = DefaultContextEngine(llm=llm).prepare_request(history, prepared_tools=tools, token_limit=810000)
+    assert ordinary.blocked_reason is None
+    request = engine.prepare_request(history, prepared_tools=tools, token_limit=810000)
+    assert request.budget_blocked and request.blocked_reason
+    assert request.on_committed is None and request.on_response is None
+    assert "operation=model_input reason=request_over_budget" in caplog.text
+    assert "PRIVATE_PRELOAD" not in caplog.text and "PRIVATE_HISTORY" not in caplog.text
+    assert history[1].content == "PRIVATE_HISTORY " * 75000
+
+
+def test_desktop_image_budget_counts_pixels_without_counting_base64_as_text():
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "")
+    image = {"type": "input_image", "media_type": "image/png", "width": 16, "height": 16, "data": "A" * 200000}
+    message = Message(role="user", content=[image])
+    short = message.model_copy(update={"content": [{**image, "data": "AA=="}]})
+    cost = guard._input_tokens([message], [])
+    assert cost == guard._input_tokens([short], [])
+    assert 512 <= cost < 2000
+    assert message.content[0]["data"] == "A" * 200000
+
+
+async def test_desktop_final_overflow_revokes_grant_before_shared_compaction():
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "")
+    engine = DefaultContextEngine(llm=SimpleNamespace(estimate_text_tokens=lambda text: len(text) // 2))
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    messages = [Message(role="system", content="BASE"), Message(role="user", content="remember")]
+    engine.prepare_request(messages, prepared_tools=prepare_tools([]), token_limit=10000)
+    record = read_record()
+    guard.admit(record)
+    delivered = project(engine, messages, record)
+    delivered.on_committed()
+    delivered.on_response()
+    assert await guard.require(record.path) is record
+    blocked = project(engine, [*messages, Message(role="assistant", content="x" * 14000)], record)
+    assert blocked.budget_blocked
+    assert blocked.on_committed is None and blocked.on_response is None
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
+    delivered.on_response()
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
+
+
+@pytest.mark.parametrize("summary_fails", [False, True])
+async def test_desktop_irreducible_input_stops_after_one_compaction(summary_fails):
+    from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
+    from box_agent.runtime import run_agent_loop
+    from box_agent.schema import StreamEvent
+
+    class Provider:
+        summary_calls = 0
+        normal_calls = 0
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 2
+
+        async def generate_stream(self, messages, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                self.summary_calls += 1
+                if summary_fails:
+                    raise RuntimeError("synthetic summary unavailable")
+                yield StreamEvent(type="text", delta="<summary>retained intent</summary>")
+            else:
+                self.normal_calls += 1
+                yield StreamEvent(type="text", delta="must not dispatch")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    activations = []
+    guard = DesktopInputGuard(lambda *args: activations.append(args), lambda _: "")
+    lookup = SimpleNamespace(model_input_guard=guard, auto_match_context=lambda _: [], correction_curator=None)
+    provider = Provider()
+    events = [event async for event in run_agent_loop(
+        llm=provider, tools={}, memory_manager=lookup, token_limit=30000, max_steps=3, logger=None,
+        messages=[Message(role="system", content="x" * 32000), Message(role="user", content="old request"),
+                  Message(role="assistant", content="old answer"), Message(role="user", content="remember")])]
+    assert provider.summary_calls == 1 and provider.normal_calls == 0
+    assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
+    assert any(isinstance(event, ErrorEvent) and "Start a shorter session" in event.message for event in events)
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.ERROR
+    assert not any(event[1] for event in activations)
+
+
 async def test_blocked_model_input_never_grants_visibility(bound):
     guard, _, _, events = bound
     record = read_record()

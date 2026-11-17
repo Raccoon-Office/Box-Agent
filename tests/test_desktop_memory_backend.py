@@ -485,10 +485,13 @@ async def test_small_model_budget_reduces_preload_without_changing_user_rules_or
         engine = DefaultContextEngine()
         engine.bind_memory(manager)
         tools = prepare_tools(create_memory_tools(manager))
-        request = engine.prepare_request(history, prepared_tools=tools, token_limit=3000)
+        # Leave room for schemas + 1,024 headroom under the same strict budget
+        # now used for final requests, while still forcing preload reduction.
+        request = engine.prepare_request(history, prepared_tools=tools, token_limit=5000)
         assert request.blocked_reason is None
         assert "KEEP-USER-RULES" in request.messages[0].content
-        assert request_input_tokens(request.messages, tools.definitions) + 1024 <= 3000
+        assert request_input_tokens(request.messages, tools.definitions) + 1024 <= 5000
+        assert manager.model_input_guard._input_tokens(request.messages, tools.definitions) + 1024 <= 5000
         assert len(request.messages[0].content) < len(original)
         assert history[0].content == original
         assert "experience experience" not in request.messages[0].content
@@ -580,6 +583,107 @@ async def test_emoji_full_read_cannot_use_character_division_as_token_capacity(h
             await manager.read_core_memory("memory.md")
         assert not host.active
         assert not any(operation == "core/mutate" for operation, _ in host.calls)
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.parametrize("mode", ["disabled", "offline", "unavailable", "legacy_read_only", "retired"])
+async def test_unavailable_core_reads_do_not_impose_desktop_budget_on_ordinary_requests(host, mode):
+    host.automatic = mode != "disabled"
+    host.online = mode != "offline"
+    host.source = mode if mode in {"unavailable", "legacy_read_only"} else "cloud"
+    manager = backend(host)
+    try:
+        engine, _ = await start_turn(manager)
+        if mode == "retired":
+            manager.end_turn()
+        engine.bind_model(SimpleNamespace(estimate_text_tokens=lambda text: len(text) // 2))
+        history = [Message(role="system", content="BASE"), Message(role="user", content="x" * 1200000)]
+        request = engine.prepare_request(history, prepared_tools=prepare_tools(create_memory_tools(manager)), token_limit=810000)
+        assert request.blocked_reason is None
+    finally:
+        await manager.aclose()
+
+
+async def test_core_read_budget_error_explains_combined_context_without_exposing_content(host):
+    manager = backend(host)
+    host.files["memory.md"] = "PRIVATE_CORE " * 5000
+    try:
+        await start_turn(manager, limit=15000)
+        reader = next(tool for tool in create_memory_tools(manager) if tool.name == "memory_read")
+        result = await reader.execute(path="memory.md")
+        assert not result.success
+        assert result.raw_output == {"code": "CORE_CONTEXT_TOO_LARGE", "outcome": "not_sent"}
+        assert "不等于记忆文件本身过大" in result.error and "新建短会话" in result.error
+        assert "PRIVATE_CORE" not in str(result)
+        assert not host.active
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.parametrize("exists", [True, False])
+async def test_long_desktop_conversation_compacts_then_reads_and_mutates_core(host, exists):
+    from box_agent.events import ErrorEvent, SummarizationEvent, ToolCallResult
+    from box_agent.runtime import run_agent_loop
+
+    manager = backend(host)
+    if not exists:
+        host.files.pop("memory.md")
+    else:
+        host.files["memory.md"] = '<mem time="2026-11-17 08:00:00" priority="0">KEEP</mem>'
+
+    class Provider:
+        summary_calls = 0
+        normal_calls = 0
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 2
+
+        async def generate_stream(self, messages, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                self.summary_calls += 1
+                yield StreamEvent(type="text", delta="<summary>The user requested a new memory entry.</summary>")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            self.normal_calls += 1
+            assert self.summary_calls == 1
+            if self.normal_calls == 1:
+                name, arguments = "memory_read", {"path": "memory.md"}
+            elif self.normal_calls == 2:
+                reply = next(message for message in messages if message.role == "tool" and message.name == "memory_read")
+                data = json.loads(reply.content)
+                assert data["exists"] is exists
+                assert data["content"] == host.files.get("memory.md", "")
+                if exists:
+                    name, arguments = "memory_edit", {"path": "memory.md", "old_text": "", "new_text": "<mem>NEW</mem>"}
+                else:
+                    name, arguments = "memory_write", {"path": "memory.md", "content": "<mem>NEW</mem>"}
+            else:
+                yield StreamEvent(type="text", delta="saved")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                id=f"call-{self.normal_calls}", type="function", function=FunctionCall(name=name, arguments=arguments))])
+
+    try:
+        await start_turn(manager, limit=810000)
+        provider = Provider()
+        history = [Message(role="system", content="BASE"), Message(role="user", content="old request"),
+                   Message(role="assistant", content="x" * 1200000),
+                   Message(role="user", content="remember NEW")]
+        events = [event async for event in run_agent_loop(
+            llm=provider, messages=history, tools={tool.name: tool for tool in create_memory_tools(manager)},
+            memory_manager=manager, max_steps=3, token_limit=810000, logger=None)]
+        assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
+        assert not [event.message for event in events if isinstance(event, ErrorEvent)]
+        assert not [event.error for event in events if isinstance(event, ToolCallResult) and not event.success]
+        assert provider.normal_calls == 3
+        assert "NEW" in host.files["memory.md"]
+        if exists:
+            assert '<mem time="2026-11-17 08:00:00" priority="0">KEEP</mem>' in host.files["memory.md"]
+        operations = [operation for operation, _ in host.calls]
+        assert operations.count("core/read") == operations.count("core/mutate") == 1
+        assert operations.index("visibility/commit") < operations.index("core/mutate")
     finally:
         await manager.aclose()
 
