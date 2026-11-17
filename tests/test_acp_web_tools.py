@@ -10,7 +10,9 @@ import pytest
 from box_agent.acp import BoxACPAgent
 from box_agent.config import AgentConfig, Config, LLMConfig, MCPConfig, ToolsConfig
 from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+from box_agent.session_log import SessionLog
 from box_agent.tools import mcp_loader
+from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
 from box_agent.tools.setup import (
     initialize_base_tools,
     merge_mcp_tools,
@@ -152,21 +154,46 @@ async def test_hello_offers_web_schemas_without_waiting_for_cold_connections(col
 
 
 @pytest.mark.asyncio
-async def test_web_call_waits_only_for_its_own_connection(cold_web_runtime, tmp_path):
+@pytest.mark.parametrize("server_name, tool_name, arguments", [
+    ("mcp-server-askecho-search-infinity", "web_search", {"query": "Iceland", "count": 1}),
+    ("box-agent-web-extract", "web_extract", {"url": "https://example.org"}),
+])
+async def test_web_call_waits_only_for_its_own_connection_and_persists_backend_identity(
+    cold_web_runtime, tmp_path, server_name, tool_name, arguments,
+):
     runtime = cold_web_runtime
-    session = await _session(runtime.host, tmp_path / "search")
-    runtime.llm.web_request = ("web_search", {"query": "Iceland", "count": 1})
-    prompt = asyncio.create_task(_prompt(runtime.host, session.sessionId, "search Iceland"))
+    workspace = tmp_path / "web-call"
+    session = await _session(runtime.host, workspace)
+    runtime.llm.web_request = (tool_name, arguments)
+    prompt = asyncio.create_task(_prompt(runtime.host, session.sessionId, "use the web tool"))
     await asyncio.wait_for(runtime.waiting.wait(), 3)
     assert not prompt.done()
     assert not runtime.implementations
-    runtime.gates["mcp-server-askecho-search-infinity"].set()
+    runtime.gates[server_name].set()
     assert (await asyncio.wait_for(prompt, 3)).stopReason == "end_turn"
     log = runtime.host._sessions[session.sessionId].agent.session_log
-    results = [event["data"]["result"] for event in log.events_of_type("tool/result")]
-    assert runtime.implementations["web_search"].calls == 1, results
-    assert "web_extract" not in runtime.implementations
+    assert runtime.implementations[tool_name].calls == 1
+    assert set(runtime.implementations) == {tool_name}
     assert not runtime.task.done()
+    entry = get_mcp_tool_catalog().get_by_model_name(tool_name)
+    assert entry is not None
+    log.close()
+    reopened = SessionLog.open(
+        log.path.parent.parent, session_id=log.header["id"], cwd=workspace,
+    )
+    try:
+        calls = [event["data"] for event in reopened.events_of_type("tool/call")]
+        results = [event["data"] for event in reopened.events_of_type("tool/result")]
+        assert len(calls) == len(results) == 1
+        assert calls[0]["name"] == results[0]["message"]["name"] == tool_name
+        assert calls[0]["callId"] == results[0]["message"]["tool_call_id"]
+        assert calls[0]["arguments"] == arguments
+        assert results[0]["result"]["success"] is True
+        for metadata in (calls[0], results[0]["result"]):
+            assert metadata["tool_id"] == entry.tool_id
+            assert metadata["server_name"] == server_name
+    finally:
+        reopened.close()
 
 
 @pytest.mark.asyncio

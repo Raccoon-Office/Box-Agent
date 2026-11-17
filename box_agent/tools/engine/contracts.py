@@ -24,7 +24,10 @@ def _execution_identity(tool: Tool) -> tuple[Any, ...]:
             "name", "mcp_tool_id", "server_name", "_server_name",
             "remote_name", "_remote_name",
         )
-    ) + (getattr(tool, "deduplicate_within_batch", False) is True,)
+    ) + (
+        getattr(tool, "deduplicate_within_batch", False) is True,
+        getattr(tool, "execution_tool_id", None),
+    )
 
 
 def _without_description(schema: dict[str, Any]) -> dict[str, Any]:
@@ -252,12 +255,13 @@ class PreparedTools:
         return None
 
     def target_identity(self, name: str) -> tuple[str | None, str | None]:
-        """Return the original MCP identity for execution events and logging."""
+        """Return native or delegated backend identity for events and logging."""
 
         definition = self._definitions_by_name.get(self.call_names.get(name, name)) or self.routed_definitions.get(name)
         if definition is None:
             return None, None
         tool_id, server_name = definition._identity[1:3]
+        tool_id = tool_id or definition._identity[-1]
         return (
             tool_id if isinstance(tool_id, str) and tool_id else None,
             server_name if isinstance(server_name, str) and server_name else None,

@@ -36,6 +36,8 @@ def test_schemas_are_available_before_connecting(web_backend, monkeypatch):
     }
     assert search.reserved_mcp_entrypoint and extract.reserved_mcp_entrypoint
     assert getattr(search, "mcp_tool_id", None) is None
+    assert search.execution_tool_id == "mcp:mcp-server-askecho-search-infinity/web_search"
+    assert extract.execution_tool_id == "mcp:box-agent-web-extract/web_extract"
     assert search.server_name == mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME
     assert search.transient_followup_allowed is mcp_loader.MCPTool(
         "web_search", "", {}, SimpleNamespace(), server_name=search.server_name,
@@ -105,7 +107,45 @@ async def test_each_call_resolves_the_current_backend_after_reconnection(web_bac
     catalog.replace_server(replacement.server_name, [replacement])
     assert (await proxy.execute(url="https://example.org")).success
     assert (original.calls, replacement.calls) == (1, 1)
+    assert proxy.execution_tool_id == original.mcp_tool_id == replacement.mcp_tool_id
     assert proxy.to_schema() == original_schema
+
+
+def test_backend_identity_metadata_preserves_native_and_local_classification(web_backend):
+    from box_agent.tools.base import Tool
+    from box_agent.tools.engine.engine import DefaultToolEngine
+
+    class LocalTool(Tool):
+        name = "local"
+        description = "Local fixture"
+        parameters = {"type": "object", "properties": {}}
+
+    local = LocalTool()
+    native = FakeMCPTool("lookup", "example")
+    native.execution_tool_id = "ignored-delegated-id"
+    proxy = FirstPartyWebTool("web_extract")
+    prepared = DefaultToolEngine(tools={
+        tool.name: tool for tool in (local, native, proxy)
+    }).prepare_tools()
+    assert prepared.target_identity(local.name) == (None, None)
+    assert prepared.target_identity(native.name) == (native.mcp_tool_id, native.server_name)
+    assert prepared.target_identity(proxy.name) == (proxy.execution_tool_id, proxy.server_name)
+    assert getattr(proxy, "mcp_tool_id", None) is None
+    assert prepared.validate_call(proxy.name) is None
+    proxy.mcp_tool_id = proxy.execution_tool_id
+    assert prepared.validate_call(proxy.name) is not None
+
+
+def test_backend_identity_is_frozen_with_the_request(web_backend, monkeypatch):
+    from box_agent.tools.engine.contracts import ToolDefinitionView
+
+    proxy = FirstPartyWebTool("web_search")
+    definition = ToolDefinitionView.from_tool(proxy)
+    monkeypatch.setattr(
+        FirstPartyWebTool, "execution_tool_id",
+        property(lambda tool: "mcp:changed/web_search"),
+    )
+    assert not definition.matches_target(proxy)
 
 
 @pytest.mark.asyncio
@@ -179,27 +219,35 @@ def test_factory_rejects_connector_owned_lookalikes(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("deferred_mcp", [False, True], ids=["eager", "deferred"])
-async def test_engine_preserves_web_backend_and_charges_one_invocation(web_backend, deferred_mcp):
-    from box_agent.events import ToolCallResult
+@pytest.mark.parametrize(("name", "server", "arguments"), [
+    ("web_search", mcp_loader.HOSTED_WEB_SEARCH_SERVER_NAME, {"query": "Iceland"}),
+    ("web_extract", "box-agent-web-extract", {"url": "https://example.org"}),
+])
+async def test_engine_preserves_web_backend_and_charges_one_invocation(
+    web_backend, deferred_mcp, name, server, arguments, tmp_path,
+):
+    from box_agent.events import ToolCallResult, ToolCallStart
     from box_agent.hooks import BaseHook
     from box_agent.runtime import run_agent_loop
     from box_agent.schema import FunctionCall, LLMResponse, Message, ToolCall
+    from box_agent.session_trace import SessionTraceWriter, scoped_session_trace
     from box_agent.tools.delegated_budget import DelegatedBudget, bind_budgets
     from box_agent.tools.engine.engine import DefaultToolEngine
     from box_agent.tools.mcp_tool_search import MCPToolExposureManager, ToolSearchTool
     from tests.test_mcp_tool_search import MockLLM
 
     catalog, _ = web_backend
-    backend = FakeMCPTool("web_extract", "box-agent-web-extract")
+    backend = FakeMCPTool(name, server)
     catalog.replace_server(backend.server_name, [backend])
     activated = OrderedDict()
     manager = MCPToolExposureManager(catalog, activated, deferred_mcp=deferred_mcp)
     manager.enable_stable_prefix(ToolSearchTool(catalog, activated))
-    tools = {"web_extract": FirstPartyWebTool("web_extract")}
+    tools = {name: FirstPartyWebTool(name)}
     prepared = DefaultToolEngine(tools=tools, tool_exposure=manager).prepare_tools()
-    assert [definition.name for definition in prepared.definitions] == ["web_extract"]
-    assert prepared.validate_call("web_extract") is None
-    assert catalog.get_by_model_name("web_extract").tool is backend
+    assert [definition.name for definition in prepared.definitions] == [name]
+    assert prepared.validate_call(name) is None
+    assert prepared.target_identity(name) == (backend.mcp_tool_id, server)
+    assert catalog.get_by_model_name(name).tool is backend
 
     starts = []
 
@@ -207,23 +255,43 @@ async def test_engine_preserves_web_backend_and_charges_one_invocation(web_backe
         async def on_tool_start(self, *, tool_call_id, tool_name, arguments):
             starts.append((tool_call_id, tool_name, arguments))
 
-    arguments = {"url": "https://example.org"}
+    call_id = f"call-{name}"
     llm = MockLLM([
         LLMResponse(content="", finish_reason="tool_use", tool_calls=[ToolCall(
-            id="extract", type="function", function=FunctionCall(
-                name="web_extract", arguments=arguments,
+            id=call_id, type="function", function=FunctionCall(
+                name=name, arguments=arguments,
             ),
         )]),
         LLMResponse(content="done", finish_reason="stop"),
     ])
     budget = DelegatedBudget(1)
+    writer = SessionTraceWriter(
+        session_id="metadata", acp_session_id="fixture", trace_dir=tmp_path, enabled=True,
+    )
     with bind_budgets((budget,)):
-        results = [event async for event in run_agent_loop(
+        stream = run_agent_loop(
             llm=llm, tools=tools, tool_exposure_manager=manager,
             messages=[Message(role="user", content="Extract the page.")],
             hooks=[Hook()], max_steps=2, max_tool_calls=1,
-        ) if isinstance(event, ToolCallResult)]
-    assert llm.offered_names[0] == ["web_extract"]
+        )
+        events = [event async for event in scoped_session_trace(
+            stream, writer=writer, turn_id="metadata",
+        )]
+    results = [event for event in events if isinstance(event, ToolCallResult)]
+    assert llm.offered_names[0] == [name]
     assert len(results) == 1 and results[0].success
+    execution_events = [event for event in events if isinstance(event, (ToolCallStart, ToolCallResult))]
+    assert len(execution_events) == 2
+    for event in execution_events:
+        assert (event.tool_call_id, event.tool_name, event.tool_id, event.server_name) == (
+            call_id, name, backend.mcp_tool_id, server,
+        )
+    records = [json.loads(line) for line in writer.file_path.read_text().splitlines()]
+    trace_events = [record for record in records if record["event"] in {"tool.request", "tool.response"}]
+    assert len(trace_events) == 2
+    for record in trace_events:
+        assert record["tool_call_id"] == call_id
+        assert record["data"]["tool_id"] == backend.mcp_tool_id
+        assert record["data"]["server_name"] == server
     assert backend.calls == budget.used == 1
-    assert starts == [("extract", "web_extract", arguments)]
+    assert starts == [(call_id, name, arguments)]

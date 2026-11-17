@@ -31,10 +31,15 @@ class ToolMessageCommitter:
     def record_call(self, call: ToolCallRecord, step: int) -> None:
         if self.session_log is None or self.turn is None:
             return
-        self.session_log.append("tool/call", {
+        data = {
             "turn": self.turn, "step": step, "callId": call.call_id,
             "name": call.name, "arguments": call.arguments,
-        })
+        }
+        if call.tool_id is not None:
+            data["tool_id"] = call.tool_id
+        if call.server_name is not None:
+            data["server_name"] = call.server_name
+        self.session_log.append("tool/call", data)
         if call.parallel:
             self._parallel_calls_pending = True
         else:
@@ -55,13 +60,18 @@ class ToolMessageCommitter:
         self.messages.append(message)
         if self.session_log is None or self.turn is None:
             return
+        metadata = {
+            "success": event.success, "content": event.content,
+            "error": event.error, "rawOutput": event.raw_output,
+            "policyDecision": event.policy_decision,
+        }
+        if event.tool_id is not None:
+            metadata["tool_id"] = event.tool_id
+        if event.server_name is not None:
+            metadata["server_name"] = event.server_name
         self.session_log.append_unlogged_messages(
             session_log_messages(self.messages), turn=self.turn, step=step,
-            tool_result_metadata={event.tool_call_id: {
-                "success": event.success, "content": event.content,
-                "error": event.error, "rawOutput": event.raw_output,
-                "policyDecision": event.policy_decision,
-            }},
+            tool_result_metadata={event.tool_call_id: metadata},
         )
         if event.image_content:
             self.session_log.flush()

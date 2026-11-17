@@ -55,6 +55,10 @@ class FirstPartyWebTool(Tool):
         return self._name
 
     @property
+    def execution_tool_id(self) -> str:
+        return f"mcp:{self.server_name}/{self.remote_name}"
+
+    @property
     def description(self) -> str:
         return self._description
 

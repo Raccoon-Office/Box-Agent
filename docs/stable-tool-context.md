@@ -8,6 +8,8 @@ Version 2 keeps the system prompt and provider-facing tool definitions stable du
 
 Configured first-party `web_search` and `web_extract` have local, stable schemas and are included in the basic tool set before MCP connections are ready. An ordinary message can reach the model immediately. Only an actual web invocation waits for its backing server, then delegates to the current MCP tool with the existing argument validation, authentication and result handling. Each invocation resolves the current backend, so reconnecting it does not replace the model-facing tool definition.
 
+Execution events and durable tool call/result records include the backend `tool_id` and `server_name`. These identifiers use the same MCP namespace as the backing tools and remain stable across reconnections.
+
 Discovery returns bounded, complete schema entries. Oversized or omitted entries receive a notice rather than an executable reference. Required tool descriptions are delivered again after compaction removes them. Execution events, permission checks, budgets and hooks retain the real target's identity, while model history retains the original `call_tool` call and call ID.
 
 Ordinary MCP tools use `mcp__<server>__<tool>` model-facing names, including
