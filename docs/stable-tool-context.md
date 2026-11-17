@@ -60,14 +60,21 @@ the exact model-facing names and short purposes of that connector's discoverable
 tools, including tools on its other MCP servers. This metadata does not activate
 sibling tools or issue their schemas or references; use `tool_names` to discover
 the tools needed for later steps. Authorization, visibility and name-conflict
-filters apply before building the catalog. Tools without a connector ID do not
-trigger this expansion.
+filters apply before building the catalog.
+
+For MCP tools without a connector ID, a successful hit returns `server_catalogs`
+instead. Each group identifies its `server_name` and contains only discoverable
+tools without a connector ID from that same server. Different user/system MCP
+servers remain separate, even when a server name equals a connector ID. This
+fallback does not assign a connector identity or change tool authorization.
 
 Purposes are whitespace-normalized and limited to 160 characters. Catalogs share
-an 8,000-character JSON budget per search, separate from the existing schema
+an 8,000-character JSON budget per search across connector and server groups,
+with existing connector groups taking priority, separate from the existing schema
 budget. `tool_count` gives the eligible total, `omitted_count` reports tools
-omitted from a group, and `connector_catalogs_omitted_count` reports whole groups
-omitted for size. Omitted tools remain searchable. An unchanged catalog is sent
+omitted from a group; `connector_catalogs_omitted_count` and
+`server_catalogs_omitted_count` report whole groups omitted for size. Omitted tools
+remain searchable. An unchanged catalog is sent
 once per session; connection-generation or visibility changes allow an update.
 Version 2 also permits redelivery on the next matching search if compaction or
 projection removes the catalog from the model's history. Catalogs are not eagerly

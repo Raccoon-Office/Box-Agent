@@ -1036,6 +1036,8 @@ class SessionState(AgentSession):
     _history_edit_in_progress: bool = field(default=False, init=False, repr=False)
     _history_cancel_requested: bool = field(default=False, init=False, repr=False)
     _history_restore_failed: bool = field(default=False, init=False, repr=False)
+    _mcp_apps_closing: bool = field(default=False, init=False, repr=False)
+    _mcp_apps_nonce: str = field(default_factory=lambda: uuid4().hex, init=False, repr=False)
     trace_writer: SessionTraceWriter | None = None
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None
@@ -1302,6 +1304,8 @@ class BoxACPAgent:
         self._base_tools = base_tools
         self._system_prompt = system_prompt
         self._sessions: dict[str, SessionState] = {}
+        from .mcp_apps import McpAppsACP
+        self._mcp_apps = McpAppsACP(self._sessions)
         # Background services belong to a product session within this adapter,
         # not its replaceable ACP handle. No per-session owner cache is needed.
         self._process_owner_namespace = uuid4()
@@ -1341,6 +1345,7 @@ class BoxACPAgent:
         """Release sessions and application plugins, retaining interrupted owners."""
         self._closing = True
         async with self._close_lock:
+            await self._mcp_apps.close()
             await self._close_sessions()
 
     async def _close_sessions(self) -> None:
@@ -2251,6 +2256,7 @@ class BoxACPAgent:
                 existing_log = existing_state.agent.session_log
                 if existing_log is not None:
                     existing_log.assert_workspace(workspace)
+                await self._mcp_apps.close_session(existing_handle)
                 await existing_state.aclose()
                 if existing_log is not None:
                     existing_log.close()
@@ -2694,6 +2700,11 @@ class BoxACPAgent:
                     }
                     if message.input_facts and message.input_facts.get("kind") == "user_supplement":
                         update.field_meta.update(inputKind="user_supplement", inputId=message.input_facts["id"])
+                    call_id = getattr(update, "tool_call_id", None)
+                    if isinstance(call_id, str):
+                        app_marker = self._mcp_apps.marker(state, call_id)
+                        if app_marker is not None:
+                            update.field_meta["mcpApp"] = app_marker
                     await self._send(session_id, update)
         except BaseException:
             try:
@@ -4007,6 +4018,9 @@ class BoxACPAgent:
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
+        if method.startswith("mcp/apps/"):
+            self._require_accepting_requests()
+            return await self._mcp_apps.dispatch(method, params)
         if method == "request_wrap_up":
             state = self._sessions.get(params.get("sessionId", ""))
             if state is None:
@@ -5370,6 +5384,8 @@ class BoxACPAgent:
             lambda: not state.cancelled and state.current_turn_id == billing_turn_id,
             control=control,
         ))
+        from box_agent.tools.mcp_apps import set_mcp_app_capture, reset_mcp_app_capture
+        app_capture_token = set_mcp_app_capture(self._mcp_apps.capture(state))
         try:
             with scoped_request_context(
                 session_id=billing_session_id or state.upstream_session_id or session_id,
@@ -5387,6 +5403,7 @@ class BoxACPAgent:
                 )
         finally:
             confirmation.reset(billing_token)
+            reset_mcp_app_capture(app_capture_token)
             if trace_token is not None:
                 reset_session_trace_writer(trace_token)
         run_handle = protocol_handle
@@ -5632,10 +5649,13 @@ class BoxACPAgent:
                                 turn_id=task_context.turn_id,
                                 workspace_dir=state.agent.workspace_dir,
                             )
-                            await self._send(
-                                session_id,
-                                update_tool_call(tid, status=status, content=[tool_content(text_block(result_text))], raw_output=output),
+                            result_update = update_tool_call(
+                                tid, status=status, content=[tool_content(text_block(result_text))], raw_output=output,
                             )
+                            app_marker = self._mcp_apps.marker(state, tid)
+                            if app_marker is not None:
+                                result_update.field_meta = {"mcpApp": app_marker}
+                            await self._send(session_id, result_update)
                             if skill_usage_payload:
                                 await _send_skill_usage(tid, skill_usage_payload)
                                 await _send_turn_usage(

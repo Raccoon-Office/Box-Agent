@@ -10,13 +10,15 @@ import pytest
 from mcp import ClientSession, types
 from mcp.server.lowlevel import Server
 
-from box_agent.tools import mcp_loader
+from box_agent.tools import mcp_apps, mcp_loader
 from box_agent.tools.mcp_sources import ResolvedMcpServer
 from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
 
 
-@pytest.fixture
-def sdk_connection(monkeypatch):
+@pytest.fixture(params=[False, True], ids=["plain-mcp", "mcp-apps"])
+def sdk_connection(monkeypatch, request):
+    monkeypatch.setattr(mcp_apps, "_host_enabled", request.param)
+    session_class = mcp_loader.MCPAppsClientSession if request.param else ClientSession
     server = Server("lifecycle-test")
 
     @server.list_tools()
@@ -32,7 +34,7 @@ def sdk_connection(monkeypatch):
                             closing=None, release_close=None, close_error=False, calls=[],
                             transport_failure=None, server=server)
 
-    class ObservedSession(ClientSession):
+    class ObservedSession(session_class):
         async def __aenter__(self):
             result = await super().__aenter__()
             state.scopes.append(self._task_group.cancel_scope)
@@ -79,7 +81,8 @@ def sdk_connection(monkeypatch):
     async def open_transport(conn):
         return await conn.exit_stack.enter_async_context(transport())
 
-    monkeypatch.setattr(mcp_loader, "ClientSession", ObservedSession)
+    monkeypatch.setattr(mcp_loader,
+                        "MCPAppsClientSession" if request.param else "ClientSession", ObservedSession)
     monkeypatch.setattr(mcp_loader.MCPServerConnection, "_connect_stdio", open_transport)
     conn = mcp_loader.MCPServerConnection("lifecycle-test", command="unused", connect_timeout=1)
     return conn, state
