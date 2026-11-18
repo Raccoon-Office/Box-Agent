@@ -11,7 +11,6 @@ from typing import Any
 
 from ..kernel.context_engine import request_input_tokens
 from ..llm.task_budgets import cap_auxiliary_client, require_complete_response
-from ..payload_privacy import private_payload_scope
 from ..schema import Message
 from .transport import MemoryProxyError
 
@@ -142,17 +141,16 @@ class ExperienceRuntime:
                         prompt = job["model_prompt"]
                         if hashlib.sha256(prompt.encode()).hexdigest() != job["model_input_sha256"]:
                             raise ValueError("fixed model input mismatch")
-                        messages = [Message(role="system", content=_SYSTEM, trace_redact_content=True),
-                                    Message(role="user", content=prompt, trace_redact_content=True)]
+                        messages = [Message(role="system", content=_SYSTEM),
+                                    Message(role="user", content=prompt)]
                         reason = "model_failed"
                         try:
                             if type(token_limit) is not int or token_limit <= 0 or request_input_tokens(messages, None) > token_limit:
                                 reason = "model_context_too_large"
                                 raise ValueError("model context budget")
                             model = cap_auxiliary_client(llm, 8192)
-                            with private_payload_scope():
-                                response = await asyncio.wait_for(model.generate(messages=messages, tools=None, thinking_enabled=False,
-                                    session_id=session_id, turn_id=event_id, call_kind="memory_experience"), timeout=30)
+                            response = await asyncio.wait_for(model.generate(messages=messages, tools=None, thinking_enabled=False,
+                                session_id=session_id, turn_id=event_id, call_kind="memory_experience"), timeout=30)
                             require_complete_response(response)
                             if response.tool_calls or response.finish_reason not in {"stop", "end_turn"}:
                                 raise ValueError("unexpected model tool invocation")

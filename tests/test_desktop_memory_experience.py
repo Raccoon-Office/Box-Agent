@@ -9,7 +9,6 @@ import pytest
 
 from box_agent.desktop_memory.experience import ExperienceRuntime
 from box_agent.desktop_memory.transport import MemoryProxyError
-from box_agent.payload_privacy import private_payloads
 from box_agent.schema import LLMResponse
 
 
@@ -89,9 +88,8 @@ class Model:
         self.finish_reason = 'stop'
 
     async def generate(self, **kwargs):
-        assert private_payloads()
         assert kwargs['tools'] is None and kwargs['thinking_enabled'] is False
-        assert all(message.trace_redact_content for message in kwargs['messages'])
+        assert not any(message.trace_redact_content for message in kwargs['messages'])
         self.calls.append(kwargs)
         self.entered.set()
         if self.gate:
@@ -339,8 +337,66 @@ async def test_producer_consumes_the_exact_native_prompt_without_tools_or_main_h
     assert model.calls[0]['messages'][1].content == transport.prompt
     assert transport.proposal == {'facts': [], 'observations': []}
     assert [item['action'] for item in transport.calls] == ['claim', 'model', 'propose', 'renew', 'advance', 'claim']
-    assert not private_payloads()
     runtime.close()
+
+
+async def test_background_experience_keeps_inherited_trace_and_exact_model_payloads(tmp_path):
+    from box_agent.llm.llm_wrapper import LLMClient
+    from box_agent.schema import LLMProvider
+    from box_agent.session_trace import (
+        SessionTraceWriter, emit_session_trace, reset_session_trace_writer, set_session_trace_writer,
+    )
+
+    class Provider(Model):
+        retry_callback = None
+
+        async def generate(self, messages, tools=None, **kwargs):
+            return await super().generate(messages=messages, tools=tools, **kwargs)
+
+    transport, provider, tasks = Transport(), Provider(), set()
+    provider.gate = asyncio.Event()
+    client = LLMClient(api_key="test-only", provider=LLMProvider.OPENAI, model="fixture-model")
+    client._client = provider
+    runtime = ExperienceRuntime(transport)
+    inherited = SessionTraceWriter(session_id="origin-session", acp_session_id="origin-acp",
+                                   trace_dir=tmp_path, enabled=True)
+    unrelated = SessionTraceWriter(session_id="other-session", acp_session_id="other-acp",
+                                  trace_dir=tmp_path, enabled=True)
+    token = set_session_trace_writer(inherited, turn_id="foreground-turn")
+    try:
+        runtime.schedule("delivery-session", client, 100000, tasks)
+    finally:
+        reset_session_trace_writer(token)
+    token = set_session_trace_writer(unrelated, turn_id="other-turn")
+    try:
+        await asyncio.wait_for(provider.entered.wait(), 1)
+        emit_session_trace("caller.after_schedule", data={"content": "unrelated caller"})
+        provider.gate.set()
+        await finish(tasks)
+    finally:
+        reset_session_trace_writer(token)
+        runtime.close()
+
+    records = [json.loads(line) for line in inherited.file_path.read_text().splitlines()]
+    request = next(row for row in records if row["event"] == "llm.request")
+    response = next(row for row in records if row["event"] == "llm.response")
+    assert "caller.after_schedule" not in {row["event"] for row in records}
+    assert request["session_id"] == response["session_id"] == "origin-session"
+    assert request["acp_session_id"] == response["acp_session_id"] == "origin-acp"
+    assert request["turn_id"] == response["turn_id"] == "event"
+    assert request["llm_call_id"] == response["llm_call_id"]
+    assert request["data"]["request_session_id"] == "delivery-session"
+    assert request["data"]["call_kind"] == "memory_experience"
+    assert request["data"]["messages"] == [
+        message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+        for message in provider.calls[0]["messages"]
+    ]
+    assert request["data"]["messages"][1]["content"] == transport.prompt
+    assert response["data"]["content"] == provider.content
+    assert transport.proposal == json.loads(provider.content)
+    assert all(row["data"].get("payload_redacted") is None for row in records)
+    assert [json.loads(line)["event"] for line in unrelated.file_path.read_text().splitlines()] == ["caller.after_schedule"]
+    assert [item["action"] for item in transport.calls] == ["claim", "model", "propose", "renew", "advance", "claim"]
 
 
 @pytest.mark.asyncio
@@ -354,7 +410,6 @@ async def test_scheduling_is_nonblocking_and_cancellation_keeps_the_started_mode
     runtime.close()
     await finish(tasks)
     assert not any(call['action'] in {'propose', 'fail', 'advance'} for call in transport.calls)
-    assert not private_payloads()
 
 
 @pytest.mark.asyncio

@@ -83,7 +83,9 @@ def log_llm_request(
     if not llm_debug_enabled():
         return
 
-    sanitized_payload = sanitize_for_logging(params)
+    from ..payload_privacy import redact_diagnostic_value
+
+    sanitized_payload = redact_diagnostic_value(params)
     if not full_payload_logging_enabled():
         sanitized_payload = summarize_request_payload_for_logging(sanitized_payload)
 
@@ -452,10 +454,9 @@ def _summarize_request_value(value: Any, *, preview_chars: int = _REQUEST_TEXT_P
 
 
 def _emit(record: dict[str, Any]) -> None:
-    from ..payload_privacy import private_payloads
+    from ..payload_privacy import redact_diagnostic_value
 
-    if private_payloads():
-        record = {"event": record.get("event"), "payload_redacted": True}
+    record = redact_diagnostic_value(record)
     full_record = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "level": "DEBUG",

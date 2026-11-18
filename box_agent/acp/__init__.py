@@ -71,6 +71,7 @@ from box_agent.agent_session import AgentSession
 from box_agent.cloud_handoff import cloud_handoff_instruction, validate_cloud_handoff
 from box_agent.acp.message_display import MessageDisplay
 from box_agent.injections import InjectionKind, InjectionManager, MessageInjection
+from box_agent.payload_privacy import diagnostic_continuation_quote, redact_diagnostic_text
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
 from box_agent.session_assembly import create_application_runtime
@@ -2879,14 +2880,6 @@ class BoxACPAgent:
                     log_store.flush()
             if log_store is not None and context:
                 log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
-            config = state.config or self._config
-            if config.agent.memory_backend_type == "desktop":
-                from ..payload_privacy import private_payload_scope
-
-                # Include prompt preparation/finalization and their failures,
-                # not only the inner model iterator's private scope.
-                with private_payload_scope():
-                    return await self._prompt_for_session(params, session_id, state, context, prepared_input)
             return await self._prompt_for_session(params, session_id, state, context, prepared_input)
         except Exception as exc:
             if edit is not None:
@@ -4438,16 +4431,6 @@ class BoxACPAgent:
         return injected
 
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._config.agent.memory_backend_type == "desktop":
-            from ..payload_privacy import private_payload_scope
-
-            # Titles/summaries can contain the same private QA as the main
-            # conversation, even though this endpoint creates no memory turn.
-            with private_payload_scope():
-                return await self._run_llm_prompt(params)
-        return await self._run_llm_prompt(params)
-
-    async def _run_llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single tool-free completion (titles/summaries/rewrites).
 
         Bypasses ``newSession``: no MCP wait, no skills metadata, no tools, no
@@ -5760,12 +5743,15 @@ class BoxACPAgent:
                                 update.field_meta = {"inputStatus": {"injectionId": injection_id, "status": status}}
                                 await self._send(session_id, update)
                                 continue
+                            diagnostic_text = None
+                            if event.kind == InjectionKind.TEXT_CONTINUATION.value:
+                                diagnostic_text = diagnostic_continuation_quote(text, message_display.last_text)
                             log.info(
                                 "session/injected",
                                 session_id=session_id,
                                 injection_id=injection_id,
                                 user_visible=user_visible,
-                                text=text[:80],
+                                text=(diagnostic_text or redact_diagnostic_text(text))[:80],
                             )
                             if not user_visible:
                                 continue
@@ -6475,7 +6461,9 @@ async def run_acp_server(config: Config | None = None) -> None:
     # Clear any pre-existing handlers first to prevent stdout leaks
     logging.root.handlers.clear()
     stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    from box_agent.payload_privacy import DiagnosticFormatter
+
+    stderr_handler.setFormatter(DiagnosticFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.root.addHandler(stderr_handler)
     logging.root.setLevel(logging.INFO)
 

@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from box_agent.user_paths import state_path
-from box_agent.payload_privacy import private_payloads, private_tool_diagnostics
+from box_agent.payload_privacy import diagnostic_event_fields
 
 # ── Level constants ──────────────────────────────────────────
 
@@ -126,11 +126,7 @@ class ACPDebugLogger:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         level_name = _LEVEL_NAMES.get(level, "UNKNOWN")
 
-        tool_name = fields.get("tool_name")
-        if private_payloads() or (
-            isinstance(tool_name, str) and tool_name.startswith("memory_")
-        ):
-            fields = private_tool_diagnostics(event, fields)
+        fields = diagnostic_event_fields(event, fields)
 
         # Sanitize: truncate known large fields
         for key in ("message", "content", "prompt", "arguments", "result"):

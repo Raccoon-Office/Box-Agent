@@ -10,6 +10,10 @@ from .llm.debug_logging import (
     summarize_request_payload_for_logging,
 )
 from .schema import Message, ToolCall
+from .payload_privacy import (
+    diagnostic_event_fields,
+    redact_diagnostic_value,
+)
 
 from box_agent.user_paths import state_path
 
@@ -99,6 +103,7 @@ class AgentLogger:
         if cache_fingerprint is not None:
             request_data["cache_fingerprint"] = dict(cache_fingerprint)
 
+        request_data = redact_diagnostic_value(request_data)
         if not full_payload_logging_enabled():
             request_data = summarize_request_payload_for_logging(request_data)
 
@@ -151,6 +156,7 @@ class AgentLogger:
         if provider_request_id:
             response_data["provider_request_id"] = provider_request_id
 
+        response_data = redact_diagnostic_value(response_data)
         if not full_payload_logging_enabled():
             response_data = summarize_request_payload_for_logging(response_data)
 
@@ -169,6 +175,7 @@ class AgentLogger:
         """
         self.log_index += 1
 
+        record = redact_diagnostic_value(record)
         event = record.get("event", "llm/debug")
         request_id = record.get("request_id") or ""
         summary = f"LLM Debug Record: {event}"
@@ -223,6 +230,7 @@ class AgentLogger:
         if raw_output is not None:
             tool_result_data["raw_output"] = raw_output
 
+        tool_result_data = diagnostic_event_fields("tool.response", tool_result_data)
         if not full_payload_logging_enabled():
             tool_result_data = summarize_request_payload_for_logging(tool_result_data)
 
@@ -241,11 +249,6 @@ class AgentLogger:
         """
         if self.log_file is None:
             return
-
-        from .payload_privacy import private_payloads
-
-        if private_payloads():
-            content = "<private diagnostic payload omitted>"
 
         with open(self.log_file, "a", encoding="utf-8") as f:
             f.write("\n" + "-" * 80 + "\n")

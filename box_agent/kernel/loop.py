@@ -84,6 +84,7 @@ from .tool_messages import (
     validate_tool_history,
 )
 from ..logger import AgentLogger
+from ..payload_privacy import redact_diagnostic_text
 from ..session_log import SessionLogReplayError
 from ..llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from ..loop_guards import (
@@ -2201,7 +2202,9 @@ async def _run_agent_loop_impl(
             )
             and looks_like_truncated_output(response.content)
         ):
-            _tail = response.content.rstrip()[-40:]
+            # Mask the diagnostic copy before slicing can separate a credential
+            # from its label. Continuation and history use the original content.
+            _tail = redact_diagnostic_text(response.content).rstrip()[-40:]
             _log.warning(
                 "suspected_truncation: finish_reason=%r completion_tokens=%s "
                 "content_len=%d request_id=%s tail=%r",

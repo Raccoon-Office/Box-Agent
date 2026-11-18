@@ -8,16 +8,21 @@ Covers:
   short replies via the completion-token floor.
 """
 
+import json
+
 import pytest
 
 from box_agent.core import run_agent_loop
 from box_agent.events import DoneEvent, InjectedMessageEvent, StopReason
+from box_agent.llm.llm_wrapper import LLMClient
 from box_agent.loop_guards import (
     MIN_TOKENS_FOR_TRUNCATION_CHECK,
     looks_like_truncated_output,
     truncation_continuation_text,
 )
-from box_agent.schema import LLMResponse, Message, StreamEvent, TokenUsage
+from box_agent.schema import LLMProvider, LLMResponse, Message, StreamEvent, TokenUsage
+from box_agent.session_trace import SessionTraceWriter, reset_session_trace_writer, set_session_trace_writer
+from tests.test_openai_empty_messages import wire_client
 
 
 # ── Pure detector ───────────────────────────────────────────────
@@ -187,6 +192,55 @@ async def test_complete_numeric_metric_line_finishes_without_appending_a_closing
     assert not any(isinstance(event, InjectedMessageEvent) for event in events)
     assert "".join(m.content or "" for m in messages if m.role == "assistant") == text
     assert [event for event in events if isinstance(event, DoneEvent)][-1].stop_reason == StopReason.END_TURN
+
+
+async def test_truncation_warning_filters_credentials_before_slicing_tail(caplog):
+    value = "f" * 48
+    text = f"The provider stopped in the middle of this response. api_key={value}"
+    llm = MockLLM([_truncated(text)])
+    messages = _msgs()
+    await _collect(run_agent_loop(
+        llm=llm, messages=messages, tools={}, truncation_continuation_enabled=False,
+    ))
+
+    warning, = [record.getMessage() for record in caplog.records
+                if record.getMessage().startswith("suspected_truncation:")]
+    assert "api_key=<redacted>" in warning and value[-40:] not in warning
+    assert messages[-1].content == text
+
+
+@pytest.mark.parametrize("finish", ["length", "stop"])
+async def test_continuation_request_retains_real_tail_on_wire_and_masks_it_in_diagnostics(
+    wire_client, tmp_path, monkeypatch, finish,
+):
+    provider, wire_requests, replies = wire_client
+    secret = "x" * 56
+    first = f"The provider stopped in the middle of this explanation. api_key={secret} next step"
+    replies.extend([({"content": first}, finish), ({"content": "Finished."}, "stop")])
+    client = LLMClient(api_key="test", provider=LLMProvider.OPENAI, model="test-model")
+    await client.aclose()
+    client._client = provider
+    provider_log = tmp_path / "provider.jsonl"
+    monkeypatch.setenv("BOX_AGENT_LLM_DEBUG", "1")
+    monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(provider_log))
+    monkeypatch.setenv("BOX_AGENT_LOG_FULL_PAYLOAD", "1")
+    writer = SessionTraceWriter(session_id="continuation", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    token = set_session_trace_writer(writer, turn_id="turn")
+    try:
+        await _collect(run_agent_loop(llm=client, messages=_msgs(), tools={}, max_steps=3))
+    finally:
+        reset_session_trace_writer(token)
+
+    assert len(wire_requests) == 2
+    assert wire_requests[1]["messages"][-1]["content"] == truncation_continuation_text(first[-40:])
+    trace = [json.loads(line) for line in writer.file_path.read_text().splitlines()]
+    request = [record["data"] for record in trace if record["event"] == "llm.request"][1]
+    debug = [json.loads(line) for line in provider_log.read_text().splitlines()]
+    sdk_request = [record["payload"] for record in debug if record["event"] == "llm/request"][1]
+    for payload in [request, sdk_request]:
+        quote = payload["messages"][-1]["content"]
+        assert "<redacted> next step" in quote and "不要重复" in quote
+        assert secret[-20:] not in json.dumps(payload)
 
 
 async def test_continues_once_on_suspected_truncation():
