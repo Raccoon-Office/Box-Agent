@@ -161,6 +161,9 @@ def test_session_trace_command_options_match_shell_and_argv_copies(tmp_path, pro
     ("env TEST_ENV=neutral curl -u acct:fixture host", "env TEST_ENV=neutral curl -u <redacted> host"),
     ("sudo curl -u acct:fixture host", "sudo curl -u <redacted> host"),
     ("Please run curl -u acct:fixture host", "Please run curl -u <redacted> host"),
+    ("Couldn't run curl -u acct:fixture host", "Couldn't run curl -u <redacted> host"),
+    ("curl -u acct'first last' host", "curl -u <redacted> host"),
+    ("utility --password acct'first last' host", "utility --password <redacted> host"),
     ('bash -lc "curl -u acct:fixture host"', 'bash -lc "curl -u <redacted> host"'),
 ])
 def test_trace_masks_complete_shell_words_and_preserves_neighboring_arguments(tmp_path, command, expected):

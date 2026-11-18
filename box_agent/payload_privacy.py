@@ -44,6 +44,9 @@ _SHELL_TOKEN = re.compile(
     r"""(?P<boundary>[\n;&|])|(?:\\[\s\S]|"(?:\\[\s\S]|[^"\\])*(?:"|\\?\Z)|"""
     r"""'[^']*(?:'|\Z)|[^\s;&|"'\\])+"""
 )
+# A diagnostic prefix may contain an ordinary contraction. Once a command or
+# credential option is active, apostrophes retain their shell quoting meaning.
+_DIAGNOSTIC_TOKEN = re.compile(r"\b[A-Za-z]+(?:'[A-Za-z]+)+(?=$|[\s.,:!?])|" + _SHELL_TOKEN.pattern)
 _ARGV_ARRAY = re.compile(r'\[\s*(?:"(?:\\.|[^"\\])*"\s*,\s*)*"(?:\\.|[^"\\])*"\s*\]')
 # An HTTP Cookie header can contain multiple assignments separated by ';'.
 _COOKIE_LINE = re.compile(r"^([ \t]*(?:set-cookie|cookie)[ \t]*:[ \t]*)[^\r\n]*", re.I | re.M)
@@ -177,7 +180,13 @@ def _redact_command_options(text: str) -> str:
     command = None
     mask_next = False
     shell_script = False
-    for token in _SHELL_TOKEN.finditer(text):
+    position = 0
+    while position < len(text):
+        lexer = _SHELL_TOKEN if mask_next or command in _AUTH_COMMANDS else _DIAGNOSTIC_TOKEN
+        token = lexer.search(text, position)
+        if token is None:
+            break
+        position = token.end()
         word = token[0]
         if token["boundary"]:
             command = None
