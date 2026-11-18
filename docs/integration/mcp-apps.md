@@ -29,7 +29,7 @@ Box-Agent 连接 MCP Server 时仍声明标准 `io.modelcontextprotocol/ui` exte
 | 方法 | 参数 | 返回 |
 | --- | --- | --- |
 | `_mcp/apps/snapshot` | `{sessionId, toolCallId}` | `{version:1, bindingId, resourceUri, tool, arguments, result}` |
-| `_mcp/apps/resource` | `{sessionId, toolCallId, bindingId, uri}` | 标准 `ReadResourceResult`：`{contents:[...]}` |
+| `_mcp/apps/resource` | `{sessionId, toolCallId, bindingId, uri}` | `ReadResourceResult`：`{contents:[...]}`；读取历史入口 UI 时另返回 `resolvedResourceUri` |
 | `_mcp/apps/call` | `{sessionId, toolCallId, bindingId, interactionId, name, arguments}` | 标准 `CallToolResult` |
 | `_mcp/apps/cancel` | `{sessionId, interactionId}` | `{cancelled:boolean}` |
 
@@ -37,13 +37,37 @@ Box-Agent 连接 MCP Server 时仍声明标准 `io.modelcontextprotocol/ui` exte
 `description`、`_meta` 等字段；`arguments` 是对象，`result` 是完整 MCP 工具结果。
 `name` 使用该 MCP Server 的原始工具名，不能填宿主内置工具名或其他服务的路由名。
 
+### 页面升级后的历史恢复
+
+`snapshot.resourceUri` 始终是原调用保存的地址，`tool`、`arguments`、`result` 也保持原样。
+打开时优先读取该历史 URI，不要求它仍出现在当前工具声明或资源列表中。
+授权来自有效 Session Log 中的原调用，并要求同服务身份、原工具仍可用且具有 UI、
+当前会话 connector 权限及连接 binding 有效；不恢复旧服务进程或跨服务请求页面。
+
+只有 `resources/read` 明确返回资源不存在，才从同一工具的当前 descriptor 取得新 URI，
+重新检查 binding/历史后最多读取一次。兼容旧代码 `-32002`；`-32602` 必须包含明确的
+missing-resource 消息，仅匹配 `data.uri` 不能认定缺页。普通参数错误或 URI 禁止访问
+即使携带相同 `data.uri` 也不回退。参见
+[MCP Resources 错误约定](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#error-handling)。
+鉴权失败、传输 HTTP 404、超时、空内容、MIME/正文不合法和普通内部错误不触发回退。
+缺页返回 `APP_RESOURCE_NOT_FOUND`；可识别的 HTTP 401/403 返回 `APP_AUTH_REQUIRED`，
+超时返回 `MCP_APP_REQUEST_TIMEOUT`。服务端任意诊断文本不透传到宿主错误提示。
+
+入口读取成功时，ACP 覆盖返回 `resolvedResourceUri` 为实际选定地址，不能由服务端正文
+伪造。Lab 使用它校验、加载 HTML 和其 CSP，并在视图内单独记录；历史快照地址不改写。
+AppBridge 仍回放原输入和完整结果，恢复不会重跑原业务工具或代确认。
+新页面解释旧数据的兼容性由 MCP 服务负责；宿主不猜版本号或迁移服务业务字段。
+
 `bindingId` 绑定运行时、会话实例、原调用、服务身份及连接代次。Lab 主进程保管它，
 不写入历史、不向第三方 iframe 暴露。每个会话实例使用独立随机 nonce，不依赖可复用的
-对象地址；会话重绑定或连接代次变化使旧值失效；
+对象地址；会话重绑定、连接代次或当前工具 UI 地址变化使旧值失效；
 必须重新请求快照，不能把旧 token 当永久授权。
-服务身份还包含配置来源、显式 `env` / `headers` 及 `credentialRef`；改变这些配置
-会使旧卡片失效，不能将原业务 ID 转交新后端。相同配置的重连、运行时凭据刷新
-仍可重新获取 binding。旧身份算法保存的快照不自动迁移，需要重新生成卡片。
+服务身份固定沿用原版计算字段：服务名、连接类型、启动命令、启动参数、URL 和
+connector ID；按原版 JSON 序列化规则计算 SHA-256。配置归属、配置 ID、配置路径、
+`env` / `headers` 和 `credentialRef` 不参与指纹，修改这些信息不会单独使历史卡片失效。
+服务路由字段改变仍返回 `APP_SERVER_CHANGED`，会话授权、connector 权限及连接代次
+继续独立校验。原版指纹的快照直接恢复，不改写历史、不重跑业务工具；不增加扩展字段
+指纹的兼容分支或迁移流程。
 
 ## 执行与授权边界
 

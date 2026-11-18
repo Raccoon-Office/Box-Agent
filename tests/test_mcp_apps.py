@@ -10,6 +10,7 @@ import anyio
 import pytest
 from mcp import types
 from mcp.server.lowlevel import Server
+from mcp.shared.exceptions import McpError
 
 from box_agent.tools import mcp_apps, mcp_loader
 from box_agent.tools.base import ToolInvocationContext
@@ -328,6 +329,73 @@ async def test_resource_read_reuses_connection_and_listing_security_metadata(app
 
 
 @pytest.mark.asyncio
+async def test_saved_ui_entry_uses_original_tool_authority_after_resource_upgrade(app_connection):
+    connection, session = app_connection
+    for tool in connection.tools:
+        tool.mcp_ui_resource_uri = 'ui://flights/v2.html'
+    result = await mcp_loader.read_mcp_app_resource(
+        'flights', URI, **bound_arguments(), ui_tool_name='search')
+    assert result['contents'][0]['uri'] == URI
+    assert result['contents'][0]['_meta']['ui']['csp']['connectDomains'] == ['https://flights.example']
+    for name in ['missing', 'refresh']:
+        with pytest.raises(mcp_apps.McpAppError, match='APP_RESOURCE_NOT_ALLOWED'):
+            await mcp_loader.read_mcp_app_resource(
+                'flights', URI, **bound_arguments(), ui_tool_name=name)
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('code,message,data,missing', [
+    (-32002, 'Resource not found', None, True),
+    (-32602, 'Resource not found', {'uri': URI}, True),
+    (-32602, f'Resource {URI} not found', None, True),
+    (-32602, f'Unknown resource: {URI}', None, True),
+    (-32602, 'Invalid arguments', None, False),
+    (-32602, 'Invalid arguments', {'uri': URI}, False),
+    (-32602, 'URI forbidden', {'uri': URI}, False),
+    (-32602, 'Invalid resource parameters: locale is required', {'uri': URI, 'parameter': 'locale'}, False),
+    (-32603, 'Internal error', None, False),
+    (-32000, 'Unauthorized', None, False),
+])
+async def test_resource_not_found_classification_does_not_mask_other_errors(
+    app_connection, code, message, data, missing,
+):
+    _, session = app_connection
+    error = McpError(types.ErrorData(code=code, message=message, data=data))
+    async def read(uri):
+        raise error
+    session.read_resource = read
+    with pytest.raises(mcp_apps.McpAppError if missing else McpError) as caught:
+        await mcp_loader.read_mcp_app_resource('flights', URI, **bound_arguments())
+    if missing:
+        assert caught.value.code == 'APP_RESOURCE_NOT_FOUND'
+    else:
+        assert caught.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['connector', 'generation', 'visibility'])
+async def test_historical_resource_read_rechecks_authority_after_response(app_connection, change):
+    connection, session = app_connection
+    allowed = {'travel'}
+    original = session.read_resource
+    async def read(uri):
+        response = await original(uri)
+        if change == 'connector':
+            allowed.clear()
+        elif change == 'generation':
+            connection.tools[0]._mcp_generation += 1
+        else:
+            connection.tools[0].mcp_visibility = frozenset({'app'})
+        return response
+    session.read_resource = read
+    with pytest.raises(mcp_apps.McpAppError, match='APP_CONNECTOR_DISABLED|APP_BINDING_EXPIRED'):
+        await mcp_loader.read_mcp_app_resource('flights', URI, **{
+            **bound_arguments(), 'allowed_connector_ids': lambda: frozenset(allowed),
+        }, ui_tool_name='search')
+
+
+@pytest.mark.asyncio
 async def test_app_only_call_returns_original_result_once_without_capturing_new_chat_view(app_connection):
     connection, session = app_connection
     snapshots = []
@@ -600,8 +668,31 @@ async def test_hosted_search_rechecks_app_admission_after_reconnect_lock_wait(mo
     assert len(session.calls) == 1
 
 
-@pytest.mark.parametrize("change", ["env", "headers", "owner", "source_path"])
-def test_configured_backend_changes_invalidate_app_server_identity(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("config,expected", [
+    ({"connection_type": "streamable_http", "url": "https://flights.example/mcp"},
+     "860bcdc38f9275ebbd0e8951fddfdab82ed9373662059e13cc1d74caf1b32e8d"),
+    ({"command": "flight-server", "args": ["--mode", "test"]},
+     "d98c74b5a3d942456729b1df68cb0e208019af2427fc7ac44638f0b7922f6f89"),
+])
+def test_app_server_identity_matches_original_saved_fingerprints(config, expected):
+    connection = mcp_loader.MCPServerConnection("flights", **config)
+    assert connection.server_identity == expected
+
+
+@pytest.mark.parametrize("change", [
+    {"name": "other-flights"}, {"connection_type": "sse"},
+    {"command": "other-server"}, {"args": ["--other"]},
+    {"url": "https://other.example/mcp"}, {"connector_id": "other-connector"},
+])
+def test_service_routing_changes_invalidate_app_server_identity(change):
+    config = {"name": "flights", "command": "flight-server", "args": ["--mode", "test"]}
+    original = mcp_loader.MCPServerConnection(**config)
+    changed = mcp_loader.MCPServerConnection(**{**config, **change})
+    assert changed.server_identity != original.server_identity
+
+
+@pytest.mark.parametrize("change", ["env", "headers", "owner", "config_id", "source_path"])
+def test_non_routing_config_changes_preserve_app_server_identity(tmp_path, monkeypatch, change):
     from dataclasses import replace
     from box_agent.tools.mcp_sources import ResolvedMcpServer
 
@@ -619,14 +710,16 @@ def test_configured_backend_changes_invalidate_app_server_identity(tmp_path, mon
         changed = replace(definition, config={**config, 'headers': {'X-Tenant': 'B'}})
     elif change == 'owner':
         changed = replace(definition, owner='system', config_id='system:data')
+    elif change == 'config_id':
+        changed = replace(definition, config_id='custom-mcp:renamed')
     else:
         changed = replace(definition, source_path=str(tmp_path / 'another-mcp.json'))
-    assert mcp_loader._build_connection(changed).server_identity != original.server_identity
+    assert mcp_loader._build_connection(changed).server_identity == original.server_identity
     reordered = replace(definition, config=dict(reversed(list(config.items()))))
     assert mcp_loader._build_connection(reordered).server_identity == original.server_identity
 
 
-def test_runtime_credential_refresh_preserves_app_server_identity(monkeypatch):
+def test_runtime_credentials_and_reference_preserve_app_server_identity(monkeypatch):
     from dataclasses import replace
     from box_agent.tools.mcp_sources import ResolvedMcpServer
 
@@ -644,7 +737,7 @@ def test_runtime_credential_refresh_preserves_app_server_identity(monkeypatch):
     assert refreshed.headers['Authorization'] != original.headers['Authorization']
     assert refreshed.server_identity == original.server_identity
     changed_reference = replace(definition, config={**definition.config, 'credentialRef': 'other-account'})
-    assert mcp_loader._build_connection(changed_reference).server_identity != original.server_identity
+    assert mcp_loader._build_connection(changed_reference).server_identity == original.server_identity
 
 
 @pytest.mark.asyncio

@@ -1677,15 +1677,12 @@ class MCPServerConnection:
         always_load: bool = False,
         connector_id: str | None = None,
         connector_name: str | None = None,
-        app_identity_config: dict[str, Any] | None = None,
     ):
         self.name = name
         self.apps_enabled = mcp_apps_host_enabled()
+        # Keep the original routing fields so saved App identities survive upgrades.
         self.server_identity = hashlib.sha256(json.dumps(
-            [name, connection_type, command, args or [], url, connector_id,
-             app_identity_config if app_identity_config is not None else {
-                 "env": env or {}, "headers": headers or {},
-             }],
+            [name, connection_type, command, args or [], url, connector_id],
             ensure_ascii=True, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
         self.connection_type = connection_type
@@ -2732,16 +2729,6 @@ def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
         always_load=bool(server_config.get("alwaysLoad", False)),
         connector_id=definition.connector_id,
         connector_name=definition.connector_name,
-        # Bind Apps to configured routing and ownership, not refreshed runtime
-        # credentials or operational settings such as timeouts/alwaysLoad.
-        app_identity_config={
-            "owner": definition.owner,
-            "configId": definition.config_id,
-            "sourcePath": definition.source_path,
-            "env": definition.config.get("env") or {},
-            "headers": definition.config.get("headers") or {},
-            "credentialRef": definition.config.get("credentialRef"),
-        },
     )
 
 
@@ -3488,20 +3475,45 @@ async def read_mcp_app_resource(
     generation: int,
     allowed_connector_ids: frozenset[str] | Callable[[], frozenset[str]],
     require_ui: bool = True,
+    ui_tool_name: str | None = None,
 ) -> dict[str, Any]:
-    """Read App resources on the existing authenticated, generation-bound connection."""
+    """Read on the bound connection; ACP may authorize its saved tool's historical UI."""
     connection = _resolve_mcp_app_connection(
         server_name, server_identity=server_identity,
         allowed_connector_ids=allowed_connector_ids,
     )
-    owners = [tool for tool in connection.tools
-              if not require_ui or tool.mcp_ui_resource_uri == resource_uri]
+    def owns_resource(tool: MCPTool) -> bool:
+        if ui_tool_name is not None:
+            return (require_ui and bool(tool.mcp_ui_resource_uri)
+                    and tool.remote_name == ui_tool_name and mcp_tool_allows(tool, "model"))
+        return not require_ui or tool.mcp_ui_resource_uri == resource_uri
+
+    owners = [tool for tool in connection.tools if owns_resource(tool)]
     if not owners:
         raise McpAppError("APP_RESOURCE_NOT_ALLOWED")
     if not any(tool.mcp_generation == generation for tool in owners):
         raise McpAppError("APP_BINDING_EXPIRED")
     async with _timeout(connection._get_execute_timeout()):
-        response = await connection.session.read_resource(resource_uri)
+        try:
+            response = await connection.session.read_resource(resource_uri)
+        except Exception as exc:
+            if _mcp_auth_status(exc) is not None:
+                raise McpAppError("APP_AUTH_REQUIRED") from exc
+            if not isinstance(exc, McpError):
+                raise
+            error = exc.error
+            # -32002 is the legacy resource-not-found code. Newer servers use
+            # Invalid Params; require a precise missing-resource message. data.uri
+            # identifies the failed resource, not whether it is missing.
+            missing = error.code == -32002 or (
+                error.code == -32602 and error.message in {
+                    "Resource not found", f"Resource not found: {resource_uri}",
+                    f"Resource {resource_uri} not found", f"Unknown resource: {resource_uri}",
+                }
+            )
+            if missing:
+                raise McpAppError("APP_RESOURCE_NOT_FOUND") from exc
+            raise
         value = response.model_dump(mode="json", by_alias=True, exclude_none=True)
         contents = value.get("contents", [])
         if require_ui:
@@ -3545,7 +3557,7 @@ async def read_mcp_app_resource(
             allowed_connector_ids=allowed_connector_ids,
         )
         if current is not connection or not any(
-            (not require_ui or tool.mcp_ui_resource_uri == resource_uri) and tool.mcp_generation == generation
+            owns_resource(tool) and tool.mcp_generation == generation
             for tool in current.tools
         ):
             raise McpAppError("APP_BINDING_EXPIRED")

@@ -130,11 +130,12 @@ class McpAppsACP:
             server_identity=snapshot["serverIdentity"],
             allowed_connector_ids=lambda: self._allowed_connectors(state), actor="model",
         )
-        if tool.mcp_ui_resource_uri != snapshot["resourceUri"]:
-            raise _error("MCP_APP_RESOURCE_CHANGED")
+        if not tool.mcp_ui_resource_uri:
+            raise _error("MCP_APP_RESOURCE_UNAVAILABLE")
         material = json.dumps([
             self._epoch, session_id, state._mcp_apps_nonce, call_id,
             tool.mcp_server_identity, tool.mcp_generation, snapshot["resourceUri"],
+            tool.mcp_ui_resource_uri,
         ], separators=(",", ":"))
         binding_id = sha256(material.encode()).hexdigest()
         if bound and not compare_digest(_string(params.get("bindingId")), binding_id):
@@ -164,20 +165,44 @@ class McpAppsACP:
                         "resourceUri": snapshot["resourceUri"], "tool": snapshot["tool"],
                         "arguments": snapshot["arguments"], "result": snapshot["result"]}
             if method == "mcp/apps/resource":
+                from box_agent.tools.mcp_apps import McpAppError
                 from box_agent.tools.mcp_loader import read_mcp_app_resource
                 uri = _string(params.get("uri"), limit=2048)
-                result = await read_mcp_app_resource(
-                    snapshot["serverName"], uri, server_identity=tool.mcp_server_identity,
-                    generation=tool.mcp_generation, allowed_connector_ids=lambda: self._allowed_connectors(state),
-                    require_ui=uri == snapshot["resourceUri"],
-                )
+                initial_ui = uri == snapshot["resourceUri"]
+
+                async def read(resource_uri: str):
+                    return await read_mcp_app_resource(
+                        snapshot["serverName"], resource_uri, server_identity=tool.mcp_server_identity,
+                        generation=tool.mcp_generation, allowed_connector_ids=lambda: self._allowed_connectors(state),
+                        require_ui=initial_ui,
+                        # Only the original, persisted call authorizes a historical entry point.
+                        ui_tool_name=snapshot["tool"]["name"] if initial_ui else None,
+                    )
+
+                try:
+                    result = await read(uri)
+                except McpAppError as exc:
+                    if (not initial_ui or exc.code != "APP_RESOURCE_NOT_FOUND"
+                            or tool.mcp_ui_resource_uri == uri):
+                        raise
+                    # A missing old resource may use this same tool's current UI once.
+                    # Recheck history, identity and binding before the second request.
+                    self._resolve(params, bound=True)
+                    uri = tool.mcp_ui_resource_uri
+                    result = await read(uri)
                 self._assert_current(session_id, state)
+                self._resolve(params, bound=True)
+                if initial_ui:
+                    # Host-owned metadata; never trust a server-supplied resolved URI.
+                    return {**result, "resolvedResourceUri": uri}
                 return result
             if method == "mcp/apps/call":
                 return await self._call(session_id, state, snapshot, tool, params)
             raise _error("MCP_APP_METHOD_UNSUPPORTED")
         except RequestError:
             raise
+        except TimeoutError as exc:
+            raise _error("MCP_APP_REQUEST_TIMEOUT") from exc
         except asyncio.CancelledError:
             raise
         except Exception as exc:
