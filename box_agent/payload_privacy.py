@@ -39,7 +39,6 @@ _VALUE = re.compile(
     r""""(?:\\.|[^"\\])*(?:"|\\?\Z)|'(?:\\.|[^'\\])*(?:'|\\?\Z)|"""
     r"""(?:Bearer|Basic)[ \t]+[^\s,;&"'\]}]+|[^\s,;&"'\]}]+""", re.I,
 )
-_SECRET_FLAG = r"--(?:password|passwd|passphrase|token|api-key|credentials)"
 _AUTH_COMMANDS = {"curl", "mysql", "mariadb"}
 _SHELL_COMMANDS = {"sh", "bash", "dash", "zsh", "ksh"}
 # Keep shell word spans so masking can preserve the caller's exact spacing.
@@ -246,8 +245,10 @@ def _redact_config_values(text: str) -> str:
                 continue
             before = text[beginning:match.start()]
             if not _MAPPING_PREFIX.fullmatch(before):
-                # A same-line log prefix may precede an explicit block header.
-                if start == len(text) or text[start] not in "|>\r\n":
+                # Valid flow containers have already been parsed. An unfinished
+                # fragment may still contain a multiword credential value.
+                flow = before.rstrip(" \t'\"").endswith(("{", ",")) and "{" in before
+                if not flow and (start == len(text) or text[start] not in "|>\r\n"):
                     continue
                 before = before[:len(before) - len(before.lstrip(" \t"))]
             edit = _yaml_value_edit(text, start, len(before.rstrip("'\"")), key)
@@ -278,7 +279,9 @@ def _redact_assignments(text: str) -> str:
             continue
         start = match.end()
         if ":" in match["separator"] and text.startswith("#", start):
-            continue  # A YAML header comment before a value on a subsequent line.
+            beginning = max(text.rfind("\n", 0, match.start()), text.rfind("\r", 0, match.start())) + 1
+            if _MAPPING_PREFIX.fullmatch(text[beginning:match.start()]):
+                continue  # A YAML header comment before a value on a subsequent line.
         if text[start:start + 1] in ("{", "["):
             pieces.extend((text[end:start], '"<redacted>"'))
             end = _container_end(text, start)
@@ -416,7 +419,9 @@ def _command_name(first: Any) -> str:
 
 def _credential_option(command: str | None, arg: str) -> str | None:
     flag, equals, _ = arg.partition("=")
-    if re.fullmatch(_SECRET_FLAG, flag) or (command == "curl" and flag in ("-u", "--user")):
+    if flag.startswith("--") and not flag.startswith(("--no-", "--ask-")) and _credential_key(flag[2:]):
+        return flag + equals
+    if command == "curl" and flag in ("-u", "--user"):
         return flag + equals
     if command == "curl" and arg.startswith("-u"):
         return "-u"
@@ -577,12 +582,12 @@ def _filter_yaml_structure(text: str) -> str | None:
             else:
                 shape = value.value
             masked = _mask_field(child_context, key, shape)
-            if masked is shape:
-                # The regular text filters below must not mistake a credential
-                # declaration in properties for the credential it describes.
+            if masked is shape or node.flow_style:
+                # Protect processed entries from the incomplete-fragment fallback.
                 label = f"{prefix}{len(labels)}X"
                 labels.append((label, text[field.start_mark.index:field.end_mark.index]))
                 edits.append((field.start_mark.index, field.end_mark.index, label))
+            if masked is shape:
                 pending.append((value, child_context))
             elif node.flow_style or context == "credential_schema":
                 # Other block-style entries are handled with their header
@@ -594,7 +599,9 @@ def _filter_yaml_structure(text: str) -> str | None:
                     replacement = " " * (field.start_mark.column + 2 - value.start_mark.column) + replacement
                 edits.append((first, stop, replacement))
     if not edits:
-        return None
+        # A parsed flow document still needs its ordinary text filters, but
+        # sending it back through fragment discovery would parse it twice.
+        return _redact_plain_text(text) if root.flow_style else None
     pieces = []
     end = 0
     for first, stop, replacement in sorted(edits):
@@ -663,18 +670,22 @@ def redact_diagnostic_text(text: str) -> str:
     # on the encoded object could swallow a JSON-escaped newline or delimiter.
     if "[" in text and "-" in text:
         text = _ARGV_ARRAY.sub(_redact_serialized_argv, text)
-    if (text.lstrip().startswith(("{", "[")) and text.rstrip().endswith(("}", "]"))
-            and '"' in text):
+    whole_container = text.lstrip().startswith(("{", "[")) and text.rstrip().endswith(("}", "]"))
+    if whole_container and '"' in text:
         try:
             parsed = json.loads(text)
         except (ValueError, RecursionError):
             pass  # Also handle escaped shell fragments and Python reprs.
         else:
             return _redact_json(text, parsed)
-    if "properties" in text and ":" in text:
-        schema = _filter_yaml_structure(text)
-        if schema is not None:
-            return schema
+    # A bare YAML flow value can contain a literal apostrophe. Parse that
+    # document before the embedded-fragment scanner treats it as an open quote.
+    if ":" in text and (
+        "properties" in text or (whole_container and re.search(r"[{,]\s*[\w.-]+\s*:", text))
+    ):
+        cleaned = _filter_yaml_structure(text)
+        if cleaned is not None:
+            return cleaned
     if ('"' in text or "'" in text or ":" in text) and ("{" in text or "[" in text):
         return _filter_embedded_containers(text)
     return _redact_plain_text(text)

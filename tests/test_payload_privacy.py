@@ -150,6 +150,30 @@ def test_session_trace_command_options_match_shell_and_argv_copies(tmp_path, pro
     assert json.dumps(args) == original
 
 
+@pytest.mark.parametrize("flag", ["--client-secret", "--access-token", "--refresh-token", "--apiKey"])
+@pytest.mark.parametrize("separate", [True, False], ids=["separate", "equals"])
+def test_default_trace_masks_credential_cli_values_and_keeps_ordinary_flags(tmp_path, monkeypatch, flag, separate):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    value = "SYNTHETIC-CLI-CANARY"
+    options = [flag, value] if separate else [f"{flag}={value}"]
+    argv = ["oauth2l", "fetch", *options, "--scope", "email", "--no-password", "--max-tokens", "128"]
+    command = " ".join(argv)
+    arguments = {"command": command, "argv": argv, "serialized": json.dumps(argv)}
+    history = json.dumps({"arguments": arguments, "status": "retry"})
+    writer = SessionTraceWriter(session_id="cli-flags", acp_session_id="", trace_dir=tmp_path)
+    writer.write("tool.request", data={"arguments": arguments})
+    writer.write("llm.request", data={"messages": [{"role": "tool", "content": history}]})
+
+    output = writer.file_path.read_text()
+    assert value not in output
+    tool, model = (json.loads(line)["data"] for line in output.splitlines())
+    safe = [word.replace(value, "<redacted>") for word in argv]
+    expected = {"command": " ".join(safe), "argv": safe, "serialized": json.dumps(safe)}
+    assert tool["arguments"] == expected
+    assert json.loads(model["messages"][0]["content"]) == {"arguments": expected, "status": "retry"}
+    assert command == " ".join(argv) and value in command and value in history
+
+
 @pytest.mark.parametrize("command,expected", [
     ('curl -u user:"fixture secret" host', 'curl -u <redacted> host'),
     ('curl -u "user":"fixture" host', 'curl -u <redacted> host'),
@@ -340,6 +364,36 @@ def test_trace_masks_entire_yaml_flow_value_and_preserves_adjacent_fields(tmp_pa
     recorded = json.loads(writer.file_path.read_text())["data"]["messages"][0]["content"]
     assert yaml.safe_load(recorded) == {"settings": {"password": "<redacted>", "mode": "retry"}, "status": "waiting"}
     assert "CANARY-FLOW" not in recorded and message["content"] == text
+
+
+@pytest.mark.parametrize("as_list", [False, True], ids=["mapping", "sequence"])
+def test_trace_preserves_flow_yaml_around_a_plain_credential_with_an_apostrophe(tmp_path, as_list):
+    service = {"service": {"credentials": "quote'd and CANARY-END", "ordinary": "keep # part", "attempts": 3}}
+    original = [service] if as_list else service
+    text = yaml.safe_dump(original, default_flow_style=True, sort_keys=False)
+    writer = SessionTraceWriter(session_id="flow-apostrophe", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    writer.write("tool.response", data={"content": text})
+    recorded = json.loads(writer.file_path.read_text())["data"]["content"]
+    safe = {"service": {**service["service"], "credentials": "<redacted>"}}
+    assert yaml.safe_load(recorded) == ([safe] if as_list else safe)
+    assert "CANARY-END" not in recorded and "CANARY-END" in text
+
+
+@pytest.mark.parametrize("prefix,value", [
+    ("settings: {mode: keep, password: ", "split CANARY-FLOW"),
+    ("settings: {password: ", "first CANARY-FLOW"),
+    ("status before password: ", "#CANARY-PROSE"),
+])
+def test_default_trace_masks_partial_flow_and_plain_prose_credentials(tmp_path, monkeypatch, prefix, value):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    suffix = "\nstatus: retry\n"
+    text = prefix + value + suffix
+    writer = SessionTraceWriter(session_id="partial-prose", acp_session_id="", trace_dir=tmp_path)
+    writer.write("tool.response", data={"error": text, "model_content": json.dumps({"stderr": text})})
+    recorded = json.loads(writer.file_path.read_text())["data"]
+    expected = prefix + "<redacted>" + suffix
+    assert recorded["error"] == expected
+    assert json.loads(recorded["model_content"]) == {"stderr": expected}
 
 
 def test_trace_preserves_yaml_tool_schema_constraints_while_masking_credential_default(tmp_path):
