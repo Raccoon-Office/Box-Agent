@@ -426,7 +426,9 @@ async def test_acp_late_initialization_failure_releases_resources_and_allows_ret
                 raise expected_error(expected_message)
 
             failing.setattr(acp, "NewSessionResponse" if failure == "response" else "SessionTraceWriter", fail)
-            with pytest.raises(expected_error, match=expected_message):
+            # Python 3.10 can drop a cancelled child task's exception message.
+            match = None if failure == "cancelled" else expected_message
+            with pytest.raises(expected_error, match=match):
                 await adapter.new_session(**request)
 
         assert len(closed) == 1 + existing
