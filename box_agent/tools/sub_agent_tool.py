@@ -2,7 +2,8 @@
 
 Spawns a child agent loop with its own message history so that
 intermediate tool output (file reads, exploratory analysis, etc.)
-stays out of the parent context.  Only the final summary is returned.
+stays out of the parent context. The parent receives a final summary or a
+bounded handoff of checkpointed work when the batch reaches its deadline.
 
 Multiple sub-agent calls are ``parallel_safe`` and will be executed
 concurrently via ``asyncio.gather`` in the core loop.
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -39,7 +41,7 @@ from ..llm.capabilities import bound_context_token_limit
 from ..schema import Message
 from ..skill_dependencies import SkillDependencyError
 from ..session_log import SessionLog, SessionLogDurabilityError
-from .base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
+from .base import EventEmittingTool, ParallelToolWindow, Tool, ToolInvocationContext, ToolResult
 from .file_change_receipts import FileWriteInvocationContext
 from .schema_validation import ToolArgumentIssue
 from .jupyter_tool import JupyterSandboxTool, SandboxStatusTool
@@ -56,6 +58,13 @@ from .sub_agent_capabilities import (
     SKILL_READ_TOOL_NAMES,
     ResolvedCapabilityBundle,
     parse_delegation_spec,
+)
+from .sub_agent_handoff import (
+    CHECKPOINT_TOOL,
+    WORK_ITEMS_SCHEMA,
+    SubAgentCheckpointTool,
+    SubAgentHandoff,
+    normalize_work_items,
 )
 
 _DEFERRED_MCP_HEADINGS = ("## Deferred MCP tools\n", "## Discoverable tools\n")
@@ -106,6 +115,7 @@ _DEFAULT_AGENT_CONFIG = AgentConfig()
 _DEFAULT_BATCH_SYNTHESIS_TIMEOUT_SECONDS = (
     _DEFAULT_AGENT_CONFIG.sub_agent_batch_synthesis_timeout_seconds
 )
+MAX_PENDING_HANDOFFS = 32
 
 
 class _WriteScopedTool(Tool):
@@ -185,18 +195,21 @@ class SubAgentTool(EventEmittingTool):
     kernel sessions and its own message history. In an automatic hosted-model
     session it may receive an isolated
     model binding selected from the host allowlist; manual sessions keep the
-    parent model. Only the final textual summary is returned to the parent.
+    parent model. A final result or a bounded handoff is returned to the parent.
     """
 
     aliases = ("sessions_spawn", "delegate_task")
 
     parallel_safe = True
+    supports_parallel_handoff = True
     supports_delegated_budget = True
 
     async def _invoke_validated(self, arguments, *, context):
         from .delegated_budget import bind_budgets, current_budgets
 
         budgets = (context.child_budgets if context is not None else ()) or current_budgets()
+        if context is not None and context.parallel_window is not None:
+            arguments = {**arguments, "_parallel_window": context.parallel_window}
         with bind_budgets(budgets):
             return await super()._invoke_validated(arguments, context=context)
 
@@ -252,10 +265,13 @@ class SubAgentTool(EventEmittingTool):
         # apply to child agents. None lets run_agent_loop resolve env/default.
         self._provider_stale_seconds = provider_stale_seconds
         self._parent_session_log: SessionLog | None = None
+        self._pending_handoffs: dict[str, tuple[dict[str, Any], SubAgentHandoff]] = {}
 
     def set_parent_session_log(self, session_log: SessionLog) -> None:
         """Attach the parent's canonical log so children can persist lineage."""
 
+        if self._parent_session_log is not session_log:
+            self._pending_handoffs.clear()
         self._parent_session_log = session_log
 
     def set_thinking_enabled(self, enabled: bool) -> None:
@@ -340,6 +356,9 @@ class SubAgentTool(EventEmittingTool):
         return dict(self._child_tools_snapshot)
 
     def invocation_may_require_user_input(self, arguments: dict[str, Any]) -> bool:
+        continuation = arguments.get("resume_from")
+        if isinstance(continuation, str) and continuation in self._pending_handoffs:
+            arguments = self._pending_handoffs[continuation][0]
         live_tools = self._resolve_child_tools()
         parsed = self._parse_delegation(arguments, live_tools)
         if isinstance(parsed, CapabilityFailure):
@@ -439,7 +458,11 @@ class SubAgentTool(EventEmittingTool):
             "`files` and `required_tools:[\"read_file\"]` to use the bounded "
             "completeness-checked batch fast path. Omitted tools with files and a one-step "
             "budget also retain that path when no write_scope is given. Pass "
-            "`budget` as an object such as `{max_steps:24, max_tool_calls:36}`."
+            "`budget` as an object such as `{max_steps:24, max_tool_calls:36}`. "
+            "For long multi-item work, supply distinct `work_items` so the child can checkpoint "
+            "finished items. Reuse the completed results in a timeout handoff. "
+            "If it supplies `resume_from`, pass that value with `task: 'Continue pending items'` "
+            "to resume only the checkpoint's pending items, once."
         )
 
     @property
@@ -530,6 +553,15 @@ class SubAgentTool(EventEmittingTool):
                     },
                     "additionalProperties": False,
                 },
+                "work_items": WORK_ITEMS_SCHEMA,
+                "resume_from": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "description": (
+                        "One-use reference from a sub-agent handoff. Pass this with a task placeholder; "
+                        "the original permissions and pending work items are restored by the runtime."
+                    ),
+                },
             },
             "required": ["task"],
             "additionalProperties": False,
@@ -566,6 +598,7 @@ class SubAgentTool(EventEmittingTool):
         bundle: ResolvedCapabilityBundle,
         *,
         include_skill_bodies: bool = True,
+        checkpoint_context: str = "",
     ) -> list[Message]:
         system_parts = [_EXPLICIT_SUB_AGENT_SYSTEM_PROMPT.rstrip()]
         system_parts.append(
@@ -584,6 +617,8 @@ class SubAgentTool(EventEmittingTool):
             )
 
         user_content = f"## Delegated task\n{spec.task}"
+        if checkpoint_context:
+            user_content += checkpoint_context
         if bundle.skills:
             if include_skill_bodies:
                 skill_text = "\n\n".join(skill.to_prompt().strip() for skill in bundle.skills)
@@ -624,8 +659,9 @@ class SubAgentTool(EventEmittingTool):
         *,
         llm: Any,
         token_limit: int,
+        checkpoint_context: str = "",
     ) -> list[Message] | CapabilityFailure:
-        messages = self._explicit_messages(spec, bundle)
+        messages = self._explicit_messages(spec, bundle, checkpoint_context=checkpoint_context)
         if not bundle.skills:
             return messages
         # Match the child loop's existing safe-input threshold and schema
@@ -640,7 +676,9 @@ class SubAgentTool(EventEmittingTool):
         # prefetch; its read_file grant is not a model-side paging capability.
         can_read = spec.strategy == "general_loop" and bool({"get_skill", "read_file"} & set(child_tools))
         if can_read:
-            messages = self._explicit_messages(spec, bundle, include_skill_bodies=False)
+            messages = self._explicit_messages(
+                spec, bundle, include_skill_bodies=False, checkpoint_context=checkpoint_context,
+            )
             estimated, _ = _estimate_context_from_latest_response(messages, budget_tools, llm=llm)
             if estimated < token_limit:
                 return messages
@@ -873,6 +911,9 @@ class SubAgentTool(EventEmittingTool):
         session_log: SessionLog | None = None,
         tool_exposure_manager: Any | None = None,
         token_limit: int | None = None,
+        handoff: SubAgentHandoff | None = None,
+        parallel_window: ParallelToolWindow | None = None,
+        wrapup_result: Callable[[], ToolResult] | None = None,
     ) -> ToolResult:
         # Import lazily because the runtime facade initializes the core, which
         # imports tool contracts while this module may still be loading.
@@ -889,30 +930,39 @@ class SubAgentTool(EventEmittingTool):
         step_open = False
         current_step: int | None = None
         turn_open = session_log is not None
+        events = run_agent_loop(
+            llm=llm,
+            messages=messages,
+            tools=child_tools,
+            tool_exposure_manager=tool_exposure_manager,
+            thinking_enabled=self._thinking_enabled,
+            max_steps=max_steps,
+            max_tool_calls=max_tool_calls,
+            tool_limits=self._tool_limits,
+            token_limit=token_limit,
+            workspace_dir=self._workspace_dir,
+            provider_stale_seconds=self._provider_stale_seconds,
+            no_progress_limit=self._no_progress_limit,
+            artifact_detection_enabled=self._artifact_detection_enabled,
+            permission_negotiator=self._permission_negotiator,
+            cache_fingerprint_context={
+                "sub_agent_strategy": diagnostic.get("strategy"),
+                "resolved_skills": diagnostic.get("resolved_skills", []),
+            },
+            call_kind="subagent_step",
+            session_log=session_log,
+            session_turn=1 if session_log is not None else None,
+        )
         try:
-            async for event in run_agent_loop(
-                llm=llm,
-                messages=messages,
-                tools=child_tools,
-                tool_exposure_manager=tool_exposure_manager,
-                thinking_enabled=self._thinking_enabled,
-                max_steps=max_steps,
-                max_tool_calls=max_tool_calls,
-                tool_limits=self._tool_limits,
-                token_limit=token_limit,
-                workspace_dir=self._workspace_dir,
-                provider_stale_seconds=self._provider_stale_seconds,
-                no_progress_limit=self._no_progress_limit,
-                artifact_detection_enabled=self._artifact_detection_enabled,
-                permission_negotiator=self._permission_negotiator,
-                cache_fingerprint_context={
-                    "sub_agent_strategy": diagnostic.get("strategy"),
-                    "resolved_skills": diagnostic.get("resolved_skills", []),
-                },
-                call_kind="subagent_step",
-                session_log=session_log,
-                session_turn=1 if session_log is not None else None,
-            ):
+            async for event in events:
+                if (
+                    parallel_window is not None and wrapup_result is not None
+                    and isinstance(event, (StepStart, ToolCallStart))
+                    and getattr(event, "tool_name", None) != CHECKPOINT_TOOL
+                    and parallel_window.wrapping_up()
+                ):
+                    parallel_window.notify_wrapup()
+                    return wrapup_result()
                 if session_log is not None:
                     if isinstance(event, (ContentEvent, ThinkingEvent)):
                         session_log.append(
@@ -991,6 +1041,12 @@ class SubAgentTool(EventEmittingTool):
                         session_log.flush()
                         turn_open = False
 
+                if (
+                    handoff is not None and isinstance(event, (ArtifactEvent, ToolCallResult))
+                    and (parallel_window is None or parallel_window.seconds_remaining() > 0)
+                ):
+                    handoff.observe(event)
+
                 if isinstance(event, ToolCallStart):
                     pending_child_tc[event.tool_call_id] = event.tool_name
                     if event.user_visible:
@@ -1015,6 +1071,8 @@ class SubAgentTool(EventEmittingTool):
                         title=title,
                         event=event,
                     )
+        except SessionLogDurabilityError:
+            raise
         except Exception as exc:
             for tc_id, tool_name in pending_child_tc.items():
                 self._put_sub_event(
@@ -1046,11 +1104,14 @@ class SubAgentTool(EventEmittingTool):
                 },
             )
         finally:
-            if session_log is not None:
-                if turn_open:
-                    session_log.repair_interrupted_turn()
-                    session_log.flush()
-                session_log.close()
+            try:
+                await events.aclose()
+            finally:
+                if session_log is not None:
+                    if turn_open:
+                        session_log.repair_interrupted_turn()
+                        session_log.flush()
+                    session_log.close()
 
         raw_output = {
             **diagnostic,
@@ -1098,6 +1159,8 @@ class SubAgentTool(EventEmittingTool):
         title: str,
         session_log: SessionLog | None = None,
         token_limit: int | None = None,
+        parallel_window: ParallelToolWindow | None = None,
+        wrapup_result: Callable[[], ToolResult] | None = None,
     ) -> ToolResult:
         token_limit = bound_context_token_limit(llm, self._token_limit if token_limit is None else token_limit)
         files = list(bundle.spec.files)
@@ -1143,6 +1206,9 @@ class SubAgentTool(EventEmittingTool):
                 return path, exc
 
         read_results = await asyncio.gather(*(read_one(path) for path in files))
+        if parallel_window is not None and wrapup_result is not None and parallel_window.wrapping_up():
+            parallel_window.notify_wrapup()
+            return finish(wrapup_result())
         failures: list[dict[str, Any]] = []
         complete_contents: list[tuple[str, str]] = []
 
@@ -1440,9 +1506,13 @@ class SubAgentTool(EventEmittingTool):
         files: list[str] | None = None,
         write_scope: list[str] | None = None,
         budget: dict[str, Any] | None = None,
+        work_items: list[dict[str, str]] | None = None,
+        resume_from: str | None = None,
         *,
         _event_queue: asyncio.Queue | None = None,
         _parent_tool_call_id: str | None = None,
+        _parallel_window: ParallelToolWindow | None = None,
+        _previous_handoff: SubAgentHandoff | None = None,
         **unexpected: Any,
     ) -> ToolResult:
         invalid_top_level = sorted(unexpected)
@@ -1460,6 +1530,14 @@ class SubAgentTool(EventEmittingTool):
                 invalid_top_level.append(field_name)
         if budget is not None and not isinstance(budget, dict):
             invalid_top_level.append("budget")
+        items = normalize_work_items(work_items)
+        if items is None:
+            invalid_top_level.append("work_items")
+        if resume_from is not None and (
+            not isinstance(resume_from, str) or not resume_from
+            or title or any(value is not None for value in (skills, required_tools, files, write_scope, budget, work_items))
+        ):
+            invalid_top_level.append("resume_from")
         if invalid_top_level:
             return self._failure_result(
                 CapabilityFailure(
@@ -1471,6 +1549,21 @@ class SubAgentTool(EventEmittingTool):
                     retryable=True,
                     invalid_fields=tuple(sorted(set(invalid_top_level))),
                 )
+            )
+
+        if resume_from is not None:
+            saved = self._pending_handoffs.pop(resume_from, None)
+            if saved is None:
+                return self._failure_result(CapabilityFailure(
+                    code="SUB_AGENT_HANDOFF_UNAVAILABLE",
+                    message="This handoff is no longer available. Verify prior results and delegate only confirmed unfinished work.",
+                    retryable=False,
+                ))
+            original, previous = saved
+            return await self.execute(
+                **original, work_items=previous.remaining_items(),
+                _event_queue=_event_queue, _parent_tool_call_id=_parent_tool_call_id,
+                _parallel_window=_parallel_window, _previous_handoff=previous,
             )
 
         queue = _event_queue if _event_queue is not None else self._event_queue
@@ -1488,12 +1581,51 @@ class SubAgentTool(EventEmittingTool):
         sub_agent_id = f"subagent-{uuid4().hex}"
 
         live_tools = self._resolve_child_tools()
-        parsed = self._parse_delegation({
+        original_arguments = {
             "task": task, "title": title, "skills": skills, "required_tools": required_tools,
             "files": files, "write_scope": write_scope, "budget": budget,
-        }, live_tools)
+        }
+        parsed = self._parse_delegation(original_arguments, live_tools)
         if isinstance(parsed, CapabilityFailure):
             return self._failure_result(parsed)
+        if items and parsed.strategy == "batch_files":
+            return self._failure_result(CapabilityFailure(
+                code="INVALID_DELEGATION_SPEC",
+                message="Work items require a general delegation. Use separate calls for independent file-only batches.",
+                retryable=True,
+            ), parsed)
+
+        handoff = SubAgentHandoff(
+            items or (), completed=dict(_previous_handoff.completed) if _previous_handoff else {},
+            artifacts=dict(_previous_handoff.artifacts) if _previous_handoff else {},
+        )
+
+        def finish_handoff(code: str, message: str, *, allow_resume: bool = True) -> ToolResult:
+            reference = None
+            if not allow_resume:
+                self._pending_handoffs.pop(sub_agent_id, None)
+                message += " Cleanup is still running. Confirm it has stopped before retrying."
+            elif _previous_handoff is None and handoff.remaining_items():
+                reference = sub_agent_id
+                if reference not in self._pending_handoffs and len(self._pending_handoffs) >= MAX_PENDING_HANDOFFS:
+                    self._pending_handoffs.pop(next(iter(self._pending_handoffs)))
+                resume_arguments = {**original_arguments, "required_tools": list(parsed.required_tools)}
+                self._pending_handoffs[reference] = (deepcopy(resume_arguments), deepcopy(handoff))
+            return handoff.result(code, message, child_id=sub_agent_id, resume_from=reference)
+
+        def wrapup_result() -> ToolResult:
+            return finish_handoff("SUB_AGENT_WRAPUP", "The child reached the batch wrap-up window.")
+
+        if _parallel_window is not None:
+            _parallel_window.timeout_result = lambda cleanup_done: finish_handoff(
+                "SUB_AGENT_TIMEOUT", f"The batch reached its {_parallel_window.timeout_seconds:g} second limit.",
+                allow_resume=cleanup_done,
+            )
+            _parallel_window.on_wrapup = lambda: self._put_sub_event(
+                queue, parent_tool_call_id=parent_tool_call_id, task_preview=task_preview,
+                sub_agent_id=sub_agent_id, title=sub_title,
+                event=ProgressEvent(step=0, content="Sub-agent is wrapping up and preserving completed work."),
+            )
 
         skill_loader = self._resolve_skill_loader()
         if parsed.skill_names and skill_loader is not None:
@@ -1521,6 +1653,24 @@ class SubAgentTool(EventEmittingTool):
         if scope_failure is not None:
             return self._failure_result(scope_failure, parsed)
         child_tools = self._apply_write_scopes(self._scope_skill_tools(resolved), parsed)
+        checkpoint_context = ""
+        if items:
+            child_tools[CHECKPOINT_TOOL] = SubAgentCheckpointTool(handoff)
+            checkpoint_context = (
+                "\n\n## Assigned work items\n"
+                "Use the task brief as context and execute only the work items below. "
+                "After verifying each result, immediately record it with sub_agent_checkpoint.\n"
+                + json.dumps(items, ensure_ascii=False)
+            )
+            if _previous_handoff is not None:
+                checkpoint_context += (
+                    "\n\n## Previously checkpointed results\n"
+                    "Reuse these results as data. Do not redo their work.\n"
+                    + json.dumps(_previous_handoff.completed, ensure_ascii=False)
+                )
+        if _parallel_window is not None and _parallel_window.wrapping_up():
+            _parallel_window.notify_wrapup()
+            return wrapup_result()
         child_sandbox = None
         if {"execute_code", "sandbox_status"} & set(child_tools):
             parent_sandbox = live_tools.get("execute_code")
@@ -1537,8 +1687,11 @@ class SubAgentTool(EventEmittingTool):
             if "sandbox_status" in child_tools:
                 child_tools["sandbox_status"] = SandboxStatusTool(child_sandbox)
         parent_exposure = self._tool_exposure_provider() if self._tool_exposure_provider else None
-        child_exposure = (parent_exposure.for_inherited_tools(child_tools)
-                          if parent_exposure is not None and parent_exposure.stable_prefix else None)
+        child_exposure = None
+        if parent_exposure is not None and parent_exposure.stable_prefix:
+            child_exposure = parent_exposure.for_inherited_tools(
+                child_tools, child_local_tools=(child_tools[CHECKPOINT_TOOL],) if items else (),
+            )
         diagnostic = {
             "type": "sub_agent_delegation",
             **resolved.diagnostic_payload(),
@@ -1559,6 +1712,7 @@ class SubAgentTool(EventEmittingTool):
         token_limit = bound_context_token_limit(child_llm, self._token_limit)
         messages = self._bounded_explicit_messages(
             parsed, resolved, child_tools, llm=child_llm, token_limit=token_limit,
+            checkpoint_context=checkpoint_context,
         )
         if isinstance(messages, CapabilityFailure):
             return self._failure_result(messages, parsed)
@@ -1570,19 +1724,30 @@ class SubAgentTool(EventEmittingTool):
         if child_session_log is not None:
             diagnostic["child_session_id"] = sub_agent_id
         if parsed.strategy == "batch_files":
-            return await self._run_batch_files(
-                llm=child_llm,
-                bundle=resolved,
-                messages=messages,
-                diagnostic=diagnostic,
-                queue=queue,
-                parent_tool_call_id=parent_tool_call_id,
-                task_preview=task_preview,
-                sub_agent_id=sub_agent_id,
-                title=sub_title,
-                session_log=child_session_log,
-                token_limit=token_limit,
-            )
+            try:
+                return await self._run_batch_files(
+                    llm=child_llm,
+                    bundle=resolved,
+                    messages=messages,
+                    diagnostic=diagnostic,
+                    queue=queue,
+                    parent_tool_call_id=parent_tool_call_id,
+                    task_preview=task_preview,
+                    sub_agent_id=sub_agent_id,
+                    title=sub_title,
+                    session_log=child_session_log,
+                    token_limit=token_limit,
+                    parallel_window=_parallel_window,
+                    wrapup_result=wrapup_result,
+                )
+            except asyncio.CancelledError:
+                if child_session_log is not None:
+                    try:
+                        child_session_log.repair_interrupted_turn()
+                        child_session_log.flush()
+                    finally:
+                        child_session_log.close()
+                raise
 
         # Isolate this child's managed browser from siblings in the same
         # parent session. The pool keys MCP clients by ContextVar, so a
@@ -1614,6 +1779,9 @@ class SubAgentTool(EventEmittingTool):
                 session_log=child_session_log,
                 tool_exposure_manager=child_exposure,
                 token_limit=token_limit,
+                handoff=handoff,
+                parallel_window=_parallel_window,
+                wrapup_result=wrapup_result,
             )
         finally:
             reset_browser_session_key(token)

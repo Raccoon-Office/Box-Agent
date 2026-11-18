@@ -7,22 +7,26 @@ import logging
 import traceback
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Any
 
 from ..base import (
     EventEmittingTool,
+    ParallelToolWindow,
     Tool,
     ToolInvocationContext,
     ToolResult,
+    bind_parallel_tool_window,
     bind_tool_cancellation,
+    current_parallel_tool_window,
 )
 from ...session_log import SessionLogDurabilityError
 from .execution import invoke_tool_once
 
 
 _log = logging.getLogger("box_agent.core")
+MAX_BATCH_WRAPUP_SECONDS = 300.0
 
 
 @dataclass(slots=True)
@@ -141,6 +145,7 @@ class ToolEngine:
         self,
         request: ToolInvocationRequest,
         event_queue: asyncio.Queue[Any] | None,
+        parallel_window: ParallelToolWindow | None = None,
     ) -> ToolResult:
         if self._is_cancelled():
             return ToolResult(
@@ -152,18 +157,31 @@ class ToolEngine:
                 return ToolResult(success=False, error=error)
         context = request.invocation_context
         if event_queue is not None:
-            from dataclasses import replace
             context = replace(
                 context or ToolInvocationContext(parent_tool_call_id=request.call_id),
                 event_queue=event_queue,
+                parallel_window=parallel_window,
             )
         tool = self._tools[request.tool_name]
-        with bind_tool_cancellation(self._is_cancelled):
+        parent_window = current_parallel_tool_window()
+
+        def admission_check() -> str | None:
+            if (parent_window is not None and parent_window.wrapping_up()
+                    and not getattr(tool, "allowed_during_wrapup", False)):
+                return "The delegated call is wrapping up. No new work was started."
+            return request.admission_check() if request.admission_check is not None else None
+
+        def is_cancelled() -> bool:
+            return self._is_cancelled() or (
+                parallel_window is not None and parallel_window.seconds_remaining() <= 0
+            )
+
+        with bind_tool_cancellation(is_cancelled), bind_parallel_tool_window(parallel_window):
             return await invoke_tool_once(
                 tool, request.arguments, context=context,
                 approved_permission_request=request.approved_permission_request,
                 on_invoke=request.on_invoke,
-                admission_check=request.admission_check,
+                admission_check=admission_check if parent_window is not None else request.admission_check,
             )
 
     async def invoke_serial(
@@ -311,6 +329,25 @@ class ToolEngine:
         state = ToolExecutionState(last_activity_at=perf_counter())
         cleanup_wait_completed = False
 
+        timeout_seconds = self._batch_timeout_seconds
+        windows: dict[int, ParallelToolWindow] = {}
+        timed_out_invocations: set[int] = set()
+        timeout_deadline = None
+        if timeout_seconds is not None and timeout_seconds > 0:
+            timeout_deadline = state.last_activity_at + timeout_seconds
+
+            def seconds_remaining(deadline: float = timeout_deadline) -> float:
+                return deadline - perf_counter()
+
+            for index, request in enumerate(requests):
+                if request.immediate_result is None and getattr(
+                    self._tools.get(request.tool_name), "supports_parallel_handoff", False
+                ):
+                    windows[index] = ParallelToolWindow(
+                        seconds_remaining, min(MAX_BATCH_WRAPUP_SECONDS, timeout_seconds / 6),
+                        timeout_seconds,
+                    )
+
         async def run_one(
             index: int,
             request: ToolInvocationRequest,
@@ -323,16 +360,29 @@ class ToolEngine:
                 )
             try:
                 async with parallel_semaphore:
+                    window = windows.get(index)
+                    if window is not None and window.wrapping_up():
+                        return ToolInvocationCompleted(
+                            call_id=request.call_id,
+                            index=index,
+                            result=ToolResult(
+                                success=False,
+                                error="The parallel batch is wrapping up. This work item did not start and remains pending.",
+                                raw_output={"code": "PARALLEL_BATCH_NOT_STARTED"},
+                            ),
+                        )
                     if request.tool_name == self._web_search_tool_name:
                         async with web_search_semaphore:
                             result = await self._invoke_with_optional_events(
                                 request,
                                 event_queue,
+                                window,
                             )
                     else:
                         result = await self._invoke_with_optional_events(
                             request,
                             event_queue,
+                            window,
                         )
             except asyncio.CancelledError:
                 raise
@@ -348,22 +398,16 @@ class ToolEngine:
             asyncio.create_task(run_one(index, request))
             for index, request in enumerate(requests)
         )
-        timeout_seconds = (
-            self._batch_timeout_seconds
-            if self._batch_timeout_seconds is not None
-            and self._batch_timeout_seconds > 0
-            else None
-        )
-        timeout_deadline = (
-            perf_counter() + timeout_seconds
-            if timeout_seconds is not None
-            else None
-        )
-
         try:
             while True:
                 all_done = all(task.done() for task in tasks)
                 if all_done and event_queue.empty():
+                    break
+                if self._is_cancelled():
+                    state.cancellation_observed = True
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
                     break
                 if (
                     timeout_deadline is not None
@@ -376,16 +420,16 @@ class ToolEngine:
                         "continuing with partial results",
                         timeout_seconds,
                     )
-                    for task in tasks:
+                    for index, task in enumerate(tasks):
                         if not task.done():
+                            window = windows.get(index)
+                            if window is not None and window.timeout_result is not None:
+                                timed_out_invocations.add(index)
                             task.cancel()
                     break
-                if self._is_cancelled() and not state.cancellation_observed:
-                    state.cancellation_observed = True
-                    for task in tasks:
-                        if not task.done():
-                            task.cancel()
-                    break
+                for index, window in windows.items():
+                    if not tasks[index].done() and window.on_wrapup is not None and window.wrapping_up():
+                        window.notify_wrapup()
                 try:
                     event = await asyncio.wait_for(
                         event_queue.get(),
@@ -458,6 +502,10 @@ class ToolEngine:
                                 ),
                             ),
                         )
+                if index in timed_out_invocations:
+                    timeout_result = windows[index].timeout_result
+                    if timeout_result is not None:
+                        outcome = replace(outcome, result=timeout_result(task.done()))
                 outcomes_by_id[outcome.call_id] = outcome
 
             for index, request in enumerate(requests):

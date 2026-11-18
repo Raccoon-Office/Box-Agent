@@ -290,7 +290,7 @@ container limits:
 ```yaml
 max_steps: 300
 max_parallel_tools: 8
-parallel_tool_timeout_seconds: 900
+parallel_tool_timeout_seconds: 1800
 provider_stale_seconds: 300
 sub_agent_token_limit: null
 sub_agent_batch_synthesis_timeout_seconds: 600

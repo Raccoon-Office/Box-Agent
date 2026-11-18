@@ -106,7 +106,7 @@ retry:
 # packaged runtime updates can revise defaults without rewriting user config.
 # max_steps: 300 # Maximum execution steps
 max_parallel_tools: 8 # Hard cap on concurrent parallel_safe tool calls (sub_agent, generate_image) per step
-parallel_tool_timeout_seconds: 900 # Per-step wall-clock cap for one parallel_safe tool batch
+# parallel_tool_timeout_seconds: 1800 # Per-step wall-clock cap for one parallel_safe tool batch
 # provider_stale_seconds: 300 # Seconds without a new provider chunk before a stream is treated as stale.
 #                             # Raise for slow/deep-thinking models; env BOX_AGENT_PROVIDER_STALE_SECONDS overrides.
 # sub_agent_token_limit: null # Auto from the routed model; a positive value sets an explicit input cap

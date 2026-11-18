@@ -96,6 +96,43 @@ def check_tool_cancellation() -> None:
         raise ToolInvocationRejected("TOOL_EXECUTION_CANCELLED", "Tool execution cancelled before writing.")
 
 
+@dataclass(slots=True)
+class ParallelToolWindow:
+    """Timing and handoff callbacks for one invocation in a timed batch."""
+
+    seconds_remaining: Callable[[], float]
+    wrapup_seconds: float
+    timeout_seconds: float
+    on_wrapup: Callable[[], None] | None = None
+    timeout_result: Callable[[bool], ToolResult] | None = None
+
+    def wrapping_up(self) -> bool:
+        return self.seconds_remaining() <= self.wrapup_seconds
+
+    def notify_wrapup(self) -> None:
+        notify, self.on_wrapup = self.on_wrapup, None
+        if notify is not None:
+            notify()
+
+
+_parallel_tool_window: ContextVar[ParallelToolWindow | None] = ContextVar(
+    "parallel_tool_window", default=None,
+)
+
+
+@contextmanager
+def bind_parallel_tool_window(window: ParallelToolWindow | None) -> Iterator[None]:
+    token = _parallel_tool_window.set(window or _parallel_tool_window.get())
+    try:
+        yield
+    finally:
+        _parallel_tool_window.reset(token)
+
+
+def current_parallel_tool_window() -> ParallelToolWindow | None:
+    return _parallel_tool_window.get()
+
+
 @dataclass(frozen=True, slots=True)
 class ToolInvocationContext:
     """Optional runtime context hidden behind the tool invocation interface."""
@@ -110,6 +147,7 @@ class ToolInvocationContext:
     # Capability-owned optional check_invocation(name, arguments) callbacks.
     # Kept off the public model schema and evaluated before tool side effects.
     capability_gates: tuple[Any, ...] = ()
+    parallel_window: ParallelToolWindow | None = None
 
 
 class Tool:
@@ -117,6 +155,8 @@ class Tool:
 
     aliases: tuple[str, ...] = ()
     parallel_safe: bool = False
+    supports_parallel_handoff: bool = False
+    allowed_during_wrapup: bool = False
     # Trusted opt-in: identical calls in one model response may share an
     # execution and its outcome (including failure). This also skips per-call
     # execution hooks for duplicates. Read-only or idempotent is not enough.

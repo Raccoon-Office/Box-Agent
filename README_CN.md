@@ -257,7 +257,7 @@ model: "claude-sonnet-4-20250514"
 provider: "anthropic" # "anthropic" 或 "openai"
 max_steps: 200
 max_parallel_tools: 8
-parallel_tool_timeout_seconds: 900
+# parallel_tool_timeout_seconds: 1800 # 单步并行工具批次超时，单位为秒
 sub_agent_batch_synthesis_timeout_seconds: 300 # 设为 0 可关闭额外综合超时
 goal_autopilot_enabled: true
 goal_autopilot_max_turns: 3

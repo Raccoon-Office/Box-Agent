@@ -306,7 +306,7 @@ model: "claude-sonnet-4-20250514"
 provider: "anthropic" # "anthropic" or "openai"
 max_steps: 300
 max_parallel_tools: 8
-parallel_tool_timeout_seconds: 900
+# parallel_tool_timeout_seconds: 1800 # Override the per-step parallel tool batch timeout
 provider_stale_seconds: 300
 sub_agent_token_limit: 50000
 sub_agent_batch_synthesis_timeout_seconds: 600 # 0 disables the extra batch synthesis cap

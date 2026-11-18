@@ -705,10 +705,13 @@ class MCPToolExposureManager:
         self._bootstrap_issued: set[str] = set()
         self._scope_parent: MCPToolExposureManager | None = None
         self._scope_upstreams: dict[str, Tool] = {}
+        self._scope_local_tools: dict[str, Tool] = {}
         self._direct_generations: dict[str, int] = {}
 
-    def for_inherited_tools(self, child_tools: dict[str, Tool]) -> MCPToolExposureManager:
-        """Freeze a child's resolved subset; borrow only parent validation authority."""
+    def for_inherited_tools(
+        self, child_tools: dict[str, Tool], *, child_local_tools: tuple[Tool, ...] = (),
+    ) -> MCPToolExposureManager:
+        """Freeze inherited capabilities and explicitly supplied child-local tools."""
         from .engine.contracts import ToolDefinitionView
 
         allowed = self.inherited_tools(dict(self._live_candidates()))
@@ -719,9 +722,16 @@ class MCPToolExposureManager:
         scoped.stable_prefix = True
         scoped._scope_parent = self
         scoped._stable_direct = {}
+        local = {tool.name: tool for tool in child_local_tools}
         for name, tool in child_tools.items():
+            if name in {TOOL_SEARCH_NAME, "call_tool"}:
+                continue
+            if local.get(name) is tool:
+                scoped._scope_local_tools[name] = tool
+                scoped._stable_direct[name] = (tool, ToolDefinitionView.from_tool(tool))
+                continue
             upstream = allowed.get(name)
-            if upstream is None or name in {TOOL_SEARCH_NAME, "call_tool"}:
+            if upstream is None:
                 continue
             scoped._scope_upstreams[name] = upstream
             scoped._stable_direct[name] = (tool, ToolDefinitionView.from_tool(tool))
@@ -843,6 +853,8 @@ class MCPToolExposureManager:
 
     def is_current_target(self, name: str, tool: Tool) -> bool:
         if self._scope_parent is not None:
+            if name in self._scope_local_tools:
+                return self._scope_local_tools[name] is tool and self._live_candidates().get(name) is tool
             upstream = self._scope_upstreams.get(name)
             return (self._live_candidates().get(name) is tool and upstream is not None
                     and self._scope_parent.is_current_target(name, upstream))
@@ -1089,6 +1101,10 @@ class MCPToolExposureManager:
         target_tool: Tool | None = None,
     ) -> str | None:
         if self._scope_parent is not None:
+            if name in self._scope_local_tools:
+                if target_tool is not None and self.is_current_target(name, target_tool):
+                    return None
+                return f"Tool '{name}' is no longer available to this child."
             upstream = self._scope_upstreams.get(name)
             if upstream is None or not self._scope_parent.is_current_target(name, upstream):
                 return f"Tool '{name}' is no longer available to this child."

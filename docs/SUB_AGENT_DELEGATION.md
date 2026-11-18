@@ -201,6 +201,23 @@ internal tool calls count only against the workflow's separate
 sub-agents but preserves the parent's completion reserve for merge, QA, and
 delivery.
 
+## Wrapping up timed parallel work
+
+The standard runtime bounds a parallel batch at 30 minutes by default. At 25
+minutes active children receive a wrap-up signal. They stop taking on new work
+at a safe execution boundary. A child that is still busy at the deadline is
+cancelled. Completed sibling results remain available. Overrides reserve the
+smaller of five minutes or one sixth of the configured limit for wrap-up.
+
+For resumable work, give a general-loop delegation distinct `work_items` with
+an `id` and `task` for each independently verifiable item. The child records
+finished items using its local `sub_agent_checkpoint` tool. A handoff includes
+checkpointed results, confirmed workspace outputs, and pending item IDs. Use its
+`resume_from` reference once in the same running parent session to delegate only
+those pending items under the original scope. For a delegation without a list
+of work items, verify the recorded outputs and identify remaining work before
+delegating again.
+
 ## Diagnostics
 
 Successful `ToolResult.raw_output` includes:
