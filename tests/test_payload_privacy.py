@@ -279,10 +279,85 @@ def test_nonstring_credential_in_serialized_tool_arguments():
     assert filtered == '{ "token":"<redacted>",  "authorization": "<redacted>", "state": true }'
 
 
+@pytest.mark.parametrize("field", ['"credentials"', '"密码"', r'"\u5bc6\u7801"', r'"creden\u0074ials"'])
+def test_default_trace_masks_composite_credentials_in_embedded_json(tmp_path, monkeypatch, field):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    name = json.loads(field)
+    embedded = '{' + field + ':{"username":"alice","value":"SYNTHETIC-TEST"},"status":401}'
+    error = "Request failed: " + embedded + " (retry pending)"
+    fields = {"error": error, "raw_output": json.loads(embedded),
+              "model_content": json.dumps({"stderr": error}, ensure_ascii=False)}
+    original = json.dumps(fields)
+    writer = SessionTraceWriter(session_id="embedded", acp_session_id="", trace_dir=tmp_path)
+    writer.write("tool.response", data=fields)
+
+    output = writer.file_path.read_text()
+    assert "SYNTHETIC-TEST" not in output and "alice" not in output
+    logged = json.loads(output)["data"]
+    assert logged["raw_output"] == {name: "<redacted>", "status": 401}
+    assert json.loads(logged["model_content"]) == {"stderr": logged["error"]}
+    text = logged["error"]
+    assert text.startswith("Request failed: ") and text.endswith(" (retry pending)")
+    assert json.loads(text.removeprefix("Request failed: ").removesuffix(" (retry pending)")) == logged["raw_output"]
+    assert json.dumps(fields) == original
+
+
+def test_default_trace_masks_multiple_json_fragments_and_nested_argument_text(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    args = {"credentials": [{"value": 'SYNTHETIC-ONE"}]'}], "operation": "upload"}
+    first = json.dumps({"arguments": json.dumps(args), "attempt": 1})
+    second = json.dumps({"密码": ["SYNTHETIC-TWO"], "attempt": 2}, ensure_ascii=False)
+    content = f"Start {first} then {second} done"
+    ordinary = 'Keep {target} and [pending]. Response: {"value":"ordinary","note":"} and ]"} intact.'
+    writer = SessionTraceWriter(session_id="several", acp_session_id="", trace_dir=tmp_path)
+    writer.write("llm.request", data={"messages": [{"role": "tool", "content": content},
+                                                  {"role": "user", "content": ordinary}]})
+
+    output = writer.file_path.read_text()
+    assert "SYNTHETIC" not in output
+    tool, user = json.loads(output)["data"]["messages"]
+    assert user["content"] == ordinary
+    text = tool["content"]
+    assert text.startswith("Start ") and text.endswith(" done")
+    left, right = map(json.loads, text.removeprefix("Start ").removesuffix(" done").split(" then "))
+    assert left["attempt"] == 1
+    assert json.loads(left["arguments"]) == {"credentials": "<redacted>", "operation": "upload"}
+    assert right == {"密码": "<redacted>", "attempt": 2}
+
+
+@pytest.mark.parametrize("fragment", [
+    '{"credentials":{"username":"alice","value":"SYNTHETIC-TRUNCATED',
+    r'{"\u5bc6\u7801":[{"value":"SYNTHETIC-TRUNCATED"},',
+    '{"credentials":{"username":"alice",oops,"value":"SYNTHETIC-MALFORMED"}}',
+    "{'credentials': {'username': 'alice', 'value': 'SYNTHETIC-REPR'}}",
+])
+def test_default_trace_masks_incomplete_or_malformed_composite_credentials(tmp_path, monkeypatch, fragment):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    writer = SessionTraceWriter(session_id="partial", acp_session_id="", trace_dir=tmp_path)
+    writer.write("llm.error", data={"partial_content": "Partial reply: " + fragment, "attempt": 3})
+    output = writer.file_path.read_text()
+    assert "SYNTHETIC" not in output and "alice" not in output
+    logged = json.loads(output)["data"]
+    assert logged["attempt"] == 3 and logged["partial_content"].startswith("Partial reply: ")
+    assert "<redacted>" in logged["partial_content"]
+
+
 def test_redacting_json_preserves_escaped_filesystem_byte_in_utf8_logs():
     text = json.dumps({"stderr": "password=fixture-value\nmissing path-\udcff"})
     sanitized = redact_diagnostic_text(text)
     assert json.loads(sanitized.encode("utf-8")) == {"stderr": "password=<redacted>\nmissing path-\udcff"}
+
+
+@pytest.mark.parametrize("text", [
+    r'Python example: labels = {"\U0001F600": "happy"}',
+    r'Unstructured label "\U0001F600": "happy"',
+    "Debug: {'values': {1, 2}, 'point': (3, 4)}",
+])
+def test_trace_keeps_ordinary_python_fragments(tmp_path, monkeypatch, text):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    writer = SessionTraceWriter(session_id="python-text", acp_session_id="", trace_dir=tmp_path)
+    writer.write("turn.input", data={"content": text})
+    assert json.loads(writer.file_path.read_text())["data"]["content"] == text
 
 
 @pytest.mark.parametrize("verdict", [True, False])

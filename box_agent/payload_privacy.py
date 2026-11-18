@@ -1,5 +1,6 @@
 """Credential filtering for diagnostic copies of agent payloads."""
 
+import ast
 import base64
 import copy
 import json
@@ -7,6 +8,7 @@ import logging
 import re
 from collections.abc import Mapping
 from typing import Any
+from uuid import uuid4
 
 _REDACTED = "<redacted>"
 CREDENTIAL_FIELD = re.compile(
@@ -26,7 +28,7 @@ KNOWN_TOKEN_PATTERN = (
 # vocabulary with its own conservative, case-insensitive policy.
 _KNOWN_TOKEN = re.compile(KNOWN_TOKEN_PATTERN)
 _ASSIGNMENT = re.compile(
-    r"""(?<![\w.-])(?P<key>(?:api|access|private|secret)[ \t]+key|[\w.-]+)"""
+    r'''(?<![\w.-])(?P<key>"(?:\\u[0-9a-f]{4}|[\w.-])+"|(?:api|access|private|secret)[ \t]+key|[\w.-]+)'''
     r"""(?P<separator>\\?["']?[ \t]*[:=：][ \t]*)""", re.I,
 )
 _VALUE = re.compile(
@@ -59,6 +61,10 @@ _AUTH_TOKEN = re.compile(
 _URL_USERINFO = re.compile(r"""(://)[^\s/?#@"']+@""")
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*(?:"|\Z)')
 _JSON_STRUCTURE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\]]')
+_OPEN_CONTAINER = re.compile(r"[\[{]")
+_CONTAINER_TOKEN = re.compile(
+    r'''\\[\s\S]|"(?:\\[\s\S]|[^"\\])*(?:"|\\?\Z)|'(?:\\[\s\S]|[^'\\])*(?:'|\\?\Z)|[{}\[\]]'''
+)
 _JSON_COLON = re.compile(r"\s*:\s*")
 _PEM_MARKER = re.compile(r"-----(BEGIN|END) ((?:[A-Z0-9]+ )*KEY)-----")
 _SCHEMA_LISTS = frozenset(("anyOf", "oneOf", "allOf", "prefixItems", "items"))
@@ -106,17 +112,43 @@ def _mask_field(context: str, key: str, value: Any) -> Any:
     return _REDACTED
 
 
+def _container_end(text: str, start: int) -> int:
+    """Find the end of a composite value, including an unfinished value at EOF."""
+    closing = ["}" if text[start] == "{" else "]"]
+    for token in _CONTAINER_TOKEN.finditer(text, start + 1):
+        if token[0] in ("{", "["):
+            closing.append("}" if token[0] == "{" else "]")
+        elif token[0] in ("}", "]"):
+            if token[0] != closing.pop():
+                return len(text)
+            if not closing:
+                return token.end()
+    return len(text)
+
+
 def _redact_assignments(text: str) -> str:
     pieces = []
     end = 0
     for match in _ASSIGNMENT.finditer(text):
-        if match.start() < end or not _credential_key(match["key"].removeprefix("--")):
+        if match.start() < end:
+            continue
+        key = match["key"]
+        if key.startswith('"'):
+            try:
+                key = json.loads(key)
+            except ValueError:
+                continue  # A quoted label in ordinary text need not be valid JSON.
+        if not _credential_key(key.removeprefix("--")):
             continue
         start = match.end()
+        if text[start:start + 1] in ("{", "["):
+            pieces.extend((text[end:start], '"<redacted>"'))
+            end = _container_end(text, start)
+            continue
         value = _VALUE.match(text, start)
         if not value:
             continue
-        if match["key"].lower() == "pass" and value[0].lower() in ("true", "false"):
+        if key.lower() == "pass" and value[0].lower() in ("true", "false"):
             continue
         quote = '\\"' if value[0].startswith('\\"') else value[0][:1]
         if quote not in ('\\"', '"', "'"):
@@ -332,6 +364,58 @@ def _redact_json(text: str, parsed: dict | list) -> str:
     return "".join(parts)
 
 
+def _json_literal(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _json_literal(item) for key, item in value.items())
+    if isinstance(value, list):
+        return all(_json_literal(item) for item in value)
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _filter_embedded_containers(text: str) -> str:
+    """Filter structured fragments and retain enclosing shell/header/field context."""
+    pieces: list[str] = []
+    fragments: list[str] = []
+    # Opaque words let the outer filters consume a whole argument, e.g.
+    # credentials={...}, while preserving the formatting of unrelated fragments.
+    prefix = "BoxTraceFragment"
+    if prefix in text:
+        prefix += uuid4().hex
+    end = scan = 0
+    while match := _OPEN_CONTAINER.search(text, scan):
+        start = match.start()
+        scan = _container_end(text, start)
+        fragment = text[start:scan]
+        if '"' not in fragment and "'" not in fragment:
+            continue
+        try:
+            parsed = json.loads(fragment)
+        except (ValueError, RecursionError):
+            if "'" not in fragment or fragment[-1] not in "}]":
+                continue
+            # Python SDKs also format request dictionaries with repr().
+            try:
+                parsed = ast.literal_eval(fragment)
+            except (ValueError, TypeError, SyntaxError, RecursionError):
+                continue
+            # The structured filter handles JSON values. Preserve other Python
+            # representations such as tuples and sets in ordinary error text.
+            if not isinstance(parsed, (dict, list)) or not _json_literal(parsed):
+                continue
+            cleaned = redact_diagnostic_value(parsed)
+            filtered = fragment if cleaned == parsed else repr(cleaned)
+        else:
+            filtered = _redact_json(fragment, parsed)
+        pieces.extend((text[end:start], f"{prefix}{len(fragments)}X"))
+        fragments.append(filtered)
+        end = scan
+    if not fragments:
+        return _redact_plain_text(text)
+    pieces.append(text[end:])
+    masked = _redact_plain_text("".join(pieces))
+    return re.sub(prefix + r"(\d+)X", lambda m: fragments[int(m[1])], masked)
+
+
 def redact_diagnostic_text(text: str) -> str:
     """Mask recognized credential values while preserving surrounding diagnostics."""
     # Inspect serialized arguments one string at a time. Running header regexes
@@ -346,6 +430,12 @@ def redact_diagnostic_text(text: str) -> str:
             pass  # Also handle escaped shell fragments and Python reprs.
         else:
             return _redact_json(text, parsed)
+    if ('"' in text or "'" in text) and ("{" in text or "[" in text):
+        return _filter_embedded_containers(text)
+    return _redact_plain_text(text)
+
+
+def _redact_plain_text(text: str) -> str:
     text = _redact_pem(text)
     if "-" in text or "=" in text:
         text = _redact_command_options(text)
