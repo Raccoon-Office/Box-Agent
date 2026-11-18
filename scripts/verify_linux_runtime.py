@@ -150,6 +150,19 @@ def _verify_acp_initialize(entry: Path, *, env: dict[str, str], request: str) ->
             process.wait(timeout=5)
 
 
+def _verify_external_resources(runtime: Path) -> Path:
+    """Validate the resource layout used by the frozen program, without a fallback copy."""
+    template = runtime / "config" / "config-example.yaml"
+    if not template.is_file():
+        raise RuntimeError(f"Bundled config template missing: {template}")
+    if not (runtime / "skills" / "_manifest.json").is_file():
+        raise RuntimeError("Bundled Skills manifest missing")
+    for name in ("config", "skills"):
+        if (runtime / "bin" / "_internal" / "box_agent" / name).exists():
+            raise RuntimeError(f"Runtime contains duplicate internal {name} resources")
+    return template
+
+
 def verify(archive: Path, *, expected_arch: str) -> None:
     if platform.system() != "Linux":
         raise RuntimeError("Linux runtime verification must run on Linux")
@@ -183,11 +196,7 @@ def verify(archive: Path, *, expected_arch: str) -> None:
 
         home = temp_dir / "home"
         home.mkdir()
-        bundled_config = (
-            runtime / "bin" / "_internal" / "box_agent" / "config" / "config-example.yaml"
-        )
-        if not bundled_config.is_file():
-            raise RuntimeError(f"Bundled config template missing: {bundled_config}")
+        bundled_config = _verify_external_resources(runtime)
         config_dir = home / ".box-agent" / "config"
         config_dir.mkdir(parents=True)
         config_text = bundled_config.read_text(encoding="utf-8").replace(

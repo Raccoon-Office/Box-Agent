@@ -788,6 +788,13 @@ class Config(BaseModel):
         return Path(__file__).parent
 
     @classmethod
+    def get_bundled_config_dir(cls) -> Path:
+        """Return immutable prompt/template resources for this installation."""
+        from .resource_paths import bundled_resource_dir
+
+        return bundled_resource_dir("config", package_dir=cls.get_package_dir())
+
+    @classmethod
     def find_config_file(cls, filename: str) -> Path | None:
         path = cls._find_config_file(filename)
         if path is not None and filename in PROMPT_TEMPLATE_FILES:
@@ -809,7 +816,7 @@ class Config(BaseModel):
         Search for config file in the following order of priority:
         1) box_agent/config/{filename} in current directory (development mode)
         2) ~/.box-agent/config/{filename} in user home directory
-        3) {package}/box_agent/config/{filename} in package installation directory
+        3) bundled config resources (runtime/config in a standalone runtime)
 
         Args:
             filename: Configuration file name (e.g., "config.yaml", "mcp.json", "system_prompt.md")
@@ -823,7 +830,7 @@ class Config(BaseModel):
                 return configured
             # Only immutable packaged prompt resources may fall back, never credentials/config/MCP.
             if filename in {"system_prompt.md", "analysis_prompt.md", "code_prompt.md"}:
-                bundled = cls.get_package_dir() / "config" / filename
+                bundled = cls.get_bundled_config_dir() / filename
                 if bundled.is_file():
                     return bundled
             return None
@@ -839,7 +846,7 @@ class Config(BaseModel):
             return user_config
 
         # Priority 3: Package installation directory's config/ subdirectory
-        package_config = cls.get_package_dir() / "config" / filename
+        package_config = cls.get_bundled_config_dir() / filename
         if package_config.exists():
             return package_config
 
@@ -880,7 +887,7 @@ class Config(BaseModel):
         if target.exists():
             return target
 
-        example = cls.get_package_dir() / "config" / "config-example.yaml"
+        example = cls.get_bundled_config_dir() / "config-example.yaml"
         if example.exists():
             shutil.copy2(example, target)
         else:
@@ -913,7 +920,7 @@ def prompt_override_drift(path: Path, filename: str) -> dict[str, Any] | None:
     version no longer fills (they would leak verbatim into the prompt).
     Returns ``None`` when ``path`` is the packaged file or matches it.
     """
-    bundled = Config.get_package_dir() / "config" / filename
+    bundled = Config.get_bundled_config_dir() / filename
     try:
         if not bundled.is_file() or path.resolve() == bundled.resolve():
             return None

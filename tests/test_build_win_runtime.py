@@ -12,6 +12,21 @@ import pytest
 from scripts import build_runtime, build_win_runtime
 
 
+@pytest.fixture(autouse=True)
+def resource_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    project = tmp_path / "source"
+    config = project / "box_agent/config"
+    config.mkdir(parents=True)
+    for name in build_runtime._RUNTIME_CONFIG_FILES:
+        (config / name).write_text("new resource " + name, encoding="utf-8")
+    skills = project / "box_agent/skills"
+    skills.mkdir()
+    (skills / "_manifest.json").write_text('{"skills": []}', encoding="utf-8")
+    (skills / "SKILL.md").write_text("new Skill", encoding="utf-8")
+    monkeypatch.setattr(build_win_runtime, "PROJECT_ROOT", project)
+    return project
+
+
 def test_windows_builder_uses_shared_pyinstaller_contract() -> None:
     hidden = build_win_runtime._windows_pyinstaller_hidden_imports()
     collect = build_win_runtime._windows_pyinstaller_collect_args()
@@ -67,6 +82,8 @@ def test_windows_pyinstaller_command_includes_web_extract_server(
     assert ("--exclude-module", "ipykernel") in hidden_pairs
     assert ("--exclude-module", "sklearn") in hidden_pairs
     assert ("--hidden-import", "PIL.Image") in hidden_pairs
+    assert "--add-data" not in captured
+    assert ("--collect-data", "box_agent.mcp_servers") in hidden_pairs
 
 
 def test_windows_manifest_advertises_bundled_web_extract_mcp(
@@ -131,7 +148,11 @@ def test_windows_build_entry_preserves_selected_profile_and_existing_tools(
         python_exe.parent.mkdir(parents=True)
         python_exe.write_bytes(b"bundled python")
 
-    build = Mock()
+    def fake_build(bin_dir, **kwargs):
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "box-agent-acp.exe").write_bytes(b"rebuilt exe")
+
+    build = Mock(side_effect=fake_build)
     installers = {
         "_install_portable_git_win": Mock(),
         "_install_portable_python_win": Mock(side_effect=install_python),
@@ -157,7 +178,14 @@ def test_windows_build_entry_preserves_selected_profile_and_existing_tools(
 
     build_win_runtime.main()
 
-    build.assert_called_once_with(runtime_dir / "bin", external_python_sandbox=not bundled)
+    build.assert_called_once()
+    called_bin = build.call_args.args[0]
+    assert called_bin.name == "bin"
+    if not exe_only:
+        assert called_bin == runtime_dir / "bin"
+    assert build.call_args.kwargs == {"external_python_sandbox": not bundled}
+    assert (runtime_dir / "skills/SKILL.md").read_text() == "new Skill"
+    assert (runtime_dir / "config/config-example.yaml").read_text() == "new resource config-example.yaml"
     manifest = json.loads((runtime_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["external_python_sandbox"] is not bundled
     expected_components = ["portable_git", "python", "node"] if bundled else []
@@ -293,6 +321,8 @@ def test_exe_only_install_preserves_tools_in_a_matching_target(tmp_path, monkeyp
     build_win_runtime.main()
 
     assert (target_dir / "bin" / "box-agent-acp.exe").read_bytes() == b"rebuilt exe"
+    assert (target_dir / "skills/SKILL.md").read_text() == "new Skill"
+    assert (target_dir / "config/config-example.yaml").read_text() == "new resource config-example.yaml"
     manifest = json.loads((target_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["version"] == "0.9.7"
     assert manifest["external_python_sandbox"] is external

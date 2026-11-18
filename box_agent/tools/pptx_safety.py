@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
+from box_agent.resource_paths import bundled_resource_dir
+
 
 _BYPASS_ERROR = (
     "PPTX HTML self-check bypass blocked. Use scripts/html_to_editable_pptx.js, "
@@ -47,8 +49,7 @@ _IMAGE_STATUS_ERROR_MESSAGES = {
 
 _NON_EXECUTABLE_STYLESHEET_SUFFIXES = {".css", ".less", ".sass", ".scss"}
 _SYNC_IMAGE_STATUS_SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "skills"
+    bundled_resource_dir("skills", package_dir=Path(__file__).resolve().parents[1])
     / "document-skills"
     / "pptx"
     / "scripts"

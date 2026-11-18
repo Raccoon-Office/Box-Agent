@@ -3,10 +3,11 @@
 
 Stages:
     bin/              ← PyInstaller-frozen BoxAgent (changes when source changes)
+    skills/, config/  ← version-matched external resource data
     runtime/          ← PortableGit + Python (only --bundled-python-sandbox)
     runtimes/         ← Node (only --bundled-python-sandbox)
 
-`--exe-only` rebuilds **bin/ only**, leaving runtime/ and runtimes/ untouched.
+`--exe-only` rebuilds **bin/, skills/ and config/**, leaving runtime/ and runtimes/ untouched.
 The selected profile must match the existing output and --install-to manifests;
 switch profiles with a clean build (without --exe-only).
 Use this when you change BoxAgent Python source but don't touch bash/node/python.
@@ -39,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 
@@ -173,15 +175,6 @@ def _run_pyinstaller(bin_dir: Path, *, external_python_sandbox: bool = True) -> 
 
     entry_point = PROJECT_ROOT / "box_agent" / "acp" / "runtime_entry.py"
 
-    datas = [
-        (str(PROJECT_ROOT / "box_agent" / "config"), "box_agent/config"),
-        (str(PROJECT_ROOT / "box_agent" / "skills"), "box_agent/skills"),
-    ]
-    datas_args: list[str] = []
-    for src, dst in datas:
-        if Path(src).exists():
-            datas_args.extend(["--add-data", f"{src}{os.pathsep}{dst}"])
-
     hidden_imports = _windows_pyinstaller_hidden_imports(
         external_python_sandbox=external_python_sandbox
     )
@@ -202,7 +195,7 @@ def _run_pyinstaller(bin_dir: Path, *, external_python_sandbox: bool = True) -> 
         "--distpath", str(dist_dir),
         "--workpath", str(work_dir),
         "--specpath", str(spec_dir),
-        *datas_args, *hidden_args, *collect_args, *exclude_args,
+        *hidden_args, *collect_args, *exclude_args,
         str(entry_point),
     ]
 
@@ -305,21 +298,74 @@ def _create_tar(output_dir: Path, runtime_dir: Path, version: str) -> Path:
     return archive_path
 
 
+def _validate_external_payload(runtime_dir: Path) -> None:
+    for relative in (
+        "bin/box-agent-acp.exe", "skills/_manifest.json",
+        "config/config-example.yaml", "manifest.json", "VERSION",
+    ):
+        if not (runtime_dir / relative).is_file():
+            raise ValueError(f"Incomplete runtime payload: missing {runtime_dir / relative}")
+
+
+def _replace_exe_only_payload(runtime_dir: Path, target: Path) -> None:
+    """Replace the versioned executable and resources together; retain stable tools."""
+    _validate_external_payload(runtime_dir)
+    names = ("bin", "skills", "config", "manifest.json", "VERSION")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix=".box-agent-payload-", dir=target.parent))
+    preserve_backup = False
+    try:
+        staging, backup = folder / "new", folder / "old"
+        staging.mkdir()
+        backup.mkdir()
+        for name in names:
+            source = runtime_dir / name
+            if source.is_dir():
+                shutil.copytree(source, staging / name)
+            else:
+                shutil.copy2(source, staging / name)
+        target.mkdir(parents=True, exist_ok=True)
+        moved, published = [], []
+        try:
+            for name in names:
+                destination = target / name
+                if destination.is_symlink():
+                    raise ValueError(f"Refusing to replace redirected runtime payload: {destination}")
+                if destination.exists():
+                    destination.rename(backup / name)
+                    moved.append(name)
+                (staging / name).rename(destination)
+                published.append(name)
+        except Exception as publish_error:
+            try:
+                for name in reversed(published):
+                    destination = target / name
+                    if destination.is_dir():
+                        _rmtree_with_retry(destination)
+                    else:
+                        destination.unlink()
+                for name in reversed(moved):
+                    (backup / name).rename(target / name)
+            except Exception as rollback_error:
+                preserve_backup = True
+                raise RuntimeError(
+                    f"Runtime payload publication failed ({publish_error!r}); "
+                    f"rollback failed ({rollback_error!r}); "
+                    f"old payload backup retained at {backup}"
+                ) from rollback_error
+            raise
+    finally:
+        if not preserve_backup:
+            _rmtree_with_retry(folder)
+
+
 def _install_to(runtime_dir: Path, target: Path, exe_only: bool) -> None:
     """Copy assembled runtime tree to an existing officev3 install location."""
+    _validate_external_payload(runtime_dir)
     target = target.resolve()
     if exe_only:
-        src_bin = runtime_dir / "bin"
-        dst_bin = target / "bin"
-        if dst_bin.exists():
-            _rmtree_with_retry(dst_bin)
-        shutil.copytree(src_bin, dst_bin)
-        # Refresh manifest + VERSION too so consumers see new version
-        for fname in ("manifest.json", "VERSION"):
-            src_f = runtime_dir / fname
-            if src_f.is_file():
-                shutil.copy2(src_f, target / fname)
-        print(f"[win] Installed bin/ -> {target}")
+        _replace_exe_only_payload(runtime_dir, target)
+        print(f"[win] Installed bin/, skills/ and config/ -> {target}")
     else:
         if target.exists():
             _rmtree_with_retry(target)
@@ -336,7 +382,7 @@ def main() -> None:
     parser.add_argument("--output", default="dist/runtime",
                         help="Output directory (default: dist/runtime)")
     parser.add_argument("--exe-only", action="store_true",
-                        help="Only rebuild bin/ (PyInstaller), keeping the same slim/full profile "
+                        help="Rebuild bin/, skills/ and config/, keeping the same slim/full profile "
                              "and existing runtime/ and runtimes/ in output and --install-to.")
     parser.add_argument("--no-tar", action="store_true",
                         help="Skip the tar.gz archive step (faster dev iteration).")
@@ -373,13 +419,14 @@ def main() -> None:
     print(f"Mode: {'exe-only' if args.exe_only else 'full'}")
 
     if args.exe_only:
-        # Wipe only bin/
-        bin_dir = runtime_dir / "bin"
-        if bin_dir.exists():
-            _rmtree_with_retry(bin_dir)
-        _run_pyinstaller(bin_dir, external_python_sandbox=external_python_sandbox)
-        # Manifest version bump so consumers see the new exe
-        _write_manifest(runtime_dir, version, external_python_sandbox=external_python_sandbox)
+        # Prepare the whole versioned payload before replacing existing files.
+        from scripts.build_runtime import copy_runtime_resources
+        with tempfile.TemporaryDirectory(prefix=".box-agent-build-", dir=output_dir) as folder:
+            staging = Path(folder)
+            _run_pyinstaller(staging / "bin", external_python_sandbox=external_python_sandbox)
+            copy_runtime_resources(PROJECT_ROOT, staging)
+            _write_manifest(staging, version, external_python_sandbox=external_python_sandbox)
+            _replace_exe_only_payload(staging, runtime_dir)
     else:
         # Full clean build
         if runtime_dir.exists():
@@ -388,6 +435,8 @@ def main() -> None:
         bin_dir = runtime_dir / "bin"
         bin_dir.mkdir()
         _run_pyinstaller(bin_dir, external_python_sandbox=external_python_sandbox)
+        from scripts.build_runtime import copy_runtime_resources
+        copy_runtime_resources(PROJECT_ROOT, runtime_dir)
         _write_manifest(runtime_dir, version, external_python_sandbox=external_python_sandbox)
         # bash + python + sandbox packages + node
         if not external_python_sandbox:
@@ -397,6 +446,8 @@ def main() -> None:
             if python_exe.is_file():
                 _install_sandbox_packages_win(python_exe)
             _install_node_win(runtime_dir)
+
+    _validate_external_payload(runtime_dir)
 
     print(f"\n[win] Runtime tree assembled: {runtime_dir}")
 

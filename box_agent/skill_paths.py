@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from .config import Config
+from .resource_paths import bundled_resource_dir
 from .user_paths import configured_box_agent_home, state_path
 
 BUILTIN_SKILLS_ENV = "BOX_AGENT_BUILTIN_SKILLS_DIR"
@@ -38,19 +39,29 @@ def resolve_builtin_skills_dir(config: Config) -> Path:
     else:
         skills_path = Path(config.tools.skills_dir).expanduser()
     package = Config.get_package_dir().resolve()
+    bundled = bundled_resource_dir("skills", package_dir=package).resolve()
     if skills_path.is_absolute():
         builtin = skills_path
+    elif skills_path == Path("skills") and bundled != package / "skills":
+        # Frozen runtimes keep bundled resources beside bin. Explicit host
+        # sources and legacy source/pip discovery retain their existing rules.
+        builtin = bundled
     else:
-        candidates = [skills_path, Path("box_agent") / skills_path, package / skills_path]
+        packaged_candidate = package / skills_path
+        if bundled != package / "skills" and skills_path.parts and skills_path.parts[0] == "skills":
+            packaged_candidate = bundled.joinpath(*skills_path.parts[1:])
+        candidates = [skills_path, Path("box_agent") / skills_path, packaged_candidate]
         if configured_box_agent_home() is not None:
-            candidates = [package / skills_path]
+            candidates = [packaged_candidate]
         builtin = candidates[0]
         for candidate in candidates:
             if candidate.exists():
                 builtin = candidate.resolve()
                 break
-    if configured_box_agent_home() is not None and not builtin.resolve().is_relative_to(package):
-        builtin = state_path("skills", builtin.resolve())
+    if configured_box_agent_home() is not None:
+        resolved = builtin.resolve()
+        if not resolved.is_relative_to(bundled) and not resolved.is_relative_to(package):
+            builtin = state_path("skills", resolved)
     return builtin
 
 

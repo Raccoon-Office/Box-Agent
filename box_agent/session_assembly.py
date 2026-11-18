@@ -678,7 +678,7 @@ def _child_prompt_template(template: str) -> str:
     """Project only the packaged template before mixing in caller content."""
     from .tools.skill_loader import SKILL_SLOT_SENTINEL
 
-    packaged = Path(__file__).with_name("config").joinpath("system_prompt.md").read_text(encoding="utf-8")
+    packaged = (Config.get_bundled_config_dir() / "system_prompt.md").read_text(encoding="utf-8")
     template = template.replace(SKILL_SLOT_SENTINEL, "{SKILLS_METADATA}")
     if template in (packaged, packaged.replace("{SKILLS_METADATA}", "")):
         template = template[template.index("## Working Guidelines\n"):]

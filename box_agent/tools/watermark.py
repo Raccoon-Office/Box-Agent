@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from box_agent.resource_paths import bundled_resource_dir
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from PIL import ImageFont
 
@@ -40,9 +42,10 @@ _RASTERIZABLE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 # Bundled CJK font so non-Latin (e.g. Chinese) custom watermark text renders
 # consistently across macOS/Windows/Linux and inside the frozen runtime. The
 # canvas-fonts directory ships with the package (pyproject ``skills/**/*`` and
-# build_runtime ``--add-data box_agent/skills``).
+# runtime builder copying the Skills resource tree).
 _CANVAS_FONTS_DIR = (
-    Path(__file__).resolve().parent.parent / "skills" / "canvas-design" / "canvas-fonts"
+    bundled_resource_dir("skills", package_dir=Path(__file__).resolve().parent.parent)
+    / "canvas-design" / "canvas-fonts"
 )
 _BUNDLED_FONT = _CANVAS_FONTS_DIR / "NotoSansSC-Regular.otf"
 

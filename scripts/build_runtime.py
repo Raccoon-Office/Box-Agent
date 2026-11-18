@@ -69,6 +69,44 @@ PYTHON_STANDALONE_SHA256 = (
 )
 BUILD_TOOLS_CACHE = Path.home() / ".cache" / "box-agent-build-tools"
 
+# Mutable per-user configuration is never part of a published runtime.
+_RUNTIME_CONFIG_FILES = frozenset({
+    "config-example.yaml", "isolated-profile-example.yaml", "mcp-example.json",
+    "system_prompt.md", "analysis_prompt.md", "code_prompt.md",
+})
+_RUNTIME_RESOURCE_JUNK = frozenset({
+    "node_modules", "__pycache__", ".git", ".venv", "venv", ".pytest_cache",
+    ".DS_Store", "Thumbs.db",
+})
+
+
+def copy_runtime_resources(project_root: Path, runtime_dir: Path) -> None:
+    """Publish resource data beside bin/, excluding developer/local state."""
+    package = project_root / "box_agent"
+    for name in ("skills", "config"):
+        source = package / name
+        if source.is_symlink() or not source.is_dir():
+            raise RuntimeError(f"Runtime resource source is missing or redirected: {source}")
+
+        def ignored(directory: str, names: list[str]) -> set[str]:
+            omitted = {
+                item for item in names
+                if item in _RUNTIME_RESOURCE_JUNK or item.endswith((".pyc", ".pyo"))
+            }
+            if name == "config" and Path(directory) == source:
+                omitted.update(set(names) - _RUNTIME_CONFIG_FILES)
+            for item in set(names) - omitted:
+                if (Path(directory) / item).is_symlink():
+                    raise RuntimeError(f"Runtime resource source contains a link: {Path(directory) / item}")
+            return omitted
+
+        shutil.copytree(source, runtime_dir / name, ignore=ignored)
+    required_files = ("skills/_manifest.json", *(f"config/{name}" for name in sorted(_RUNTIME_CONFIG_FILES)))
+    for required in required_files:
+        if not (runtime_dir / required).is_file():
+            raise RuntimeError(f"Runtime resource is missing: {required}")
+
+
 # ── Platform detection ───────────────────────────────────────
 
 
@@ -700,16 +738,7 @@ def build_runtime(
 
     entry_point = project_root / "box_agent" / "acp" / "runtime_entry.py"
 
-    # Collect data files: config/, skills/
-    datas = [
-        (str(project_root / "box_agent" / "config"), "box_agent/config"),
-        (str(project_root / "box_agent" / "skills"), "box_agent/skills"),
-    ]
-    datas_args = []
-    for src, dst in datas:
-        if Path(src).exists():
-            datas_args.extend(["--add-data", f"{src}{os.pathsep}{dst}"])
-
+    # Skills and config are published as external resources beside bin/.
     hidden_imports = pyinstaller_hidden_imports(
         external_python_sandbox=external_python_sandbox
     )
@@ -732,7 +761,6 @@ def build_runtime(
         "--distpath", str(dist_dir),
         "--workpath", str(output_dir / "pyinstaller_build"),
         "--specpath", str(output_dir),
-        *datas_args,
         *hidden_args,
         *collect_args,
         *exclude_args,
@@ -770,6 +798,8 @@ def build_runtime(
             shutil.copytree(item, dest)
         else:
             shutil.copy2(item, dest)
+
+    copy_runtime_resources(project_root, runtime_dir)
 
     # Ensure entry is executable
     entry_bin = bin_dir / "box-agent-acp"

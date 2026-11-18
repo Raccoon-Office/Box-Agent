@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from box_agent.user_paths import state_path
+from box_agent.resource_paths import bundled_resource_dir
 from .safety import builtin_skill_write_error
 
 if TYPE_CHECKING:
@@ -203,7 +204,7 @@ class PermissionEngine:
         try:
             self._builtin_skills_dir: Path | None = (
                 Path(policy.builtin_skills_dir) if policy.builtin_skills_dir
-                else package_root / "skills"
+                else bundled_resource_dir("skills", package_dir=package_root)
             ).resolve()
         except (OSError, RuntimeError):
             self._builtin_skills_dir = None

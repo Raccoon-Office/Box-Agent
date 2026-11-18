@@ -19,10 +19,11 @@ try:
 except Exception:  # pragma: no cover
     yaml = None
 
-DEFAULT_SKILL_DIRS = [
+DEFAULT_SKILL_DIRS = list(dict.fromkeys(path.resolve() for path in [
     Path.home() / ".box-agent" / "skills",
-    Path("/Applications/office-raccoon.app/Contents/Resources/box-agent-runtime/bin/_internal/box_agent/skills"),
-]
+    Path(__file__).resolve().parents[2],
+    Path("/Applications/office-raccoon.app/Contents/Resources/box-agent-runtime/skills"),
+]))
 
 CATEGORY_RULES = [
     ("技能导航", ["skill-map", "skill-navigation", "navigation", "技能地图", "技能导航", "技能库导航"]),

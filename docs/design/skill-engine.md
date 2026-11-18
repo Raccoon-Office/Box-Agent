@@ -64,9 +64,11 @@ flowchart LR
 
 桌面宿主通过 Agent 子进程环境 `BOX_AGENT_BUILTIN_SKILLS_DIR` 指定生效的内置
 Skill 根目录。`skill_paths.resolve_builtin_skills_dir` 是共享解析入口：未设置时
-继续使用 `tools.skills_dir` 和既有开发/包路径查找；设置时要求非空，且在展开
-`~` 后为绝对路径，不会因非法值静默回退。启用 `BOX_AGENT_HOME` 时，包目录外的
-来源还必须在该独立 profile 内；目录或符号链接解析后逃出 profile 会被拒绝。
+继续使用 `tools.skills_dir` 和既有开发/包路径查找；独立 runtime 的默认
+`skills` 使用 `bin/` 同级的随包资源。设置时要求非空，且在展开 `~` 后为
+绝对路径，不会因非法值静默回退。启用 `BOX_AGENT_HOME` 时，除当前运行包的
+实际内置 Skill 根目录外，包目录外的来源仍必须在该独立 profile 内；目录
+或符号链接解析后逃出 profile 会被拒绝。
 宿主不要为这个过程改写共享 `config.yaml`，也不要搬迁或删除旧用户 Skill 目录。
 
 目录中的普通 `_manifest.json` 文件必须显式带 `"desktopManaged": true`，才会

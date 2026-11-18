@@ -19,10 +19,11 @@ from pathlib import Path
 from .shell_inspection import ShellInspection, ShellInvocation, ShellRedirection, inspect_shell_command
 
 from box_agent.user_paths import state_path
+from box_agent.resource_paths import bundled_resource_dir
 
 # Global trash directory for file backups
 TRASH_DIR = state_path('trash')
-BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"
+BUILTIN_SKILLS_ROOT = bundled_resource_dir("skills", package_dir=Path(__file__).resolve().parents[1])
 
 
 def builtin_skill_write_error(
