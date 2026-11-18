@@ -233,6 +233,7 @@ _LEGACY_WORKFLOW_MARKERS = (
     "CONTROLLED_PRESENTATION_STAGE=",
     "[BOX_AGENT_EXTERNAL_SKILL_CHECKPOINT]",
 )
+_SURFACE_MESSAGE_TYPES = {"user/message", "assistant/message", "tool/result"}
 
 
 def _is_legacy_workflow_context(message: Message) -> bool:
@@ -246,6 +247,37 @@ def _is_legacy_workflow_context(message: Message) -> bool:
     return content.startswith(_LEGACY_RUNTIME_CONTEXT_PREFIXES) and any(
         marker in content for marker in _LEGACY_WORKFLOW_MARKERS
     )
+
+
+def _apply_surface_message(
+    surface: list[tuple[int, Message]], event: dict[str, Any],
+) -> Message:
+    data = event["data"]
+    message_data = data if event["type"] == "user/message" else data.get("message")
+    seq = event["seq"]
+    try:
+        message = Message.model_validate(message_data)
+    except Exception as exc:
+        raise SessionLogCorrupted(f"session event {seq} has an invalid message") from exc
+
+    node = (seq, message)
+    operation = event.get("surfaceOp")
+    if operation == "append":
+        surface.append(node)
+        return message
+    if not isinstance(operation, dict) or operation.get("op") != "replace":
+        raise SessionLogCorrupted(f"surface event {seq} has an invalid surfaceOp")
+    start = operation.get("start")
+    end = operation.get("end")
+    positions = {node_seq: index for index, (node_seq, _) in enumerate(surface)}
+    if start not in positions or end not in positions:
+        raise SessionLogCorrupted(f"surface replacement {seq} names a missing node")
+    start_index = positions[start]
+    end_index = positions[end]
+    if start_index > end_index:
+        raise SessionLogCorrupted(f"surface replacement {seq} has a reversed range")
+    surface[start_index : end_index + 1] = [node]
+    return message
 
 
 def _acquire_writer_lock(path: Path) -> BinaryIO:
@@ -303,6 +335,8 @@ class SessionLog:
         self.path = path
         self.header = dict(header)
         self._events = events
+        self._surface: list[tuple[int, Message]] = []
+        self._surface_cursor: int | None = None if events else 0
         self._handle = handle
         self._lock_handle = lock_handle
         self._closed = False
@@ -718,13 +752,20 @@ class SessionLog:
             event["surfaceOp"] = surface_op
         if source_event_seqs is not None:
             event["sourceEventSeqs"] = source_event_seqs
-        encoded = _encode_record(event)
+        # Keep facts used by the incremental Surface independent of callers.
+        stored_event = event
+        if event_type in _SURFACE_MESSAGE_TYPES or event_type == "history/revise":
+            stored_event = deepcopy(event)
+        encoded = _encode_record(stored_event)
         try:
             self._handle.write(encoded)
         except OSError as exc:
             self._failed = True
             raise SessionLogDurabilityError("session log append failed") from exc
-        self._events.append(event)
+        self._events.append(stored_event)
+        if event_type == "history/revise":
+            # Revisions can restore nodes removed by earlier replacements.
+            self._surface_cursor = None
         return dict(event)
 
     def flush(self) -> None:
@@ -920,13 +961,14 @@ class SessionLog:
 
         The Session Log is a recovery aid and must not terminate the active task
         merely because runtime context management rewrote the in-memory Surface.
-        Stored-log corruption still fails in ``replay()``; only a valid stored
-        Surface that differs from the valid live Surface is replaced here.
+        Stored message events use the same validation as ``replay()``. Request
+        measurements and other recovery state are not needed to compare messages.
         """
 
-        persisted = self.replay().messages
         persisted_payloads = [
-            message.model_dump(mode="json", exclude_none=True) for message in persisted
+            message.model_dump(mode="json", exclude_none=True)
+            for _, message in self._surface_nodes()
+            if not _is_legacy_workflow_context(message)
         ]
         live_payloads = [
             message.model_dump(mode="json", exclude_none=True) for message in messages
@@ -1000,30 +1042,25 @@ class SessionLog:
         return appended
 
     def _surface_nodes(self) -> list[tuple[int, Message]]:
-        surface: list[tuple[int, Message]] = []
-        for event in self._active_events():
+        end = len(self._events)
+        if self._surface_cursor == end:
+            return self._surface
+        if self._surface_cursor is None:
+            surface: list[tuple[int, Message]] = []
+            events = self._active_events()
+        else:
+            surface = self._surface
+            events = self._events[self._surface_cursor:end]
+
+        # A partial refresh after corruption must not be reused.
+        self._surface_cursor = None
+        for event in events:
             if event["type"] == "surface/reset":
                 surface.clear()
-                continue
-            if event["type"] not in {
-                "user/message",
-                "assistant/message",
-                "tool/result",
-            }:
-                continue
-            data = event["data"]
-            message_data = data if event["type"] == "user/message" else data["message"]
-            message = Message.model_validate(message_data)
-            operation = event.get("surfaceOp")
-            node = (event["seq"], message)
-            if operation == "append":
-                surface.append(node)
-                continue
-            if isinstance(operation, dict) and operation.get("op") == "replace":
-                positions = {seq: index for index, (seq, _) in enumerate(surface)}
-                start_index = positions[operation["start"]]
-                end_index = positions[operation["end"]]
-                surface[start_index : end_index + 1] = [node]
+            elif event["type"] in _SURFACE_MESSAGE_TYPES:
+                _apply_surface_message(surface, event)
+        self._surface = surface
+        self._surface_cursor = end
         return surface
 
     def history_messages(self) -> list[tuple[int, Message, dict[str, Any]]]:
@@ -1039,7 +1076,8 @@ class SessionLog:
             elif kind == "compaction/end":
                 compacting = False
             elif (not compacting and not data.get("surfaceDerived")
-                  and kind in {"user/message", "assistant/message", "tool/result"}):
+                  and kind in _SURFACE_MESSAGE_TYPES):
+                data = deepcopy(data)
                 payload = data if kind == "user/message" else data["message"]
                 history.append((event["seq"], Message.model_validate(payload), data))
         return history
@@ -1284,47 +1322,9 @@ class SessionLog:
                 value = data.get("skills")
                 skills = deepcopy(value) if isinstance(value, list) else []
                 continue
-            if event_type not in {
-                "user/message",
-                "assistant/message",
-                "tool/result",
-            }:
-                continue
-            message_data = (
-                data
-                if event_type == "user/message"
-                else data.get("message")
-            )
-            try:
-                message = Message.model_validate(message_data)
-            except Exception as exc:
-                raise SessionLogCorrupted(
-                    f"session event {event['seq']} has an invalid message"
-                ) from exc
-            _restore_context_usage(message, data.get("contextUsage"))
-            operation = event.get("surfaceOp")
-            node = (event["seq"], message)
-            if operation == "append":
-                surface.append(node)
-                continue
-            if not isinstance(operation, dict) or operation.get("op") != "replace":
-                raise SessionLogCorrupted(
-                    f"surface event {event['seq']} has an invalid surfaceOp"
-                )
-            start = operation.get("start")
-            end = operation.get("end")
-            positions = {seq: index for index, (seq, _) in enumerate(surface)}
-            if start not in positions or end not in positions:
-                raise SessionLogCorrupted(
-                    f"surface replacement {event['seq']} names a missing node"
-                )
-            start_index = positions[start]
-            end_index = positions[end]
-            if start_index > end_index:
-                raise SessionLogCorrupted(
-                    f"surface replacement {event['seq']} has a reversed range"
-                )
-            surface[start_index : end_index + 1] = [node]
+            if event_type in _SURFACE_MESSAGE_TYPES:
+                message = _apply_surface_message(surface, event)
+                _restore_context_usage(message, data.get("contextUsage"))
         messages = [message for _, message in surface if not _is_legacy_workflow_context(message)]
         latest_snapshot_seen = False
         for message in reversed(messages):
