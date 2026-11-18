@@ -229,8 +229,15 @@ class DefaultContextEngine:
         definitions = self.prepared_tools.definitions if self.prepared_tools is not None else ()
         pending = ([Message(role="user", source="runtime", content=list(self._pending_followup_blocks))]
                    if self._pending_followup_blocks else [])
+        context_messages = self.project_history([*self._history, *envelopes, *self._extra_messages, *pending])
+        # Budget the same optional input projection as the next model request.
+        if self._input_guard is not None and self.prepared_tools is not None:
+            context_messages = self._input_guard.project_messages(
+                context_messages, tools=self.prepared_tools, token_limit=self._token_limit,
+                reserve_tokens=self._transient_reserve_tokens,
+            )
         available = skill_reference_budget_chars(
-            self.project_history([*self._history, *envelopes, *self._extra_messages, *pending]), definitions,
+            context_messages, definitions,
             self._token_limit - self._transient_reserve_tokens, self._output_tokens, llm=self.llm,
         )
         return self.references.read(name, **arguments, budget_chars=max(

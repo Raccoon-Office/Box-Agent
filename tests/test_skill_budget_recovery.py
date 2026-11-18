@@ -8,11 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from box_agent.context_input import DefaultContextEngine
+from box_agent.desktop_memory.visibility import DesktopInputGuard
 from box_agent.events import DoneEvent, ErrorEvent, StepStart, StopReason, SummarizationEvent
 from box_agent.hooks import BaseHook
 from box_agent.kernel.context_engine import (
     _fallback_context_estimate, request_input_tokens, skill_reference_budget_chars,
 )
+from box_agent.memory import place_memory_block
 from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall, TokenUsage
 from box_agent.session_log import SessionLog
@@ -20,7 +22,7 @@ from box_agent.skill_context import SkillReferenceContext
 from box_agent.skill_runtime import SkillRuntime
 from box_agent.tools.engine.preparation import prepare_tools
 from box_agent.tools.engine.engine import DefaultToolEngine
-from box_agent.tools.base import Tool
+from box_agent.tools.base import Tool, ToolInvocationContext
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.skill_tool import GetSkillTool
 
@@ -80,6 +82,56 @@ def test_host_and_paged_tool_share_the_safe_input_budget(runtime):
     page = engine.tool_reader("demo", limit=20)
     assert page.success and "EXACT_METHOD_BODY" in page.model_context
     assert page.raw_output["skill_reference"]["has_more"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_followup", [False, True])
+async def test_skill_read_uses_guarded_history_and_reserves_late_followup(runtime, late_followup):
+    preload = "P" * 15400
+    guard = DesktopInputGuard(lambda *_: None, lambda size: preload[:size])
+    engine = DefaultContextEngine()
+    engine.configure_run(skill_engine=runtime)
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    tool = GetSkillTool(runtime.loader)
+    prepared_tools = prepare_tools([tool])
+    history = [
+        Message(role="system", content=place_memory_block(
+            "BASE", "--- MEMORY START ---\n" + preload + "\n--- MEMORY END ---", reserve=True,
+        )),
+        Message(role="user", content="X" * 259000),
+    ]
+    request = engine.prepare_request(history, prepared_tools=prepared_tools, token_limit=90000)
+
+    assert request.blocked_reason is None
+    assert request_input_tokens(history, prepared_tools.definitions) > 90000
+    assert request_input_tokens(request.messages, prepared_tools.definitions) + 1024 < 90000
+    assert preload not in str(request.messages)
+    history.append(Message(role="assistant", content="", tool_calls=[ToolCall(
+        id="read-demo", type="function",
+        function=FunctionCall(name="get_skill", arguments={"skill_name": "demo"}),
+    )]))
+    if late_followup:
+        engine.reserve_followup([{"type": "text", "text": "late input " * 2000}])
+
+    result = await tool.invoke(
+        {"skill_name": "demo"}, context=ToolInvocationContext(skill_reader=engine.tool_reader),
+    )
+
+    if late_followup:
+        assert not result.success
+        assert result.raw_output["code"] == "SKILL_CONTEXT_BUDGET"
+        assert runtime.turn_deliveries == {}
+    else:
+        assert result.success, result.error
+        assert "EXACT_METHOD_BODY" in result.model_context
+        history.append(Message(
+            role="tool", name="get_skill", tool_call_id="read-demo", content=result.model_context,
+        ))
+        next_request = engine.prepare_request(history, prepared_tools=prepared_tools, token_limit=90000)
+        assert next_request.blocked_reason is None
+        assert request_input_tokens(next_request.messages, prepared_tools.definitions) <= 90000
+    # Optional input projection must not rewrite durable history.
+    assert preload in history[0].content
 
 
 def test_near_limit_selected_skill_pages_without_blocking_final_request(runtime):
