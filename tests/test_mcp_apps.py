@@ -763,6 +763,8 @@ async def test_hosted_app_auth_checks_scope_at_transport_and_requests_reconnect(
         "flights", connection_type="streamable_http", url="https://fixture.example/mcp",
         auth=mcp_loader.DynamicBearerAuth(auth_file=str(login_file)),
     )
+    # Exercise a transport whose App identity has already been published.
+    connection.auth.app_scope_bound = True
     monkeypatch.setattr(mcp_loader, "_mcp_connections", [connection])
     sent = []
 

@@ -439,6 +439,7 @@ class DynamicBearerAuth(httpx.Auth):
         self.auth_file = auth_file
         self.explicit_token = explicit_token
         self.app_scope: tuple[str, str] | None = None
+        self.app_scope_bound = False
 
     def current_app_scope(self) -> tuple[str, str]:
         login = read_hosted_auth_snapshot(self.auth_file)
@@ -454,20 +455,26 @@ class DynamicBearerAuth(httpx.Auth):
         yield self._with_current_auth(request)
 
     def _with_current_auth(self, request: httpx.Request) -> httpx.Request:
-        if self.app_scope is not None:
-            # A queued request can reach the HTTP transport after the account
-            # changes, so check the original scope here as well as at admission.
-            if self.app_scope_changed() or not should_attach_auth_header(str(request.url)):
+        attachable = should_attach_auth_header(str(request.url))
+        authorization = request.headers.get("authorization")
+        scope = self.app_scope
+        if scope is not None and (
+            not attachable or self.app_scope_changed()
+            or (authorization is not None and authorization != f"Bearer {scope[0]}")
+        ):
+            # Discovery still follows normal transport authentication. If an
+            # endpoint or login changes during discovery, this client cannot
+            # attest App bindings. Published App clients fail closed before send.
+            if self.app_scope_bound:
                 raise McpAppError("APP_SERVER_CHANGED")
-            token = self.app_scope[0]
-            authorization = request.headers.get("authorization")
-            if authorization is not None and authorization != f"Bearer {token}":
-                raise McpAppError("APP_SERVER_CHANGED")
+            self.app_scope = scope = None
+        if scope is not None:
+            token = scope[0]
         else:
-            if "authorization" in request.headers:
+            if authorization is not None:
                 return request
             token = resolve_auth_token(self.explicit_token, self.auth_file)
-        if not token or not should_attach_auth_header(str(request.url)):
+        if not token or not attachable:
             return request
 
         request.headers["Authorization"] = f"Bearer {token}"
@@ -1935,6 +1942,7 @@ class MCPServerConnection:
             self.exit_stack = AsyncExitStack()
             session_lease: SessionLease | None = None
             if self.apps_enabled and isinstance(self.auth, DynamicBearerAuth):
+                self.auth.app_scope_bound = False
                 self.auth.app_scope = self.auth.current_app_scope()
                 self._set_app_server_identity()
 
@@ -1997,6 +2005,9 @@ class MCPServerConnection:
                 session_lease = self.session_pool.lease
                 session = None
 
+            if isinstance(self.auth, DynamicBearerAuth) and self.auth.app_scope is None:
+                self.server_identity = ""
+
             # Wrap each tool with execute timeout
             execute_timeout = self._get_execute_timeout()
             for tool in tools_list.tools:
@@ -2043,10 +2054,12 @@ class MCPServerConnection:
                 )
                 self.tools.append(mcp_tool)
 
-            if isinstance(self.auth, DynamicBearerAuth) and not any(
-                tool.mcp_ui_resource_uri and mcp_tool_allows(tool, "model") for tool in self.tools
-            ):
-                self.auth.app_scope = None
+            if isinstance(self.auth, DynamicBearerAuth):
+                self.auth.app_scope_bound = bool(self.server_identity) and any(
+                    tool.mcp_ui_resource_uri and mcp_tool_allows(tool, "model") for tool in self.tools
+                )
+                if not self.auth.app_scope_bound:
+                    self.auth.app_scope = None
 
             conn_info = self.url if self.url else self.command
             if self.connection_type == "stdio_http" and self.server_process is not None:
@@ -3352,18 +3365,19 @@ async def reconnect_auth_failed_mcp_servers_if_token_changed() -> list[dict]:
     if not current_fingerprint:
         return []
 
-    names = {
-        connection.name for connection in _mcp_connections
-        if isinstance(connection.auth, DynamicBearerAuth) and connection.auth.app_scope_changed()
-    }
+    names = []
     if current_fingerprint != _mcp_auth_fingerprint:
         _mcp_auth_fingerprint = current_fingerprint
-        names.update(
+        names.extend(
             status.name for status in _mcp_status.values()
             if status.state == "failed" and status.auth_status in {401, 403}
         )
+    names.extend(
+        connection.name for connection in _mcp_connections
+        if isinstance(connection.auth, DynamicBearerAuth) and connection.auth.app_scope_changed()
+    )
     results: list[dict] = []
-    for name in sorted(names):
+    for name in dict.fromkeys(names):
         result = await reconnect_mcp_server(name)
         results.append({"name": name, **result})
     return results
