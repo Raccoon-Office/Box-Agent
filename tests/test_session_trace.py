@@ -112,6 +112,83 @@ def test_writer_failure_never_escapes_into_agent_flow(tmp_path):
     assert blocked_trace_dir.read_text(encoding="utf-8") == "occupied"
 
 
+@pytest.mark.parametrize("source", ["default_link", "environment", "argument"])
+def test_unsafe_trace_directory_disables_diagnostics_without_writing_outside_profile(
+    tmp_path, monkeypatch, caplog, source,
+):
+    profile = tmp_path / "profile"
+    (profile / "log").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    options = {}
+    if source == "default_link":
+        try:
+            (profile / "log/sessions").symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("Directory symlinks unavailable on this platform")
+    elif source == "environment":
+        monkeypatch.setenv("BOX_AGENT_SESSION_TRACE_DIR", str(outside))
+    else:
+        options["trace_dir"] = outside
+
+    writer = SessionTraceWriter(session_id="unsafe-path", acp_session_id="acp", enabled=True, **options)
+    writer.write("session.start", data={"content": "must stay private"})
+
+    assert writer.enabled is False
+    assert list(outside.iterdir()) == []
+    assert "session trace disabled" in caplog.text
+    if source == "default_link":
+        assert (profile / "log/sessions").is_symlink()
+
+
+def test_disabled_trace_writer_does_not_resolve_diagnostic_directory(tmp_path, monkeypatch):
+    def unexpected():
+        pytest.fail("disabled diagnostics must not resolve a directory")
+
+    monkeypatch.setattr(session_trace_module, "default_session_trace_dir", unexpected)
+    writer = SessionTraceWriter(session_id="disabled", acp_session_id="acp", enabled=False)
+    writer.write("session.start")
+
+
+@pytest.mark.asyncio
+async def test_acp_continues_with_unsafe_default_trace_directory(tmp_path, monkeypatch, caplog):
+    from tests.test_acp import DoneLLM, DummyConn
+
+    profile = tmp_path / "profile"
+    workspace = profile / "workspace"
+    (profile / "log").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (profile / "log/sessions").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks unavailable on this platform")
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    monkeypatch.setenv("BOX_AGENT_SESSION_TRACE_ENABLED", "1")
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(workspace), enable_memory=False, max_steps=1),
+        tools=ToolsConfig(enable_mcp=False, enable_skills=False, enable_sub_agent=False),
+    )
+    adapter = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    try:
+        for text in ("first turn", "second turn"):
+            session = await adapter.new_session(str(workspace), session_id="unsafe-trace-session")
+            state = adapter._sessions[session.session_id]
+            assert state.trace_writer.enabled is False
+            result = await adapter.prompt(session.session_id, [{"type": "text", "text": text}])
+            assert result.stop_reason == "end_turn"
+        assert [message.content for message in state.agent.messages
+                if message.role == "user" and message.source != "runtime"] == [
+            "first turn", "second turn",
+        ]
+        assert list(outside.iterdir()) == []
+        assert "session trace disabled" in caplog.text
+    finally:
+        await adapter.aclose()
+
+
 def _trace_file(path, *, size: int, mtime: float):
     path.write_text("x" * size, encoding="utf-8")
     os.utime(path, (mtime, mtime))
