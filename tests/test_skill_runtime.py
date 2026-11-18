@@ -848,11 +848,11 @@ def test_runtime_prompt_mentions_python_node_and_npm_rules(tmp_path: Path) -> No
         sandbox_env=sandbox,
         node_runtime_root=tmp_path / "missing-node",
     )
-    out = build_skill_runtime_prompt(ctx)
+    out = build_skill_runtime_prompt(ctx, shell_name="bash")
 
     assert "## Skill Runtime Context" in out
     assert "- Python:" in out
-    assert "$BOX_AGENT_PYTHON" in out
+    assert '"$BOX_AGENT_PYTHON"' in out
     assert "- Node:" in out
     assert "初始化时未确认可用的 Node" in out
     assert "应直接报告依赖缺失" not in out
@@ -863,7 +863,7 @@ def test_runtime_prompt_mentions_python_node_and_npm_rules(tmp_path: Path) -> No
     assert "普通聊天不需要检查或等待这些运行时" in out
     assert "npm install -g" in out
     assert "$BOX_AGENT_SKILL_TOOLS_ROOT" in out
-    assert "标准 `python`/`python3`" in out
+    assert "标准 `python`/`python3`" not in out
     assert "禁止 `sudo`" in out
 
 

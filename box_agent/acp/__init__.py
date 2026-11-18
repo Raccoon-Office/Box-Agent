@@ -255,6 +255,7 @@ from box_agent.tools.runtime import (
     SkillRuntimeContext,
     build_skill_runtime_context,
     build_skill_runtime_prompt,
+    managed_python_shell_command,
 )
 from box_agent.tools.skill_preload import (
     SkillPreloadAttribution,
@@ -2435,8 +2436,8 @@ class BoxACPAgent:
                                 "name": runtime_tool.shell_name,
                                 "instruction": (
                                     f"Subsequent bash tool calls must use {runtime_tool.shell_name} syntax. "
-                                    "This is the current shell after environment refresh; "
-                                    "do not reuse commands written for a different shell."
+                                    "When managed Python is ready, invoke it as "
+                                    f"{managed_python_shell_command(runtime_tool.shell_name)}."
                                 ),
                             }
                     return shell

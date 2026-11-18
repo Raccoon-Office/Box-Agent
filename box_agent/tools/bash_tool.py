@@ -34,7 +34,7 @@ from .pptx_safety import (
     detect_pptx_image_status_command_bypass,
     detect_pptx_self_check_bypass,
 )
-from .runtime import bundled_win_bash
+from .runtime import bundled_win_bash, managed_python_shell_command
 from .shell_inspection import inspect_shell_command
 from .owned_file_cleanup import OwnedFileCleanup
 from .safety import (
@@ -1476,8 +1476,15 @@ class BashTool(Tool):
 
     @property
     def description(self) -> str:
+        python_command = managed_python_shell_command(self.shell_name)
+        refreshed_shell = "If local_environment reports a new shell, use its syntax and managed Python command."
+        python_tip = (
+            f"If BOX_AGENT_PYTHON points to a working managed interpreter, run it as {python_command}. "
+            "Otherwise prepare the managed Python through local_environment when available."
+        )
         shell_examples = {
             "Windows": f"""Execute PowerShell commands in foreground or background.
+{refreshed_shell}
 
 If the user forbids installation, do not install dependencies or provision environments, including automatic downloads by npx/uvx. Use existing compatible capabilities or report the blocker; do not switch tools to bypass the restriction. Read-only version/import/location probes remain allowed. Installation guidance below applies only when consistent with the user's constraints.
 
@@ -1501,14 +1508,16 @@ Tips:
   - Quote file paths with spaces: cd "My Documents"
   - Run dependent commands separately and check each exit status before continuing
   - Use absolute paths instead of cd when possible
+  - {python_tip}
   - For background commands, monitor with bash_output and terminate with bash_kill
   - Use lifetime=runtime only when the user explicitly needs a service or command to remain available after the final response
 
 Examples:
   - git status
   - npm test
-  - python -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true; read the dynamic port with bash_output)""",
+  - {python_command} -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true, then read the dynamic port with bash_output)""",
             "Unix": f"""Execute bash commands in foreground or background.
+{refreshed_shell}
 
 If the user forbids installation, do not install dependencies or provision environments, including automatic downloads by npx/uvx. Use existing compatible capabilities or report the blocker; do not switch tools to bypass the restriction. Read-only version/import/location probes remain allowed. Installation guidance below applies only when consistent with the user's constraints.
 
@@ -1538,7 +1547,7 @@ Tips:
   - Keep retained QA reports, requested previews, and delivery dependencies in the task directory. Do not recursively delete QA/task directories as delivery housekeeping; leave undeclared files in place.
   - Files referenced by chat and their local dependencies must remain available. Never delete or move them as cleanup. Normal edits and appends are allowed. Only a current explicit user deletion request may enter the dedicated confirmation flow.
   - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.
-  - If BOX_AGENT_PYTHON points to a working managed interpreter, run it as "$BOX_AGENT_PYTHON"; otherwise prepare the managed Python through local_environment when available. Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).
+  - {python_tip} Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).
   - For one-off data scripts, validate input types and never append to a collection while iterating it; collect additions separately or iterate over a copy
   - A timeout, resource stop, or optional QA failure is advisory for artifact workflows: preserve usable output, record the warning, and continue to delivery when safe
   - For background commands, monitor with bash_output and terminate with bash_kill
@@ -1547,7 +1556,7 @@ Tips:
 Examples:
   - git status
   - npm test
-  - "$BOX_AGENT_PYTHON" -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true; read the dynamic port with bash_output)""",
+  - {python_command} -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true, then read the dynamic port with bash_output)""",
         }
         # When the bundled Git-for-Windows bash is active on Win, the shell is
         # POSIX bash with coreutils — use the Unix description so the LLM
@@ -1558,14 +1567,17 @@ Examples:
 
     @property
     def parameters(self) -> dict[str, Any]:
-        cmd_desc = f"The {self.shell_name} command to execute. Quote file paths with spaces using double quotes."
+        # The same schema stays callable after local_environment switches shells.
         return {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
                     "maxLength": MAX_BASH_COMMAND_CHARS,
-                    "description": cmd_desc,
+                    "description": (
+                        "Command in the active shell's syntax. "
+                        "Quote file paths with spaces using double quotes."
+                    ),
                 },
                 "timeout": {
                     "type": "integer",

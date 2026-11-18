@@ -115,18 +115,32 @@ def resolve_cli_shell_python() -> Path | None:
     return None
 
 
-def build_skill_runtime_prompt(ctx: SkillRuntimeContext) -> str:
+def managed_python_shell_command(shell_name: str) -> str:
+    """Return the managed Python command prefix for the selected shell."""
+    if shell_name == "PowerShell":
+        return '& "$env:BOX_AGENT_PYTHON"'
+    return '"$BOX_AGENT_PYTHON"'
+
+
+def build_skill_runtime_prompt(ctx: SkillRuntimeContext, *, shell_name: str | None = None) -> str:
     """Render runtime facts and rules for the ACP/CLI system prompt."""
     python = ctx.get("python")
     node = ctx.get("node")
 
     lines = ["## Skill Runtime Context"]
+    if shell_name is not None:
+        shell_label = "Bash" if shell_name == "bash" else shell_name
+        lines.append(
+            f"- 当前 shell：`{shell_label}`（会话初始化时选定）。`bash` 工具使用该 shell 的语法。"
+            "若 `local_environment` 返回 `shell`，后续命令以最新返回的 shell 和调用方式为准。"
+        )
 
     if python.available:
-        py_line = (
-            f"- Python: {python.provider}，标准 `python`/`python3` 已指向受管运行时"
-            "（也可用 `$BOX_AGENT_PYTHON`）"
-        )
+        py_line = f"- Python: {python.provider}，托管解释器已就绪"
+        if shell_name is not None:
+            py_line += f"。在 `bash` 工具中使用 `{managed_python_shell_command(shell_name)}` 调用"
+        else:
+            py_line += "（由环境变量 `BOX_AGENT_PYTHON` 指定）"
     else:
         py_line = "- Python: 初始化时未确认可用的 shell Python；当前可用性以实际检测和工具执行结果为准"
     if python.notes:
@@ -159,7 +173,7 @@ def build_skill_runtime_prompt(ctx: SkillRuntimeContext) -> str:
         "不要要求用户自行安装另一套环境。普通聊天不需要检查或等待这些运行时。"
     )
     lines.append(
-        "- Rules: 第三方 skill 可使用标准运行时命令；仅在确认依赖缺失时安装。"
+        "- Rules: 第三方 skill 同样使用上述托管运行时。仅在确认依赖缺失时安装。"
         "`npm install -g` 已被重定向到 `$BOX_AGENT_SKILL_TOOLS_ROOT`，"
         "禁止 `sudo` 或用 `--prefix` 绕到系统目录。"
     )

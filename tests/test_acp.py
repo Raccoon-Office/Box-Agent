@@ -631,6 +631,64 @@ async def test_acp_registers_skillhub_search_only_for_capable_host(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bundled_bash", "shell", "python_command"),
+    [(True, "Bash", '"$BOX_AGENT_PYTHON"'), (False, "PowerShell", '& "$env:BOX_AGENT_PYTHON"')],
+)
+async def test_acp_model_request_describes_the_actual_windows_shell_and_python(
+    tmp_path, monkeypatch, bundled_bash, shell, python_command,
+):
+    monkeypatch.setattr("box_agent.tools.bash_tool.platform.system", lambda: "Windows")
+    binary = tmp_path / "PortableGit" / "usr" / "bin" / "bash.exe"
+    if bundled_bash:
+        binary.parent.mkdir(parents=True)
+        binary.touch()
+    monkeypatch.setattr(
+        "box_agent.tools.bash_tool.bundled_win_bash", lambda: binary if bundled_bash else None,
+    )
+    python = tmp_path / "python.exe"
+    python.touch(mode=0o755)
+    requests = []
+
+    class PromptLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            schema = next(tool.to_openai_schema() for tool in tools if tool.name == "bash")
+            requests.append((messages[0].content, schema["function"]["description"]))
+            async for event in super().generate_stream(messages, tools, **kwargs):
+                yield event
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False),
+        tools=ToolsConfig(enable_mcp=False, enable_skills=False, enable_sub_agent=False),
+    )
+    host = BoxACPAgent(DummyConn(), config, PromptLLM(), [], "system")
+    session = await host.new_session(**acp_params(SimpleNamespace(
+        cwd=str(tmp_path),
+        field_meta={
+            "session_mode": "code_agent",
+            "env_context": {
+                "platform": "win32",
+                "runtimes": {"python": {"path": str(python), "ready": True, "provider": "host"}},
+            },
+        },
+    )))
+    try:
+        await host.prompt(**acp_params(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "Ping."}], field_meta={},
+        )))
+        system_prompt, description = requests[0]
+        assert f"当前 shell：`{shell}`" in system_prompt
+        assert f"`{python_command}`" in system_prompt
+        assert "标准 `python`/`python3`" not in system_prompt
+        assert "Get-ChildItem" not in system_prompt
+        assert f"{python_command} -u -m http.server" in description
+        assert ("Get-ChildItem" in description) is (not bundled_bash)
+    finally:
+        await host._sessions[session.sessionId].aclose()
+
+
+@pytest.mark.asyncio
 async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tmp_path, monkeypatch):
     import box_agent.tools.bash_tool as bash_module
     monkeypatch.setattr(bash_module.platform, "system", lambda: "Windows")
@@ -669,13 +727,16 @@ async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tm
     assert "not installed" in result.content
     shell_tool = tools["bash"]
     assert shell_tool.shell_name == "PowerShell"
+    assert "当前 shell：`PowerShell`" in host._sessions[capable.sessionId].agent.system_prompt
     installed_bash.parent.mkdir(parents=True)
     installed_bash.write_bytes(b"fixture")
     installed = await tools["local_environment"].execute("git", "ensure")
     assert tools["bash"] is shell_tool
     assert shell_tool.shell_name == "bash"
-    assert json.loads(installed.content)["shell"]["name"] == "bash"
-    assert "syntax" in json.loads(installed.content)["shell"]["instruction"]
+    shell = json.loads(installed.content)["shell"]
+    assert shell["name"] == "bash"
+    assert "bash syntax" in shell["instruction"]
+    assert '"$BOX_AGENT_PYTHON"' in shell["instruction"]
     chromium = await tools["local_environment"].execute("chromium", "ensure")
     assert chromium.success
     for key in ("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"):

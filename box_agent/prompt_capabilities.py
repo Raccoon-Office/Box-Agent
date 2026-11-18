@@ -22,10 +22,9 @@ _FILE_OPERATIONS_FULL = (
     'JSONL 超长记录改用 `execute_code` 整体读取。'
 )
 _CODE_DIRECTORY_FULL = (
-    '查看当前目录或项目根目录的一层结构时，使用 Bash 执行只读、非递归的目录命令（如 `git status --short '
-    '--branch`；macOS/Linux 用 `pwd`、`find . -mindepth 1 -maxdepth 1 '
-    '-print`，Windows PowerShell 用 `Get-Location`、`Get-ChildItem -Name`）；'
-    '这只是目录查看，不得用 Bash 替代常规文件或内容搜索，也不要用 `glob("*")` 或 `search_files` 的 '
+    '查看当前目录或项目根目录的一层结构时，用 `bash` 工具按当前 shell 的语法运行只读、非递归的目录命令。'
+    'Git 项目还可用 `git status --short --branch` 查看变更。'
+    '常规文件或内容搜索使用搜索工具。不要用 `glob("*")` 或 `search_files` 的 '
     '`pattern="*"` 代替目录列表。'
 )
 _LARGE_FILE_WRITING_FULL = (
