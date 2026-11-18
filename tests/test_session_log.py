@@ -17,6 +17,7 @@ from box_agent.schema import FunctionCall, Message, TokenUsage, ToolCall
 from box_agent.session_log import (
     SessionLog,
     SessionLogCorrupted,
+    SessionLogDurabilityError,
     SessionLogInUseError,
     SessionLogWorkspaceMismatch,
 )
@@ -147,6 +148,7 @@ def test_replay_uses_latest_active_measurement_and_compaction_clears_it(tmp_path
         restored = reopened.replay().messages
         assert [message.usage._request_snapshot is not None for message in restored[1:]] == [False, False, True]
         assert request_input_tokens(restored, {}, llm=llm) == 310
+        assert reopened.append_unlogged_messages(restored, turn=4, step=1) == []
         reopened.append("history/revise", {
             "revision_id": "r2", "previous_revision_id": "initial", "turn_id": "t4",
             "restore_through_seq": checkpoints[0],
@@ -154,11 +156,13 @@ def test_replay_uses_latest_active_measurement_and_compaction_clears_it(tmp_path
         revised = reopened.replay().messages
         assert len(revised) == 2
         assert request_input_tokens(revised, {}, llm=llm) == 110
+        assert reopened.append_unlogged_messages(revised, turn=4, step=1) == []
         compacted = [
             Message(role="user", source="runtime", content="summary " * 50),
             revised[-1].model_copy(update={"usage": None, "request_only_input_tokens": 0}),
         ]
         reopened.replace_surface(compacted, turn=4, step=1)
+        assert reopened.append_unlogged_messages(compacted, turn=4, step=1) == []
     finally:
         reopened.close()
 
@@ -169,6 +173,124 @@ def test_replay_uses_latest_active_measurement_and_compaction_clears_it(tmp_path
         assert request_input_tokens(restored, {}, llm=llm) > 310
     finally:
         compacted_log.close()
+
+
+def test_message_reconciliation_leaves_old_measurements_to_session_recovery(tmp_path, monkeypatch):
+    from box_agent.kernel.context_engine import capture_request_usage, request_input_tokens
+
+    llm = SimpleNamespace(model="model", estimate_text_tokens=lambda text: len(text))
+    question = Message(role="user", content="question")
+    usage = TokenUsage(input_tokens=800, output_tokens=10, total_tokens=810)
+    usage._request_snapshot = capture_request_usage([question], 1, [], llm)
+    answer = Message(role="assistant", content="answer", usage=usage)
+    log = SessionLog.create(tmp_path, session_id="reconcile-measurement", cwd=tmp_path)
+    try:
+        log.append_unlogged_messages([question, answer], turn=1, step=1)
+        log.flush()
+    finally:
+        log.close()
+
+    reopened = SessionLog.open(tmp_path, session_id="reconcile-measurement", cwd=tmp_path)
+    restored = reopened.replay().messages
+    restore_usage = session_log_module._restore_context_usage
+    restored_measurements = []
+
+    def track_restore(message, metadata):
+        if metadata is not None:
+            restored_measurements.append(message.content)
+        restore_usage(message, metadata)
+
+    monkeypatch.setattr(session_log_module, "_restore_context_usage", track_restore)
+    followup = Message(role="user", content="follow-up")
+    try:
+        assert reopened.append_unlogged_messages(restored, turn=2, step=1) == []
+        [event] = reopened.append_unlogged_messages([*restored, followup], turn=2, step=1)
+        assert event["surfaceOp"] == "append"
+        assert restored_measurements == []
+        reopened.flush()
+    finally:
+        reopened.close()
+
+    reloaded = SessionLog.open(tmp_path, session_id="reconcile-measurement", cwd=tmp_path)
+    try:
+        recovered = reloaded.replay().messages
+        assert recovered == [*restored, followup]
+        assert recovered[1].usage._request_snapshot == usage._request_snapshot
+        assert request_input_tokens(recovered[:2], {}, llm=llm) == 810
+        assert "answer" in restored_measurements
+    finally:
+        reloaded.close()
+
+
+@pytest.mark.parametrize(("data", "surface_op", "error"), [
+    ({"role": "user"}, "append", "invalid message"),
+    ({"role": "user", "content": "bad"}, "unknown", "invalid surfaceOp"),
+    ({"role": "user", "content": "bad"}, {"op": "replace", "start": 0, "end": 99}, "missing node"),
+])
+def test_reconciliation_rejects_corrupt_surface_even_after_reset(tmp_path, data, surface_op, error):
+    log = SessionLog.create(tmp_path, session_id="malformed-surface", cwd=tmp_path)
+    try:
+        first = Message(role="user", content="known prefix")
+        log.append_unlogged_messages([first], turn=1, step=1)
+        assert log.append_unlogged_messages([first], turn=1, step=1) == []
+        log.append("user/message", data, surface_op=surface_op)
+        log.reset_surface(reason="reset does not hide malformed events")
+        # A partial refresh from a valid prefix must also fail on subsequent calls.
+        for _ in range(2):
+            with pytest.raises(SessionLogCorrupted, match=error):
+                log.append_unlogged_messages([], turn=2, step=1)
+    finally:
+        log.close()
+
+
+def test_reconciliation_uses_persisted_message_after_caller_mutation(tmp_path):
+    log = SessionLog.create(tmp_path, session_id="surface-ownership", cwd=tmp_path)
+    first = Message(role="user", content=[{"type": "text", "text": "persisted"}])
+    try:
+        payload = first.model_dump(mode="json", exclude_none=True)
+        event = log.append("user/message", payload, surface_op="append")
+        assert log.append_unlogged_messages([first], turn=1, step=1) == []
+
+        event["data"]["content"][0]["text"] = "changed by caller"
+        log.history_messages()[0][2]["content"][0]["text"] = "changed by history reader"
+
+        assert log.append_unlogged_messages([first], turn=1, step=1) == []
+        assert log.replay().messages == [first]
+    finally:
+        log.close()
+
+
+def test_failed_message_append_does_not_enter_recovered_surface(tmp_path, monkeypatch):
+    before = Message(role="user", content="committed prefix")
+    followup = Message(role="assistant", content="answer")
+    log = SessionLog.create(tmp_path, session_id="append-failure", cwd=tmp_path)
+    try:
+        log.append_unlogged_messages([before], turn=1, step=1)
+        log.flush()
+        assert log.append_unlogged_messages([before], turn=1, step=1) == []
+        original_size = log.path.stat().st_size
+
+        def fail_write(_):
+            raise OSError(errno.ENOSPC, "disk full")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(log._handle, "write", fail_write)
+            with pytest.raises(SessionLogDurabilityError, match="session log append failed"):
+                log.append_unlogged_messages([before, followup], turn=1, step=1)
+        assert log.failed
+        assert log.path.stat().st_size == original_size
+    finally:
+        log.close()
+
+    reopened = SessionLog.open(tmp_path, session_id="append-failure", cwd=tmp_path)
+    try:
+        assert reopened.replay().messages == [before]
+        [reply] = reopened.append_unlogged_messages([before, followup], turn=1, step=1)
+        assert reply["type"] == "assistant/message" and reply["surfaceOp"] == "append"
+        reopened.flush()
+        assert reopened.replay().messages == [before, followup]
+    finally:
+        reopened.close()
 
 
 def test_history_revision_restores_tool_pairs_and_all_prefix_state_after_reopen(tmp_path):
