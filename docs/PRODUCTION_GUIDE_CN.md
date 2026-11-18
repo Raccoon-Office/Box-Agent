@@ -232,14 +232,15 @@ max_steps: 300
 max_parallel_tools: 8
 parallel_tool_timeout_seconds: 900
 provider_stale_seconds: 300
-sub_agent_token_limit: 50000
+sub_agent_token_limit: null
 sub_agent_batch_synthesis_timeout_seconds: 600
 ```
 
 这些配置分别控制不同操作：`max_steps` 限制顶层模型迭代，`max_parallel_tools`
 限制单步中 `parallel_safe` 调用并发量，`parallel_tool_timeout_seconds` 限制一个
 并发批次，`provider_stale_seconds` 限制 Provider 流连续无新数据的等待时间，
-`sub_agent_token_limit` 限制子 Agent 摘要前的独立上下文预算，最后一项只
+`sub_agent_token_limit` 默认 `null`，按实际子模型能力推导安全输入预算；显式正数只作为
+额外上限。最后一项只
 限制传入 `files` 时推导出的无工具综合请求。将最后一项设为 `0` 只会关闭这层额外限制，
 不会关闭 provider timeout。批处理策略还包含文件数量与内容硬限制，详见
 [子 Agent 委派](SUB_AGENT_DELEGATION_CN.md)。

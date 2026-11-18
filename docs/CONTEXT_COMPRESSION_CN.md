@@ -198,7 +198,8 @@ Kernel 通过 `CompactionInput` 调用 `CompactEnginePort`。默认引擎沿用�
 
 Context 先投影有效历史。压缩引擎必须在摘要调用或确定性兜底前调用 Kernel 提供的
 `before_summary`；Kernel 提交并 flush 返回的 surface 后才更新内存历史。请求交付及响应
-确认回调、最多一次压缩重试的规则保持不变。普通及 managed 装配均保留调用方提供的压缩器，
+确认回调保持不变。普通请求重新投影后仍超限时继续收紧历史预算，每步最多尝试三次压缩。
+普通及 managed 装配均保留调用方提供的压缩器，
 包括布尔值为假的实例。`CompactionOutcome` 保留原 tuple 解包方式，超限标志必须与已有
 blocked 模式一致。
 
@@ -209,6 +210,10 @@ autoCompactThreshold = 0.9 * (context_window - max_output_tokens)
 ```
 
 `LLMConfig.context_token_limit` 会先预留配置的最大输出预算，再从剩余输入预算中保留 10% 作为 token 估算误差和摘要请求的余量。
+
+子 Agent 在实际模型路由完成后使用同一公式。`sub_agent_token_limit` 默认 `null`
+（自动），显式正数仅作为额外上限；Skill 预检、子循环及预取后的 batch_files
+完整请求共用该子模型推导的额度，并发子任务不共享可变的派生预算。
 
 ACP 模型绑定可以通过当前所选模型的 `contextWindow` 和 `maxTokens` 覆盖这两个值。Agent 在创建会话时推导输入阈值，并在轮次之间切换模型绑定时重新计算。绑定缺少能力声明时，使用适用于当前模型的 profile、客户端、目录或 `config.yaml` 配置。
 

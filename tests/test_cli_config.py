@@ -286,23 +286,23 @@ def test_config_parses_goal_autopilot_settings(tmp_path: Path) -> None:
     assert config.agent.goal_autopilot_no_progress_turns == 4
 
 
-def test_config_sub_agent_token_limit_defaults_and_overrides(tmp_path: Path) -> None:
+@pytest.mark.parametrize("override", [None, 12345])
+def test_config_sub_agent_token_limit_defaults_and_overrides(tmp_path: Path, override) -> None:
     # Default when absent from yaml.
     default_path = tmp_path / "default.yaml"
     _write_config(default_path)
     defaults = cli.Config.from_yaml(default_path).agent
     assert defaults.max_steps == 300
     assert defaults.provider_stale_seconds == 300.0
-    assert defaults.sub_agent_token_limit == 50_000
+    assert defaults.sub_agent_token_limit is None
 
-    # Overridable for advanced/host scenarios; config-example.yaml documents it
-    # only as a comment so generated configs continue to inherit runtime updates.
+    # Explicit null keeps automatic sizing; a positive override is an input cap.
     override_path = tmp_path / "override.yaml"
     _write_config(override_path)
     with override_path.open("a", encoding="utf-8") as f:
-        f.write("sub_agent_token_limit: 12345\n")
+        f.write(f"sub_agent_token_limit: {'null' if override is None else override}\n")
 
-    assert cli.Config.from_yaml(override_path).agent.sub_agent_token_limit == 12345
+    assert cli.Config.from_yaml(override_path).agent.sub_agent_token_limit == override
 
 
 def test_config_batch_synthesis_timeout_defaults_and_overrides(tmp_path: Path) -> None:

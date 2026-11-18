@@ -35,6 +35,7 @@ from ..events import (
     WebSearchEvent,
 )
 from ..llm.model_routing import resolve_model_client
+from ..llm.capabilities import bound_context_token_limit
 from ..schema import Message
 from ..skill_dependencies import SkillDependencyError
 from ..session_log import SessionLog, SessionLogDurabilityError
@@ -208,7 +209,7 @@ class SubAgentTool(EventEmittingTool):
         parent_tools: dict[str, Tool],
         workspace_dir: str | None = None,
         tool_limits: ToolLimitsConfig | None = None,
-        token_limit: int = _DEFAULT_AGENT_CONFIG.sub_agent_token_limit,
+        token_limit: int | None = _DEFAULT_AGENT_CONFIG.sub_agent_token_limit,
         parent_system_prompt: str | None = None,
         no_progress_limit: int | None = None,
         batch_synthesis_timeout_seconds: float = _DEFAULT_BATCH_SYNTHESIS_TIMEOUT_SECONDS,
@@ -620,6 +621,9 @@ class SubAgentTool(EventEmittingTool):
         spec: DelegationSpec,
         bundle: ResolvedCapabilityBundle,
         child_tools: dict[str, Tool],
+        *,
+        llm: Any,
+        token_limit: int,
     ) -> list[Message] | CapabilityFailure:
         messages = self._explicit_messages(spec, bundle)
         if not bundle.skills:
@@ -628,20 +632,21 @@ class SubAgentTool(EventEmittingTool):
         # estimate, rather than imposing a second fixed output reservation.
         from ..kernel.context_engine import _estimate_context_from_latest_response
 
-        estimated, _ = _estimate_context_from_latest_response(messages, child_tools)
-        if estimated < self._token_limit:
+        budget_tools = child_tools if spec.strategy == "general_loop" else None
+        estimated, _ = _estimate_context_from_latest_response(messages, budget_tools, llm=llm)
+        if estimated < token_limit:
             return messages
         # batch_files performs one synthesis call with no tools after host
         # prefetch; its read_file grant is not a model-side paging capability.
         can_read = spec.strategy == "general_loop" and bool({"get_skill", "read_file"} & set(child_tools))
         if can_read:
             messages = self._explicit_messages(spec, bundle, include_skill_bodies=False)
-            estimated, _ = _estimate_context_from_latest_response(messages, child_tools)
-            if estimated < self._token_limit:
+            estimated, _ = _estimate_context_from_latest_response(messages, budget_tools, llm=llm)
+            if estimated < token_limit:
                 return messages
-        return self._skill_reference_budget_failure(estimated, can_read=can_read)
+        return self._skill_reference_budget_failure(estimated, token_limit=token_limit, can_read=can_read)
 
-    def _skill_reference_budget_failure(self, estimated: int, *, can_read: bool) -> CapabilityFailure:
+    def _skill_reference_budget_failure(self, estimated: int, *, token_limit: int, can_read: bool) -> CapabilityFailure:
         return CapabilityFailure(
             code="SKILL_REFERENCE_BUDGET_EXCEEDED",
             message=(
@@ -650,7 +655,7 @@ class SubAgentTool(EventEmittingTool):
                 "grant a bounded read capability before retrying."
             ),
             retryable=False,
-            details={"estimated_tokens": estimated, "token_limit": self._token_limit,
+            details={"estimated_tokens": estimated, "token_limit": token_limit,
                      "has_skill_reader": can_read},
         )
 
@@ -867,11 +872,13 @@ class SubAgentTool(EventEmittingTool):
         title: str,
         session_log: SessionLog | None = None,
         tool_exposure_manager: Any | None = None,
+        token_limit: int | None = None,
     ) -> ToolResult:
         # Import lazily because the runtime facade initializes the core, which
         # imports tool contracts while this module may still be loading.
         from ..runtime import run_agent_loop
 
+        token_limit = bound_context_token_limit(llm, self._token_limit if token_limit is None else token_limit)
         final_content = ""
         stop_reason: StopReason | None = None
         fatal_error: ErrorEvent | None = None
@@ -892,7 +899,7 @@ class SubAgentTool(EventEmittingTool):
                 max_steps=max_steps,
                 max_tool_calls=max_tool_calls,
                 tool_limits=self._tool_limits,
-                token_limit=self._token_limit,
+                token_limit=token_limit,
                 workspace_dir=self._workspace_dir,
                 provider_stale_seconds=self._provider_stale_seconds,
                 no_progress_limit=self._no_progress_limit,
@@ -1090,7 +1097,9 @@ class SubAgentTool(EventEmittingTool):
         sub_agent_id: str,
         title: str,
         session_log: SessionLog | None = None,
+        token_limit: int | None = None,
     ) -> ToolResult:
+        token_limit = bound_context_token_limit(llm, self._token_limit if token_limit is None else token_limit)
         files = list(bundle.spec.files)
         read_tool = bundle.tools["read_file"]
         if session_log is not None:
@@ -1264,16 +1273,22 @@ class SubAgentTool(EventEmittingTool):
             )
         messages[-1].content = f"{messages[-1].content}\n\n" + "\n".join(blocks)
 
-        if bundle.skills:
-            from ..kernel.context_engine import _estimate_context_from_latest_response
+        from ..kernel.context_engine import request_input_tokens
 
-            estimated, _ = _estimate_context_from_latest_response(messages, None)
-            if estimated >= self._token_limit:
-                result = self._failure_result(
-                    self._skill_reference_budget_failure(estimated, can_read=False), bundle.spec
+        estimated = request_input_tokens(messages, None, llm=llm)
+        if estimated > token_limit:
+            failure = (
+                self._skill_reference_budget_failure(estimated, token_limit=token_limit, can_read=False)
+                if bundle.skills else CapabilityFailure(
+                    code="CONTEXT_INPUT_BUDGET_EXCEEDED",
+                    message="The complete batch request exceeds the selected model's safe context budget.",
+                    retryable=False,
+                    details={"estimated_tokens": estimated, "token_limit": token_limit},
                 )
-                result.raw_output["tool_calls"] = len(files)
-                return finish(result)
+            )
+            result = self._failure_result(failure, bundle.spec)
+            result.raw_output["tool_calls"] = len(files)
+            return finish(result)
 
         if session_log is not None:
             session_log.replace_surface(messages[1:], turn=1, step=1)
@@ -1524,10 +1539,6 @@ class SubAgentTool(EventEmittingTool):
         parent_exposure = self._tool_exposure_provider() if self._tool_exposure_provider else None
         child_exposure = (parent_exposure.for_inherited_tools(child_tools)
                           if parent_exposure is not None and parent_exposure.stable_prefix else None)
-        messages = self._bounded_explicit_messages(parsed, resolved, child_tools)
-        if isinstance(messages, CapabilityFailure):
-            return self._failure_result(messages, parsed)
-
         diagnostic = {
             "type": "sub_agent_delegation",
             **resolved.diagnostic_payload(),
@@ -1544,6 +1555,13 @@ class SubAgentTool(EventEmittingTool):
             files=parsed.files,
         )
         diagnostic["model_routing"] = model_routing
+        # Keep the resolved budget local: parallel siblings may use different models.
+        token_limit = bound_context_token_limit(child_llm, self._token_limit)
+        messages = self._bounded_explicit_messages(
+            parsed, resolved, child_tools, llm=child_llm, token_limit=token_limit,
+        )
+        if isinstance(messages, CapabilityFailure):
+            return self._failure_result(messages, parsed)
         child_session_log = self._create_child_session_log(
             child_session_id=sub_agent_id,
             title=sub_title,
@@ -1563,6 +1581,7 @@ class SubAgentTool(EventEmittingTool):
                 sub_agent_id=sub_agent_id,
                 title=sub_title,
                 session_log=child_session_log,
+                token_limit=token_limit,
             )
 
         # Isolate this child's managed browser from siblings in the same
@@ -1594,6 +1613,7 @@ class SubAgentTool(EventEmittingTool):
                 title=sub_title,
                 session_log=child_session_log,
                 tool_exposure_manager=child_exposure,
+                token_limit=token_limit,
             )
         finally:
             reset_browser_session_key(token)

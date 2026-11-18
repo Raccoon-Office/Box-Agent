@@ -287,8 +287,9 @@ summary-request input limit.
 Context projects effective history before compaction. The engine calls the
 Kernel's `before_summary` callback before a summary attempt or deterministic
 fallback. The Kernel commits the returned surface and flushes it before changing
-live messages; request delivery/response callbacks and the one-retry input-budget
-rule are unchanged. Static and managed composition preserve supplied compactors,
+live messages. Ordinary requests that remain over budget after reprojection
+tighten the history budget and retry, with at most three compaction attempts per
+step. Request delivery/response callbacks remain unchanged. Static and managed composition preserve supplied compactors,
 including falsey instances. `CompactionOutcome` retains legacy tuple iteration;
 its limit flag must agree with its existing blocked mode.
 
@@ -303,6 +304,12 @@ autoCompactThreshold = 0.9 * (context_window - max_output_tokens)
 `LLMConfig.context_token_limit` reserves the configured maximum output budget,
 then keeps 10% of the remaining input budget as headroom for estimation drift
 and the summary request.
+
+Sub-agents use the same formula after their actual model has been selected.
+The default `sub_agent_token_limit` is `null` (automatic), with a positive
+explicit value acting only as an additional cap. Skill preflight, the child
+loop and fully prefetched batch requests all use that child's resolved budget;
+parallel siblings do not share a mutable derived limit.
 
 ACP model bindings may override both values with the selected model's
 `contextWindow` and `maxTokens`. The Agent derives its input limit when the

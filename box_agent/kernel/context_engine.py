@@ -340,14 +340,11 @@ def _budget_image_tokens(content: Any) -> int:
     )
 
 
-def _transient_followup_token_estimate(blocks: list[dict[str, Any]]) -> int:
+def _transient_followup_token_estimate(blocks: list[dict[str, Any]], *, llm: Any = None) -> int:
     """Estimate canonical request-only content without counting image base64."""
-    total = 32
     for block in blocks:
         block_type = block.get("type")
         if block_type == "text":
-            text = str(block.get("text") or "")
-            total += max(1, len(text.encode("utf-8")) // 3)
             continue
         if block_type != "input_image":
             raise ValueError(f"unsupported transient content block: {block_type!r}")
@@ -359,8 +356,9 @@ def _transient_followup_token_estimate(blocks: list[dict[str, Any]]) -> int:
             or not data
         ):
             raise ValueError("invalid canonical transient input_image block")
-        total += _image_token_estimate(block)
-    return total
+    return request_input_tokens(
+        [Message(role="user", source="runtime", content=blocks)], {}, llm=llm,
+    )
 
 
 def _validate_transient_followup_result(
@@ -398,7 +396,7 @@ def _validate_transient_followup_result(
             0,
         )
     try:
-        estimate = _transient_followup_token_estimate(blocks)
+        estimate = _transient_followup_token_estimate(blocks, llm=llm)
     except ValueError as exc:
         return (
             ToolResult(

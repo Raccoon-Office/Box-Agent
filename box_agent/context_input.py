@@ -10,7 +10,7 @@ from time import perf_counter
 from typing import Any, Callable
 
 from .kernel.context_engine import (
-    _fallback_context_estimate, context_text_counter,
+    context_text_counter,
     request_input_tokens, skill_reference_budget_chars,
 )
 from .kernel.context_types import InitialContextTransition
@@ -46,6 +46,8 @@ class PreparedContext:
     required_reference_tokens: int = 0
     input_context: dict[str, Any] | None = None
     materialized_skill_messages: tuple[Message, ...] = ()
+    # Complete request cost used by the guard; None preserves older contexts.
+    total_input_tokens: int | None = None
 
 
 class ModelInputGuard(ABC):
@@ -306,10 +308,12 @@ class DefaultContextEngine:
             extra_messages = (*extra_messages, correction_context)
         self._extra_messages = (*extra_messages, *((transient_message,) if transient_message is not None else ()))
         self._token_limit, self._output_tokens = token_limit, output_tokens
-        self._transient_tokens = (max(transient_tokens, _fallback_context_estimate([transient_message], {}))
+        transient_input_tokens = (request_input_tokens([transient_message], {}, llm=self.llm)
+                                  if transient_message is not None else 0)
+        self._transient_tokens = (max(transient_tokens, transient_input_tokens)
                                   if transient_message is not None else 0)
         self._transient_reserve_tokens = (max(
-            0, self._transient_tokens - _fallback_context_estimate([transient_message], {}),
+            0, self._transient_tokens - transient_input_tokens,
         ) if transient_message is not None else 0)
         context_messages = self.project_history([*messages, *extra_messages])
         if self._input_guard is not None:
@@ -384,8 +388,8 @@ class DefaultContextEngine:
                 [*context_messages, *((transient_message,) if transient_message is not None else ())],
                 prepared_tools.definitions, llm=self.llm,
             ) + self._transient_reserve_tokens
-        if (not blocked_reason and max(base_input_tokens + self._request_reference_tokens,
-                                       actual_input_tokens) > token_limit):
+        total_input_tokens = max(base_input_tokens + self._request_reference_tokens, actual_input_tokens)
+        if not blocked_reason and total_input_tokens > token_limit:
             blocked_reason = "Model input exceeds the safe context budget. Compact context before retrying."
             budget_blocked = True
             on_committed = None
@@ -400,11 +404,13 @@ class DefaultContextEngine:
                 thinking_enabled=self.thinking_enabled,
             )
             provider_messages = image_projection.messages
+            total_input_tokens = max(total_input_tokens, request_input_tokens(
+                provider_messages, prepared_tools.definitions, llm=self.llm,
+            ) + self._transient_reserve_tokens)
             if image_projection.blocked_reason:
                 blocked_reason = image_projection.blocked_reason
                 budget_blocked = defer_image_changes
-            elif (not blocked_reason and request_input_tokens(provider_messages, prepared_tools.definitions, llm=self.llm)
-                  + self._transient_reserve_tokens > token_limit):
+            elif not blocked_reason and total_input_tokens > token_limit:
                 blocked_reason = "Model input exceeds the safe context budget. Compact context before retrying."
                 budget_blocked = True
             if image_projection.on_committed is not None:
@@ -479,5 +485,6 @@ class DefaultContextEngine:
             image_projection.manifest if image_projection else None,
             image_projection.notices if image_projection else (),
             required_reference_tokens, input_manifest, materialized_skill_messages,
+            total_input_tokens=total_input_tokens,
         )
         return self._input_guard.prepare_context(projection) if self._input_guard is not None else projection

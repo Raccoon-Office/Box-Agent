@@ -292,7 +292,7 @@ max_steps: 300
 max_parallel_tools: 8
 parallel_tool_timeout_seconds: 900
 provider_stale_seconds: 300
-sub_agent_token_limit: 50000
+sub_agent_token_limit: null
 sub_agent_batch_synthesis_timeout_seconds: 600
 ```
 
@@ -300,8 +300,9 @@ These limits control different operations: `max_steps` bounds top-level model
 iterations, `max_parallel_tools` caps `parallel_safe` calls in one step,
 `parallel_tool_timeout_seconds` caps one such parallel batch,
 `provider_stale_seconds` bounds how long a provider stream may remain silent,
-`sub_agent_token_limit` bounds each child context before summarization, and the
-batch synthesis setting caps only the tool-free request inferred from `files`.
+`sub_agent_token_limit` defaults to `null`, deriving each child's safe input
+budget from its actual model; a positive value sets an additional explicit cap.
+The batch synthesis setting caps only the tool-free request inferred from `files`.
 Setting the last value to `0` disables that extra cap, not the provider timeout.
 The inferred batch path also enforces file/count/content limits; see
 [Sub-agent Delegation](SUB_AGENT_DELEGATION.md).

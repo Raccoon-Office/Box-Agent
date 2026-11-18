@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ..config import derive_context_token_limit
+from ..config import LLMConfig, derive_context_token_limit
 
 
-def bound_context_token_limit(llm: Any, token_limit: int) -> int:
-    """Clamp a caller budget to the active model's known context capacity."""
+def bound_context_token_limit(llm: Any, token_limit: int | None) -> int:
+    """Derive the active model's safe input budget, optionally applying a cap."""
     window = getattr(llm, "context_window", None)
     windows = [window] if type(window) is int and window > 0 else []
     model = getattr(llm, "model", None)
@@ -19,10 +19,11 @@ def bound_context_token_limit(llm: Any, token_limit: int) -> int:
             if type(window) is int and window > 0:
                 windows.append(window)
     if not windows:
-        return token_limit
-    return min(token_limit, derive_context_token_limit(
+        return LLMConfig().context_token_limit if token_limit is None else token_limit
+    model_limit = derive_context_token_limit(
         min(windows), getattr(llm, "max_output_tokens", 0),
-    ))
+    )
+    return model_limit if token_limit is None else min(token_limit, model_limit)
 
 
 # Known vision model names matched as substrings (gateway prefixes and snapshots

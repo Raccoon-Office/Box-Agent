@@ -57,7 +57,6 @@ from ..events import (
 )
 from .context_engine import (
     REQUEST_INPUT_HEADROOM_TOKENS,
-    _fallback_context_estimate,
     _estimate_context_from_latest_response,
     _is_compaction_metadata,
     _validate_transient_followup_result,
@@ -118,6 +117,7 @@ LLM_PROVIDER_STALE_SECONDS: Final[float] = (
     _DEFAULT_AGENT_CONFIG.provider_stale_seconds
 )
 MAX_PROVIDER_STALE_RECOVERIES: Final[int] = 3
+MAX_CONTEXT_COMPACTION_ATTEMPTS: Final[int] = 3
 _PROVIDER_STALE_SECONDS_ENV: Final[str] = "BOX_AGENT_PROVIDER_STALE_SECONDS"
 
 
@@ -1438,10 +1438,10 @@ async def _run_agent_loop_impl(
             if pending_transient_followup_blocks
             else None
         )
-        extra_tokens = (_fallback_context_estimate(request_context_messages, {})
+        extra_tokens = (request_input_tokens(request_context_messages, {}, llm=llm)
                         if request_context_messages else 0)
         transient_tokens = (max(pending_transient_followup_tokens,
-            _fallback_context_estimate([transient_message], {})) if transient_message is not None else 0)
+            request_input_tokens([transient_message], {}, llm=llm)) if transient_message is not None else 0)
         history_token_limit = max(
             1,
             token_limit - extra_tokens - transient_tokens,
@@ -1526,6 +1526,12 @@ async def _run_agent_loop_impl(
                 )
                 return await projection if inspect.isawaitable(projection) else projection
 
+            def projected_input_tokens(projection):
+                measured = getattr(projection, "total_input_tokens", None)
+                return measured if measured is not None else request_input_tokens(
+                    projection.messages, budget_tools_by_name, llm=llm,
+                )
+
             projection = await prepare_request(messages)
             # A blocked projection means the complete request is over budget.
             # Compact at a slightly tighter history limit to leave room for
@@ -1580,25 +1586,55 @@ async def _run_agent_loop_impl(
                     api_prompt_tokens=api_prompt_tokens,
                     llm=llm,
                 )
-                force_compaction = projection_budget_blocked and estimated_history < history_token_limit
-                compaction_limit = (
-                    max(1, history_token_limit - REQUEST_INPUT_HEADROOM_TOKENS)
-                    if force_compaction else history_token_limit
-                )
-                result, summarization_event = await compact_context(
-                    compaction_limit,
-                    force=force_compaction,
-                    estimate_tools=budget_tools_by_name,
-                    # A fitting full request already accounts for request-only input.
-                    skip_check=(not projection.blocked_reason and request_input_tokens(
-                        projection.messages, budget_tools_by_name, llm=llm,
-                    ) <= token_limit),
-                )
-                if summarization_event is not None:
-                    yield summarization_event
-                if cancelled():
-                    yield await cancellation_done_event()
-                    return
+                request_reserve = max(
+                    extra_tokens + transient_tokens,
+                    projected_input_tokens(projection) - estimated_history,
+                ) + getattr(projection, "required_reference_tokens", 0)
+                compaction_limit = max(1, token_limit - request_reserve)
+                for compaction_attempt in range(MAX_CONTEXT_COMPACTION_ATTEMPTS):
+                    if cancelled():
+                        yield await cancellation_done_event()
+                        return
+                    result, summarization_event = await compact_context(
+                        compaction_limit,
+                        force=projection_budget_blocked,
+                        estimate_tools=budget_tools_by_name,
+                        skip_check=(not projection.blocked_reason
+                                    and projected_input_tokens(projection) <= token_limit),
+                    )
+                    if summarization_event is not None:
+                        yield summarization_event
+                    if cancelled():
+                        yield await cancellation_done_event()
+                        return
+                    if result.blocked:
+                        break
+                    if result.messages is not None:
+                        # Delivery facts must be rebound to the compacted surface.
+                        append_tool_descriptions(messages)
+                        projection = await prepare_request(messages)
+                    projection_budget_blocked = bool(
+                        projection.blocked_reason and getattr(projection, "budget_blocked", False)
+                    )
+                    if not projection_budget_blocked:
+                        break
+                    if compaction_attempt + 1 == MAX_CONTEXT_COMPACTION_ATTEMPTS:
+                        break
+                    full_input_tokens = projected_input_tokens(projection)
+                    current_history_tokens, _ = _estimate_context_from_latest_response(
+                        messages, budget_tools_by_name, llm=llm,
+                    )
+                    # Restored references/images can add input after compaction.
+                    # Tighten against that exact projection, never the old usage.
+                    request_reserve = max(0, full_input_tokens - current_history_tokens)
+                    request_reserve += getattr(projection, "required_reference_tokens", 0)
+                    next_limit = max(1, min(
+                        compaction_limit - max(1, full_input_tokens - token_limit),
+                        token_limit - request_reserve,
+                    ))
+                    if next_limit >= compaction_limit:
+                        break
+                    compaction_limit = next_limit
             if initial_context_transition is None and result.blocked:
                 budget_details = {
                     "stage": "history_compaction", "totalLimitTokens": token_limit,
@@ -1622,17 +1658,19 @@ async def _run_agent_loop_impl(
                                  error_details=budget_details)
                 yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                 return
-            if initial_context_transition is None and result.messages is not None:
-                # Rebinding is mandatory: persistent read facts do not prove
-                # the corresponding tool text survived compaction.
-                append_tool_descriptions(messages)
-                projection = await prepare_request(messages)
             if projection.blocked_reason:
                 msg = projection.blocked_reason or "Context remains above the safe input limit after bounded compaction."
                 if hook_mgr.hooks:
                     await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
                     await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
-                yield ErrorEvent(message=msg, is_fatal=True)
+                yield ErrorEvent(
+                    message=msg, is_fatal=True,
+                    error_code="CONTEXT_INPUT_BUDGET_EXCEEDED" if projection_budget_blocked else None,
+                    error_category="context_length" if projection_budget_blocked else None,
+                    error_details={"stage": "request_projection", "totalLimitTokens": token_limit,
+                                   "estimatedInputTokens": projected_input_tokens(projection)}
+                                  if projection_budget_blocked else None,
+                )
                 yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                 return
             request_messages = projection.context_messages
