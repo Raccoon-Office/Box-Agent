@@ -2641,7 +2641,8 @@ async def test_parallel_sub_agents_get_distinct_browser_keys():
     assert all(k.startswith("sess-3:subagent-") for k in llm.observed)
 
 
-def test_add_workspace_tools_wires_sub_agent_token_limit(tmp_path) -> None:
+@pytest.mark.parametrize("token_limit", [None, 12345])
+def test_add_workspace_tools_wires_sub_agent_token_limit(tmp_path, token_limit) -> None:
     """Sub-agent config and live capability providers flow through setup."""
     from box_agent.config import AgentConfig, ToolLimitsConfig, ToolsConfig
     from box_agent.tools.setup import add_workspace_tools
@@ -2651,7 +2652,7 @@ def test_add_workspace_tools_wires_sub_agent_token_limit(tmp_path) -> None:
             sub_agent={"general_max_steps": 55, "no_progress_steps": 9}
         )
         agent = AgentConfig(
-            sub_agent_token_limit=12345,
+            sub_agent_token_limit=token_limit,
             sub_agent_batch_synthesis_timeout_seconds=234.5,
         )
         tools = ToolsConfig(
@@ -2675,7 +2676,7 @@ def test_add_workspace_tools_wires_sub_agent_token_limit(tmp_path) -> None:
     )
 
     sub_agent = next(t for t in tools if t.name == "sub_agent")
-    assert sub_agent._token_limit == 12345
+    assert sub_agent._token_limit == token_limit
     assert sub_agent._tool_limits.sub_agent.general_max_steps == 55
     assert sub_agent._no_progress_limit == 9
     assert sub_agent._batch_synthesis_timeout_seconds == 234.5

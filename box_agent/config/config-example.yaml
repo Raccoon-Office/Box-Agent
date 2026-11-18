@@ -109,7 +109,7 @@ max_parallel_tools: 8 # Hard cap on concurrent parallel_safe tool calls (sub_age
 parallel_tool_timeout_seconds: 900 # Per-step wall-clock cap for one parallel_safe tool batch
 # provider_stale_seconds: 300 # Seconds without a new provider chunk before a stream is treated as stale.
 #                             # Raise for slow/deep-thinking models; env BOX_AGENT_PROVIDER_STALE_SECONDS overrides.
-# sub_agent_token_limit: 50000 # Per-call child context budget
+# sub_agent_token_limit: null # Auto from the routed model; a positive value sets an explicit input cap
 # sub_agent_batch_synthesis_timeout_seconds: 600 # files batch synthesis call; 0 disables this extra cap
 workspace_dir: "./workspace" # Working directory
 system_prompt_path: "system_prompt.md" # System prompt file (same config directory)

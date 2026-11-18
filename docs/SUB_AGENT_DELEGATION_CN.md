@@ -154,7 +154,11 @@ tool_limits:
 
 调用方可以通过 `budget.max_steps` 和 `budget.max_tool_calls` 请求更小预算，超过配置
 上限的值会被截断。`budget` 必须是 JSON 对象，不能是序列化 JSON 文本。
-`sub_agent_token_limit` 独立限制子上下文。
+默认在路由完成后，用实际子模型的窗口和输出上限按
+`0.9 * (context_window - max_output_tokens)` 推导安全输入额度，与主 Agent 公式一致，
+不再固定为 5 万 token。Skill 预检、通用循环和 batch_files 预取后的完整请求共用
+该额度。显式正数 `sub_agent_token_limit` 保留为额外上限，省略或 `null` 表示自动。
+缺少模型窗口元数据时，兼容回退到主配置的默认安全输入额度；这不代表已知该模型容量。
 
 可恢复的产物工作流使用两套计数。父 Agent 的一次 `sub_agent` 调用只在主工作流
 `max_tool_calls` 中计一次；子 Agent 内部工具仅计入独立的

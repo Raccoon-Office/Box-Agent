@@ -288,12 +288,10 @@ class AgentConfig(BaseModel):
     # expiry reports an incomplete task, not a successful completion verdict.
     # The ``BOX_AGENT_PROVIDER_STALE_SECONDS`` env var overrides this.
     provider_stale_seconds: float = 300.0
-    # Per-call token budget for sub-agent child contexts before they summarize.
-    # The child runs in an isolated context, so this is independent of the main
-    # loop's context_token_limit. Single source of truth for the value that was
-    # previously hardcoded in SubAgentTool; shown only as a commented advanced
-    # override in config-example.yaml so new user configs do not pin it.
-    sub_agent_token_limit: int = 50_000
+    # None derives each child's safe input budget from its actual routed model,
+    # using the same formula as the main agent. A positive legacy override is
+    # an optional cap, never permission to exceed the selected model's capacity.
+    sub_agent_token_limit: int | None = Field(default=None, gt=0)
     # Total wall-clock cap for the tool-free synthesis call used by
     # Tool-free synthesis used when a sub_agent request includes ``files``.
     # Set to 0 to rely only on the provider request timeout. This remains
