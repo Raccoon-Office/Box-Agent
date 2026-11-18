@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from contextlib import aclosing, asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import fields, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .events import AgentEvent
 from .hooks import HookBus, HookManager, HookRegistration, LegacyHookAdapter, HookConfigError
@@ -21,6 +23,9 @@ from .plugins.defaults import (
 )
 from .plugins.host import PluginActivation, PluginCleanupError, PluginHost
 from .plugins.hooks import HookOwner, HookProviderPort
+
+if TYPE_CHECKING:
+    from .tools.engine.call_contracts import ToolRunContext
 
 
 _SERVICE_OWNED_RUN_ARGUMENTS = frozenset(
@@ -42,6 +47,27 @@ _SERVICE_OWNED_RUN_ARGUMENTS = frozenset(
         "compact_engine",
     }
 )
+
+_TOOL_RUN_CONTEXT_SINK: ContextVar[Callable[[ToolRunContext], None] | None] = ContextVar(
+    "tool_run_context_sink", default=None,
+)
+
+
+async def with_tool_run_context_sink(
+    events: AsyncGenerator[AgentEvent, None], sink: Callable[[ToolRunContext], None],
+) -> AsyncIterator[AgentEvent]:
+    """Pass an internal observer through the stable loop entry point."""
+    async with aclosing(events):
+        token = _TOOL_RUN_CONTEXT_SINK.set(sink)
+        try:
+            first = await anext(events)
+        except StopAsyncIteration:
+            return
+        finally:
+            _TOOL_RUN_CONTEXT_SINK.reset(token)
+        yield first
+        async for event in events:
+            yield event
 
 
 def _default_capabilities(run_arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -136,6 +162,29 @@ async def register_run_hooks(
     except BaseException:
         await bus.close()
         raise
+
+
+@asynccontextmanager
+async def standalone_tool_hooks(run_arguments: Mapping[str, Any]) -> AsyncIterator[HookBus]:
+    """Resolve the session's configured Hooks for a standalone tool call."""
+    capabilities = _default_capabilities(run_arguments)
+    bus = capabilities["hook_bus"]
+    plugins = tuple(run_arguments.get("plugins") or ())
+    host = create_default_plugin_host(**capabilities, plugins=plugins) if plugins else None
+    activation = None
+    try:
+        hooks = (*_builtin_run_hooks(run_arguments), *(run_arguments.get("hooks") or ()))
+        if host is not None:
+            activation = await host.activate()
+            await register_run_hooks(bus=bus, activation=activation, legacy_hooks=hooks)
+        else:
+            _register_legacy_hooks(bus, hooks)
+            bus.freeze()
+        yield bus
+    finally:
+        error = await _cleanup_hook_run(bus, activation, host)
+        if error is not None:
+            raise error
 
 
 def compose_default_kernel_services(
@@ -377,6 +426,11 @@ async def run_agent_loop_with_default_services(
     runtime_defaults: Any,
 ) -> AsyncIterator[AgentEvent]:
     """Bind run hooks to default or borrowed managed capabilities, then run the kernel."""
+    tool_run_context_sink = _TOOL_RUN_CONTEXT_SINK.get()
+    if tool_run_context_sink is not None:
+        # A plugin may start a nested run during activation.
+        _TOOL_RUN_CONTEXT_SINK.set(None)
+
     managed_services = run_arguments.get("kernel_services")
     if managed_services is not None:
         if not isinstance(managed_services, KernelServices):
@@ -452,10 +506,13 @@ async def run_agent_loop_with_default_services(
             binding = getattr(context, "abind_history", context.bind_history)(run_arguments.get("messages") or [])
             if inspect.isawaitable(binding):
                 await binding
+        kernel_arguments = _kernel_run_arguments(run_arguments)
+        if tool_run_context_sink is not None:
+            kernel_arguments["tool_run_context_sink"] = tool_run_context_sink
         kernel = AgentLoopKernel(
             _services=services,
             _runtime_defaults=runtime_defaults,
-            **_kernel_run_arguments(run_arguments),
+            **kernel_arguments,
         )
         events = kernel.run()
         async for event in events:

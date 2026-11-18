@@ -14,9 +14,15 @@ from mcp.shared.exceptions import McpError
 from box_agent.acp import BoxACPAgent
 from box_agent.acp.mcp_apps import McpAppsACP, SNAPSHOT_EVENT, INTERACTION_EVENT
 from box_agent.config import Config, AgentConfig, LLMConfig, ToolsConfig, MCPConfig
+from box_agent.kernel.hook_types import BeforeToolDecision
+from box_agent.plugins.descriptors import PluginDescriptor
+from box_agent.plugins.hooks import HookProviderPort, HookSpec
 from box_agent.schema import StreamEvent, ToolCall, FunctionCall
 from box_agent.tools import mcp_loader
+from box_agent.tools.base import Tool
+from box_agent.tools.completion_checks import CompletionIssue
 from box_agent.tools.mcp_apps import set_mcp_apps_host_capability
+from box_agent.tools.mcp_sources import ResolvedMcpServer
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mcp_apps_server.py"
 
@@ -82,6 +88,7 @@ async def environment(tmp_path, monkeypatch, *, interface_version=1):
     backend = mcp_loader.MCPServerConnection("flight-fixture", command=sys.executable,
         args=[str(FIXTURE)], env={"MCP_APPS_FIXTURE_LOG": str(record)}, connect_timeout=10)
     monkeypatch.setattr(mcp_loader, "_mcp_connections", [backend])
+    monkeypatch.setattr(mcp_loader, "_mcp_connection_epochs", {})
     catalog = mcp_loader.get_mcp_tool_catalog()
     catalog.clear()
     try:
@@ -120,7 +127,12 @@ async def test_app_workflow_guidance_reaches_model_without_changing_card_result(
             description = llm.offered_descriptions[0]['mcp__flight-fixture__list_flights']
         else:
             discovery = next(m for m in llm.requests[1] if m.tool_call_id == 'discover-flights')
-            description = json.loads(discovery.content)['activated'][0]['description']
+            payload = json.loads(discovery.content)
+            description = payload['activated'][0]['description']
+            assert payload['mcp_server_instructions'] == [{
+                'server_name': 'flight-fixture', 'source': 'mcp_server',
+                'instructions': 'Flight fixture service instructions.',
+            }]
         assert MCP_APP_MODEL_GUIDANCE in description
         guidance = ' '.join(description.split())
         assert '30-second interaction window from that invitation' in guidance
@@ -170,6 +182,197 @@ async def test_real_stdio_app_roundtrip_keeps_complete_data_out_of_model_and_ref
         interactions = [e for e in state.agent.session_log.events if e['type'] == INTERACTION_EVENT]
         assert [e['data']['status'] for e in interactions] == ['started', 'completed']
         assert len([m for m in state.agent.messages if m.role == 'tool']) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_turn", [False, True], ids=["idle", "active"])
+@pytest.mark.parametrize("policy", ["hook-deny", "hook-modify", "capability"])
+async def test_app_call_enforces_session_policy_before_remote_dispatch(
+    tmp_path, monkeypatch, policy, active_turn,
+):
+    async with environment(tmp_path, monkeypatch) as (host, _, llm, _, session_id, record):
+        agent = host._sessions[session_id].agent
+        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        hook_calls = []
+
+        async def before(context):
+            expected_session = (
+                agent.active_tool_run_context.hook_context.session_id if active_turn else session_id
+            )
+            assert context.session_id == expected_session
+            assert context.payload["tool_name"] == "mcp__flight-fixture__refresh_flights"
+            hook_calls.append(context.tool_call_id)
+            if policy == "hook-deny":
+                return BeforeToolDecision.deny("Fixture policy denies refresh", "TEST_DENIED")
+            return BeforeToolDecision.modify({"previous": 8})
+
+        class Hooks:
+            def get_hooks(self):
+                return (HookSpec("app-policy", ("tool.before_execution",), "before_tool", before),)
+
+        class Gate:
+            async def check_invocation(self, name, arguments):
+                assert name == "mcp__flight-fixture__refresh_flights"
+                return CompletionIssue("TEST_GATE_DENIED", "Fixture capability denies refresh")
+
+            async def check(self):
+                return None
+
+        class GateOwner(Tool):
+            name = "fixture_guard"
+            description = "Owns a fixture capability gate."
+            parameters = {"type": "object", "properties": {}}
+
+            async def execute(self):
+                pytest.fail("Gate owner should not execute")
+
+            async def create_completion_gate(self, context):
+                return Gate()
+
+            async def restore_completion_gate(self, context, state):
+                assert state == {"fixture": True}
+                return Gate()
+
+        if policy == "capability":
+            owner = agent.tools[GateOwner.name] = GateOwner()
+            if not active_turn:
+                agent.session_log.append("completion.paused", {
+                    "version": 1, "checks": {owner.name: {"fixture": True}},
+                }, ignorable=True)
+                agent.session_log.flush()
+        else:
+            agent._plugins = (PluginDescriptor("fixture.app-policy", "1.0.0", (HookProviderPort,), Hooks),)
+
+        entered, release = asyncio.Event(), asyncio.Event()
+        prompt_task = None
+        if active_turn:
+            async def hold_model(messages, tools=None, **kwargs):
+                entered.set()
+                await release.wait()
+                yield StreamEvent(type="text", delta="Done.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+            monkeypatch.setattr(llm, "generate_stream", hold_model)
+            prompt_task = asyncio.create_task(host.prompt(session_id, [{"type": "text", "text": "Wait"}]))
+        try:
+            if active_turn:
+                await asyncio.wait_for(entered.wait(), timeout=5)
+                assert agent.active_tool_run_context is not None
+            params = request(
+                session_id, bindingId=snapshot["bindingId"], interactionId="app-policy-check",
+                name="refresh_flights", arguments={"previous": 1},
+            )
+            if policy == "hook-deny":
+                with pytest.raises(RequestError, match="MCP_APP_TOOL_DENIED"):
+                    await host.ext_method("mcp/apps/call", params)
+            else:
+                result = await host.ext_method("mcp/apps/call", params)
+                if policy == "capability":
+                    assert result["isError"] and "TEST_GATE_DENIED" in result["content"][0]["text"]
+                else:
+                    assert result["structuredContent"]["revision"] == 2
+                    assert calls(record)[-1]["arguments"] == {"previous": 8}
+            assert len(calls(record)) == (2 if policy == "hook-modify" else 1)
+            assert hook_calls == ([] if policy == "capability" else ["app-policy-check"])
+        finally:
+            release.set()
+            if prompt_task is not None:
+                await asyncio.wait_for(prompt_task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_app_call_waits_for_current_turn_authorization_context(tmp_path, monkeypatch):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, _, session_id, record):
+        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        reserved, proceed = asyncio.Event(), asyncio.Event()
+        run_prompt = host._prompt_for_session
+        params = request(session_id, bindingId=snapshot["bindingId"],
+                         interactionId="during-preparation", name="refresh_flights",
+                         arguments={"previous": 1})
+
+        async def hold_preparation(*args, **kwargs):
+            reserved.set()
+            await proceed.wait()
+            return await run_prompt(*args, **kwargs)
+
+        monkeypatch.setattr(host, "_prompt_for_session", hold_preparation)
+        task = asyncio.create_task(host.prompt(session_id, [{"type": "text", "text": "Wait"}]))
+        try:
+            await asyncio.wait_for(reserved.wait(), timeout=5)
+            state = host._sessions[session_id]
+            assert state._prompt_in_progress and state.agent.active_tool_run_context is None
+            with pytest.raises(RequestError, match="MCP_APP_SESSION_BUSY"):
+                await host.ext_method("mcp/apps/call", params)
+            assert len(calls(record)) == 1
+        finally:
+            proceed.set()
+            await asyncio.wait_for(task, timeout=5)
+        assert (await host.ext_method("mcp/apps/call", params))["structuredContent"]["revision"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["set", "clear"])
+async def test_accepted_credential_change_revokes_app_binding_before_reconnect(
+    tmp_path, monkeypatch, operation,
+):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, backend, session_id, record):
+        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        ref = "fixture-credential"
+        definition = ResolvedMcpServer(
+            name=backend.name, config={"credentialRef": ref}, owner="connector", config_id="fixture",
+            connector_id="fixture", connector_name="Fixture", source_path="<fixture>", fingerprint="fixture",
+        )
+        monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", {backend.name: definition})
+        monkeypatch.setattr(mcp_loader, "_mcp_runtime_credentials", {ref: {"X-Tenant": "old"}})
+        monkeypatch.setattr(mcp_loader, "_mcp_runtime_credential_versions", {})
+        credential = {"credentialRef": ref}
+        if operation == "set":
+            credential["headers"] = {"X-Tenant": "new"}
+        result = await host.ext_method(f"mcp/credential/{operation}", credential)
+        assert result == {"success": True, "affectedServers": [backend.name]}
+        assert backend.session is not None
+        for method, extra in (
+            ("snapshot", {}),
+            ("resource", {"bindingId": snapshot["bindingId"], "uri": snapshot["resourceUri"]}),
+            ("call", {"bindingId": snapshot["bindingId"], "interactionId": "after-revoke",
+                      "name": "refresh_flights", "arguments": {"previous": 1}}),
+        ):
+            with pytest.raises(RequestError, match="APP_SERVER_CHANGED"):
+                await host.ext_method(f"mcp/apps/{method}", request(session_id, **extra))
+        assert len(calls(record)) == 1
+
+
+@pytest.mark.asyncio
+async def test_app_reply_is_withheld_after_binding_revocation_but_receipt_survives(tmp_path, monkeypatch):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, backend, session_id, record):
+        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        result_received, send_reply = asyncio.Event(), asyncio.Event()
+        remote_call = backend.session.call_tool
+
+        async def hold_reply(*args, **kwargs):
+            result = await remote_call(*args, **kwargs)
+            result_received.set()
+            await send_reply.wait()
+            return result
+
+        monkeypatch.setattr(backend.session, "call_tool", hold_reply)
+        params = request(session_id, bindingId=snapshot["bindingId"], interactionId="revoked-before-reply",
+                         name="refresh_flights", arguments={"previous": 1})
+        pending = asyncio.create_task(host.ext_method("mcp/apps/call", params))
+        try:
+            await asyncio.wait_for(result_received.wait(), timeout=5)
+            mcp_loader._begin_mcp_connection(backend.name)
+            send_reply.set()
+            with pytest.raises(RequestError, match="APP_SERVER_CHANGED"):
+                await asyncio.wait_for(pending, timeout=5)
+            log = host._sessions[session_id].agent.session_log
+            assert [e["data"]["status"] for e in log.events_of_type(INTERACTION_EVENT)] == [
+                "started", "completed",
+            ]
+            assert len(calls(record)) == 2
+        finally:
+            send_reply.set()
+            await asyncio.gather(pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -599,7 +802,7 @@ async def test_history_edit_preserves_app_interaction_receipts_after_reload(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["unchanged", "env", "headers", "args"])
-async def test_old_app_reopens_with_original_routing_and_new_connection_binding(tmp_path, monkeypatch, change):
+async def test_history_rebind_requires_same_connection_identity(tmp_path, monkeypatch, change):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
         env, headers = dict(backend.env), dict(backend.headers)
@@ -617,7 +820,7 @@ async def test_old_app_reopens_with_original_routing_and_new_connection_binding(
             mcp_loader._replace_server_catalog(replacement)
             params = request(session_id, bindingId=snapshot['bindingId'], interactionId='after-reconnect',
                              name='refresh_flights', arguments={'previous': 1})
-            if change != 'args':
+            if change == 'unchanged':
                 with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
                     await host.ext_method('mcp/apps/call', params)
                 restored = await host.ext_method('mcp/apps/snapshot', request(session_id))
@@ -633,10 +836,26 @@ async def test_old_app_reopens_with_original_routing_and_new_connection_binding(
                 with pytest.raises(RequestError, match='APP_SERVER_CHANGED'):
                     await host.ext_method('mcp/apps/snapshot', request(session_id))
                 with pytest.raises(RequestError, match='APP_SERVER_CHANGED'):
+                    await host.ext_method('mcp/apps/resource', request(
+                        session_id, bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
+                with pytest.raises(RequestError, match='APP_SERVER_CHANGED'):
                     await host.ext_method('mcp/apps/call', params)
                 assert [item['name'] for item in calls(record)] == ['list_flights']
         finally:
             await replacement.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_legacy_app_snapshot_cannot_establish_a_live_binding(tmp_path, monkeypatch):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, _, session_id, record):
+        session_log = host._sessions[session_id].agent.session_log
+        saved = deepcopy(next(iter(session_log.events_of_type(SNAPSHOT_EVENT)))["data"])
+        # An older snapshot contains a routing digest without credential scope.
+        session_log.append(SNAPSHOT_EVENT, {**saved, "serverIdentity": "a" * 64}, ignorable=True)
+        session_log.flush()
+        with pytest.raises(RequestError, match="APP_SERVER_CHANGED"):
+            await host.ext_method("mcp/apps/snapshot", request(session_id))
+        assert len(calls(record)) == 1
 
 
 @pytest.mark.asyncio
@@ -683,7 +902,7 @@ async def test_request_connector_context_preserves_session_and_existing_card_bin
         monkeypatch.setattr(backend, 'connector_id', 'travel')
         context = {'selected_connector_ids': ['travel'], 'connector_statuses': [
             {'id': 'travel', 'name': 'Travel', 'status': 'connected'}]}
-        # App restoration must also work while the original model turn is active.
+        # Read-only restoration also works while the next turn is preparing.
         state._prompt_in_progress = True
         try:
             first = await host.ext_method('mcp/apps/snapshot', request(session_id, connectorContext=context))
@@ -693,12 +912,12 @@ async def test_request_connector_context_preserves_session_and_existing_card_bin
             resource = await host.ext_method('mcp/apps/resource', request(session_id,
                 connectorContext=second_context, bindingId=original['bindingId'], uri=original['resourceUri']))
             assert resource['contents'][0]['uri'] == original['resourceUri']
-            result = await host.ext_method('mcp/apps/call', request(session_id,
-                connectorContext=context, bindingId=original['bindingId'], interactionId='context-refresh',
-                name='refresh_flights', arguments={'previous': 1}))
-            assert result['structuredContent']['revision'] == 2
         finally:
             state._prompt_in_progress = False
+        result = await host.ext_method('mcp/apps/call', request(session_id,
+            connectorContext=context, bindingId=original['bindingId'], interactionId='context-refresh',
+            name='refresh_flights', arguments={'previous': 1}))
+        assert result['structuredContent']['revision'] == 2
         assert host._sessions[session_id] is state
         assert state._mcp_apps_nonce == nonce
         assert (state.thinking_enabled, state.execution_profile) == controls

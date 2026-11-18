@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import anyio
+import httpx
 import pytest
 from mcp import types
 from mcp.server.lowlevel import Server
@@ -168,7 +169,7 @@ def test_app_workflow_guidance_preserves_server_descriptor(monkeypatch, legacy):
     tool = mcp_loader.MCPTool(
         name="mcp__flights__search", description=info["description"],
         parameters=info["inputSchema"], session=Session(), server_name="flights",
-        remote_name="search", descriptor=info,
+        remote_name="search", descriptor=info, server_identity="fixture-app-binding",
     )
     assert tool.description.startswith("Find flights\n\n")
     assert mcp_apps.MCP_APP_MODEL_GUIDANCE in tool.description
@@ -185,7 +186,7 @@ async def test_app_guidance_does_not_pollute_status_search_or_catalog_purposes(m
     create = mcp_loader.MCPTool(
         name="mcp__flights__create_canvas", description=create_info["description"],
         parameters=create_info["inputSchema"], session=Session(), server_name="flights",
-        remote_name="create_canvas", descriptor=create_info,
+        remote_name="create_canvas", descriptor=create_info, server_identity="fixture-app-binding",
     )
     status = mcp_loader.MCPTool(
         name="mcp__flights__get_task", description="Get task status.",
@@ -668,15 +669,18 @@ async def test_hosted_search_rechecks_app_admission_after_reconnect_lock_wait(mo
     assert len(session.calls) == 1
 
 
-@pytest.mark.parametrize("config,expected", [
-    ({"connection_type": "streamable_http", "url": "https://flights.example/mcp"},
-     "860bcdc38f9275ebbd0e8951fddfdab82ed9373662059e13cc1d74caf1b32e8d"),
-    ({"command": "flight-server", "args": ["--mode", "test"]},
-     "d98c74b5a3d942456729b1df68cb0e208019af2427fc7ac44638f0b7922f6f89"),
-])
-def test_app_server_identity_matches_original_saved_fingerprints(config, expected):
-    connection = mcp_loader.MCPServerConnection("flights", **config)
-    assert connection.server_identity == expected
+@pytest.fixture
+def identity_enabled(monkeypatch):
+    monkeypatch.setattr(mcp_apps, "_host_enabled", True)
+
+
+def test_app_binding_fingerprint_survives_profile_reload(identity_enabled):
+    config = {"command": "flight-server", "env": {"DATA_SOURCE": "fixture-private-config"}}
+    identity = mcp_loader.MCPServerConnection("flights", **config).server_identity
+    assert identity.startswith("mcp-app-v2:")
+    assert "fixture-private-config" not in identity
+    mcp_apps._binding_key.cache_clear()
+    assert mcp_loader.MCPServerConnection("flights", **config).server_identity == identity
 
 
 @pytest.mark.parametrize("change", [
@@ -684,7 +688,7 @@ def test_app_server_identity_matches_original_saved_fingerprints(config, expecte
     {"command": "other-server"}, {"args": ["--other"]},
     {"url": "https://other.example/mcp"}, {"connector_id": "other-connector"},
 ])
-def test_service_routing_changes_invalidate_app_server_identity(change):
+def test_service_routing_changes_invalidate_app_server_identity(identity_enabled, change):
     config = {"name": "flights", "command": "flight-server", "args": ["--mode", "test"]}
     original = mcp_loader.MCPServerConnection(**config)
     changed = mcp_loader.MCPServerConnection(**{**config, **change})
@@ -692,7 +696,7 @@ def test_service_routing_changes_invalidate_app_server_identity(change):
 
 
 @pytest.mark.parametrize("change", ["env", "headers", "owner", "config_id", "source_path"])
-def test_non_routing_config_changes_preserve_app_server_identity(tmp_path, monkeypatch, change):
+def test_only_connection_context_changes_invalidate_app_identity(tmp_path, monkeypatch, identity_enabled, change):
     from dataclasses import replace
     from box_agent.tools.mcp_sources import ResolvedMcpServer
 
@@ -714,12 +718,13 @@ def test_non_routing_config_changes_preserve_app_server_identity(tmp_path, monke
         changed = replace(definition, config_id='custom-mcp:renamed')
     else:
         changed = replace(definition, source_path=str(tmp_path / 'another-mcp.json'))
-    assert mcp_loader._build_connection(changed).server_identity == original.server_identity
+    changed_identity = mcp_loader._build_connection(changed).server_identity
+    assert (changed_identity != original.server_identity) == (change in {"env", "headers"})
     reordered = replace(definition, config=dict(reversed(list(config.items()))))
     assert mcp_loader._build_connection(reordered).server_identity == original.server_identity
 
 
-def test_runtime_credentials_and_reference_preserve_app_server_identity(monkeypatch):
+def test_runtime_credentials_and_reference_are_bound_to_app_identity(monkeypatch, identity_enabled):
     from dataclasses import replace
     from box_agent.tools.mcp_sources import ResolvedMcpServer
 
@@ -735,9 +740,51 @@ def test_runtime_credentials_and_reference_preserve_app_server_identity(monkeypa
     credentials['travel-token'] = {'Authorization': 'Bearer after-refresh'}
     refreshed = mcp_loader._build_connection(replace(definition, fingerprint='refreshed'))
     assert refreshed.headers['Authorization'] != original.headers['Authorization']
-    assert refreshed.server_identity == original.server_identity
+    assert refreshed.server_identity != original.server_identity
+    credentials['other-account'] = dict(credentials['travel-token'])
     changed_reference = replace(definition, config={**definition.config, 'credentialRef': 'other-account'})
-    assert mcp_loader._build_connection(changed_reference).server_identity == original.server_identity
+    assert mcp_loader._build_connection(changed_reference).server_identity != refreshed.server_identity
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["access_token", "office_identity"])
+async def test_hosted_app_auth_checks_scope_at_transport_and_requests_reconnect(
+    tmp_path, monkeypatch, identity_enabled, field,
+):
+    login_file = tmp_path / "auth.json"
+    login = {"access_token": "fixture-token", "office_identity": "org-a"}
+    login_file.write_text(json.dumps(login))
+    monkeypatch.setattr(mcp_loader, "_mcp_auth_file", str(login_file))
+    monkeypatch.setattr(mcp_loader, "_mcp_auth_token", "")
+    monkeypatch.setattr(mcp_loader, "_mcp_status", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_auth_fingerprint", mcp_loader._current_mcp_auth_fingerprint())
+    monkeypatch.setattr(mcp_loader, "should_attach_auth_header", lambda url: True)
+    connection = mcp_loader.MCPServerConnection(
+        "flights", connection_type="streamable_http", url="https://fixture.example/mcp",
+        auth=mcp_loader.DynamicBearerAuth(auth_file=str(login_file)),
+    )
+    monkeypatch.setattr(mcp_loader, "_mcp_connections", [connection])
+    sent = []
+
+    def handle(request):
+        sent.append(request.headers.get("Authorization"))
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), auth=connection.auth) as client:
+        await client.post(connection.url)
+        login[field] += "-changed"
+        login_file.write_text(json.dumps(login))
+        with pytest.raises(mcp_apps.McpAppError, match="APP_SERVER_CHANGED"):
+            await client.post(connection.url)
+    assert sent == ["Bearer fixture-token"]
+
+    async def reconnect(name):
+        return {"success": name == connection.name}
+
+    monkeypatch.setattr(mcp_loader, "reconnect_mcp_server", reconnect)
+    assert await mcp_loader.reconnect_auth_failed_mcp_servers_if_token_changed() == [
+        {"name": "flights", "success": True},
+    ]
 
 
 @pytest.mark.asyncio

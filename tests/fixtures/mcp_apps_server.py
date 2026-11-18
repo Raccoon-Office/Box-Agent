@@ -15,7 +15,7 @@ from mcp.server.stdio import stdio_server
 
 URI = "ui://flight-fixture/search.html"
 MIME = "text/html;profile=mcp-app"
-server = Server("mcp-apps-flight-fixture")
+server = Server("mcp-apps-flight-fixture", instructions="Flight fixture service instructions.")
 revision = 0
 HTML = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 :root{color-scheme:light dark;font:14px system-ui,sans-serif}body{margin:0;padding:18px;background:#fff;color:#222}body.dark{background:#1f2023;color:#eee}h2{font-size:18px;margin:0 0 12px}p{color:#666}body.dark p{color:#aaa}table{width:100%;border-collapse:collapse;margin:12px 0}td{padding:9px 4px;border-bottom:1px solid #8884}td:last-child{text-align:right;font-variant-numeric:tabular-nums}button{border:0;border-radius:8px;background:#5368df;color:white;padding:10px 14px;cursor:pointer;font:inherit}button:disabled{opacity:.5;cursor:wait}#status{min-height:20px;overflow-wrap:anywhere}article{max-width:760px}

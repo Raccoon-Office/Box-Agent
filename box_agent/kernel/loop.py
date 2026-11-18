@@ -676,6 +676,7 @@ async def _run_agent_loop_impl(
     run_control: Any | None = None,
     initial_context_transition: InitialContextTransition | None = None,
     completion_checks_enabled: bool = True,
+    tool_run_context_sink: Callable[[ToolRunContext], None] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -1075,24 +1076,25 @@ async def _run_agent_loop_impl(
             skill_subjects=tuple(s for s in subjects if s.kind == "skill"), workspace=workspace_dir or "",
         )
 
+    tool_run_context = ToolRunContext(
+        messages=messages, hooks=hook_mgr, result_storage=result_storage,
+        hook_dispatch=_services.hook_dispatch, hook_context=_services.hook_context,
+        is_cancelled=cancelled, record_call=tool_messages.record_call,
+        flush_calls=tool_messages.flush_calls,
+        commit_result=tool_messages.commit_result,
+        validate_followup=validate_followup,
+        policy_error=browser_intent_policy.tool_call_error,
+        session_log=session_log,
+        completion_gates=completion_checks.gates,
+        workspace_dir=workspace_dir,
+        session_id=session_id, turn_id=turn_id,
+        permission_negotiator=permission_negotiator, logger=logger,
+        resource_ledger=resource_ledger, activate_skill=active_skill_activator,
+        skill_reader=context_engine.tool_reader if context_engine is not None else None,
+        correction_observer=_correction_observer if memory_lookup else None,
+    )
     tool_engine.configure_run(
-        ToolRunContext(
-            messages=messages, hooks=hook_mgr, result_storage=result_storage,
-            hook_dispatch=_services.hook_dispatch, hook_context=_services.hook_context,
-            is_cancelled=cancelled, record_call=tool_messages.record_call,
-            flush_calls=tool_messages.flush_calls,
-            commit_result=tool_messages.commit_result,
-            validate_followup=validate_followup,
-            policy_error=browser_intent_policy.tool_call_error,
-            session_log=session_log,
-            completion_gates=completion_checks.gates,
-            workspace_dir=workspace_dir,
-            session_id=session_id, turn_id=turn_id,
-            permission_negotiator=permission_negotiator, logger=logger,
-            resource_ledger=resource_ledger, activate_skill=active_skill_activator,
-            skill_reader=context_engine.tool_reader if context_engine is not None else None,
-            correction_observer=_correction_observer if memory_lookup else None,
-        ),
+        tool_run_context,
         ToolExecutionOptions(
             tool_call_limits=tool_call_limits, max_tool_calls=max_tool_calls,
             max_delegated_tool_calls=max_delegated_tool_calls,
@@ -1107,6 +1109,8 @@ async def _run_agent_loop_impl(
             artifact_detection_enabled=artifact_detection_enabled,
         ),
     )
+    if tool_run_context_sink is not None:
+        tool_run_context_sink(tool_run_context)
     visible_tool_call_total = 0
     final_summary_guidance_injected = False
     empty_final_answer_retry_injected = False

@@ -85,7 +85,7 @@ def seko_tool(server="seko-canvas", remote="generate_image", connector_id=None):
         name=_public_mcp_tool_name(server, remote, connector_id),
         remote_name=remote, server_name=server, connector_id=connector_id,
         description=descriptor["description"], parameters=descriptor["inputSchema"],
-        descriptor=descriptor, session=session,
+        descriptor=descriptor, session=session, server_identity="fixture-app-binding",
     )
     return tool, original, session
 

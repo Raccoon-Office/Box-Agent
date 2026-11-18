@@ -89,6 +89,7 @@ except ImportError:
 
 from box_agent.auth import (
     is_private_service_url,
+    read_hosted_auth_snapshot,
     request_auth_headers,
     resolve_auth_token,
     should_attach_auth_header,
@@ -112,7 +113,7 @@ from .browser_tool_names import (
 from .mcp_bootstrap import is_default_hosted_search_url
 from .mcp_apps import (
     MCP_APP_MODEL_GUIDANCE,
-    MCPAppsClientSession, McpAppError, UI_MIME_TYPE, bounded_json,
+    MCPAppsClientSession, McpAppError, UI_MIME_TYPE, app_server_identity, bounded_json,
     bind_mcp_app_admission, check_mcp_app_dispatch,
     capture_mcp_app_result, capture_raw_app_result, mcp_app_invocation,
     mcp_app_result_is_host_only, mcp_apps_host_enabled, mcp_tool_allows,
@@ -213,6 +214,7 @@ def _mcp_tool_always_load(server_name: str, tool: Any, server_default: bool) -> 
 
 
 def _replace_server_catalog(connection: "MCPServerConnection") -> None:
+    connection._app_epoch = _mcp_connection_epochs.get(connection.name)
     catalog = get_mcp_tool_catalog()
     catalog.replace_server(connection.name, connection.tools)
     conflicts = sorted(
@@ -436,6 +438,14 @@ class DynamicBearerAuth(httpx.Auth):
     def __init__(self, auth_file: str = "", explicit_token: str = ""):
         self.auth_file = auth_file
         self.explicit_token = explicit_token
+        self.app_scope: tuple[str, str] | None = None
+
+    def current_app_scope(self) -> tuple[str, str]:
+        login = read_hosted_auth_snapshot(self.auth_file)
+        return (self.explicit_token or "").strip() or login.request_token, login.office_identity
+
+    def app_scope_changed(self) -> bool:
+        return self.app_scope is not None and self.current_app_scope() != self.app_scope
 
     def sync_auth_flow(self, request: httpx.Request):
         yield self._with_current_auth(request)
@@ -444,10 +454,19 @@ class DynamicBearerAuth(httpx.Auth):
         yield self._with_current_auth(request)
 
     def _with_current_auth(self, request: httpx.Request) -> httpx.Request:
-        if "authorization" in request.headers:
-            return request
-
-        token = resolve_auth_token(self.explicit_token, self.auth_file)
+        if self.app_scope is not None:
+            # A queued request can reach the HTTP transport after the account
+            # changes, so check the original scope here as well as at admission.
+            if self.app_scope_changed() or not should_attach_auth_header(str(request.url)):
+                raise McpAppError("APP_SERVER_CHANGED")
+            token = self.app_scope[0]
+            authorization = request.headers.get("authorization")
+            if authorization is not None and authorization != f"Bearer {token}":
+                raise McpAppError("APP_SERVER_CHANGED")
+        else:
+            if "authorization" in request.headers:
+                return request
+            token = resolve_auth_token(self.explicit_token, self.auth_file)
         if not token or not should_attach_auth_header(str(request.url)):
             return request
 
@@ -988,7 +1007,7 @@ class MCPTool(Tool):
                 + description
             )
             self._search_description = self._description
-        if (self.mcp_ui_resource_uri and mcp_apps_host_enabled()
+        if (self.mcp_ui_resource_uri and self.mcp_server_identity and mcp_apps_host_enabled()
                 and session_lease is None and mcp_tool_allows(self, "model")):
             # Model guidance belongs to the offered description. Preserve the
             # server descriptor and all tool results used by the card/history.
@@ -1618,14 +1637,7 @@ async def _open_streamable_http(
                 """MCP 2.x auth hook retaining per-request token refresh."""
 
                 async def async_auth_flow(self, request):
-                    if "authorization" not in request.headers:
-                        token = resolve_auth_token(
-                            dynamic_auth.explicit_token,
-                            dynamic_auth.auth_file,
-                        )
-                        if token and should_attach_auth_header(str(request.url)):
-                            request.headers["Authorization"] = f"Bearer {token}"
-                    yield request
+                    yield dynamic_auth._with_current_auth(request)
 
             transport_auth = Httpx2DynamicBearerAuth()
 
@@ -1689,22 +1701,25 @@ class MCPServerConnection:
         always_load: bool = False,
         connector_id: str | None = None,
         connector_name: str | None = None,
+        credential_ref: str | None = None,
     ):
         self.name = name
-        self.apps_enabled = mcp_apps_host_enabled()
-        # Keep the original routing fields so saved App identities survive upgrades.
-        self.server_identity = hashlib.sha256(json.dumps(
-            [name, connection_type, command, args or [], url, connector_id],
-            ensure_ascii=True, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")).hexdigest()
+        self.apps_enabled = (
+            mcp_apps_host_enabled() and connection_type != "stdio_http"
+            and (auth is None or isinstance(auth, DynamicBearerAuth))
+        )
+        if self.apps_enabled and isinstance(auth, DynamicBearerAuth):
+            # Own the pinned authorization independently of other connections.
+            auth = DynamicBearerAuth(auth.auth_file, auth.explicit_token)
+            auth.app_scope = auth.current_app_scope()
         self.connection_type = connection_type
         # STDIO
         self.command = command
-        self.args = args or []
-        self.env = env or {}
+        self.args = list(args or [])
+        self.env = dict(env or {})
         # URL-based
         self.url = url
-        self.headers = headers or {}
+        self.headers = dict(headers or {})
         self.auth = auth
         # Timeout settings (per-server overrides)
         self.connect_timeout = connect_timeout
@@ -1713,6 +1728,9 @@ class MCPServerConnection:
         self.always_load = always_load
         self.connector_id = connector_id
         self.connector_name = connector_name
+        self._credential_ref = credential_ref
+        self._app_epoch: object | None = None
+        self._set_app_server_identity()
         self._web_search_concurrency_limiter: asyncio.Semaphore | None = None
         self._active_search_calls = 0
         self._search_calls_drained = asyncio.Event()
@@ -1731,6 +1749,22 @@ class MCPServerConnection:
         # client pool that hands every agent session its own BrowserContext.
         self.server_process: ManagedHttpServerProcess | None = None
         self.session_pool: PlaywrightSessionPool | None = None
+
+    def _set_app_server_identity(self, env: dict[str, str] | None = None) -> None:
+        self.server_identity = ""
+        if not self.apps_enabled:
+            return
+        scope = self.auth.app_scope if isinstance(self.auth, DynamicBearerAuth) else None
+        headers = sorted(
+            ((name.lower(), value) for name, value in self.headers.items()), key=lambda pair: pair[0],
+        )
+        try:
+            self.server_identity = app_server_identity([
+                self.name, self.connection_type, self.command, self.args, self.url, self.connector_id,
+                self.env if env is None else env, headers, self._credential_ref, scope,
+            ])
+        except (OSError, ValueError, TypeError):
+            _warn(f"[mcp] App binding unavailable for {self.name!r}")
 
     @property
     def transport_label(self) -> str:
@@ -1900,6 +1934,9 @@ class MCPServerConnection:
         try:
             self.exit_stack = AsyncExitStack()
             session_lease: SessionLease | None = None
+            if self.apps_enabled and isinstance(self.auth, DynamicBearerAuth):
+                self.auth.app_scope = self.auth.current_app_scope()
+                self._set_app_server_identity()
 
             # Wrap connection with timeout
             async with _timeout(connect_timeout):
@@ -2005,6 +2042,11 @@ class MCPServerConnection:
                     server_identity=self.server_identity,
                 )
                 self.tools.append(mcp_tool)
+
+            if isinstance(self.auth, DynamicBearerAuth) and not any(
+                tool.mcp_ui_resource_uri and mcp_tool_allows(tool, "model") for tool in self.tools
+            ):
+                self.auth.app_scope = None
 
             conn_info = self.url if self.url else self.command
             if self.connection_type == "stdio_http" and self.server_process is not None:
@@ -2164,6 +2206,8 @@ class MCPServerConnection:
             env=env or None,
             cwd=tempfile.gettempdir(),
         )
+        if self.apps_enabled:
+            self._set_app_server_identity({**get_default_environment(), **(env or {})})
         return await self.exit_stack.enter_async_context(stdio_client(server_params))
 
     async def _connect_sse(self):
@@ -2741,6 +2785,7 @@ def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
         always_load=bool(server_config.get("alwaysLoad", False)),
         connector_id=definition.connector_id,
         connector_name=definition.connector_name,
+        credential_ref=definition.config.get("credentialRef"),
     )
 
 
@@ -3293,30 +3338,32 @@ async def _reconcile_mcp_sources_locked(
 
 
 async def reconnect_auth_failed_mcp_servers_if_token_changed() -> list[dict]:
-    """Reconnect auth-failed MCP servers after the product login token rotates.
+    """Reconnect auth-failed or App-bound MCP servers after a login-scope change.
 
     Hosted MCP discovery happens once during CLI startup. If that initial
     connection receives a 401, there is no persistent HTTP client on which the
-    dynamic bearer hook can observe a later desktop-login refresh. This helper
-    notices the auth-file change and retries only servers whose last failure was
-    an authentication failure. Connected servers do not need reconnecting:
-    ``DynamicBearerAuth`` already reads the latest token for every request.
+    dynamic bearer hook can observe a later desktop-login refresh. App
+    transports pin an authorization scope and need a fresh connection before
+    serving new calls under the new login.
     """
     global _mcp_auth_fingerprint
 
     current_fingerprint = _current_mcp_auth_fingerprint()
-    if not current_fingerprint or current_fingerprint == _mcp_auth_fingerprint:
+    if not current_fingerprint:
         return []
-    _mcp_auth_fingerprint = current_fingerprint
 
-    failed_names = [
-        status.name
-        for status in _mcp_status.values()
-        if status.state == "failed"
-        and status.auth_status in {401, 403}
-    ]
+    names = {
+        connection.name for connection in _mcp_connections
+        if isinstance(connection.auth, DynamicBearerAuth) and connection.auth.app_scope_changed()
+    }
+    if current_fingerprint != _mcp_auth_fingerprint:
+        _mcp_auth_fingerprint = current_fingerprint
+        names.update(
+            status.name for status in _mcp_status.values()
+            if status.state == "failed" and status.auth_status in {401, 403}
+        )
     results: list[dict] = []
-    for name in failed_names:
+    for name in sorted(names):
         result = await reconnect_mcp_server(name)
         results.append({"name": name, **result})
     return results
@@ -3446,7 +3493,9 @@ def _resolve_mcp_app_connection(
     connection = next((item for item in _mcp_connections if item.name == server_name), None)
     if connection is None or connection.session is None or not connection.apps_enabled:
         raise McpAppError("APP_SERVER_UNAVAILABLE")
-    if connection.server_identity != server_identity:
+    if (not server_identity or connection.server_identity != server_identity
+            or connection._app_epoch is not _mcp_connection_epochs.get(server_name)
+            or (isinstance(connection.auth, DynamicBearerAuth) and connection.auth.app_scope_changed())):
         raise McpAppError("APP_SERVER_CHANGED")
     allowed = allowed_connector_ids() if callable(allowed_connector_ids) else allowed_connector_ids
     if connection.connector_id is not None and connection.connector_id not in allowed:

@@ -3,12 +3,55 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from functools import lru_cache
+from hmac import digest
+from pathlib import Path
+from secrets import token_bytes
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from mcp import ClientSession, types
+
+from box_agent.user_paths import state_path
+
+
+@lru_cache(maxsize=16)
+def _binding_key(path: Path) -> bytes:
+    """Share a profile-local key across restarts and concurrent hosts."""
+    try:
+        key = path.read_bytes()
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with NamedTemporaryFile(dir=path.parent, prefix=".mcp-app-binding-", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(token_bytes(32))
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass  # Another host already installed the key.
+            key = path.read_bytes()
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    if len(key) != 32:
+        raise ValueError("Invalid MCP App binding key")
+    return key
+
+
+def app_server_identity(material: list[Any]) -> str:
+    """Persist an opaque connection fingerprint without a credential verifier."""
+    encoded = json.dumps(
+        material, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    key = _binding_key(state_path("config/mcp-app-binding.key"))
+    return "mcp-app-v2:" + digest(key, encoded, "sha256").hex()
+
 
 class McpAppError(ValueError):
     def __init__(self, code: str):
@@ -211,7 +254,8 @@ def capture_mcp_app_result(tool: Any, result: Any) -> bool:
     callback = _capture.get()
     invocation = _invocation.get()
     uri = tool.mcp_ui_resource_uri
-    if raw_callback is None and (callback is None or invocation is None or not invocation[0] or not uri):
+    if raw_callback is None and (callback is None or invocation is None or not invocation[0] or
+                                 not uri or not tool.mcp_server_identity):
         return False
     payload = call_result_json(result)
     if raw_callback is not None:

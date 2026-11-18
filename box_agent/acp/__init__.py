@@ -1628,7 +1628,7 @@ class BoxACPAgent:
             log.info("mcp/catalog_ready_injected", sessions=injected)
 
     async def _refresh_mcp_after_auth_change(self) -> list[dict]:
-        """Reconnect auth-failed MCP servers after the host refreshes auth.json."""
+        """Reconnect auth-failed or App-bound MCP servers after a login-scope change."""
 
         if not self._mcp_loaded:
             return []

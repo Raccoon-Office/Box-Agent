@@ -69,7 +69,8 @@ class CompletionChecks:
 
     @classmethod
     async def create(
-        cls, tools: Mapping, context: CompletionContext, *, enabled: bool = True,
+        cls, tools: Mapping, context: CompletionContext, *,
+        enabled: bool = True, include_inputs: bool = True,
     ) -> CompletionChecks:
         checks = cls(context, enabled=enabled)
         if not enabled:
@@ -93,7 +94,8 @@ class CompletionChecks:
                     checks.failures.append(CompletionIssue(
                         "COMPLETION_RESTORE_FAILED", f"{name}: {exc}", False,
                     ))
-        await checks.include_inputs(tools, context)
+        if include_inputs:
+            await checks.include_inputs(tools, context)
         return checks
 
     def suspend(self) -> None:
