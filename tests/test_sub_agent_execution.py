@@ -503,10 +503,13 @@ async def test_read_only_children_still_overlap_with_hosted_image_billing(tmp_pa
 async def test_image_child_waits_in_current_turn_without_parallel_batch_timeout(tmp_path, monkeypatch, rewrite_at, hook_route, approved):
     from box_agent.core import run_agent_loop
     from box_agent.tools.billing import confirmation
+    from box_agent.tools.engine import scheduler
     from box_agent.tools.image_generation_tool import GenerateImageTool
 
     from box_agent.hooks import BaseHook
 
+    now = 0.0
+    monkeypatch.setattr(scheduler, "perf_counter", lambda: now)
     hook_calls = []
     class AddImageHook(BaseHook):
         async def on_tool_start(self, *, tool_call_id, tool_name, arguments):
@@ -599,8 +602,9 @@ async def test_image_child_waits_in_current_turn_without_parallel_batch_timeout(
     task = asyncio.create_task(run())
     try:
         await asyncio.wait_for(waiting.wait(), 2)
-        # Human approval waits on the current invocation, beyond the ordinary
-        # parallel batch deadline. Later children must not start while waiting.
+        # Advance the clock once the parallel prefix has finished and the
+        # serial invocation is awaiting approval. Later children stay queued.
+        now = 1.0
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(task), 0.2)
         assert len(child_starts) == (rewrite_at or 0) + 1

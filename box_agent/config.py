@@ -279,7 +279,7 @@ class AgentConfig(BaseModel):
     # Wall-clock cap for one batch of parallel_safe tool calls. Completed
     # sibling results are kept; unfinished siblings get synthetic timeout
     # failures so the parent can continue instead of waiting forever.
-    parallel_tool_timeout_seconds: float = 900.0
+    parallel_tool_timeout_seconds: float = 1800.0
     # Seconds a streaming response may go without a new provider chunk before
     # the loop treats it as stale and triggers bounded recovery. The default
     # matches the shared runtime fallback; raise it for slow/deep-thinking

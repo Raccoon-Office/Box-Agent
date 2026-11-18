@@ -291,6 +291,8 @@ def test_schema_exposes_flat_contract_with_safe_defaults():
         "files",
         "write_scope",
         "budget",
+        "work_items",
+        "resume_from",
     }
     assert input_schema["required"] == ["task"]
     assert "default" not in properties["required_tools"]

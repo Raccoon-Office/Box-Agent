@@ -600,7 +600,7 @@ def test_enable_playwright_preserves_custom_execute_timeout(tmp_path: Path) -> N
 def test_config_parallel_tool_timeout_defaults_and_overrides(tmp_path: Path) -> None:
     default_path = tmp_path / "default.yaml"
     _write_config(default_path)
-    assert cli.Config.from_yaml(default_path).agent.parallel_tool_timeout_seconds == 900.0
+    assert cli.Config.from_yaml(default_path).agent.parallel_tool_timeout_seconds == 1800.0
 
     override_path = tmp_path / "override.yaml"
     _write_config(override_path)

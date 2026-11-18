@@ -378,6 +378,70 @@ async def test_parallel_timeout_keeps_completed_result_and_synthesizes_missing(m
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("limit, wrapup_at", [(1800, 1500), (900, 750), (0, None)])
+async def test_parallel_wrapup_uses_the_configured_limit_and_defers_queued_work(
+    monkeypatch, limit, wrapup_at,
+):
+    now = 0.0
+    started = asyncio.Event()
+    release = asyncio.Event()
+    notified = asyncio.Event()
+    calls = []
+    monkeypatch.setattr("box_agent.tools.engine.scheduler.perf_counter", lambda: now)
+
+    class ChildTool(_TestTool):
+        name = "child"
+        supports_parallel_handoff = True
+        uses_invocation_context = True
+
+        async def _invoke_validated(self, arguments, *, context):
+            value = arguments["value"]
+            calls.append(value)
+            if value == "first":
+                window = context.parallel_window
+                if window is not None:
+                    window.on_wrapup = notified.set
+                started.set()
+                await release.wait()
+            return ToolResult(success=True, content=value)
+
+    async def collect():
+        return [
+            record async for record in _engine(
+                {"child": ChildTool()}, max_parallel_tools=1, batch_timeout_seconds=limit,
+            ).invoke_parallel([
+                ToolInvocationRequest(call_id=value, tool_name="child", arguments={"value": value})
+                for value in ("first", "queued")
+            ])
+        ]
+
+    task = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        now = wrapup_at if wrapup_at is not None else 1800
+        if wrapup_at is not None:
+            await asyncio.wait_for(notified.wait(), timeout=2)
+        release.set()
+        records = await asyncio.wait_for(task, timeout=2)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    batch = records[-1]
+    assert isinstance(batch, ToolBatchCompleted)
+    assert batch.outcomes_by_id["first"].result.success
+    queued = batch.outcomes_by_id["queued"].result
+    if wrapup_at is None:
+        assert calls == ["first", "queued"]
+        assert queued.success
+        assert not notified.is_set()
+    else:
+        assert calls == ["first"]
+        assert queued.raw_output["code"] == "PARALLEL_BATCH_NOT_STARTED"
+
+
+@pytest.mark.asyncio
 async def test_parallel_cancellation_synthesizes_existing_error() -> None:
     class BlockingTool(_TestTool):
         parallel_safe = True
