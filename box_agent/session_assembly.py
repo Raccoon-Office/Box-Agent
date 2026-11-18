@@ -22,6 +22,7 @@ from .experts import ExpertSessionContext
 from .execution_profile import FAST_OPTIONAL_SKILLS
 from .tools.permissions import CapabilityPolicy
 from .skill_paths import managed_builtin_skills_dir
+from .tools.bash_tool import BashTool
 from .tools.runtime import (
     SkillRuntimeContext, build_skill_runtime_context, build_skill_runtime_prompt,
 )
@@ -414,6 +415,7 @@ async def prepare_prompt(resources: SessionResources) -> None:
     if not options.utility:
         available_tools |= {"tool_search"}
 
+    shell_tool = next((tool for tool in reversed(resources.tools) if tool.name == "bash"), None)
     child_segments: list[str] = []
     resources.system_prompt = build_session_prompt(
         config, template,
@@ -426,6 +428,7 @@ async def prepare_prompt(resources: SessionResources) -> None:
         policy=options.effective_policy,
         env_context=resources.state.get("env_context"),
         skill_runtime_context=resources.state.get("skill_runtime_context"),
+        shell_name=shell_tool.shell_name if isinstance(shell_tool, BashTool) else None,
         expert_context=resources.state.get("expert_context"),
         workspace_layout=options.workspace_layout,
         follow_up_suggestions_enabled=options.follow_up_suggestions_enabled,
@@ -700,6 +703,7 @@ def _compose_session_prompt(
     follow_up_suggestions_enabled: bool,
     host_ui_hints: bool,
     available_tools: frozenset[str] | None = None,
+    shell_name: str | None = None,
     child_prompt_segments: list[str] | None = None,
     skill_sourcing_provided: bool = False,
 ) -> str:
@@ -776,7 +780,7 @@ def _compose_session_prompt(
         env_context=env_context,
     )
     base_prompt = append(
-        build_skill_runtime_prompt(runtime_context),
+        build_skill_runtime_prompt(runtime_context, shell_name=shell_name),
     )
 
     # Action hints steer the user to host settings UI (e.g. officev3 tabs);
@@ -832,6 +836,7 @@ def build_session_prompt(
     memory_block: str | None = None,
     prompt_suffix: str | None = None,
     available_tools: frozenset[str] | None = None,
+    shell_name: str | None = None,
     child_prompt_segments: list[str] | None = None,
 ) -> str:
     """The one system-prompt builder for CLI, ACP and Python SDK sessions."""
@@ -853,6 +858,7 @@ def build_session_prompt(
         follow_up_suggestions_enabled=follow_up_suggestions_enabled,
         host_ui_hints=host_ui_hints,
         available_tools=available_tools,
+        shell_name=shell_name,
         child_prompt_segments=child_prompt_segments,
         skill_sourcing_provided=SKILL_SOURCE_DISCOVERY_PROMPT in (prompt_suffix or ""),
     )

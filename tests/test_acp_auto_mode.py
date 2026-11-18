@@ -149,7 +149,8 @@ def test_code_agent_prompt_includes_software_engineering_contract(tmp_path):
     assert "只知文件名或扩展名时用 `glob`" in code_prompt
     assert "查找符号或内容时用 `grep`" in code_prompt
     assert "不可用时回退到 `search_files`" in code_prompt
-    assert "Bash 执行只读、非递归的目录命令" in code_prompt
+    assert "用 `bash` 工具按当前 shell 的语法运行只读、非递归的目录命令" in code_prompt
+    assert "Get-ChildItem" not in code_prompt
     assert '`glob("*")`' in code_prompt
     assert '`pattern="*"` 代替目录列表' in code_prompt
     assert "代码工作区就是交付位置" in code_prompt

@@ -186,7 +186,8 @@ _MANAGED_RUNTIME_DESCRIPTION_CHANGES = {
     "bash": (
         (
             "Execute bash commands in foreground or background.\n\n",
-            "Execute bash commands in foreground or background.\n\n"
+            "Execute bash commands in foreground or background.\n"
+            "If local_environment reports a new shell, use its syntax and managed Python command.\n\n"
             'Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") '
             "for that capability when available; join any active installation. Do not use or install alternate "
             "runtimes or ask the user to switch environments. On failure, report the returned cause or retry "
@@ -194,9 +195,13 @@ _MANAGED_RUNTIME_DESCRIPTION_CHANGES = {
         ),
         (
             '  - Run the injected Python runtime as "$BOX_AGENT_PYTHON"; do not write "$BOX_AGENT_PYTHON:-python3"\n',
-            '  - If BOX_AGENT_PYTHON points to a working managed interpreter, run it as "$BOX_AGENT_PYTHON"; '
-            "otherwise prepare the managed Python through local_environment when available. "
+            '  - If BOX_AGENT_PYTHON points to a working managed interpreter, run it as "$BOX_AGENT_PYTHON". '
+            "Otherwise prepare the managed Python through local_environment when available. "
             'Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).\n',
+        ),
+        (
+            "(with run_in_background=true; read the dynamic port with bash_output)",
+            "(with run_in_background=true, then read the dynamic port with bash_output)",
         ),
     ),
     "execute_code": (
@@ -608,10 +613,15 @@ def _assert_schema_contract(tools, profile):
                 '  - If cleanup returns CHAT_REFERENCE_PROTECTED, leave those files in place and continue the task. Do not retry via another command/tool or ask for automatic-cleanup approval\n'
                 '  - Prefer the grep tool for searches (no matches is a normal empty result). Shell grep/rg exit 1 means no matches; diff exit 1 means differences. Use separate calls for queries: compound commands and pipelines retain native failure/short-circuit semantics. Do not mask errors with blanket `|| true`\n',
             )
-            entry["schema"]["input_schema"]["properties"]["temporary_files"] = {
+            properties = entry["schema"]["input_schema"]["properties"]
+            properties["temporary_files"] = {
                 "type": "array", "items": {"type": "string"}, "maxItems": 64,
                 "description": "New disposable output files this foreground command will create, relative to the workspace (not inline cd). Parents must exist. Runtime reserves absent paths; existing files cannot be adopted. Write reserved files in place. Later exact rm is approval-free only while unchanged and unpublished.",
             }
+            properties["command"]["description"] = (
+                "Command in the active shell's syntax. "
+                "Quote file paths with spaces using double quotes."
+            )
         if tool.name == "write_file":
             entry["schema"]["input_schema"]["properties"]["temporary"] = {
                 "type": "boolean", "default": False,

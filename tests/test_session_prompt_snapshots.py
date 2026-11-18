@@ -110,8 +110,8 @@ def pinned_environment(monkeypatch):
     monkeypatch.setattr(tools_setup, "date", FixedDate)
     for name in (*_ENDPOINT_ENV, *_API_KEY_ENV):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(runtime_module, "build_skill_runtime_prompt", lambda _ctx: SKILL_RUNTIME_MARKER)
-    monkeypatch.setattr(session_assembly, "build_skill_runtime_prompt", lambda _ctx: SKILL_RUNTIME_MARKER)
+    monkeypatch.setattr(runtime_module, "build_skill_runtime_prompt", lambda _ctx, **_: SKILL_RUNTIME_MARKER)
+    monkeypatch.setattr(session_assembly, "build_skill_runtime_prompt", lambda _ctx, **_: SKILL_RUNTIME_MARKER)
 
 
 async def _assemble(name: str, workspace: Path, *, workspace_layout=None, child: bool = False) -> str:

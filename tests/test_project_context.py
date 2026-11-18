@@ -81,7 +81,9 @@ def test_acp_session_prompt_builder_preserves_overlay_order(monkeypatch, tmp_pat
     monkeypatch.setattr(session_assembly, "_workspace_layout_prompt", lambda **_: "layout")
     monkeypatch.setattr(session_assembly, "build_project_startup_context_prompt", lambda _: "startup")
     monkeypatch.setattr(session_assembly, "build_env_context_prompt", lambda _: "env")
-    monkeypatch.setattr(session_assembly, "build_skill_runtime_prompt", lambda _: "skills")
+    monkeypatch.setattr(
+        session_assembly, "build_skill_runtime_prompt", lambda _, *, shell_name=None: "skills",
+    )
     monkeypatch.setattr(session_assembly, "build_follow_up_suggestions_prompt", lambda: "follow-up")
     monkeypatch.setattr(session_assembly, "_filesystem_access_prompt", lambda *_: "filesystem")
     monkeypatch.setattr(session_assembly, "_build_action_hints_prompt", lambda *_: "hints")
@@ -244,7 +246,9 @@ def test_acp_session_prompt_renders_current_date_per_session(monkeypatch) -> Non
     monkeypatch.setattr(session_assembly, "build_sandbox_info_prompt", lambda *_args: "sandbox")
     monkeypatch.setattr(session_assembly, "build_file_delivery_prompt", lambda *_: "delivery")
     monkeypatch.setattr(session_assembly, "build_env_context_prompt", lambda _: "")
-    monkeypatch.setattr(session_assembly, "build_skill_runtime_prompt", lambda _: "")
+    monkeypatch.setattr(
+        session_assembly, "build_skill_runtime_prompt", lambda _, *, shell_name=None: "",
+    )
     monkeypatch.setattr(session_assembly, "_build_action_hints_prompt", lambda *_: "")
     config = SimpleNamespace(agent=SimpleNamespace(code_prompt_path=None, analysis_prompt_path=None))
     template = "今天日期：`{{.CurrentDate}}`"
@@ -265,6 +269,7 @@ def test_bash_description_does_not_model_unrequested_git_writes() -> None:
         tool.default_timeout_seconds = 120
         tool.max_timeout_seconds = 600
         tool.is_windows = is_windows
+        tool.shell_name = "PowerShell" if is_windows else "bash"
         tool._bundled_win_bash = None
         description = tool.description
 

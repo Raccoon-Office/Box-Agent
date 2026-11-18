@@ -268,6 +268,8 @@ async def test_rejects_oversized_command_before_execution():
 
 @pytest.mark.asyncio
 async def test_windows_existing_tool_refreshes_shell_after_host_install(tmp_path, monkeypatch):
+    from box_agent.tools.engine.contracts import ToolDefinitionView
+
     monkeypatch.setattr(bash_tool_module.platform, "system", lambda: "Windows")
     monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: None)
     binary = tmp_path / "PortableGit" / "usr" / "bin" / "bash.exe"
@@ -280,12 +282,14 @@ async def test_windows_existing_tool_refreshes_shell_after_host_install(tmp_path
     assert spawn.call_args.args[0].lower().endswith(r"\windowspowershell\v1.0\powershell.exe")
     assert bash_tool_module.ntpath.isabs(spawn.call_args.args[0])
     assert tool.shell_name == "PowerShell"
+    offered = ToolDefinitionView.from_tool(tool)
 
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"test fixture; never executed")
     tool.update_runtime_env({"BOX_AGENT_BUNDLED_BASH": str(binary), "PATH": "new-path"})
     assert tool.shell_name == "bash"
-    assert "bash command" in tool.parameters["properties"]["command"]["description"].lower()
+    assert "Execute bash commands" in tool.description
+    assert offered.matches_target(tool)
     await tool._create_subprocess("printf OK")
     assert spawn.call_args.args[:2] == (str(binary), "-c")
     assert str(binary.parent) in spawn.call_args.kwargs["env"]["PATH"]
@@ -1488,7 +1492,7 @@ def test_posix_description_uses_injected_python_and_reserved_scratch_directory(m
     assert '"$BOX_AGENT_PYTHON" -u -m http.server' in description
     assert 'under "$BOX_AGENT_SCRATCH_DIR"' in description
     assert "Use only application-managed Python, Node and Git" in description
-    assert "otherwise prepare the managed Python through local_environment" in description
+    assert "prepare the managed Python through local_environment" in description
     assert "otherwise check for an available Python executable" not in description
     assert '"${BOX_AGENT_PYTHON:-python3}" -u -m http.server' not in description
 
