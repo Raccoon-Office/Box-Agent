@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import sys
+from urllib.parse import quote
 
 import pytest
 import yaml
@@ -573,3 +574,65 @@ def test_ordinary_tool_data_named_like_a_schema_still_redacts_credentials(field)
     expected = {field: {"properties": {"token": "<redacted>"}}}
     assert redact_diagnostic_value(record) == expected
     assert json.loads(redact_diagnostic_text(json.dumps(record))) == expected
+
+
+_AZURE_SAS = "https://acct.blob.core.windows.net/c/f.txt?sv=2022-11-02&se=2026-12-01&sp=r&sig=SYNTHETICSIG%2Bab%3D"
+_GCS_SIGNED = ("https://storage.googleapis.com/b/o?X-Goog-Algorithm=GOOG4-RSA-SHA256"
+               "&X-Goog-Credential=SYNTHETICCRED%2F20261119&X-Goog-Expires=600&X-Goog-Signature=SYNTHETICGOOGSIG")
+_S3_PRESIGNED = ("https://bucket.s3.amazonaws.com/k?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+                 "&X-Amz-Credential=SYNTHETICCRED&X-Amz-Security-Token=SYNTHETICSESSION&X-Amz-Signature=SYNTHETICS3SIG")
+
+
+@pytest.mark.parametrize("url, kept", [
+    (_AZURE_SAS, "sv=2022-11-02&se=2026-12-01&sp=r&sig=<redacted>"),
+    (_GCS_SIGNED, "X-Goog-Expires=600&X-Goog-Signature=<redacted>"),
+    (_S3_PRESIGNED, "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<redacted>"),
+    ("https://cos.example/o?q-sign-algorithm=sha1&q-signature=SYNTHETICCOS", "q-signature=<redacted>"),
+    ("https://oss.example/o?OSSAccessKeyId=id&Signature=SYNTHETICOSS&security-token=SYNTHETICSTS",
+     "Signature=<redacted>&security-token=<redacted>"),
+])
+@pytest.mark.parametrize("encode", [
+    lambda url: url,
+    lambda url: url.replace("&", "&amp;"),
+    lambda url: url.replace("&", "\\u0026"),
+    lambda url: "https://app.invalid/login?next=" + quote(url, safe="") + "&lang=zh",
+])
+def test_signed_url_credentials_are_masked_in_every_encoding(url, kept, encode):
+    output = redact_diagnostic_text("download failed: " + encode(url) + " (status 403)")
+    assert "SYNTHETIC" not in output
+    assert output.startswith("download failed: ") and output.endswith(" (status 403)")
+    assert "<redacted>" in output
+    assert kept in redact_diagnostic_text(url)
+
+
+def test_signed_url_masking_keeps_ordinary_query_parameters():
+    text = "https://docs.invalid/search?q=signature&signature_help=1&credentials_doc=yes#sig=anchor"
+    assert redact_diagnostic_text(text) == text
+    assert redact_diagnostic_text(_AZURE_SAS).startswith(
+        "https://acct.blob.core.windows.net/c/f.txt?sv=2022-11-02&se=2026-12-01&sp=r&sig=<redacted>")
+
+
+def test_trace_masks_signed_urls_in_user_input_tool_results_and_logs(tmp_path):
+    writer = SessionTraceWriter(session_id="signed", acp_session_id="acp", enabled=True, trace_dir=tmp_path)
+    writer.write("llm.request", data={"messages": [{"role": "user", "content": f"Summarize {_AZURE_SAS}"}]})
+    writer.write("tool.response", data={
+        "tool_name": "bash", "success": True, "content": f"Location: {_S3_PRESIGNED}\nsaved",
+        "raw_output": {"stdout": json.dumps({"mediaLink": _GCS_SIGNED})},
+    })
+    text = writer.file_path.read_text()
+    request, result = map(json.loads, text.splitlines())
+    assert "SYNTHETIC" not in text
+    assert request["data"]["messages"][0]["content"].startswith("Summarize https://acct.blob.core.windows.net/")
+    assert result["data"]["content"].endswith("&X-Amz-Signature=<redacted>\nsaved")
+    assert json.loads(result["data"]["raw_output"]["stdout"])["mediaLink"].startswith("https://storage.googleapis.com/b/o?")
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(DiagnosticFormatter("%(levelname)s %(message)s"))
+    logger = logging.getLogger("tests.signed_url")
+    logger.addHandler(handler)
+    try:
+        logger.warning("fetch %s failed", _GCS_SIGNED)
+    finally:
+        logger.removeHandler(handler)
+    assert "SYNTHETIC" not in stream.getvalue() and "X-Goog-Signature=<redacted>" in stream.getvalue()

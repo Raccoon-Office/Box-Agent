@@ -67,6 +67,15 @@ _AUTH_TOKEN = re.compile(
     r"\b(Bearer|Basic)([ \t]+)([a-z0-9._~+/=-]+)", re.IGNORECASE | re.ASCII,
 )
 _URL_USERINFO = re.compile(r"""(://)[^\s/?#@"']+@""")
+# A signed object-storage URL is a bearer credential until it expires. Mask
+# its signature and session-credential query parameters wherever the URL
+# appears: raw, JSON/HTML-escaped, or percent-encoded inside another URL.
+_SIGNED_URL_PARAM = re.compile(
+    r"(?P<prefix>(?:[?&;]|&amp;|\\u0026|%26|%3F))"
+    r"(?P<name>sig|q-signature|(?:x-(?:amz|goog|oss|cos|obs)-)?(?:signature|credential|security-token))"
+    r"(?P<separator>=|%3D)(?:(?!%2[36]|\\u0026)[^\s&#\"'<>\\\])}`,;])+",
+    re.I,
+)
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*(?:"|\Z)')
 _JSON_STRUCTURE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\]]')
 _OPEN_CONTAINER = re.compile(r"[\[{]")
@@ -666,6 +675,10 @@ def _filter_embedded_containers(text: str) -> str:
 
 def redact_diagnostic_text(text: str) -> str:
     """Mask recognized credential values while preserving surrounding diagnostics."""
+    # Query parameters keep their delimiters, so every later parser (JSON,
+    # YAML, argv, plain text) sees the same structure with the value masked.
+    if "=" in text or "%3D" in text or "%3d" in text:
+        text = _SIGNED_URL_PARAM.sub(r"\g<prefix>\g<name>\g<separator><redacted>", text)
     # Inspect serialized arguments one string at a time. Running header regexes
     # on the encoded object could swallow a JSON-escaped newline or delimiter.
     if "[" in text and "-" in text:
