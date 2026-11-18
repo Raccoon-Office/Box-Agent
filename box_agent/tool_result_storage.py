@@ -298,6 +298,7 @@ class ToolResultStorage:
         original_model_content: str,
         event_metadata: dict[str, Any],
         raw_output_preview: dict[str, Any] | None = None,
+        raw_output_notice_in_model: bool = True,
     ) -> ToolResultDelivery:
         """Bound all tool results without changing execution/commit semantics."""
         directory = (
@@ -334,7 +335,8 @@ class ToolResultStorage:
         if raw_output is not None and not _json_fits(raw_output, MAX_RAW_OUTPUT_BYTES):
             raw_output, notice = self._externalize_raw_output(raw_output, directory, label, raw_output_preview)
             content += "\n\n" + notice
-            model_content += "\n\n" + notice
+            if raw_output_notice_in_model:
+                model_content += "\n\n" + notice
             if error is not None:
                 error += "\n\n" + notice
 

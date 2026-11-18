@@ -621,20 +621,31 @@ async def test_core_read_budget_error_explains_combined_context_without_exposing
         await manager.aclose()
 
 
-@pytest.mark.parametrize("exists", [True, False])
-async def test_long_desktop_conversation_compacts_then_reads_and_mutates_core(host, exists):
+@pytest.mark.parametrize(("operation", "compact"), [
+    ("edit", False),
+    ("write", False),
+    ("edit", True),
+    ("write", True),
+    ("create", True),
+])
+async def test_desktop_core_read_qualifies_mutation_after_result_delivery(host, operation, compact):
     from box_agent.events import ErrorEvent, SummarizationEvent, ToolCallResult
     from box_agent.runtime import run_agent_loop
 
     manager = backend(host)
+    exists = operation != "create"
+    read_attempts = 2 if compact else 1
     if not exists:
         host.files.pop("memory.md")
     else:
-        host.files["memory.md"] = '<mem time="2026-11-17 08:00:00" priority="0">KEEP</mem>'
+        priority = 0 if operation == "edit" else 1
+        original_content = f'<mem time="2026-11-17 08:00:00" priority="{priority}">' + "记忆" * 15_000 + "</mem>"
+        host.files["memory.md"] = original_content
 
     class Provider:
         summary_calls = 0
         normal_calls = 0
+        read_reply = ""
 
         def estimate_text_tokens(self, text):
             return len(text.encode("utf-8")) // 2
@@ -646,19 +657,20 @@ async def test_long_desktop_conversation_compacts_then_reads_and_mutates_core(ho
                 yield StreamEvent(type="finish", finish_reason="stop")
                 return
             self.normal_calls += 1
-            assert self.summary_calls == (0 if self.normal_calls == 1 else 1)
-            if self.normal_calls <= 2:
+            assert self.summary_calls == int(compact and self.normal_calls > 1)
+            if self.normal_calls <= read_attempts:
                 if self.normal_calls == 2:
                     failed = next(message for message in messages if message.role == "tool" and message.name == "memory_read")
                     assert "CORE_CONTEXT_TOO_LARGE" in failed.content
                     assert not host.active
                 name, arguments = "memory_read", {"path": "memory.md"}
-            elif self.normal_calls == 3:
+            elif self.normal_calls == read_attempts + 1:
                 reply = next(message for message in reversed(messages) if message.role == "tool" and message.name == "memory_read")
-                data = json.loads(reply.content)
+                self.read_reply = reply.content
+                data, _ = json.JSONDecoder().raw_decode(self.read_reply)
                 assert data["exists"] is exists
                 assert data["content"] == host.files.get("memory.md", "")
-                if exists:
+                if operation == "edit":
                     name, arguments = "memory_edit", {"path": "memory.md", "old_text": "", "new_text": "<mem>NEW</mem>"}
                 else:
                     name, arguments = "memory_write", {"path": "memory.md", "content": "<mem>NEW</mem>"}
@@ -672,23 +684,37 @@ async def test_long_desktop_conversation_compacts_then_reads_and_mutates_core(ho
     try:
         await start_turn(manager, limit=810000)
         provider = Provider()
-        history = [Message(role="system", content="BASE"), Message(role="user", content="old request"),
-                   Message(role="assistant", content="x" * 1200000),
-                   Message(role="user", content="remember NEW")]
+        history = [Message(role="system", content="BASE")]
+        if compact:
+            history.extend([Message(role="user", content="old request"),
+                            Message(role="assistant", content="x" * 1_200_000)])
+        history.append(Message(role="user", content="remember NEW"))
         events = [event async for event in run_agent_loop(
             llm=provider, messages=history, tools={tool.name: tool for tool in create_memory_tools(manager)},
             memory_manager=manager, max_steps=4, token_limit=810000, logger=None)]
-        assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
+        assert len([event for event in events if isinstance(event, SummarizationEvent)]) == int(compact)
         assert not [event.message for event in events if isinstance(event, ErrorEvent)]
         failures = [event for event in events if isinstance(event, ToolCallResult) and not event.success]
-        assert len(failures) == 1 and failures[0].tool_name == "memory_read"
-        assert "CORE_CONTEXT_TOO_LARGE" in failures[0].error
-        assert provider.normal_calls == 4
-        assert "NEW" in host.files["memory.md"]
+        assert len(failures) == int(compact)
+        if compact:
+            assert failures[0].tool_name == "memory_read"
+            assert "CORE_CONTEXT_TOO_LARGE" in failures[0].error
+        assert provider.normal_calls == read_attempts + 2
+        assert host.files["memory.md"].endswith(">NEW</mem>")
+        if operation == "edit":
+            assert host.files["memory.md"].startswith(original_content + "\n")
+        else:
+            assert host.files["memory.md"].count("<mem ") == 1
+
         if exists:
-            assert '<mem time="2026-11-17 08:00:00" priority="0">KEEP</mem>' in host.files["memory.md"]
+            read_event = next(event for event in events if isinstance(event, ToolCallResult)
+                              and event.tool_name == "memory_read" and event.success)
+            assert "Structured output externalized." in read_event.content
+            saved = Path(read_event.raw_output["_persisted_output"]["path"]).read_text(encoding="utf-8")
+            assert provider.read_reply == model_json(json.loads(saved))
+
         operations = [operation for operation, _ in host.calls]
-        assert operations.count("core/read") == 2 and operations.count("core/mutate") == 1
+        assert operations.count("core/read") == read_attempts and operations.count("core/mutate") == 1
         assert operations.index("visibility/commit") < operations.index("core/mutate")
     finally:
         await manager.aclose()

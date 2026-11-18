@@ -63,8 +63,13 @@ class DesktopMemoryTool(Tool):
                       "managed_read": self._backend.managed_read, "experience_search": self._backend.experience_search}[self.operation]
             data = await method(**arguments)
             content = model_json(data)
-            return ToolResult(success=True, content=content, model_context=content,
-                              raw_output=data if isinstance(data, dict) else {"results": data})
+            return ToolResult(
+                success=True,
+                content=content,
+                model_context=content,
+                raw_output=data if isinstance(data, dict) else {"results": data},
+                raw_output_notice_in_model=self.operation != "read",
+            )
         except MemoryProxyError as exc:
             if exc.code == "CORE_CONTEXT_TOO_LARGE":
                 return ToolResult(success=False, error=(
