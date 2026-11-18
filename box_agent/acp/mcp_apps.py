@@ -115,8 +115,28 @@ class McpAppsACP:
         return session_id, state
 
     @staticmethod
-    def _allowed_connectors(state: Any) -> frozenset[str]:
-        return frozenset(getattr(state, "selected_connector_ids", set()))
+    def _allowed_connectors(state: Any, params: dict[str, Any]) -> frozenset[str]:
+        if "connectorContext" not in params:
+            return frozenset(getattr(state, "selected_connector_ids", set()))
+        # Only the native host supplies this request-local snapshot. It is not
+        # model/session state and never changes the App binding or other requests.
+        from . import (
+            _connector_ids_from_meta, _connector_statuses_from_meta,
+            _connector_status_unavailable_from_meta,
+        )
+        context = params["connectorContext"]
+        if not isinstance(context, dict):
+            raise _error("MCP_APP_INVALID_REQUEST")
+        try:
+            selected = _connector_ids_from_meta(context)
+            statuses = _connector_statuses_from_meta(context)
+            unavailable = _connector_status_unavailable_from_meta(context)
+        except ValueError as exc:
+            raise _error("MCP_APP_INVALID_REQUEST") from exc
+        if selected is None or len(selected) > 100:
+            raise _error("MCP_APP_INVALID_REQUEST")
+        return frozenset(connector_id for connector_id, _, status in statuses or ()
+                         if not unavailable and status == "connected" and connector_id in selected)
 
     def _resolve(self, params: dict[str, Any], *, bound: bool):
         from box_agent.tools.mcp_loader import resolve_mcp_app_tool
@@ -128,7 +148,7 @@ class McpAppsACP:
         tool = resolve_mcp_app_tool(
             snapshot["serverName"], snapshot["tool"]["name"],
             server_identity=snapshot["serverIdentity"],
-            allowed_connector_ids=lambda: self._allowed_connectors(state), actor="model",
+            allowed_connector_ids=lambda: self._allowed_connectors(state, params), actor="model",
         )
         if not tool.mcp_ui_resource_uri:
             raise _error("MCP_APP_RESOURCE_UNAVAILABLE")
@@ -173,7 +193,7 @@ class McpAppsACP:
                 async def read(resource_uri: str):
                     return await read_mcp_app_resource(
                         snapshot["serverName"], resource_uri, server_identity=tool.mcp_server_identity,
-                        generation=tool.mcp_generation, allowed_connector_ids=lambda: self._allowed_connectors(state),
+                        generation=tool.mcp_generation, allowed_connector_ids=lambda: self._allowed_connectors(state, params),
                         require_ui=initial_ui,
                         # Only the original, persisted call authorizes a historical entry point.
                         ui_tool_name=snapshot["tool"]["name"] if initial_ui else None,
@@ -231,7 +251,7 @@ class McpAppsACP:
         resolve_mcp_app_tool(
             snapshot["serverName"], name, server_identity=original_tool.mcp_server_identity,
             generation=original_tool.mcp_generation,
-            allowed_connector_ids=lambda: self._allowed_connectors(state), actor="app",
+            allowed_connector_ids=lambda: self._allowed_connectors(state, params), actor="app",
         )
         signature = sha256(json.dumps([snapshot["toolCallId"], name, arguments],
                                      sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -249,7 +269,8 @@ class McpAppsACP:
                 return deepcopy(previous["result"])
             raise _error(previous.get("error", "MCP_APP_OUTCOME_UNKNOWN"))
         task = asyncio.create_task(self._execute(session_id, state, snapshot, original_tool,
-                                               interaction_id, signature, name, arguments),
+                                               interaction_id, signature, name, arguments,
+                                               lambda: self._allowed_connectors(state, params)),
                                    name="mcp-app-interaction")
         self._interactions[key] = signature, task
         def retire(completed):
@@ -280,7 +301,7 @@ class McpAppsACP:
             reset_browser_session_key(browser_token)
             reset_model_tool_context(model_token)
 
-    async def _execute(self, session_id, state, snapshot, original_tool, interaction_id, signature, name, arguments):
+    async def _execute(self, session_id, state, snapshot, original_tool, interaction_id, signature, name, arguments, allowed_connectors):
         from box_agent.tools.mcp_loader import call_mcp_app_tool
         record = {"version": VERSION, "toolCallId": snapshot["toolCallId"],
                   "interactionId": interaction_id, "signature": signature, "name": name, "arguments": arguments}
@@ -297,7 +318,7 @@ class McpAppsACP:
                 result = await call_mcp_app_tool(
                     snapshot["serverName"], name, arguments,
                     server_identity=original_tool.mcp_server_identity, generation=original_tool.mcp_generation,
-                    allowed_connector_ids=lambda: self._allowed_connectors(state), invocation_context=context,
+                    allowed_connector_ids=allowed_connectors, invocation_context=context,
                     is_cancelled=lambda: (self.sessions.get(session_id) is not state
                         or getattr(state, "_closed", False)
                         or getattr(state, "_mcp_apps_closing", False)

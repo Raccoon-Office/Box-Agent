@@ -37,12 +37,25 @@ Box-Agent 连接 MCP Server 时仍声明标准 `io.modelcontextprotocol/ui` exte
 `description`、`_meta` 等字段；`arguments` 是对象，`result` 是完整 MCP 工具结果。
 `name` 使用该 MCP Server 的原始工具名，不能填宿主内置工具名或其他服务的路由名。
 
+### 请求级连接器状态
+
+`snapshot`、`resource`、`call` 可携带 `connectorContext`，字段复用宿主元数据：
+`selected_connector_ids`、`connector_statuses`（`id`、`name`、`status`）及
+`connector_status_unavailable`。Lab 每次请求只从前端接收选择 ID，连接状态由主进程
+连接器服务重新读取，第三方 iframe 不能声明授权状态。
+
+提供此字段时，仅本次请求中已选且原生状态为 `connected` 的 connector 可用；状态缺失、
+不可用或未连接时不回退到会话旧授权，格式错误直接拒绝。省略字段的旧宿主仍使用原会话选择。
+实际 MCP 连接、服务身份、工具可见性和 binding 校验继续执行。该上下文不写回
+`selected_connector_ids` / 模型状态，不触发 `session/resume`，不改变会话 nonce、思考配置
+或已有卡片绑定；正常会话恢复仍只在 Agent 会话不存在时执行。客户端与 Box-Agent 需配套升级。
+
 ### 页面升级后的历史恢复
 
 `snapshot.resourceUri` 始终是原调用保存的地址，`tool`、`arguments`、`result` 也保持原样。
 打开时优先读取该历史 URI，不要求它仍出现在当前工具声明或资源列表中。
 授权来自有效 Session Log 中的原调用，并要求同服务身份、原工具仍可用且具有 UI、
-当前会话 connector 权限及连接 binding 有效；不恢复旧服务进程或跨服务请求页面。
+当前请求 connector 权限及连接 binding 有效；不恢复旧服务进程或跨服务请求页面。
 
 只有 `resources/read` 明确返回资源不存在，才从同一工具的当前 descriptor 取得新 URI，
 重新检查 binding/历史后最多读取一次。兼容旧代码 `-32002`；`-32602` 必须包含明确的
@@ -72,7 +85,7 @@ connector ID；按原版 JSON 序列化规则计算 SHA-256。配置归属、配
 ## 执行与授权边界
 
 - 沿用 Box-Agent 已有 MCP 连接及认证，不由 renderer 新建连接或获取凭据。
-- App 调用限定原服务、当前连接代次及当前会话选中的 connector。
+- App 调用限定原服务、当前连接代次及当前请求获准的 connector（未提供请求级状态时使用会话选择）。
   `visibility` 必须包含 `app`；仅含 `app` 的工具不进入模型发现/调用目录。
 - 调用继续经过参数 schema 和现有 invocation guards；`readOnlyHint` 不是授权依据。
   打开组件不会授予跨服务、跨会话或内置工具执行权限。

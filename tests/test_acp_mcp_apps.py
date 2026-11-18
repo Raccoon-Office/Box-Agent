@@ -670,3 +670,73 @@ async def test_repeated_session_reload_never_revives_old_app_bindings(tmp_path, 
             arguments={'previous': 1}))
         assert result['structuredContent']['revision'] == 2
         assert [item['name'] for item in calls(record)] == ['list_flights', 'refresh_flights']
+
+
+@pytest.mark.asyncio
+async def test_request_connector_context_preserves_session_and_existing_card_binding(tmp_path, monkeypatch):
+    async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
+        original = await host.ext_method('mcp/apps/snapshot', request(session_id))
+        state = host._sessions[session_id]
+        nonce = state._mcp_apps_nonce
+        controls = (state.thinking_enabled, state.execution_profile)
+        messages = deepcopy(state.agent.messages)
+        monkeypatch.setattr(backend, 'connector_id', 'travel')
+        context = {'selected_connector_ids': ['travel'], 'connector_statuses': [
+            {'id': 'travel', 'name': 'Travel', 'status': 'connected'}]}
+        # App restoration must also work while the original model turn is active.
+        state._prompt_in_progress = True
+        try:
+            first = await host.ext_method('mcp/apps/snapshot', request(session_id, connectorContext=context))
+            second_context = {**context, 'selected_connector_ids': ['travel', 'other']}
+            second = await host.ext_method('mcp/apps/snapshot', request(session_id, connectorContext=second_context))
+            assert first == second == original
+            resource = await host.ext_method('mcp/apps/resource', request(session_id,
+                connectorContext=second_context, bindingId=original['bindingId'], uri=original['resourceUri']))
+            assert resource['contents'][0]['uri'] == original['resourceUri']
+            result = await host.ext_method('mcp/apps/call', request(session_id,
+                connectorContext=context, bindingId=original['bindingId'], interactionId='context-refresh',
+                name='refresh_flights', arguments={'previous': 1}))
+            assert result['structuredContent']['revision'] == 2
+        finally:
+            state._prompt_in_progress = False
+        assert host._sessions[session_id] is state
+        assert state._mcp_apps_nonce == nonce
+        assert (state.thinking_enabled, state.execution_profile) == controls
+        assert state.selected_connector_ids == set()
+        assert state.connector_statuses is None
+        assert state.agent.messages == messages
+        assert len(llm.requests) == 2
+        # A successful App request never grants the model or subsequent requests access.
+        with pytest.raises(RequestError, match='APP_CONNECTOR_DISABLED'):
+            await host.ext_method('mcp/apps/snapshot', request(session_id))
+        state.selected_connector_ids.add('travel')
+        for denied in [
+            {**context, 'selected_connector_ids': []},
+            {**context, 'connector_statuses': [{'id': 'travel', 'name': 'Travel', 'status': 'disconnected'}]},
+            {**context, 'connector_status_unavailable': True},
+            {'selected_connector_ids': ['travel']},
+        ]:
+            for method, fields in [
+                ('snapshot', {}),
+                ('resource', {'bindingId': original['bindingId'], 'uri': original['resourceUri']}),
+                ('call', {'bindingId': original['bindingId'], 'interactionId': 'denied',
+                          'name': 'refresh_flights', 'arguments': {'previous': 1}}),
+            ]:
+                with pytest.raises(RequestError, match='APP_CONNECTOR_DISABLED'):
+                    await host.ext_method('mcp/apps/' + method, request(session_id, connectorContext=denied, **fields))
+        assert [item['name'] for item in calls(record)] == ['list_flights', 'refresh_flights']
+        # Existing hosts without the new field retain session authorization.
+        assert await host.ext_method('mcp/apps/snapshot', request(session_id)) == original
+
+
+@pytest.mark.asyncio
+async def test_malformed_app_connector_context_never_falls_back_to_session_grants(tmp_path, monkeypatch):
+    async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
+        monkeypatch.setattr(backend, 'connector_id', 'travel')
+        host._sessions[session_id].selected_connector_ids.add('travel')
+        for context in [None, [], {}, {'selected_connector_ids': 'travel'},
+                        {'selected_connector_ids': ['travel'], 'connector_statuses': 'connected'},
+                        {'selected_connector_ids': ['travel'], 'connector_status_unavailable': 'false'}]:
+            with pytest.raises(RequestError, match='MCP_APP_INVALID_REQUEST'):
+                await host.ext_method('mcp/apps/snapshot', request(session_id, connectorContext=context))
+        assert len(calls(record)) == 1
