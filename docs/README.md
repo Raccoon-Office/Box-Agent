@@ -30,6 +30,7 @@ contracts.
 | Workflow ownership and third-party Skill recovery | [Workflow Ownership](WORKFLOW_OWNERSHIP.md) | Same document |
 | Flat sub-agent request and derived policy | [Sub-agent Delegation](SUB_AGENT_DELEGATION.md) | [子 Agent 委派](SUB_AGENT_DELEGATION_CN.md) |
 | Agent session and scoped plugin lifecycle | [Agent Session](AGENT_SESSION.md) | Same document |
+| Session shell selection and managed Python guidance (`session_assembly.py`, `tools/bash_tool.py`, `tools/runtime.py`, ACP environment refresh) | [Shell and managed runtime guidance](AGENT_SESSION.md#shell-and-managed-runtime-guidance) | Same document |
 | Persistent memory integration | [Memory Integration](MEMORY_INTEGRATION.md) | Same document |
 | Hosted login recovery | [Hosted login recovery](hosted-auth-recovery.md) | Same document |
 | Hosted web image search | [Web Image Search](WEB_SEARCH_IMAGE_SEARCH.md) | [联网文搜图](WEB_SEARCH_IMAGE_SEARCH_CN.md) |
