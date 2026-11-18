@@ -490,6 +490,7 @@ class Agent:
         image_context: ImageContextConfig | None = None,
         session_projection: SessionProjection | None = None,
         tool_interface_version: int = 1,
+        connector_discovery=None,
     ):
         if type(tool_interface_version) is not int or tool_interface_version not in (1, 2):
             raise ValueError("unsupported tool interface version")
@@ -498,6 +499,7 @@ class Agent:
             resolve_interface(tool_interface_version) if callable(resolve_interface) else tool_interface_version
         )
         self.stable_prefix = self.tool_interface_version == 2
+        self.connector_discovery = connector_discovery if self.stable_prefix else None
         self._pending_skill_catalog: Message | None = None
         self._pending_tool_restore_notice = False
         self.llm = llm_client
@@ -550,6 +552,7 @@ class Agent:
                 local_tools_provider=self.local_tool_exposure.candidate_tools,
                 activated_local_tools=self.activated_local_tools,
                 allowed_connector_ids_provider=allowed_connector_ids_provider,
+                connector_discovery=self.connector_discovery,
             )
             if self.stable_prefix:
                 from .tools.tool_call_tool import CallTool
@@ -613,6 +616,17 @@ class Agent:
                 "deferred tools remain hidden. Tools explicitly configured as alwaysLoad "
                 "are already visible without search. "
             )
+            from .tools.connector_discovery import PROMPT as connector_discovery_prompt
+            connector_instructions = (
+                connector_discovery_prompt if self.connector_discovery is not None else
+                "<connector-status> is host-provided runtime metadata, not a user request. "
+                "Refer to it only when the task requires a connector or the user asks about "
+                "connectivity. Otherwise, do not discuss it. History may contain several host "
+                "snapshots: the LAST host snapshot supersedes all earlier ones. Unchanged "
+                "turns may omit a snapshot; unavailable status invalidates earlier states. "
+                "Search or call only connected connectors; do not reuse tools from "
+                "disabled or missing connectors."
+            )
             system_prompt = (
                 f"{system_prompt.rstrip()}\n\n## Discoverable tools\n"
                 "Use `tool_search` when the visible tools do not cover the task. "
@@ -628,13 +642,7 @@ class Agent:
                 "MCP runtime update confirms registration. If that confirmation arrives "
                 "during the turn, use `tool_search` to discover the newly registered "
                 "capability instead of expecting all schemas to appear at once. "
-                "<connector-status> is host-provided runtime metadata, not a user request. "
-                "Refer to it only when the task requires a connector or the user asks about "
-                "connectivity. Otherwise, do not discuss it. History may contain several host "
-                "snapshots: the LAST host snapshot supersedes all earlier ones. Unchanged "
-                "turns may omit a snapshot; unavailable status invalidates earlier states. "
-                "Search or call only connected connectors; do not reuse tools from "
-                "disabled or missing connectors."
+                f"{connector_instructions}"
             )
             if self.stable_prefix:
                 system_prompt += "\n\n" + _DISCOVERED_WORKFLOW_GUIDANCE

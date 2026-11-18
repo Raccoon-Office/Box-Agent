@@ -21,6 +21,7 @@ SDK 0.12.1 与配套 Lab 的接口、生命周期约束和回归矩阵见
 | **Memory Match**      | 后端 → 前端 | `update_tool_call.rawOutput`          | [MEMORY_MATCH_PROTOCOL.md](./MEMORY_MATCH_PROTOCOL.md)           | 宿主展示本轮 `memory_search` 或后端自动匹配到的上下文记忆                         |
 | **Memory Proposal**   | 双向        | `session/memory_proposal` + extension methods | [MEMORY_PROPOSAL_PROTOCOL.md](./MEMORY_PROPOSAL_PROTOCOL.md) | 记忆晋升提案的 push、list、apply 流程 |
 | **Env Context**       | 前端 → 后端 | `session/new._meta.env_context`       | [ENV_CONTEXT_PROTOCOL.md](./ENV_CONTEXT_PROTOCOL.md)             | 宿主把 CLI 路径 / 平台 / 浏览器工具状态等已知事实喂给模型，避免它否认已可用的工具 |
+| **Connector Discovery** | 双向 | `session/new/prompt._meta` + `update_tool_call.rawOutput` | [按需发现连接器](#按需发现连接器与恢复入口) | 未连接能力发现、结构化设置请求及逐轮权限核验 |
 | **Filesystem Policy** | 前端 → 后端 | `session/new._meta.filesystem_policy` | [FILESYSTEM_POLICY_PROTOCOL.md](./FILESYSTEM_POLICY_PROTOCOL.md) | 宿主声明 session 工作区根 + 额外允许目录，避免反复触发 `permission/request` 协商  |
 | **Permission Mode**   | 前端 → 后端 | `session/new._meta.permission_mode`   | [FILESYSTEM_POLICY_PROTOCOL.md](./FILESYSTEM_POLICY_PROTOCOL.md) | `default` 显式受限；`full_access` 仅在服务端 `tools.allow_full_access` 已启用时生效 |
 | **Artifact**          | 后端 → 前端 | `update_tool_call.rawOutput`          | [ARTIFACT_PROTOCOL.md](./ARTIFACT_PROTOCOL.md)                   | 宿主收集、解析并渲染 Agent 生成的文件产物                                          |
@@ -33,6 +34,114 @@ SDK 0.12.1 与配套 Lab 的接口、生命周期约束和回归矩阵见
 ---
 
 ## 典型对接场景
+
+### 视频插件配套技能与安装恢复
+
+支持此链路的 runtime manifest 声明 `plugin_skills_env_version: 1`。宿主通过进程环境
+`BOX_AGENT_PLUGIN_SKILLS_DIR` 指定当前 `BOX_AGENT_HOME/plugins/skills`；未传时 CLI 和旧宿主保持原有来源。
+这个目录是插件配套资源，不属于后台内置技能目录，也不属于普通用户技能。
+
+宿主显式安装视频插件时，从应用分发的 Agent 资源复制 `hyperframes-video/SKILL.md`，
+同时校验运行组件、模板、浏览器和技能。完整就绪后才设置 `BOX_AGENT_VIDEO_RUNTIME_READY=1`；
+安装前的 `env_context.hyperframes.setup_supported=true` 允许模型请求安装引导。
+未就绪时 `get_skill` 返回 `runtime_component_required` v1，组件为 `video-generation`，
+代码为 `VIDEO_GENERATION_SETUP_REQUIRED`。模型解释后结束回合，宿主等待用户点击安装。
+宿主刷新进程环境并在同一产品会话发送一次短继续消息；保留历史、产物及当前连接器选择，
+不重放原请求或附件。`video` 仍仅表示 `read_video` 所需的 ffmpeg/ffprobe。
+
+### 按需发现连接器与恢复入口
+
+这是可选的版本 1 扩展，只在新建的工具接口 v2 会话中协商启用：
+
+1. `initialize` 返回 `_meta.connector_discovery = {"versions": [1]}`。
+2. 宿主在 `session/new._meta.host_capabilities.connector_discovery` 传整数 `1`，
+   并在 `_meta.connector_discovery` 提供下述快照。
+3. 启用后的会话返回 `_meta.capabilities.connector_discovery_versions = [1]`。
+   宿主以此回执决定后续 `session/prompt` 是否发送新快照。
+
+会话模式以可忽略的 `connectors/discovery-contract` 事件保存在 Session Log；
+完整连接器清单只保存在运行时。已有会话、工具接口 v1、旧宿主和 utility 会话
+保持 legacy 行为，不因后续提供元数据自动升级。新模式会话恢复时需要宿主重新提供
+能力声明和快照；旧宿主重绑时使用 legacy 行为，保留已存的模式供受支持宿主恢复。
+`session/new` 可同时传新快照与旧 `connector_statuses`，以支持工具接口 v1 回退。
+新模式不会把旧完整状态清单注入模型。
+
+```json
+{
+  "selected_connector_ids": [],
+  "connector_discovery": {
+    "schema_version": 1,
+    "catalog_revision": "manifest-content-revision",
+    "state_revision": 1,
+    "available": true,
+    "entries": [{
+      "id": "tmeet",
+      "name": "腾讯会议",
+      "description": "管理会议、录制和纪要。",
+      "kind": "cli",
+      "auth_mode": "oauth",
+      "skills": ["tmeet"],
+      "keywords": ["meeting", "minutes", "会議"],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    }]
+  }
+}
+```
+
+宿主 manifest 是能力简介和可选关键词的单一来源。快照最多 256 项；ID 匹配
+`^[a-z0-9][a-z0-9_-]{0,63}$` 且不可重复；name 最多 128 字符，description
+1024，auth_mode 32，catalog_revision 128，reason_code 64。
+skills 最多 16 项、每项 128 字符；keywords 最多 16 项、每项 64 字符。
+所有长度按 Unicode 字符计，禁止控制换行；未知字段（包括凭据、地址和 schema）拒绝。
+state_revision 是非负 JavaScript 安全整数，同一绑定内不可回退，同 revision 内容不可变化；
+选择变化只通过 `selected_connector_ids` 表达。快照每轮更新，缺失时使已知能力变为
+不可执行；无效或倒退快照使本轮失败并撤销 ready 状态。`available: false` 表示宿主
+状态读取不可用，不把所有项目误报为断开连接。
+
+原生 status 保留 `disconnected`、`configuring`、`authorizing`、`connecting`、
+`connected`、`unauthorized`、`error`、`cancelling`、`disconnecting` 和 `unknown`。
+建议的 reason_code 包括 `STATUS_UNAVAILABLE`、`SKILL_UNAVAILABLE`、`AUTH_REQUIRED`、
+`CONNECTION_FAILED`、`EXECUTION_UNAVAILABLE`、`UNSUPPORTED_*`，不放底层错误或凭据。
+模型只在 `tool_search(query/queries)` 时看到最多 3 个相关候选，候选用途最多
+160 字符；候选、状态、action、CLI 方法名与附加 notice 的实际 JSON 文本总计最多
+2400 字符（包括转义）。完整清单不进入模型消息或工具定义，固定引导不超过 600 字符。
+已在当前请求可见的候选简介不重复发送；压缩、移除后可再次完整发现，状态仍逐次返回。
+
+普通查询的 `connector_candidates` 仅说明能力，不激活工具，也不发起设置。
+只有 `tool_search(connector="精确 ID 或唯一名称")` 单独指定连接器且该项未就绪时，
+返回成功的发现结果和下述 `rawOutput`：
+
+```json
+{
+  "type": "connector_action_required",
+  "version": 1,
+  "connector_id": "tmeet",
+  "action": "connect",
+  "state_revision": 1
+}
+```
+
+action 为 `connect`（未配置）、`enable`（已配置但禁用）、`reauthorize`（授权失效）、
+`retry`（配置后故障或执行能力缺失）、`select`（已就绪但当前会话未选）、`wait`
+（正在配置/授权/连接/取消/断开），或 `recheck`（状态未知/不可读/平台不支持）。
+未知和进行中状态优先于配置标志，授权失效优先于禁用。
+server_name、tool_names、混合查询和不唯一的名称不会生成设置回执；现有 MCP 工具
+的 count、top_k、精确 scope、schema 与 tool_ref 语义保持不变。
+
+发现不授予权限。`selected_connector_ids` 是选择状态的唯一来源；执行还要求当前
+快照 configured/enabled/connected/execution_ready，并保留实际 MCP runtime 与工具
+门禁检查。CLI 的 execution_ready 必须由宿主核验驱动/文件/owner/技能启用，
+Agent 只允许加载真实 Skill loader 中属于该已选连接器且与快照 skills 名称一致的
+启用方法；不会伪造 MCP schema 或仅凭已加载的历史技能恢复授权。
+自定义 MCP 和 computer use 沿用原有独立发现、开关和权限流程。
+
+设置、授权、取消和 UI 由宿主负责，Agent 没有静默连接/安装接口。用户完成设置后，
+宿主确认执行能力、更新选择及快照，等待当前轮结束，再向同一会话发送普通续做输入，
+使用稳定的 `turn_id` 保持原有幂等边界。不要重发原始业务请求、把运行时热更新当作
+会话选择，或只凭旧回执重试写入操作。Agent 会重新搜索并在真实调用时再次检查权限。
 
 ### 运行时限前收尾
 

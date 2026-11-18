@@ -107,6 +107,7 @@ def build_agent(
     allowed_connector_ids_provider: Callable[[], frozenset[str]] | None = None,
     deferred_mcp_loading_enabled: bool = True,
     tool_interface_version: int | object = _UNSET,
+    connector_discovery=None,
     session_log: Any = _UNSET,
     session_projection: Any = _UNSET,
     enable_builtin_tools: bool | object = _UNSET,
@@ -149,6 +150,8 @@ def build_agent(
         kwargs["image_context"] = image_context
     if tool_interface_version is not _UNSET:
         kwargs["tool_interface_version"] = tool_interface_version
+    if connector_discovery is not None:
+        kwargs["connector_discovery"] = connector_discovery
     if plugins is not _UNSET:
         kwargs["plugins"] = plugins
     if hooks is not _UNSET:

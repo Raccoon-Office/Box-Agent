@@ -70,12 +70,14 @@ class ToolSearchTool(Tool):
         readiness_timeout: float = 15.0,
         local_tools_provider: Callable[[], Iterable[Tool]] | None = None,
         activated_local_tools: OrderedDict[str, Tool] | None = None,
+        connector_discovery=None,
     ) -> None:
         self._stable_manager = None
         self._catalog = catalog
         self._activated = activated
         self._protected_names_provider = protected_names_provider
         self._allowed_connector_ids_provider = allowed_connector_ids_provider
+        self._connector_discovery = connector_discovery
         self._readiness_timeout = readiness_timeout
         self._local_tools_provider = local_tools_provider
         self._activated_local = (
@@ -229,6 +231,10 @@ class ToolSearchTool(Tool):
                 "connector": {
                     "type": "string",
                     "description": (
+                        "Connector ID from connector_candidates, or unique display-name text. "
+                        "On its own, activates ready authorized MCP tools or returns a host setup request. "
+                        "With query, server_name, or tool_names, narrows discovery without requesting setup."
+                        if self._connector_discovery is not None else
                         "Connector ID or unique display-name text from "
                         "<connector-status>, such as pkulaw or 北大法宝. On its "
                         "own, activates all tools owned by that enabled connector; "
@@ -338,9 +344,9 @@ class ToolSearchTool(Tool):
         mcp_ready = (
             not self._catalog.loading
             if (
-                self._local_tools_provider is not None
-                and normalized_server_name is None
-                and normalized_connector is None
+                (self._local_tools_provider is not None
+                 and normalized_server_name is None and normalized_connector is None)
+                or (self._connector_discovery is not None and connector_direct)
             )
             else await self._catalog.wait_until_ready(self._readiness_timeout)
         )
@@ -546,7 +552,17 @@ class ToolSearchTool(Tool):
                     if isinstance(item, dict) else item[:256] if isinstance(item, str) else item
                     for item in values[:12]
                 ]
-        if not mcp_ready:
+        connector_receipt = None
+        if (self._connector_discovery is not None and normalized_server_name is None
+                and not normalized_tool_names):
+            connector_receipt = self._connector_discovery.augment(
+                payload, queries=normalized_queries, connector=normalized_connector,
+                exact_request=connector_direct,
+                live_mcp_ids=(self._allowed_connector_ids_provider()
+                              if self._allowed_connector_ids_provider is not None else frozenset()),
+            )
+        has_candidates = bool(payload.get("connector_candidates"))
+        if not mcp_ready and not has_candidates:
             payload.update(
                 success=bool(activated_results),
                 state="partial_catalog_loading" if activated_results else "catalog_loading",
@@ -563,7 +579,7 @@ class ToolSearchTool(Tool):
                 )
         self._add_connector_catalogs(payload, protected_names)
         conflict_error = None
-        if conflicts and not activated_results:
+        if conflicts and not activated_results and not has_candidates:
             conflict_error = (
                 "MCP tool name conflict; adjust MCP configuration before activation."
             )
@@ -571,6 +587,7 @@ class ToolSearchTool(Tool):
             success=conflict_error is None,
             content=json.dumps(payload, ensure_ascii=False),
             error=conflict_error,
+            raw_output=connector_receipt,
         )
 
 
@@ -672,6 +689,8 @@ class MCPToolExposureManager:
         """Bind descriptors to a tool-search call committed by the engine."""
         if not call_id:
             return
+        if self._search_tool is not None and self._search_tool._connector_discovery is not None:
+            self._search_tool._connector_discovery.record_result(call_id, content)
         matches = self._matching_search_descriptors(content)
         if matches:
             self._search_result_calls[call_id] = matches
@@ -708,6 +727,9 @@ class MCPToolExposureManager:
         Only call IDs recorded when an actual search result was committed qualify.
         Already-prepared request snapshots are immutable and gain no new refs.
         """
+        messages = tuple(messages)
+        if self._search_tool is not None and self._search_tool._connector_discovery is not None:
+            self._search_tool._connector_discovery.acknowledge(messages)
         visible_catalogs: set[str] = set()
         for message in messages:
             if (getattr(message, "role", None) != "tool"

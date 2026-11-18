@@ -1187,20 +1187,30 @@ def _connected_connector_ids(selected_connector_ids: set[str]) -> frozenset[str]
     )
 
 
-def _connector_skill_is_available(skill: Any, selected_connector_ids: set[str]) -> bool:
+def _connector_skill_is_available(skill: Any, selected_connector_ids: set[str], discovery=None) -> bool:
     """Gate new connector-Skill recognition without removing already loaded guidance."""
     if getattr(skill, "source", None) != "connector":
         return True
+    if discovery is not None:
+        owner_id = getattr(skill, "owner_id", None)
+        if not discovery.permitted(owner_id):
+            return False
+        entry = discovery.entries[owner_id]
+        if entry["kind"] == "cli":
+            return skill.name in entry["skills"] and not getattr(skill, "disabled", False)
     return getattr(skill, "owner_id", None) in _connected_connector_ids(
         selected_connector_ids
     )
 
 
-def _connector_skill_is_granted(skill: Any, connector_skill_grants: set[str]) -> bool:
-    """Allow connector Skills only after this conversation's internal selector grants them."""
-    return getattr(skill, "source", None) != "connector" or getattr(
-        skill, "name", None
-    ) in connector_skill_grants
+def _connector_skill_is_granted(skill: Any, connector_skill_grants: set[str], discovery=None) -> bool:
+    """Keep selector grants; a selected ready CLI also permits its verified methods."""
+    if getattr(skill, "source", None) != "connector" or getattr(skill, "name", None) in connector_skill_grants:
+        return True
+    if discovery is not None:
+        entry = discovery.entries.get(getattr(skill, "owner_id", None), {})
+        return entry.get("kind") == "cli" and _connector_skill_is_available(skill, set(), discovery)
+    return False
 
 
 _UNAVAILABLE_CONNECTOR_STATUS = (
@@ -1743,7 +1753,10 @@ class BoxACPAgent:
             agent_info=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
         skills = self._skills_meta()
-        response_meta: dict[str, Any] = {"raccoon_thinking": {"protocol_version": 1}}
+        response_meta: dict[str, Any] = {
+            "raccoon_thinking": {"protocol_version": 1},
+            "connector_discovery": {"versions": [1]},
+        }
         if skills is not None:
             # Pydantic alias: _meta ↔ field_meta
             response_meta["skills"] = skills
@@ -1872,6 +1885,7 @@ class BoxACPAgent:
         skillhub_search_enabled = False
         skillhub_install_enabled = False
         runtime_environment_enabled = False
+        connector_discovery_requested = False
         # Lightweight one-shot utility session (e.g. host-side title/tag
         # generation). When set, the session carries no tools, skips memory
         # recall injection, and skips auto memory-extraction — it is a pure
@@ -1925,6 +1939,10 @@ class BoxACPAgent:
                 "hostCapabilities"
             )
             if isinstance(host_capabilities, dict):
+                connector_discovery_requested = (
+                    type(host_capabilities.get("connector_discovery")) is int
+                    and host_capabilities["connector_discovery"] == 1
+                )
                 runtime_environment_enabled = host_capabilities.get("runtime_environment") == 1
                 raw_skillhub_search = host_capabilities.get(
                     "skillhub_search",
@@ -2224,6 +2242,7 @@ class BoxACPAgent:
         session_log: SessionLog | None = None
         session_projection = None
         session_log_restored = False
+        resumed = False
         if upstream_session_id:
             for existing_handle, existing_state in list(self._sessions.items()):
                 if existing_state.upstream_session_id != upstream_session_id and existing_handle != session_id:
@@ -2306,6 +2325,24 @@ class BoxACPAgent:
         # the historical direct ``Agent(...)`` call and its test hook.
         state = None
         try:
+            from box_agent.tools.connector_discovery import (
+                ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
+            )
+
+            configured_tool_version = self._config.agent.tool_interface_version
+            discovery_mode = resolve_discovery_mode(
+                session_log,
+                requested=connector_discovery_requested and not utility,
+                new_session=not resumed,
+                tool_version=(
+                    session_log.resolve_tool_interface_version(configured_tool_version)
+                    if session_log is not None else configured_tool_version
+                ),
+            )
+            connector_discovery = None
+            if discovery_mode and connector_discovery_requested and not utility:
+                connector_discovery = ConnectorDiscovery(lambda: selected_connector_ids)
+                connector_discovery.update(meta.get("connector_discovery"))
             state = await SessionState.open(
                 config=self._config,
                 runtime=self._plugin_runtime,
@@ -2329,10 +2366,12 @@ class BoxACPAgent:
                     workspace_tools_factory=add_workspace_tools,
                     capability_state_provider=self._sub_agent_capability_state,
                     skill_access_filter=lambda skill: _connector_skill_is_granted(
-                        skill, connector_skill_grants
-                    ),
+                        skill, connector_skill_grants, connector_discovery
+                    ) and (connector_discovery is None or _connector_skill_is_available(
+                        skill, selected_connector_ids, connector_discovery
+                    )),
                     skill_catalog_filter=lambda skill: _connector_skill_is_available(
-                        skill, selected_connector_ids
+                        skill, selected_connector_ids, connector_discovery
                     ),
                     extra_tools=tools,
                     prompt_suffix="\n\n".join(part for part in (
@@ -2344,9 +2383,11 @@ class BoxACPAgent:
                 ),
                 agent_factory=Agent,
                 session_projection=session_projection,
-                allowed_connector_ids_provider=lambda: _connected_connector_ids(
-                    selected_connector_ids
+                allowed_connector_ids_provider=lambda: frozenset(
+                    connector_id for connector_id in _connected_connector_ids(selected_connector_ids)
+                    if connector_discovery is None or connector_discovery.permitted(connector_id)
                 ),
+                connector_discovery=connector_discovery,
                 connector_skill_grants=connector_skill_grants,
                 selected_connector_ids=selected_connector_ids,
                 connector_statuses=connector_statuses,
@@ -2373,6 +2414,11 @@ class BoxACPAgent:
                 continuation_applied=session_log_restored,
                 mcp_fallback_tools=dict(self._base_mcp_fallback_tools),
             )
+            if connector_discovery is not None:
+                bind_discovery_mode(
+                    session_log, requested=True, new_session=not resumed,
+                    tool_version=state.agent.tool_interface_version,
+                )
             agent = state.agent
             session_skill_loader = state.skill_loader
             tools = list(agent.tools.values())
@@ -2480,6 +2526,8 @@ class BoxACPAgent:
                 ]
             if runtime_environment_tool is not None:
                 response_meta["capabilities"]["runtime_environment_versions"] = [1]
+            if connector_discovery is not None:
+                response_meta["capabilities"]["connector_discovery_versions"] = [1]
             skills = (
                 session_skill_loader.list_skills_metadata(include_connector=False)
                 if session_skill_loader is not None
@@ -2944,6 +2992,9 @@ class BoxACPAgent:
         _bind_user_source_text(state, source_binding_text)
         cloud_handoff = prompt_meta.get("cloudHandoff") is True
         if not state.utility_session:
+            discovery = getattr(state.agent, "connector_discovery", None)
+            if discovery is not None:
+                discovery.update(prompt_meta.get("connector_discovery"))
             selected_connector_ids = _connector_ids_from_meta(prompt_meta)
             if selected_connector_ids is not None:
                 state.selected_connector_ids.clear()
@@ -2996,7 +3047,7 @@ class BoxACPAgent:
         if hints and not state.utility_session:
             user_text = "\n\n".join([user_text.rstrip(), *hints])
         host_connector_status = None
-        if not state.utility_session:
+        if not state.utility_session and getattr(state.agent, "connector_discovery", None) is None:
             try:
                 host_connector_status = _connector_status_context(
                     state.selected_connector_ids,
@@ -3408,7 +3459,7 @@ class BoxACPAgent:
             for skill_name in matched_skill_names:
                 skill = state.skill_loader.get_skill(skill_name)
                 if skill is not None and _connector_skill_is_available(
-                    skill, state.selected_connector_ids
+                    skill, state.selected_connector_ids, getattr(state.agent, "connector_discovery", None)
                 ):
                     state.connector_skill_grants.add(skill.name)
 

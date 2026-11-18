@@ -10,6 +10,20 @@ from .user_paths import configured_box_agent_home, state_path
 BUILTIN_SKILLS_ENV = "BOX_AGENT_BUILTIN_SKILLS_DIR"
 
 
+def host_plugin_skills_dir() -> Path | None:
+    """Opt-in host-owned plugin methods; never discover another profile's Skills."""
+    raw = os.environ.get("BOX_AGENT_PLUGIN_SKILLS_DIR")
+    if raw is None:
+        return None
+    path = Path(raw.strip()).expanduser()
+    if not raw.strip() or not path.is_absolute():
+        raise ValueError("BOX_AGENT_PLUGIN_SKILLS_DIR must be an absolute directory")
+    expected = state_path("plugins/skills").resolve()
+    if path.resolve() != expected:
+        raise ValueError("Plugin Skills must be inside the active profile's plugins/skills directory")
+    return expected
+
+
 def resolve_builtin_skills_dir(config: Config) -> Path:
     """Prefer a host's process-local source; retain legacy config lookup otherwise.
 

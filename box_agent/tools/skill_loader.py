@@ -39,7 +39,7 @@ import yaml
 from box_agent.execution_profile import is_skill_blocked
 from box_agent.user_paths import state_path
 
-SkillSource = Literal["builtin", "connector", "user", "expert"]
+SkillSource = Literal["builtin", "connector", "plugin", "user", "expert"]
 
 SKILL_USAGE_GUIDANCE = (
     "When the user names a Skill or the task clearly matches an available Skill, read its "

@@ -90,6 +90,11 @@ class GetSkillTool(Tool):
         if refresh:
             self.skill_loader.maybe_reload()
         loader = catalog or self.skill_loader
+        from .runtime_components import plugin_skill_requirement
+
+        requirement = plugin_skill_requirement(name, loader)
+        if requirement is not None:
+            return requirement
         if self.allowed_skill_names is not None or self.skill_access_filter is not None:
             try:
                 dependencies = resolve_required_skills(loader, [name])

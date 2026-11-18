@@ -217,7 +217,7 @@ def _sanitize_hyperframes(raw: Any) -> dict[str, Any]:
         return {}
 
     cleaned: dict[str, Any] = {}
-    for field_name in ("installed", "available", "template", "ffmpeg", "ffprobe"):
+    for field_name in ("installed", "available", "template", "ffmpeg", "ffprobe", "setup_supported"):
         value = raw.get(field_name)
         if isinstance(value, bool):
             cleaned[field_name] = value
@@ -288,6 +288,7 @@ class HyperFramesState(BaseModel):
     template: bool | None = None
     ffmpeg: bool | None = None
     ffprobe: bool | None = None
+    setup_supported: bool = False
 
 
 class HostRuntime(BaseModel):
@@ -529,13 +530,18 @@ def _format_hyperframes(state: HyperFramesState) -> list[str]:
             "生成 contact sheet 时不要用 `rm -rf` 清理帧目录，改用新的子目录或覆盖固定帧文件，避免触发危险命令确认。"
             "不要复制 `[Full tool-call argument omitted from model history]` 这类历史占位文本。"
         )
-    elif state.installed is True:
+    elif state.setup_supported:
         lines.append(
-            "  - HyperFrames 已安装但当前不可用：先检查模板、浏览器、ffmpeg/ffprobe 状态；"
-            "不要承诺已完成视频渲染。"
+            "  - 视频插件尚未完整就绪。用户要求生成视频时，调用 get_skill('hyperframes-video') "
+            "取得宿主的安装/修复入口；说明需要准备后结束本回合，等待用户操作。"
+            "不要自行安装依赖、下载替代技能或承诺已完成渲染。"
         )
+    elif state.installed is True:
+        lines.append("  - HyperFrames 已安装但当前不可用：先检查模板、浏览器、ffmpeg/ffprobe 状态；不要承诺已完成视频渲染。")
     else:
-        lines.append("- HyperFrames 不可用：不要计划调用视频渲染链路，除非用户先启用/安装相关运行时。")
+        lines.append(
+            "- HyperFrames 不可用：不要计划调用视频渲染链路，除非用户先启用/安装相关运行时。"
+        )
     return lines
 
 

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, List, Mapping, Optional
 from uuid import uuid4
 
 from box_agent.config import Config, ToolLimitsConfig
-from box_agent.skill_paths import managed_builtin_skills_dir, resolve_builtin_skills_dir
+from box_agent.skill_paths import host_plugin_skills_dir, managed_builtin_skills_dir, resolve_builtin_skills_dir
 from box_agent.llm.capabilities import image_input_support, model_candidate_has_tag
 from box_agent.llm.model_routing import ModelRoutingError, resolve_model_client
 from box_agent.llm.task_budgets import LONG_TASK_MAX_OUTPUT_TOKENS
@@ -427,6 +427,11 @@ async def initialize_base_tools(
                 (connector_skills_dir, "connector"),
                 (builtin_dir, "builtin"),
             ]
+            plugin_dir = host_plugin_skills_dir()
+            if plugin_dir is not None:
+                # The host owns these methods; a same-name user file cannot make
+                # a readiness-checked plugin execute different instructions.
+                sources.insert(0, (plugin_dir, "plugin"))
 
             # ACP path: defer discovery to a background task so a directory
             # full of malformed SKILL.md files can't block stdio setup and

@@ -1,0 +1,559 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "d127bdd11d1f3f0343589005547d157ee0f2266ea2cc59e5056aa7a090c35e4c",
+  "state_revision": 1,
+  "available": true,
+  "entries": [
+    {
+      "id": "qveris",
+      "name": "QVeris",
+      "description": "发现、查看和调用专业数据与工具，通过 QVeris 账号授权访问。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "tencent-dlc",
+      "name": "腾讯云数据湖计算 DLC",
+      "description": "通过腾讯云账号授权，查询数据湖元数据、执行 SQL 并管理 Spark 作业。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "tencent-es",
+      "name": "腾讯云 Elasticsearch",
+      "description": "通过可从本机访问的集群专属 SSE 地址查询 Elasticsearch 索引与数据。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "tencent-tchouse-c",
+      "name": "腾讯云数据仓库 TCHouse-C",
+      "description": "使用腾讯云 MCP 广场生成的专属 SSE 地址查询数据仓库实例。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "lingxing",
+      "name": "领星 ERP",
+      "description": "查询和管理跨境电商运营数据，使用领星 ERP 的 MCP 密钥连接。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "tianyancha",
+      "name": "天眼查",
+      "description": "查询企业工商、司法风险、知识产权及经营信息，使用天眼查 OpenAPI Token 连接。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "lexiang",
+      "name": "乐享知识库",
+      "description": "搜索、读取和管理企业知识库，粘贴乐享生成的含企业标识和访问令牌的 MCP URL。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "laiye-adp",
+      "name": "来也智能文档专家",
+      "description": "解析文档，识别发票、订单和证件，抽取关键信息并输出结构化结果。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "keywords": [
+        "invoice extraction",
+        "document parsing",
+        "請求書",
+        "文書解析"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "fazhi",
+      "name": "同花顺法律AI助手",
+      "description": "同花顺法律 AI 助手，通过账号授权访问法律服务。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "kuaicha",
+      "name": "同花顺快查企业数据",
+      "description": "查询企业数据，通过同花顺快查账号授权访问。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "ifind",
+      "name": "同花顺 iFinD 金融数据",
+      "description": "通过同花顺 iFinD 账号授权访问金融数据。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "qixin",
+      "name": "启信慧眼",
+      "description": "企业信息查询与风险洞察，通过启信 Data AI 账号授权访问。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "qichacha",
+      "name": "企查查",
+      "description": "查询企业、风险、知识产权、经营及董监高信息，通过企查查账号授权访问。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "gaode",
+      "name": "高德云图",
+      "description": "提供地图数据、商业洞察、选址经营等服务。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "cloudbase",
+      "name": "腾讯云 CloudBase",
+      "description": "提供 PostgreSQL 数据库、文档型数据库、云存储、身份认证、云函数等后端能力",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "description": "搜索、读取和编辑 Notion 工作区中的页面与数据库。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "keywords": [
+        "workspace pages",
+        "Notion",
+        "ワークスペース"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "description": "读取代码仓库、Issue 和 Pull Request，并管理开发协作内容。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "keywords": [
+        "pull request",
+        "repository",
+        "代码仓库",
+        "プルリクエスト"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "description": "通过 Linear 账号授权，查询和管理 Issue、项目与评论。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "keywords": [
+        "issue tracking",
+        "project issues",
+        "課題管理"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "klingai-cn",
+      "name": "可灵 AI",
+      "description": "通过可灵账号授权，生成图片和视频并查询任务结果。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "keywords": [
+        "video generation",
+        "image generation",
+        "動画生成"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "tripo-3d",
+      "name": "Tripo 3D",
+      "description": "通过 Tripo 账号授权，生成和处理 3D 模型并导出常见格式。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "xmind",
+      "name": "Xmind 国际版",
+      "description": "创建、读取和编辑 Xmind 思维导图。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "keywords": [
+        "mind map",
+        "マインドマップ"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "xmind-cn",
+      "name": "Xmind",
+      "description": "创建、读取和编辑 Xmind 思维导图。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "jinshuju",
+      "name": "金数据",
+      "description": "创建和管理表单、查询和编辑收集的数据，通过金数据账号授权访问。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "tushare",
+      "name": "Tushare",
+      "description": "Tushare 金融数据服务，支持 A股、指数、ETF/基金、财务、估值、资金流、公告新闻、板块概念与宏观数据等研究工作。",
+      "kind": "mcp",
+      "auth_mode": "oauth",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "pkulaw",
+      "name": "北大法宝 · 法律智能检索",
+      "description": "聚合法规与案例检索、引用核验和原文链接，共 10 个法律工具。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "keywords": [
+        "legal cases",
+        "laws",
+        "判例検索",
+        "法令"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "jiejue",
+      "name": "解决 · 法律智能检索",
+      "description": "连接解决开放平台，使用法律检索等 MCP 工具。",
+      "kind": "mcp",
+      "auth_mode": "mcp",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "jiandaoyun",
+      "name": "简道云",
+      "description": "查询个人待办、应用和表单数据，并向有权限的表单新增数据。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "tencent-map",
+      "name": "腾讯位置服务",
+      "description": "查询地点、地址、路线和天气，使用腾讯位置服务 Key 连接。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "keywords": [
+        "directions",
+        "weather",
+        "route",
+        "天気",
+        "経路"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "bugly-token",
+      "name": "Bugly 质量概览",
+      "description": "查看产品的崩溃率、ANR 率、FOOM（OOM）率与启动耗时等质量概览。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "wind-finance",
+      "name": "Wind Alice 万得金融数据",
+      "description": "查询股票、基金、债券、商品、指数、宏观数据及万得金融模型与工具。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "cisp-mcp",
+      "name": "水滴征信",
+      "description": "查询工商、知识产权、舆情、财务、土地、企业关联关系等企业信息，并支持企业要素核验。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "picset-commerce-images",
+      "name": "Picset AI 电商设计",
+      "description": "生成电商套图与创意单图，支持图片编辑、任务跟踪和按编号局部修改。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "picset-video-generation",
+      "name": "Picset AI 视频创作",
+      "description": "生成电商商品视频、复刻视频创意和生成模特图，并支持脚本规划与任务状态查询。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "opendata",
+      "name": "及刻智能·时空数据MCP",
+      "description": "通过自然语言查询区域热力、场景识别、客流分析和 POI 等线下时空数据。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "h3c-cloudnet",
+      "name": "新华三Cloudnet灵犀AI助手",
+      "description": "查询网络运行状态与设备信息，分析网络问题并排查无线终端故障。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "datayes-data",
+      "name": "通联数据",
+      "description": "用自然语言查询 A 股、港股、基金、债券、指数、期货期权、宏观、公告与政策法规。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "baixiao-mcp",
+      "name": "百晓智能",
+      "description": "检索中英文学术资料与基金招投标信息，核验参考文献，并推荐投稿期刊与审稿人。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "deeplink",
+      "name": "深度智联·地产数据",
+      "description": "查询新房、二手房、土地、企业和宏观等地产数据，并提供地产领域专业知识问答。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "dnb-global-data",
+      "name": "邓白氏查全球",
+      "description": "通过自然语言查询全球企业档案、财务数据、风险洞察、企业关联及最终受益人信息。",
+      "kind": "mcp",
+      "auth_mode": "token",
+      "skills": [],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "tmeet",
+      "name": "腾讯会议",
+      "description": "通过腾讯会议命令行工具管理会议、录制和纪要，使用腾讯会议账号授权。",
+      "kind": "cli",
+      "auth_mode": "cli",
+      "skills": [
+        "tmeet-skill"
+      ],
+      "keywords": [
+        "meeting minutes",
+        "meeting recordings",
+        "会議録",
+        "会議の録画"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    },
+    {
+      "id": "kdocs",
+      "name": "金山文档",
+      "description": "通过金山文档命令行工具管理云文档，使用 WPS 个人账号授权。",
+      "kind": "cli",
+      "auth_mode": "cli",
+      "skills": [
+        "kdocs"
+      ],
+      "keywords": [
+        "cloud documents",
+        "WPS",
+        "クラウド文書"
+      ],
+      "configured": false,
+      "enabled": false,
+      "status": "disconnected",
+      "execution_ready": false
+    }
+  ]
+}

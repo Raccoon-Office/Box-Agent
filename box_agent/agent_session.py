@@ -137,6 +137,7 @@ class AgentSession:
         skill_runtime: Any = _UNSET,
         utility: bool = False,
         allowed_connector_ids_provider: Callable[[], frozenset[str]] | None = None,
+        connector_discovery=None,
         agent_factory: AgentFactory = Agent,
         **state: Any,
     ) -> AgentSession:
@@ -154,6 +155,8 @@ class AgentSession:
             capabilities["session_id"] = session_id
         if session_projection is not None:
             capabilities["session_projection"] = session_projection
+        if connector_discovery is not None:
+            capabilities["connector_discovery"] = connector_discovery
         agent = AgentService(agent_factory=agent_factory).create_agent(
             llm_client=llm_client,
             system_prompt=system_prompt,
