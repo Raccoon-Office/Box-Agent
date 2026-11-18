@@ -80,6 +80,29 @@ def _has(tools: Collection[str] | None, *names: str) -> bool:
     return tools is None or all(name in tools for name in names)
 
 
+def render_image_generation_policy(tools: Collection[str] | None) -> str:
+    """Shared service selection, inherited without a parent's tool inventory."""
+    if tools is not None and not (
+        {"generate_image", "tool_search"} & set(tools)
+        or any(name.startswith("mcp__") and name.endswith(("__generate_image", "__seko_generate_image"))
+               for name in tools)
+    ):
+        return ""
+    return "\n".join([
+        "## Image Generation Routing",
+        "图片生成/编辑统一按以下规则选择服务；文生图、图生图、改图及 HTML/PPT 位图配图均适用。",
+        "1. 未明确指定服务时，默认使用 Box-Agent 内置生图工具，沿用当前配置的生图服务；"
+        "无需为普通生图请求搜索其他服务。缺少默认工具或配置时如实说明，不假装可用。",
+        "2. 用户明确指定其他生图服务时遵从指定。仅当用户明确指定 Seko，或继续一个已明确指定 Seko 的"
+        "图片任务时，使用 Seko 生图工具；同一任务的后续修改沿用用户指定的服务，无关新任务恢复默认。",
+        "3. 服务已连接、已授权、工具已被发现或此前调用过，不代表用户选择了它。"
+        "仅询问 Seko 能力、引用名称或明确说不要使用 Seko，不视为指定 Seko。",
+        "4. 默认生图失败、不可用或用户拒绝费用确认时，不自动切换到 Seko；"
+        "用户指定的服务不可用时说明原因，不擅自替换。拒绝后不得换服务绕过。",
+        "具体调用以当前任务可用的工具及发现机制为准；委派任务缺少所选能力时向父 Agent 报告。",
+    ])
+
+
 def render_web_access_policy(tools: Collection[str] | None) -> str:
     """One routing contract, including sessions with discoverable MCP tools.
 
@@ -299,6 +322,7 @@ __all__ = [
     "CODE_SEARCH_TOOLS_PLACEHOLDER",
     "PLANNING_TOOLS_PLACEHOLDER",
     "render_code_search_tools",
+    "render_image_generation_policy",
     "render_planning_tools",
     "render_web_access_policy",
     "resolve_capability_placeholders",

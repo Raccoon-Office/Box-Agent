@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ..tool_result_storage import DEFAULT_MAX_RESULT_SIZE_CHARS
 from .base import Tool, ToolResult, build_tool_name_index
+from .mcp_apps import mcp_tool_allows
 from .mcp_tool_catalog import MCPToolCatalog, MCPToolEntry, _normalize
 
 if TYPE_CHECKING:
@@ -19,10 +20,10 @@ if TYPE_CHECKING:
 
 TOOL_SEARCH_NAME = "tool_search"
 _DISCOVERY_ENTRY_BUDGET_CHARS = 48_000
-_CONNECTOR_CATALOG_BUDGET_CHARS = 8_000
-_CONNECTOR_PURPOSE_CHARS = 160
 _SERVER_INSTRUCTIONS_FIELD = "mcp_server_instructions"
 _SERVER_INSTRUCTIONS_BUDGET_CHARS = 4_096
+_TOOL_CATALOG_BUDGET_CHARS = 8_000
+_TOOL_PURPOSE_CHARS = 160
 _ACTIVATION_COMPANIONS: dict[str, tuple[str, ...]] = {
     # Playwright navigation returns metadata before the page-body snapshot.
     # Exposing one without the other creates a runtime state the model cannot
@@ -145,70 +146,86 @@ class ToolSearchTool(Tool):
         self._activated_local = (
             activated_local_tools if activated_local_tools is not None else OrderedDict()
         )
-        self._delivered_connector_catalogs: dict[
-            str, tuple[tuple[tuple[str, int], ...], str]
+        self._delivered_tool_catalogs: dict[
+            tuple[str, str], tuple[tuple[tuple[str, int], ...], str]
         ] = {}
         self._seen_server_instructions: set[tuple[str, str]] = set()
 
     def _entry_is_allowed(self, entry) -> bool:
+        if not mcp_tool_allows(entry.tool, "model"):
+            return False
         if entry.connector_id is None:
             return True
         if self._allowed_connector_ids_provider is None:
             return True
         return entry.connector_id in self._allowed_connector_ids_provider()
 
-    def _add_connector_catalogs(self, payload: dict, protected_names: frozenset[str]) -> None:
+    def _add_tool_catalogs(self, payload: dict, protected_names: frozenset[str]) -> None:
         """Append bounded sibling metadata without activating or issuing refs."""
         connector_ids = {
             item["connector_id"] for item in payload["activated"]
             if item.get("connector_id") is not None
         }
-        groups = []
-        remaining = _CONNECTOR_CATALOG_BUDGET_CHARS - 2
-        omitted_connectors = 0
-        snapshot = self._catalog.snapshot() if connector_ids else ()
-        for connector_id in sorted(connector_ids):
-            entries = sorted(
-                (entry for entry in snapshot
-                 if entry.connector_id == connector_id and self._entry_is_allowed(entry)
-                 and not entry.name_conflict and entry.model_name not in protected_names
-                 and entry.model_name != TOOL_SEARCH_NAME
-                 and (self._stable_manager is None
-                      or self._stable_manager.is_discoverable(entry.tool))),
-                key=lambda entry: entry.tool_id,
-            )
-            signature = tuple((entry.tool_id, entry.generation) for entry in entries)
-            previous = self._delivered_connector_catalogs.get(connector_id)
-            if not entries or (previous is not None and previous[0] == signature):
-                continue
-            group = {"connector_id": connector_id, "tool_count": len(entries),
-                     "tools": [], "omitted_count": len(entries)}
-            available = remaining - len(json.dumps(group, ensure_ascii=False)) - 2
-            for entry in entries:
-                item = {"tool_name": entry.model_name,
-                        "purpose": " ".join(entry.description.split())[:_CONNECTOR_PURPOSE_CHARS]}
-                size = len(json.dumps(item, ensure_ascii=False)) + 2
-                if size > available:
+        server_names = {
+            item["server_name"] for item in payload["activated"]
+            if item.get("connector_id") is None and item.get("server_name")
+        }
+        remaining = _TOOL_CATALOG_BUDGET_CHARS - 2
+        snapshot = self._catalog.snapshot() if connector_ids or server_names else ()
+        # Preserve connector grouping and budget priority; unowned MCP tools use
+        # their own server, never one shared group for all connector_id=None tools.
+        for scope, catalog_field, identities in (
+            ("connector_id", "connector_catalogs", connector_ids),
+            ("server_name", "server_catalogs", server_names),
+        ):
+            groups = []
+            omitted_groups = 0
+            for identity in sorted(identities):
+                entries = sorted(
+                    (entry for entry in snapshot
+                     if (entry.connector_id == identity if scope == "connector_id"
+                         else entry.connector_id is None and entry.server_name == identity)
+                     and self._entry_is_allowed(entry)
+                     and not entry.name_conflict and entry.model_name not in protected_names
+                     and entry.model_name != TOOL_SEARCH_NAME
+                     and (self._stable_manager is None
+                          or self._stable_manager.is_discoverable(entry.tool))),
+                    key=lambda entry: entry.tool_id,
+                )
+                signature = tuple((entry.tool_id, entry.generation) for entry in entries)
+                group_key = (scope, identity)
+                previous = self._delivered_tool_catalogs.get(group_key)
+                if not entries or (previous is not None and previous[0] == signature):
                     continue
-                group["tools"].append(item)
-                group["omitted_count"] -= 1
-                available -= size
-            if not group["tools"]:
-                omitted_connectors += 1
-                continue
-            groups.append(group)
-            remaining -= len(json.dumps(group, ensure_ascii=False)) + 2
-            self._delivered_connector_catalogs[connector_id] = (
-                signature, json.dumps(group, ensure_ascii=False, sort_keys=True),
-            )
-        if groups or omitted_connectors:
-            payload["connector_catalogs"] = groups
-            payload["connector_catalogs_omitted_count"] = omitted_connectors
-            payload["connector_catalogs_notice"] = (
-                "Connector catalogs contain names and short purposes only; listing a tool "
-                "does not activate it or issue a tool_ref. Search exact tool_names for "
-                "complete schemas. Omitted entries can still be found through tool_search."
-            )
+                group = {scope: identity, "tool_count": len(entries),
+                         "tools": [], "omitted_count": len(entries)}
+                available = remaining - len(json.dumps(group, ensure_ascii=False)) - 2
+                for entry in entries:
+                    item = {"tool_name": entry.model_name,
+                            "purpose": " ".join(entry.description.split())[:_TOOL_PURPOSE_CHARS]}
+                    size = len(json.dumps(item, ensure_ascii=False)) + 2
+                    if size > available:
+                        continue
+                    group["tools"].append(item)
+                    group["omitted_count"] -= 1
+                    available -= size
+                if not group["tools"]:
+                    omitted_groups += 1
+                    continue
+                groups.append(group)
+                remaining -= len(json.dumps(group, ensure_ascii=False)) + 2
+                self._delivered_tool_catalogs[group_key] = (
+                    signature, json.dumps(group, ensure_ascii=False, sort_keys=True),
+                )
+            if groups or omitted_groups:
+                payload[catalog_field] = groups
+                payload[f"{catalog_field}_omitted_count"] = omitted_groups
+                label = "Connector" if scope == "connector_id" else "MCP server"
+                payload[f"{catalog_field}_notice"] = (
+                    f"{label} catalogs contain names and short purposes only; listing a tool "
+                    "does not activate it or issue a tool_ref. Search exact tool_names for "
+                    "complete schemas. Omitted entries can still be found through tool_search."
+                )
 
     @property
     def name(self) -> str:
@@ -534,7 +551,7 @@ class ToolSearchTool(Tool):
                 already_active = previous is not None and previous.generation == entry.generation
                 item = {"name": entry.model_name, "server_name": entry.server_name,
                         "connector_id": entry.connector_id, "connector_name": entry.connector_name,
-                        "remote_name": entry.remote_name, "description": entry.description,
+                        "remote_name": entry.remote_name, "description": entry.tool.description,
                         "already_active": already_active}
             if self._stable_manager is not None:
                 placeholder = "tool:v1:" + "x" * 32
@@ -643,7 +660,7 @@ class ToolSearchTool(Tool):
                     success=False, content=json.dumps(payload, ensure_ascii=False),
                     error="MCP catalog is still loading; retry tool_search shortly.",
                 )
-        self._add_connector_catalogs(payload, protected_names)
+        self._add_tool_catalogs(payload, protected_names)
         if activated_mcp_tools:
             max_chars = _DISCOVERY_ENTRY_BUDGET_CHARS - entry_chars
             if self._stable_manager is None:
@@ -752,7 +769,8 @@ class MCPToolExposureManager:
         search_tool._local_tools_provider = lambda: tuple(self._stable_candidates.values())
 
     def is_discoverable(self, tool: Tool) -> bool:
-        return (tool.name not in {"tool_search", "call_tool"}
+        return (mcp_tool_allows(tool, "model")
+                and tool.name not in {"tool_search", "call_tool"}
                 and tool.name not in (self._stable_direct or {})
                 and (self._stable_visibility is None or self._stable_visibility(tool.name)))
 
@@ -837,19 +855,21 @@ class MCPToolExposureManager:
             for ref, _ in matched:
                 self._search_refs.add(ref)
             if matched:
-                catalogs = json.loads(message.content).get("connector_catalogs", [])
-                if isinstance(catalogs, list):
-                    visible_catalogs.update(
-                        json.dumps(group, ensure_ascii=False, sort_keys=True)
-                        for group in catalogs if isinstance(group, dict)
-                    )
+                payload = json.loads(message.content)
+                for catalog_field in ("connector_catalogs", "server_catalogs"):
+                    catalogs = payload.get(catalog_field, [])
+                    if isinstance(catalogs, list):
+                        visible_catalogs.update(
+                            json.dumps(group, ensure_ascii=False, sort_keys=True)
+                            for group in catalogs if isinstance(group, dict)
+                        )
         if self._search_tool is not None:
-            delivered = self._search_tool._delivered_connector_catalogs
+            delivered = self._search_tool._delivered_tool_catalogs
             # If compaction or projection removed a receipt, the next matching
             # search may return its catalog again. Do not restore it eagerly.
-            for connector_id, (_, receipt) in tuple(delivered.items()):
+            for group_key, (_, receipt) in tuple(delivered.items()):
                 if receipt not in visible_catalogs:
-                    del delivered[connector_id]
+                    del delivered[group_key]
 
     def is_current_target(self, name: str, tool: Tool) -> bool:
         if self._scope_parent is not None:
@@ -937,7 +957,7 @@ class MCPToolExposureManager:
         for entry in self._catalog.snapshot():
             if not entry.always_load or entry.name_conflict or not self._entry_is_allowed(entry) or not self.is_discoverable(entry.tool):
                 continue
-            if queue_tool(entry.model_name, entry.description, entry.tool, entry.generation):
+            if queue_tool(entry.model_name, entry.tool.description, entry.tool, entry.generation):
                 eager_tools.append(entry.tool)
         instructions = _server_instructions_payload(
             eager_tools, seen_instructions, max_chars=description_budget - pending_size,
@@ -986,7 +1006,7 @@ class MCPToolExposureManager:
         return restored
 
     def _entry_is_allowed(self, entry) -> bool:
-        return self._connector_is_allowed(entry.connector_id)
+        return mcp_tool_allows(entry.tool, "model") and self._connector_is_allowed(entry.connector_id)
 
     def _connector_is_allowed(self, connector_id: str | None) -> bool:
         if connector_id is None:
@@ -1052,7 +1072,7 @@ class MCPToolExposureManager:
                 self._activated_local.pop(name, None)
         for tool in candidates:
             if getattr(tool, "mcp_tool_id", None) is not None:
-                if not self._deferred_mcp and self._connector_is_allowed(
+                if mcp_tool_allows(tool, "model") and not self._deferred_mcp and self._connector_is_allowed(
                     getattr(tool, "mcp_connector_id", None)
                 ):
                     visible[tool.name] = tool
@@ -1109,6 +1129,12 @@ class MCPToolExposureManager:
             if upstream is None or not self._scope_parent.is_current_target(name, upstream):
                 return f"Tool '{name}' is no longer available to this child."
             return self._scope_parent.validate_call(name, offered_generation, upstream)
+        candidate = target_tool
+        if candidate is None:
+            entry = self._catalog.get_by_model_name(name)
+            candidate = entry.tool if entry is not None else None
+        if candidate is not None and not mcp_tool_allows(candidate, "model"):
+            return f"MCP tool '{name}' is not callable by the model."
         if target_tool is not None and not self._connector_is_allowed(
             getattr(target_tool, "mcp_connector_id", None)
         ):

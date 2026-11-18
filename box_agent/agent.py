@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .events import (
     AgentEvent,
@@ -68,6 +68,9 @@ from .cli_renderer import CliRenderer, Colors, _format_size, render_agent_events
 from .session_continuation import ContinuationMessage
 
 from box_agent.user_paths import state_path
+
+if TYPE_CHECKING:
+    from .tools.engine.call_contracts import ToolRunContext
 
 
 _log = logging.getLogger(__name__)
@@ -573,6 +576,8 @@ class Agent:
         self._proposal_negotiator = None  # set by CLI/ACP to handle MemoryProposalEvent
         self._hooks = hooks
         self._plugins = tuple(plugins)
+        self.active_tool_run_context: ToolRunContext | None = None
+        self.tool_run_context_generation = 0
         self._memory_extractor = None  # set by CLI/ACP when memory extraction is enabled
         self.thinking_enabled = thinking_enabled
         self.memory_promotion_enabled = memory_promotion_enabled
@@ -1420,6 +1425,14 @@ class Agent:
 
         from .context_input import DefaultContextEngine
 
+        tool_run_context = None
+
+        def bind_tool_run_context(context: ToolRunContext) -> None:
+            nonlocal tool_run_context
+            tool_run_context = context
+            self.active_tool_run_context = context
+            self.tool_run_context_generation += 1
+
         transition = effective_options.initial_context_transition
         run_arguments = dict(
             llm=effective_options.llm,
@@ -1480,6 +1493,7 @@ class Agent:
             session_log=self.session_log,
             session_turn=session_turn,
             completion_checks_enabled=effective_options.completion_checks_enabled,
+            _tool_run_context_sink=bind_tool_run_context,
         )
         if effective_options.kernel_services is not None:
             run_arguments["kernel_services"] = effective_options.kernel_services
@@ -1599,6 +1613,8 @@ class Agent:
             self._session_surface_replay_failed = True
             raise
         finally:
+            if self.active_tool_run_context is tool_run_context:
+                self.active_tool_run_context = None
             try:
                 close = getattr(events, "aclose", None)
                 if callable(close):

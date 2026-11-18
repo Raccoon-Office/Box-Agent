@@ -201,7 +201,7 @@ class MCPToolCatalog:
                     tool_id=tool_id,
                     model_name=raw_name,
                     server_name=server_name,
-                    description=tool.description,
+                    description=getattr(tool, "mcp_search_description", tool.description),
                     tool=tool,
                     generation=generation,
                     always_load=bool(getattr(tool, "mcp_always_load", False)),

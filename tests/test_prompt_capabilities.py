@@ -128,7 +128,7 @@ def test_missing_image_tool_does_not_misdiagnose_configured_service(monkeypatch,
         env["BOX_AGENT_IMAGE_GENERATION_ENDPOINT"] = "https://example.invalid/images"
     prompt = build_image_generation_prompt(config, env, tools=frozenset())
     assert "未配置" not in prompt
-    assert "当前会话没有生图工具" in prompt
+    assert "当前会话没有内置生图工具" in prompt
 
 
 @pytest.mark.parametrize("mode,file_tools,bash,sandbox", [
@@ -211,7 +211,7 @@ async def test_restricted_host_prompt_does_not_claim_configured_image_service_is
         host=HostBindings(llm_client=object(), tools=[RequestUserInputTool()]))
     try:
         prompt = session.agent.system_prompt
-        assert "当前会话没有生图工具" in prompt
+        assert "当前会话没有内置生图工具" in prompt
         assert "未配置 `image_generation.endpoint`" not in prompt
         assert "`request_user_decision`" not in prompt
         assert "调用 `publish_artifact`" not in prompt

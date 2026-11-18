@@ -676,11 +676,18 @@ def _assert_schema_contract(tools, profile):
                 "Clarify unresolved content, targets, or scope only. ",
             )
         if tool.name == "generate_image":
+            anchor = "Standard Box-Agent image tool shared by CLI and ACP. "
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor, anchor +
+                "This is the default image tool; use it unless the user explicitly selects another image service "
+                "for the current image task, including that task's follow-up edits. ",
+            )
             anchor = "`generate`. "
             assert entry["schema"]["description"].count(anchor) == 1
             entry["schema"]["description"] = entry["schema"]["description"].replace(
                 anchor, anchor +
-                "Once the image request is clear, including an explicit request to continue, "
+                "When this service is selected and the image request is clear, including an explicit request to continue, "
                 "call this tool directly; the runtime handles billing confirmation. Do not ask separately for authorization. ",
             )
         if tool.name == "bash":

@@ -15,7 +15,7 @@ import pytest
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCRequest
 
-from box_agent.tools import mcp_loader
+from box_agent.tools import mcp_apps, mcp_loader
 from box_agent.tools.browser_runtime_scope import (
     BrowserRuntimeCoordinator,
     release_browser_runtime,
@@ -418,6 +418,7 @@ async def test_private_mcp_transport_does_not_forward_redirected_requests(
 async def test_sse_endpoint_respects_private_service_boundary(
     monkeypatch, private, endpoint, allowed,
 ):
+    monkeypatch.setattr(mcp_apps, "_host_enabled", True)
     monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
     monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
     requests = []

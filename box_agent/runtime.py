@@ -12,6 +12,7 @@ from contextlib import aclosing
 from functools import wraps
 from typing import Any
 
+from .composition import with_tool_run_context_sink
 from .core import run_agent_loop as _run_agent_loop
 from .events import AgentEvent
 from .session_log import SessionLogDurabilityError
@@ -29,7 +30,10 @@ from .tools.model_tool_context import current_model_tool_context, scoped_model_t
 def run_agent_loop(**kwargs: Any) -> AsyncIterator[AgentEvent]:
     """Run the kernel with shared model-tool context composed in."""
     llm = kwargs.get("llm")
+    tool_run_context_sink = kwargs.pop("_tool_run_context_sink", None)
     events = _run_agent_loop(**kwargs)
+    if tool_run_context_sink is not None:
+        events = with_tool_run_context_sink(events, tool_run_context_sink)
     parent_context = current_model_tool_context()
     return scoped_model_tool_context(
         events,

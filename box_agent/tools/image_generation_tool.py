@@ -471,7 +471,9 @@ class GenerateImageTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Standard Box-Agent image tool shared by CLI and ACP. Generate or edit a bitmap image "
+            "Standard Box-Agent image tool shared by CLI and ACP. This is the default image tool; "
+            "use it unless the user explicitly selects another image service for the current image task, "
+            "including that task's follow-up edits. Generate or edit a bitmap image "
             "with the Box-Agent-configured image service, save it inside "
             "the session cwd, and return a local path for use in HTML/PPTX assets. "
             "For explicit native image, illustration, poster, cover, or bitmap infographic requests, "
@@ -479,7 +481,7 @@ class GenerateImageTool(Tool):
             "for one of those editable/rendered formats. Use text-to-image when the user "
             "asks for a new image. Use image-to-image with reference_images when the user asks to modify, "
             "redraw, restyle, or preserve a supplied image/logo/sketch. Use for PPT image_plan items marked "
-            "`generate`. Once the image request is clear, including an explicit request to continue, "
+            "`generate`. When this service is selected and the image request is clear, including an explicit request to continue, "
             "call this tool directly; the runtime handles billing confirmation. Do not ask separately for authorization. "
             "If the user forbids fallback and this tool fails, report the request as blocked. "
             "If the service is not configured, report the blocked image generation instead of "

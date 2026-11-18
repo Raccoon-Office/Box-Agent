@@ -30,7 +30,9 @@ from .tools.setup import (
     build_file_delivery_prompt, build_image_generation_prompt, build_sandbox_info_prompt,
     render_system_prompt_template,
 )
-from .prompt_capabilities import render_web_access_policy, resolve_capability_placeholders
+from .prompt_capabilities import (
+    render_image_generation_policy, render_web_access_policy, resolve_capability_placeholders,
+)
 from .project_context import (
     PROJECT_WORKSPACE_MODE_PROMPT, WORKSPACE_STATEMENT_PREFIX, append_prompt_segment, compose_prompt_segments,
     build_project_startup_context_prompt,
@@ -750,6 +752,7 @@ def _compose_session_prompt(
         return append_prompt_segment(base_prompt, segment, skip_empty=skip_empty)
 
     base_prompt = append(render_web_access_policy(available_tools))
+    base_prompt = append(render_image_generation_policy(available_tools))
 
     if workspace is not None:
         base_prompt = append(

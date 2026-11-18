@@ -1,4 +1,4 @@
-"""Connector summaries aid discovery without broadening tool exposure."""
+"""Connector and MCP server summaries aid discovery without broadening exposure."""
 
 import json
 from collections import OrderedDict
@@ -61,6 +61,118 @@ async def test_hit_lists_same_connector_across_servers_without_activating_siblin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stable", [False, True])
+async def test_user_mcp_hit_lists_only_same_server_without_activating_siblings(stable):
+    catalog = MCPToolCatalog()
+    tools = [
+        FakeMCPTool("mcp__seko__generate_image", "seko", "Generate image"),
+        FakeMCPTool("mcp__seko__create_canvas", "seko", "  Create\n canvas  "),
+        FakeMCPTool("mcp__seko__get_task", "seko", "Query generation"),
+    ]
+    catalog.replace_server("seko", tools)
+    catalog.replace_server("other", [FakeMCPTool("other_status", "other")])
+    search, manager, active = make_search(catalog, stable=stable)
+
+    result = await search.execute(tool_names=[tools[0].name], server_name="seko")
+    payload = json.loads(result.content)
+    assert result.success
+    assert "connector_catalogs" not in payload
+    assert payload["server_catalogs"] == [{
+        "server_name": "seko", "tool_count": 3, "omitted_count": 0,
+        "tools": [
+            {"tool_name": "mcp__seko__create_canvas", "purpose": "Create canvas"},
+            {"tool_name": "mcp__seko__generate_image", "purpose": "Generate image"},
+            {"tool_name": "mcp__seko__get_task", "purpose": "Query generation"},
+        ],
+    }]
+    assert payload["server_catalogs_omitted_count"] == 0
+    assert payload["activated_count"] == 1
+    assert list(active) == [tools[0].mcp_tool_id]
+    assert "other_status" not in result.content
+    assert all(tool.calls == 0 for tool in tools)
+    if stable:
+        assert {tool.name for tool, _, _ in manager._stable_refs.values()} == {tools[0].name}
+    else:
+        assert manager.prepare_tools(tools).tools == [tools[0]]
+
+
+@pytest.mark.asyncio
+async def test_server_and_connector_with_same_identity_keep_separate_catalogs():
+    catalog = MCPToolCatalog()
+    catalog.replace_server("seko", [FakeMCPTool("user_generate", "seko")])
+    catalog.replace_server("managed", [
+        FakeMCPTool("connector_generate", "managed", connector_id="seko"),
+        FakeMCPTool("connector_status", "managed", connector_id="seko"),
+    ])
+    search, _, _ = make_search(catalog)
+    payload = json.loads((await search.execute(
+        tool_names=["user_generate", "connector_generate"],
+    )).content)
+    assert payload["server_catalogs"][0]["tools"] == [
+        {"tool_name": "user_generate", "purpose": ""},
+    ]
+    assert payload["connector_catalogs"][0]["tools"] == [
+        {"tool_name": "connector_generate", "purpose": ""},
+        {"tool_name": "connector_status", "purpose": ""},
+    ]
+    repeat = json.loads((await search.execute(
+        tool_names=["user_generate", "connector_generate"],
+    )).content)
+    assert "server_catalogs" not in repeat
+    assert "connector_catalogs" not in repeat
+    catalog.replace_server("seko", [
+        FakeMCPTool("user_generate", "seko"), FakeMCPTool("user_status", "seko"),
+    ])
+    refreshed = json.loads((await search.execute(
+        tool_names=["user_generate", "connector_generate"],
+    )).content)
+    assert refreshed["server_catalogs"][0]["tool_count"] == 2
+    assert "connector_catalogs" not in refreshed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connector_id", [None, "seko"])
+async def test_catalog_excludes_app_only_hidden_conflicting_and_protected_tools(connector_id):
+    catalog = MCPToolCatalog()
+    tools = [FakeMCPTool(name, "seko", connector_id=connector_id) for name in [
+        "generate", "app_only", "hidden", "duplicate", "bash", "tool_search", "call_tool",
+    ]]
+    tools[1].mcp_visibility = frozenset({"app"})
+    catalog.replace_server("seko", tools)
+    catalog.replace_server("other", [FakeMCPTool("duplicate", "other")])
+    search, manager, _ = make_search(catalog, protected=frozenset({"bash"}))
+    manager._stable_visibility = lambda name: name != "hidden"
+
+    payload = json.loads((await search.execute(tool_names=["generate"])).content)
+    catalog_field = "connector_catalogs" if connector_id else "server_catalogs"
+    assert payload[catalog_field][0]["tools"] == [{"tool_name": "generate", "purpose": ""}]
+    assert payload[catalog_field][0]["tool_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_connector_and_server_catalogs_share_budget_without_losing_omitted_group():
+    catalog = MCPToolCatalog()
+    for server, connector in [("managed", "connector"), ("custom", None)]:
+        catalog.replace_server(server, [
+            FakeMCPTool(f"{server}_{index:03d}", server, "x" * 160, connector_id=connector)
+            for index in range(100)
+        ])
+    search, _, active = make_search(catalog)
+    payload = json.loads((await search.execute(
+        tool_names=["managed_000", "custom_000"],
+    )).content)
+    groups = payload["connector_catalogs"] + payload["server_catalogs"]
+    assert len(json.dumps(groups, ensure_ascii=False)) <= 8_000
+    assert payload["connector_catalogs"][0]["connector_id"] == "connector"
+    assert payload["server_catalogs"] == []
+    assert payload["server_catalogs_omitted_count"] == 1
+    assert len(active) == 2
+    later = json.loads((await search.execute(tool_names=["custom_000"])).content)
+    assert later["server_catalogs"][0]["server_name"] == "custom"
+    assert later["server_catalogs"][0]["omitted_count"] > 0
+
+
+@pytest.mark.asyncio
 async def test_catalog_excludes_unauthorized_hidden_conflicting_and_protected_tools():
     catalog = MCPToolCatalog()
     names = ["generate", "hidden", "duplicate", "bash", "tool_search", "call_tool"]
@@ -88,32 +200,36 @@ async def test_catalog_excludes_unauthorized_hidden_conflicting_and_protected_to
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stable", [False, True])
-async def test_unchanged_catalog_is_once_per_session_and_refresh_resends_it(stable):
+@pytest.mark.parametrize("with_connector", [False, True])
+async def test_unchanged_catalog_is_once_per_session_and_refresh_resends_it(stable, with_connector):
+    catalog_field = "connector_catalogs" if with_connector else "server_catalogs"
     catalog = MCPToolCatalog()
-    first = FakeMCPTool("generate", "seko", connector_id="seko")
+    first = FakeMCPTool("generate", "seko", connector_id="seko" if with_connector else None)
     catalog.replace_server("seko", [first])
     search, _, _ = make_search(catalog, stable=stable)
-    assert "connector_catalogs" in json.loads((await search.execute(tool_names=["generate"])).content)
-    assert "connector_catalogs" not in json.loads((await search.execute(tool_names=["generate"])).content)
+    assert catalog_field in json.loads((await search.execute(tool_names=["generate"])).content)
+    assert catalog_field not in json.loads((await search.execute(tool_names=["generate"])).content)
 
     fresh, _, _ = make_search(catalog, stable=stable)
-    assert "connector_catalogs" in json.loads((await fresh.execute(tool_names=["generate"])).content)
+    assert catalog_field in json.loads((await fresh.execute(tool_names=["generate"])).content)
     catalog.replace_server("seko", [
-        FakeMCPTool("generate", "seko", connector_id="seko"),
-        FakeMCPTool("status", "seko", "Query status", connector_id="seko"),
+        FakeMCPTool("generate", "seko", connector_id="seko" if with_connector else None),
+        FakeMCPTool("status", "seko", "Query status", connector_id="seko" if with_connector else None),
     ])
     updated = json.loads((await search.execute(tool_names=["generate"])).content)
-    assert updated["connector_catalogs"][0]["tool_count"] == 2
-    catalog.replace_server("seko", [FakeMCPTool("generate", "seko", connector_id="seko")])
+    assert updated[catalog_field][0]["tool_count"] == 2
+    catalog.replace_server("seko", [FakeMCPTool("generate", "seko", connector_id="seko" if with_connector else None)])
     removed = json.loads((await search.execute(tool_names=["generate"])).content)
-    assert removed["connector_catalogs"][0]["tool_count"] == 1
+    assert removed[catalog_field][0]["tool_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_visibility_change_resends_current_catalog():
+@pytest.mark.parametrize("with_connector", [False, True])
+async def test_visibility_change_resends_current_catalog(with_connector):
+    catalog_field = "connector_catalogs" if with_connector else "server_catalogs"
     catalog = MCPToolCatalog()
     catalog.replace_server("seko", [
-        FakeMCPTool(name, "seko", connector_id="seko") for name in ["generate", "status"]
+        FakeMCPTool(name, "seko", connector_id="seko" if with_connector else None) for name in ["generate", "status"]
     ])
     search, manager, _ = make_search(catalog)
     hidden = set()
@@ -121,74 +237,80 @@ async def test_visibility_change_resends_current_catalog():
     await search.execute(tool_names=["generate"])
     hidden.add("status")
     reduced = json.loads((await search.execute(tool_names=["generate"])).content)
-    assert reduced["connector_catalogs"][0]["tool_count"] == 1
+    assert reduced[catalog_field][0]["tool_count"] == 1
     hidden.clear()
     expanded = json.loads((await search.execute(tool_names=["generate"])).content)
-    assert expanded["connector_catalogs"][0]["tool_count"] == 2
+    assert expanded[catalog_field][0]["tool_count"] == 2
 
 
 @pytest.mark.asyncio
-async def test_missing_conflicting_or_unowned_hits_do_not_attach_connector_catalogs():
+async def test_missing_or_conflicting_hits_do_not_attach_catalogs():
     catalog = MCPToolCatalog()
     catalog.replace_server("one", [
-        FakeMCPTool("unowned", "one"),
         FakeMCPTool("duplicate", "one", connector_id="seko"),
     ])
     catalog.replace_server("two", [FakeMCPTool("duplicate", "two", connector_id="seko")])
     search, _, _ = make_search(catalog)
-    for name in ["missing", "duplicate", "unowned"]:
+    for name in ["missing", "duplicate"]:
         payload = json.loads((await search.execute(tool_names=[name])).content)
         assert "connector_catalogs" not in payload
+        assert "server_catalogs" not in payload
 
 
 @pytest.mark.asyncio
-async def test_oversized_schema_does_not_trigger_or_suppress_connector_catalog():
+@pytest.mark.parametrize("with_connector", [False, True])
+async def test_oversized_schema_does_not_trigger_or_suppress_catalog(with_connector):
+    catalog_field = "connector_catalogs" if with_connector else "server_catalogs"
     catalog = MCPToolCatalog()
     catalog.replace_server("seko", [
-        FakeMCPTool("giant", "seko", connector_id="seko",
+        FakeMCPTool("giant", "seko", connector_id="seko" if with_connector else None,
                     parameters={"type": "object", "description": "x" * 50_000}),
-        FakeMCPTool("small", "seko", connector_id="seko"),
+        FakeMCPTool("small", "seko", connector_id="seko" if with_connector else None),
     ])
     search, _, active = make_search(catalog)
     oversized = json.loads((await search.execute(tool_names=["giant"])).content)
     assert oversized["oversized_schema_count"] == 1
     assert oversized["activated"] == []
-    assert "connector_catalogs" not in oversized
+    assert catalog_field not in oversized
     assert not active
     delivered = json.loads((await search.execute(tool_names=["small"])).content)
-    assert delivered["connector_catalogs"][0]["tool_count"] == 2
+    assert delivered[catalog_field][0]["tool_count"] == 2
     assert list(active) == ["mcp:seko/small"]
 
 
 @pytest.mark.asyncio
-async def test_catalog_budget_is_shared_across_connectors_and_reports_omissions():
+@pytest.mark.parametrize("with_connector", [False, True])
+async def test_catalog_budget_is_shared_across_groups_and_reports_omissions(with_connector):
+    catalog_field = "connector_catalogs" if with_connector else "server_catalogs"
     catalog = MCPToolCatalog()
     for connector in ["a", "b", "c"]:
         catalog.replace_server(connector, [
-            FakeMCPTool(f"{connector}_{index:03d}", connector, "x" * 160, connector_id=connector)
+            FakeMCPTool(f"{connector}_{index:03d}", connector, "x" * 160, connector_id=connector if with_connector else None)
             for index in range(100)
         ])
     search, _, active = make_search(catalog)
     payload = json.loads((await search.execute(tool_names=["a_000", "b_000", "c_000"])).content)
-    groups = payload["connector_catalogs"]
+    groups = payload[catalog_field]
     assert len(json.dumps(groups, ensure_ascii=False)) <= 8_000
     assert sum(len(group["tools"]) for group in groups) < 300
     assert sum(group["omitted_count"] for group in groups) > 0
-    assert payload["connector_catalogs_omitted_count"] > 0
+    assert payload[f"{catalog_field}_omitted_count"] > 0
     assert len(active) == 3
     # A group omitted for the shared budget is not permanently suppressed.
     later = json.loads((await search.execute(tool_names=["c_000"])).content)
-    assert later["connector_catalogs"][0]["connector_id"] == "c"
+    assert later[catalog_field][0]["connector_id" if with_connector else "server_name"] == "c"
     # An omitted sibling is still discoverable by its exact name.
     exact = json.loads((await search.execute(tool_names=["a_099"])).content)
     assert exact["activated"][0]["name"] == "a_099"
 
 
 @pytest.mark.asyncio
-async def test_catalog_loss_after_compaction_allows_resend_without_changing_tool_definitions():
+@pytest.mark.parametrize("with_connector", [False, True])
+async def test_catalog_loss_after_compaction_allows_resend_without_changing_tool_definitions(with_connector):
+    catalog_field = "connector_catalogs" if with_connector else "server_catalogs"
     catalog = MCPToolCatalog()
     catalog.replace_server("seko", [
-        FakeMCPTool(name, "seko", connector_id="seko") for name in ["generate", "status"]
+        FakeMCPTool(name, "seko", connector_id="seko" if with_connector else None) for name in ["generate", "status"]
     ])
     search, manager, _ = make_search(catalog)
     engine = DefaultToolEngine(tools={"tool_search": search, "call_tool": CallTool()}, tool_exposure=manager)
@@ -198,28 +320,30 @@ async def test_catalog_loss_after_compaction_allows_resend_without_changing_tool
     manager.record_search_result("search-1", result.content)
     manager.acknowledge_search_results([message])
     repeat = json.loads((await search.execute(tool_names=["generate"])).content)
-    assert "connector_catalogs" not in repeat
+    assert catalog_field not in repeat
 
     compacted = manager.restore_compacted_descriptions([Message(role="user", content="Continue")])
-    assert all("connector_catalogs" not in (message.content or "") for message in compacted)
+    assert all(catalog_field not in (message.content or "") for message in compacted)
     manager.acknowledge_search_results(compacted)
     recovered = json.loads((await search.execute(tool_names=["generate"])).content)
-    assert recovered["connector_catalogs"][0]["tool_count"] == 2
+    assert recovered[catalog_field][0]["tool_count"] == 2
     assert recovered["activated"][0]["tool_ref"] == json.loads(result.content)["activated"][0]["tool_ref"]
     assert [definition.to_schema() for definition in engine.prepare_tools().definitions] == before
     assert {tool.name for tool, _, _ in manager._stable_refs.values()} == {"generate"}
 
 
 @pytest.mark.asyncio
-async def test_undelivered_catalog_does_not_suppress_later_search():
+@pytest.mark.parametrize("with_connector", [False, True])
+async def test_undelivered_catalog_does_not_suppress_later_search(with_connector):
+    catalog_field = "connector_catalogs" if with_connector else "server_catalogs"
     catalog = MCPToolCatalog()
-    catalog.replace_server("seko", [FakeMCPTool("generate", "seko", connector_id="seko")])
+    catalog.replace_server("seko", [FakeMCPTool("generate", "seko", connector_id="seko" if with_connector else None)])
     search, manager, _ = make_search(catalog)
     result = await search.execute(tool_names=["generate"])
     manager.record_search_result("search-1", result.content)
     payload = json.loads(result.content)
-    payload.pop("connector_catalogs")
+    payload.pop(catalog_field)
     manager.acknowledge_search_results([
         Message(role="tool", name="tool_search", tool_call_id="search-1", content=json.dumps(payload)),
     ])
-    assert "connector_catalogs" in json.loads((await search.execute(tool_names=["generate"])).content)
+    assert catalog_field in json.loads((await search.execute(tool_names=["generate"])).content)
