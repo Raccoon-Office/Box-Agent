@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from box_agent.llm.debug_logging import (
 from box_agent.llm.openai_client import OpenAIClient
 from box_agent.logger import AgentLogger
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
+from box_agent.session_trace import SessionTraceWriter
 from box_agent.tools.base import Tool, ToolResult
 
 
@@ -50,6 +52,39 @@ def test_sanitize_for_logging_redacts_auth_headers() -> None:
     assert sanitized["extra_headers"]["Authorization"] == "<redacted>"
     assert sanitized["extra_headers"]["x-api-key"] == "<redacted>"
     assert sanitized["extra_headers"]["X-Trace"] == "keep"
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("Authorization", 'Digest username="example", realm="test", response="fixture-value"'),
+    ("Proxy-Authorization", "AWS4-HMAC-SHA256 Credential=fixture-value, SignedHeaders=host;date, Signature=fixture-value"),
+    ("Authorization", "Token fixture-value"),
+])
+@pytest.mark.parametrize("prefix", ["> ", "[INFO] "])
+def test_trace_preserves_http_headers_after_a_multiword_authorization_value(tmp_path, name, value, prefix):
+    writer = SessionTraceWriter(session_id="headers", acp_session_id="", enabled=True, trace_dir=tmp_path)
+    content = f"HTTP diagnostic\r\n{prefix}{name}: {value}\r\n> X-Request-ID: req-3\r\nPermission denied"
+    writer.write("tool.response", data={"content": content})
+    recorded = json.loads(writer.file_path.read_text())["data"]["content"]
+    assert recorded == content.replace(value, "<redacted>")
+    assert "fixture-value" in content
+
+
+@pytest.mark.parametrize(("flag", "separate"), [
+    ("-H", True), ("-H", False), ("--header", True), ("--header=", False), ("--proxy-header", True),
+])
+def test_trace_filters_only_the_authentication_value_in_curl_header_arguments(tmp_path, flag, separate):
+    writer = SessionTraceWriter(session_id="curl", acp_session_id="", enabled=True, trace_dir=tmp_path)
+    value = 'Digest username="example", response="fixture-value"'
+    header = f"Proxy-Authorization: {value}"
+    following = ["-H", "X-Request-ID: req-3", "https://example.invalid/path"]
+    argv = ["curl", *([flag, header] if separate else [flag + header]), *following]
+    command = f"curl {flag}{' ' if separate else ''}'{header}' -H '{following[1]}' {following[2]}"
+    arguments = {"command": command, "argv": argv}
+    writer.write("tool.request", data={"arguments": arguments})
+    recorded = json.loads(writer.file_path.read_text())["data"]["arguments"]
+    assert recorded["command"] == command.replace(value, "<redacted>")
+    assert recorded["argv"] == [arg.replace(value, "<redacted>") for arg in argv]
+    assert value in arguments["command"] and any(value in arg for arg in arguments["argv"])
 
 
 @pytest.mark.parametrize(

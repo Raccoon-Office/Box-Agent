@@ -6,6 +6,7 @@ import logging
 import sys
 
 import pytest
+import yaml
 
 from box_agent.cli import _config_display_value
 from box_agent.payload_privacy import DiagnosticFormatter, redact_diagnostic_text, redact_diagnostic_value
@@ -277,6 +278,118 @@ def test_nonstring_credential_in_serialized_tool_arguments():
     text = '{ "token":123,  "authorization": {"id":42}, "state": true }'
     filtered = redact_diagnostic_text(text)
     assert filtered == '{ "token":"<redacted>",  "authorization": "<redacted>", "state": true }'
+
+
+@pytest.mark.parametrize("prefix,secret,suffix", [
+    ("Config read failed\n", "password: |\n  YAML-CANARY-A\n\n  YAML-CANARY-B\n", "status: retry\n"),
+    ("Config read failed\n", "apiKey: >- # folded key\n  YAML-CANARY-A\n  YAML-CANARY-B\n", "status: retry\n"),
+    ("service:\n  status: waiting\n", '  "密码": |2+\n    YAML-CANARY-A\n    YAML-CANARY-B\n',
+     "  attempts: 2\nnext: normal\n"),
+    ("Config read failed\n", "token:\n  YAML-CANARY-A\n  YAML-CANARY-B\n", "status: retry\n"),
+    ("Config read failed\r\n", "api_key: |-\r\n  YAML-CANARY-A\r\n  YAML-CANARY-B\r\n", "status: retry\r\n"),
+    ("Config read failed\n", "password: 'YAML-CANARY-A''s YAML-CANARY-B'\n", "status: retry\n"),
+    ("service:\n", "  password: YAML-CANARY-A\n    YAML-CANARY-B\n", "  attempts: 2\n"),
+    ("service:\n", "  credentials: # supplied by client\n    account: YAML-CANARY-A\n"
+     "    devices:\n      - value: YAML-CANARY-B\n", "  attempts: 2\n"),
+    ("service:\n", "  credentials:\n  - YAML-CANARY-A\n  - YAML-CANARY-B\n", "  attempts: 2\n"),
+    ("jobs:\n", "  - credentials:\n      - name: YAML-CANARY-A\n        value: YAML-CANARY-B\n",
+     "    status: retry\n  - name: ordinary job\n"),
+], ids=["literal", "folded", "explicit-indent", "next-line-scalar", "windows-lines", "single-quote-escape", "plain-continuation",
+        "nested-mapping", "indentless-sequence", "sequence-item"])
+def test_default_trace_masks_yaml_credentials_and_keeps_following_diagnostics(
+    tmp_path, monkeypatch, prefix, secret, suffix,
+):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    text = prefix + secret + suffix
+    content = {"error": text, "model_content": json.dumps({"stderr": text, "exit_code": 7})}
+    writer = SessionTraceWriter(session_id="yaml", acp_session_id="", trace_dir=tmp_path)
+    writer.write("tool.response", data=content)
+    writer.write("llm.request", data={"messages": [{"role": "tool", "content": text}]})
+
+    output = writer.file_path.read_text()
+    assert "YAML-CANARY" not in output
+    result, request = (json.loads(line)["data"] for line in output.splitlines())
+    cleaned = result["error"]
+    assert cleaned.startswith(prefix) and cleaned.endswith(suffix) and "<redacted>" in cleaned
+    assert json.loads(result["model_content"]) == {"stderr": cleaned, "exit_code": 7}
+    assert request["messages"][0]["content"] == cleaned
+    assert content["error"] == text and json.loads(content["model_content"])["stderr"] == text
+
+
+def test_formatter_with_timestamp_masks_http_fields_before_prefixing():
+    record = logging.LogRecord("wire", logging.INFO, "", 0, "Authorization: %s", ("Token fixture-secret",), None)
+    rendered = DiagnosticFormatter("%(asctime)s %(levelname)s %(message)s").format(record)
+    assert rendered.endswith("INFO Authorization: <redacted>")
+    assert record.getMessage() == "Authorization: Token fixture-secret"
+
+
+def test_default_trace_preserves_ordinary_yaml_multiline_text(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    text = "report: |\n  Build failed.\n\n  Retry on Friday.\nchecks:\n  - outcome: pending\n  - outcome: done\n"
+    writer = SessionTraceWriter(session_id="yaml-body", acp_session_id="", trace_dir=tmp_path)
+    writer.write("turn.input", data={"content": text})
+    assert json.loads(writer.file_path.read_text())["data"]["content"] == text
+
+
+@pytest.mark.parametrize("value", ["first CANARY-FLOW", "'first''CANARY-FLOW'"])
+def test_trace_masks_entire_yaml_flow_value_and_preserves_adjacent_fields(tmp_path, value):
+    text = f"settings: {{password: {value}, mode: retry}}\nstatus: waiting\n"
+    message = {"role": "tool", "content": text}
+    writer = SessionTraceWriter(session_id="flow", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    writer.write("llm.request", data={"messages": [message]})
+    recorded = json.loads(writer.file_path.read_text())["data"]["messages"][0]["content"]
+    assert yaml.safe_load(recorded) == {"settings": {"password": "<redacted>", "mode": "retry"}, "status": "waiting"}
+    assert "CANARY-FLOW" not in recorded and message["content"] == text
+
+
+def test_trace_preserves_yaml_tool_schema_constraints_while_masking_credential_default(tmp_path):
+    definition = {"type": "string", "description": "Client authentication", "minLength": 8, "default": "CANARY-SCHEMA"}
+    schema = {"name": "lookup", "inputSchema": {
+        "type": "object", "properties": {"password": definition}, "required": ["password"],
+    }}
+    text = yaml.safe_dump(schema, sort_keys=False)
+    writer = SessionTraceWriter(session_id="schema", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    writer.write("tool.response", data={"content": text})
+    recorded = json.loads(writer.file_path.read_text())["data"]["content"]
+    expected = yaml.safe_load(text)
+    expected["inputSchema"]["properties"]["password"]["default"] = "<redacted>"
+    assert yaml.safe_load(recorded) == expected
+    assert "CANARY-SCHEMA" not in recorded and "CANARY-SCHEMA" in text
+
+
+def test_trace_keeps_indented_traceback_after_an_http_authorization_header(tmp_path):
+    header_value = 'Digest username="demo", response="CANARY-HTTP"'
+    text = f'HTTP parse failed\nAuthorization: {header_value}\n  File "client.py", line 5\nHTTP 401'
+    writer = SessionTraceWriter(session_id="http", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    writer.write("tool.response", data={"error": text})
+    recorded = json.loads(writer.file_path.read_text())["data"]["error"]
+    assert recorded == text.replace(header_value, "<redacted>")
+    assert redact_diagnostic_text(recorded) == recorded
+
+
+@pytest.mark.parametrize("quote", ['"""', "'''"])
+def test_default_trace_masks_toml_multiline_credentials_only(tmp_path, monkeypatch, quote):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    prefix = "[service]\nname = 'build'\n"
+    suffix = "\n[retries]\nmax_attempts = 2\n"
+    text = prefix + "password = " + quote + "\nTOML-CANARY-A\nTOML-CANARY-B" + quote + suffix
+    writer = SessionTraceWriter(session_id="toml", acp_session_id="", trace_dir=tmp_path)
+    writer.write("tool.response", data={"content": text})
+    logged = json.loads(writer.file_path.read_text())["data"]["content"]
+    assert "TOML-CANARY" not in logged and "<redacted>" in logged
+    assert logged.startswith(prefix) and logged.endswith(suffix)
+
+
+def test_default_trace_masks_curl_user_after_shell_line_continuation(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    prefix = "Previous response: https://first.example.test/status\ncurl --user "
+    suffix = " https://second.example.test/status\nConnection closed normally.\n"
+    command = prefix + "\\\n  fixture-account:SHELL-CANARY" + suffix
+    writer = SessionTraceWriter(session_id="shell-continuation", acp_session_id="", trace_dir=tmp_path)
+    writer.write("tool.request", data={"arguments": {"command": command}})
+    logged = json.loads(writer.file_path.read_text())["data"]["arguments"]["command"]
+    assert "fixture-account" not in logged and "SHELL-CANARY" not in logged
+    assert "<redacted>" in logged and logged.startswith(prefix) and logged.endswith(suffix)
 
 
 @pytest.mark.parametrize("field", ['"credentials"', '"密码"', r'"\u5bc6\u7801"', r'"creden\u0074ials"'])
