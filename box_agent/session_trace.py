@@ -291,8 +291,19 @@ class SessionTraceWriter:
         self.session_id = session_id.strip() or acp_session_id.strip() or "unknown-session"
         self.acp_session_id = acp_session_id.strip()
         self.enabled = session_trace_enabled() if enabled is None else enabled
-        self.trace_dir = Path(trace_dir) if trace_dir is not None else default_session_trace_dir()
-        self.file_path = self.trace_dir / safe_session_trace_name(self.session_id)
+        self.trace_dir: Path | None = None
+        self.file_path: Path | None = None
+        if not self.enabled:
+            return
+        try:
+            self.trace_dir = (
+                state_path("log/sessions", trace_dir)
+                if trace_dir is not None else default_session_trace_dir()
+            )
+            self.file_path = self.trace_dir / safe_session_trace_name(self.session_id)
+        except Exception as error:
+            self.enabled = False
+            logger.warning("session trace disabled: diagnostic directory unavailable: %s", error)
 
     def write(
         self,
@@ -306,7 +317,7 @@ class SessionTraceWriter:
     ) -> None:
         """Append one trace record; never raise into the caller."""
 
-        if not self.enabled:
+        if not self.enabled or self.trace_dir is None or self.file_path is None:
             return
         try:
             from .payload_privacy import private_payloads, private_tool_diagnostics

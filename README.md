@@ -399,7 +399,11 @@ CLI traces include input, LLM/tool activity, final output, stop reason and turn
 duration; no test-harness writer is required. Startup probes and idle CLI commands
 are outside the turn trace. Set `BOX_AGENT_SESSION_TRACE_DIR` to override the
 directory, or `BOX_AGENT_SESSION_TRACE_ENABLED=0` to disable tracing. CLI trace
-initialization or write failures do not fail the task. These files contain sensitive task data; the same
+initialization or write failures do not fail the task. ACP follows the same best-effort
+policy: if a trace directory cannot be resolved safely during initialization, that
+session's diagnostic writer is disabled with a warning without blocking the conversation. Explicit profiles continue
+to reject trace paths that resolve outside `BOX_AGENT_HOME`; no files or directory
+links are moved or repaired automatically. These files contain sensitive task data; the same
 retention policy below applies to both entrypoints.
 
 Choose **Compare sources** to compare equivalent runs from any number of sources. The selected root uses source directories directly, without an extra data-directory level:

@@ -2304,6 +2304,7 @@ class BoxACPAgent:
 
         # Resolve the module-level factory at session creation time, matching
         # the historical direct ``Agent(...)`` call and its test hook.
+        state = None
         try:
             state = await SessionState.open(
                 config=self._config,
@@ -2372,132 +2373,145 @@ class BoxACPAgent:
                 continuation_applied=session_log_restored,
                 mcp_fallback_tools=dict(self._base_mcp_fallback_tools),
             )
-        except BaseException:
+            agent = state.agent
+            session_skill_loader = state.skill_loader
+            tools = list(agent.tools.values())
+            if runtime_environment_tool is not None:
+                from box_agent.tools.jupyter_tool import JupyterSandboxTool
+
+                def _apply_runtime_environment(values: dict[str, str]) -> dict[str, str] | None:
+                    shell = None
+                    for runtime_tool in agent.tools.values():
+                        if isinstance(runtime_tool, (BashTool, JupyterSandboxTool)):
+                            runtime_tool.update_runtime_env(values)
+                        if isinstance(runtime_tool, BashTool):
+                            shell = {
+                                "name": runtime_tool.shell_name,
+                                "instruction": (
+                                    f"Subsequent bash tool calls must use {runtime_tool.shell_name} syntax. "
+                                    "This is the current shell after environment refresh; "
+                                    "do not reuse commands written for a different shell."
+                                ),
+                            }
+                    return shell
+
+                runtime_environment_tool.apply_environment = _apply_runtime_environment
+                runtime_environment_tool.workspace_dir = workspace
+                for runtime_tool in tools:
+                    if isinstance(runtime_tool, JupyterSandboxTool):
+                        runtime_environment_tool.runtime_env.update(runtime_tool.runtime_env)
+                        runtime_tool.runtime_preparer = runtime_environment_tool.ensure_python
+            for tool in tools:
+                # Keep Bash ownership across a rebind while other process-backed
+                # tools (notably Python kernels) remain handle-scoped.
+                if isinstance(tool, (BashTool, BashOutputTool, BashKillTool)):
+                    tool.process_owner_id = bash_process_owner_id
+                if isinstance(tool, SkillHubInstallTool):
+                    tool._skill_loader = session_skill_loader
+
+            if skillhub_search_tool is not None:
+                skillhub_search_tool.set_snapshot_provider(
+                    lambda: capability_snapshot(agent, session_skill_loader)
+                )
+
+            if initial_goal_request is not None:
+                goal_result = self._apply_goal_action(agent, initial_goal_request)
+                if "error" in goal_result:
+                    log.warn(
+                        "session/goal_init_error",
+                        session_id=session_id,
+                        message=str(goal_result["error"]),
+                    )
+                else:
+                    goal_payload = goal_result.get("goal") or {}
+                    log.info(
+                        "session/goal_init",
+                        session_id=session_id,
+                        status=goal_payload.get("status"),
+                    )
+
+            trace_writer = SessionTraceWriter(
+                session_id=upstream_session_id or session_id,
+                acp_session_id=session_id,
+            )
+            state.trace_writer = trace_writer
+            async def prepare_images(paths, text):
+                return await self._run_image_attachment_tool(
+                    state=state, session_id=session_id, turn_id=state.current_turn_id,
+                    user_text=text, prompt_meta={"image_attachment_paths": paths},
+                )
+            state.agent._input_image_preparer = prepare_images
+            trace_writer.write(
+                "session.start",
+                data={
+                    "workspace": str(workspace),
+                    "session_mode": session_mode,
+                    "execution_profile": execution_profile,
+                    "title": upstream_title,
+                    "utility": utility,
+                    "context_window": session_context_window,
+                    "max_output_tokens": session_max_output_tokens,
+                    "context_token_limit": session_token_limit,
+                },
+            )
+
+            for event, data in diagnostic_events:
+                trace_writer.write(event, data=data)
+            diagnostic_events.clear()
+
+            tool_names = [t.name for t in tools]
+            log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
+
+            kwargs: dict[str, Any] = {"session_id": session_id}
+            response_meta: dict[str, Any] = {}
+            response_meta["capabilities"] = {
+                "session_continuation_versions": [1],
+                "history_revision_versions": [1],
+                "managed_mcp_config_versions": [1],
+            }
+            response_meta["history_revision_id"] = session_log.current_revision() if session_log else "initial"
+            if skillhub_search_enabled:
+                response_meta["capabilities"]["skillhub_search_versions"] = [
+                    SKILLHUB_SEARCH_CAPABILITY_VERSION
+                ]
+            if skillhub_install_enabled:
+                response_meta["capabilities"]["skillhub_install_versions"] = [
+                    SKILLHUB_INSTALL_CAPABILITY_VERSION
+                ]
+            if runtime_environment_tool is not None:
+                response_meta["capabilities"]["runtime_environment_versions"] = [1]
+            skills = (
+                session_skill_loader.list_skills_metadata(include_connector=False)
+                if session_skill_loader is not None
+                else self._skills_meta()
+            )
+            if skills is not None:
+                response_meta["skills"] = skills
+            if expert_context is not None:
+                response_meta["expert_context"] = expert_context.to_metadata()
+            if agent.goal is not None:
+                response_meta["goal"] = _goal_payload(agent)
+            if response_meta:
+                kwargs["field_meta"] = response_meta
+            response = NewSessionResponse(**kwargs)
+        except BaseException as error:
+            from box_agent.session_assembly import attach_cleanup_error
+
+            # Until publication, this initializer owns both the managed session
+            # and the log lock, including failures in diagnostics/response setup.
+            if state is not None:
+                try:
+                    await state.aclose()
+                except BaseException as cleanup_error:
+                    attach_cleanup_error(error, cleanup_error)
             if session_log is not None:
-                session_log.close()
+                try:
+                    session_log.close()
+                except BaseException as cleanup_error:
+                    attach_cleanup_error(error, cleanup_error)
             raise
-        agent = state.agent
-        session_skill_loader = state.skill_loader
-        tools = list(agent.tools.values())
-        if runtime_environment_tool is not None:
-            from box_agent.tools.jupyter_tool import JupyterSandboxTool
-
-            def _apply_runtime_environment(values: dict[str, str]) -> dict[str, str] | None:
-                shell = None
-                for runtime_tool in agent.tools.values():
-                    if isinstance(runtime_tool, (BashTool, JupyterSandboxTool)):
-                        runtime_tool.update_runtime_env(values)
-                    if isinstance(runtime_tool, BashTool):
-                        shell = {
-                            "name": runtime_tool.shell_name,
-                            "instruction": (
-                                f"Subsequent bash tool calls must use {runtime_tool.shell_name} syntax. "
-                                "This is the current shell after environment refresh; "
-                                "do not reuse commands written for a different shell."
-                            ),
-                        }
-                return shell
-
-            runtime_environment_tool.apply_environment = _apply_runtime_environment
-            runtime_environment_tool.workspace_dir = workspace
-            for runtime_tool in tools:
-                if isinstance(runtime_tool, JupyterSandboxTool):
-                    runtime_environment_tool.runtime_env.update(runtime_tool.runtime_env)
-                    runtime_tool.runtime_preparer = runtime_environment_tool.ensure_python
-        for tool in tools:
-            # Keep Bash ownership across a rebind while other process-backed
-            # tools (notably Python kernels) remain handle-scoped.
-            if isinstance(tool, (BashTool, BashOutputTool, BashKillTool)):
-                tool.process_owner_id = bash_process_owner_id
-            if isinstance(tool, SkillHubInstallTool):
-                tool._skill_loader = session_skill_loader
-
-        if skillhub_search_tool is not None:
-            skillhub_search_tool.set_snapshot_provider(
-                lambda: capability_snapshot(agent, session_skill_loader)
-            )
-
-        if initial_goal_request is not None:
-            goal_result = self._apply_goal_action(agent, initial_goal_request)
-            if "error" in goal_result:
-                log.warn(
-                    "session/goal_init_error",
-                    session_id=session_id,
-                    message=str(goal_result["error"]),
-                )
-            else:
-                goal_payload = goal_result.get("goal") or {}
-                log.info(
-                    "session/goal_init",
-                    session_id=session_id,
-                    status=goal_payload.get("status"),
-                )
-
-        trace_writer = SessionTraceWriter(
-            session_id=upstream_session_id or session_id,
-            acp_session_id=session_id,
-        )
-        state.trace_writer = trace_writer
-        async def prepare_images(paths, text):
-            return await self._run_image_attachment_tool(
-                state=state, session_id=session_id, turn_id=state.current_turn_id,
-                user_text=text, prompt_meta={"image_attachment_paths": paths},
-            )
-        state.agent._input_image_preparer = prepare_images
         self._sessions[session_id] = state
-        trace_writer.write(
-            "session.start",
-            data={
-                "workspace": str(workspace),
-                "session_mode": session_mode,
-                "execution_profile": execution_profile,
-                "title": upstream_title,
-                "utility": utility,
-                "context_window": session_context_window,
-                "max_output_tokens": session_max_output_tokens,
-                "context_token_limit": session_token_limit,
-            },
-        )
-
-        for event, data in diagnostic_events:
-            trace_writer.write(event, data=data)
-        diagnostic_events.clear()
-
-        tool_names = [t.name for t in tools]
-        log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
-
-        kwargs: dict[str, Any] = {"session_id": session_id}
-        response_meta: dict[str, Any] = {}
-        response_meta["capabilities"] = {
-            "session_continuation_versions": [1],
-            "history_revision_versions": [1],
-            "managed_mcp_config_versions": [1],
-        }
-        response_meta["history_revision_id"] = session_log.current_revision() if session_log else "initial"
-        if skillhub_search_enabled:
-            response_meta["capabilities"]["skillhub_search_versions"] = [
-                SKILLHUB_SEARCH_CAPABILITY_VERSION
-            ]
-        if skillhub_install_enabled:
-            response_meta["capabilities"]["skillhub_install_versions"] = [
-                SKILLHUB_INSTALL_CAPABILITY_VERSION
-            ]
-        if runtime_environment_tool is not None:
-            response_meta["capabilities"]["runtime_environment_versions"] = [1]
-        skills = (
-            session_skill_loader.list_skills_metadata(include_connector=False)
-            if session_skill_loader is not None
-            else self._skills_meta()
-        )
-        if skills is not None:
-            response_meta["skills"] = skills
-        if expert_context is not None:
-            response_meta["expert_context"] = expert_context.to_metadata()
-        if agent.goal is not None:
-            response_meta["goal"] = _goal_payload(agent)
-        if response_meta:
-            kwargs["field_meta"] = response_meta
-        return NewSessionResponse(**kwargs)
+        return response
 
     async def _restore_session(
         self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,

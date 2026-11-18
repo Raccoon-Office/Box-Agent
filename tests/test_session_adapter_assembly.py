@@ -387,6 +387,129 @@ async def test_acp_finish_failure_releases_unpublished_session(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure", ["trace", "cancelled", "response"])
+async def test_acp_late_initialization_failure_releases_resources_and_allows_retry(
+    tmp_path, monkeypatch, existing, failure,
+):
+    import asyncio
+    from box_agent.session_log import SessionLog
+
+    profile = tmp_path / "profile"
+    workspace = profile / "workspace"
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(workspace), enable_memory=False, max_steps=1),
+        tools=ToolsConfig(enable_mcp=False, enable_skills=False, enable_sub_agent=False),
+    )
+    closed = []
+    original_tools = assembly.prepare_tools
+
+    async def tools(resources):
+        await original_tools(resources)
+        resources.cleanup.callback(closed.append, resources.context.session_key)
+
+    monkeypatch.setattr(assembly, "prepare_tools", tools)
+    adapter = acp.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = {"cwd": str(workspace), "session_id": "retry-late-initialization"}
+    try:
+        if existing:
+            session = await adapter.new_session(**request)
+            await adapter.prompt(session.session_id, [{"type": "text", "text": "kept history"}])
+
+        with monkeypatch.context() as failing:
+            expected_error = asyncio.CancelledError if failure == "cancelled" else ValueError
+            expected_message = "late initialization failed"
+
+            def fail(*args, **kwargs):
+                raise expected_error(expected_message)
+
+            failing.setattr(acp, "NewSessionResponse" if failure == "response" else "SessionTraceWriter", fail)
+            with pytest.raises(expected_error, match=expected_message):
+                await adapter.new_session(**request)
+
+        assert len(closed) == 1 + existing
+        assert adapter._sessions == {}
+        assert adapter._plugin_runtime._sessions == {}
+        assert adapter._session_bindings_in_progress == {}
+        restored = SessionLog.open(profile / "sessions", session_id=request["session_id"], cwd=workspace)
+        try:
+            if existing:
+                assert any(message.content == "kept history" for message in restored.replay().messages)
+        finally:
+            restored.close()
+
+        session = await adapter.new_session(**request)
+        state = adapter._sessions[session.session_id]
+        if existing:
+            assert any(message.content == "kept history" for message in state.agent.messages)
+        result = await adapter.prompt(session.session_id, [{"type": "text", "text": "retry succeeded"}])
+        assert result.stop_reason == "end_turn"
+    finally:
+        # Also release leaked locks when running the regression against the baseline.
+        logs = [session.owner.agent.session_log for session in adapter._plugin_runtime._sessions.values()
+                if session.owner is not None and session.owner.agent.session_log is not None]
+        await adapter.aclose()
+        for session_log in logs:
+            session_log.close()
+
+
+@pytest.mark.asyncio
+async def test_acp_initialization_error_keeps_primary_error_and_unlocks_when_cleanup_fails(
+    tmp_path, monkeypatch,
+):
+    from box_agent.plugins.host import PluginCleanupError
+    from box_agent.session_log import SessionLog
+    from box_agent.user_paths import state_path
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False),
+        tools=ToolsConfig(enable_mcp=False, enable_skills=False, enable_sub_agent=False),
+    )
+    original_tools = assembly.prepare_tools
+    primary_error = ValueError("trace initialization failed")
+    cleanup_error = RuntimeError("resource cleanup failed")
+    closed = []
+
+    def close():
+        closed.append(True)
+        if len(closed) == 1:
+            raise cleanup_error
+
+    async def tools(resources):
+        await original_tools(resources)
+        resources.cleanup.callback(close)
+
+    def fail_trace(**kwargs):
+        raise primary_error
+
+    monkeypatch.setattr(assembly, "prepare_tools", tools)
+    adapter = acp.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = {"cwd": str(tmp_path), "session_id": "cleanup-failure"}
+    try:
+        with monkeypatch.context() as failing:
+            failing.setattr(acp, "SessionTraceWriter", fail_trace)
+            with pytest.raises(ValueError, match="trace initialization failed") as caught:
+                await adapter.new_session(**request)
+        assert caught.value is primary_error
+        assert isinstance(primary_error.__cause__, PluginCleanupError)
+        assert primary_error.__cause__.errors == (cleanup_error,)
+        assert closed == [True]
+        assert adapter._sessions == {}
+        restored = SessionLog.open(state_path("sessions"), session_id=request["session_id"], cwd=tmp_path)
+        restored.close()
+        await adapter.new_session(**request)
+    finally:
+        logs = [session.owner.agent.session_log for session in adapter._plugin_runtime._sessions.values()
+                if session.owner is not None and session.owner.agent.session_log is not None]
+        await adapter.aclose()
+        for session_log in logs:
+            session_log.close()
+
+
+@pytest.mark.asyncio
 async def test_owned_client_cleanup_preserves_primary_error_without_python311_api(monkeypatch):
     import sys
 
