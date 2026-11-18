@@ -42,9 +42,12 @@ def resolve_builtin_skills_dir(config: Config) -> Path:
     bundled = bundled_resource_dir("skills", package_dir=package).resolve()
     if skills_path.is_absolute():
         builtin = skills_path
-    elif skills_path == Path("skills") and bundled != package / "skills":
-        # Frozen runtimes keep bundled resources beside bin. Explicit host
-        # sources and legacy source/pip discovery retain their existing rules.
+    elif (
+        bundled != package / "skills"
+        and skills_path == Path("skills")
+        and "skills_dir" not in config.tools.model_fields_set
+    ):
+        # Only the implicit default bypasses the legacy relative lookup.
         builtin = bundled
     else:
         packaged_candidate = package / skills_path

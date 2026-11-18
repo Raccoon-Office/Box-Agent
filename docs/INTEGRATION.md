@@ -278,6 +278,8 @@ box-agent-runtime/
 `get_skill` 返回新资源目录中的路径，后续读取和脚本执行沿用这套路径；内置
 Skill 的写保护也覆盖新位置。显式的 `tools.skills_dir`、宿主
 `BOX_AGENT_BUILTIN_SKILLS_DIR` 和用户配置优先级保持原有语义。
+未设置 `BOX_AGENT_HOME` 时，显式相对 Skill 路径仍优先查找工作目录；
+未显式配置 `tools.skills_dir` 时，独立 runtime 默认使用随包 `skills/`。
 
 这里的 `config/` 是发行资源，不是用户状态目录。实际 `config.yaml`、认证、
 MCP 配置及会话状态仍使用原有用户目录或显式 `BOX_AGENT_HOME`；启用独立

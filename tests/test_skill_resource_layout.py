@@ -72,6 +72,33 @@ def test_default_release_skills_are_authoritative_even_when_missing(release):
     assert config.tools.skills_dir == "./skills"
 
 
+@pytest.mark.parametrize("profile_enabled", [False, True])
+def test_explicit_relative_skills_keep_legacy_working_directory_precedence(
+    release, monkeypatch, profile_enabled,
+):
+    runtime, _, profile = release
+    workspace = profile / "workspace"
+    cwd_skills = workspace / "skills"
+    cwd_skills.mkdir(parents=True)
+    bundled_skills = runtime / "skills"
+    bundled_skills.mkdir()
+    monkeypatch.chdir(workspace)
+    if not profile_enabled:
+        monkeypatch.delenv("BOX_AGENT_HOME")
+    config_dir = profile / "config"
+    config_dir.mkdir()
+    config_file = config_dir / "config.yaml"
+    config_file.write_text("api_key: synthetic-only\n", encoding="utf-8")
+    assert resolve_builtin_skills_dir(Config.from_yaml(config_file)) == bundled_skills
+
+    config_file.write_text('api_key: synthetic-only\ntools:\n  skills_dir: "./skills"\n', encoding="utf-8")
+    explicit_config = Config.from_yaml(config_file)
+    expected = bundled_skills if profile_enabled else cwd_skills
+    assert resolve_builtin_skills_dir(explicit_config) == expected
+    cwd_skills.rmdir()
+    assert resolve_builtin_skills_dir(explicit_config) == bundled_skills
+
+
 @pytest.mark.parametrize("host_override", [False, True])
 def test_explicit_release_skill_source_keeps_host_precedence(release, monkeypatch, host_override):
     runtime, _, profile = release
