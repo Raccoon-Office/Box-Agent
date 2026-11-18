@@ -541,6 +541,40 @@ def _assert_schema_contract(tools, profile):
                 "uses a child-isolated kernel with the parent's runtime and workspace. "
                 "`sandbox_status` reports only this child's kernels. ",
             )
+            entry["schema"]["description"] += (
+                " For long multi-item work, supply distinct `work_items` so the child can checkpoint "
+                "finished items. Reuse the completed results in a timeout handoff. "
+                "If it supplies `resume_from`, pass that value with `task: 'Continue pending items'` "
+                "to resume only the checkpoint's pending items, once."
+            )
+            entry["schema"]["input_schema"]["properties"].update({
+                "work_items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "description": (
+                        "Independently verifiable items for long multi-item work. Give each item a stable, distinct ID "
+                        "and a self-contained brief so the child can checkpoint it and only pending items can be resumed."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1, "maxLength": 64},
+                            "task": {"type": "string", "minLength": 1, "maxLength": 800},
+                        },
+                        "required": ["id", "task"],
+                        "additionalProperties": False,
+                    },
+                },
+                "resume_from": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "description": (
+                        "One-use reference from a sub-agent handoff. Pass this with a task placeholder; "
+                        "the original permissions and pending work items are restored by the runtime."
+                    ),
+                },
+            })
         if tool.name == "bash":
             anchor = (
                 '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'

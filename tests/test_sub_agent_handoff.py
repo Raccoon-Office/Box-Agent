@@ -36,6 +36,7 @@ async def test_child_deadline_preserves_committed_work_and_only_resumes_pending_
     now = 0.0
     stopped = False
     blocked = asyncio.Event()
+    sibling_finished = asyncio.Event()
     unblock = asyncio.Event()
     wrapping_up = asyncio.Event()
     resumed_items = []
@@ -45,6 +46,16 @@ async def test_child_deadline_preserves_committed_work_and_only_resumes_pending_
         {"id": "second", "task": "Produce the second file."},
     ]
     monkeypatch.setattr(scheduler, "perf_counter", lambda: now)
+    invoke_tool = scheduler.ToolEngine._invoke_with_optional_events
+
+    async def observe_completion(self, request, *args, **kwargs):
+        if request.call_id == "sibling":
+            task = asyncio.current_task()
+            assert task is not None
+            task.add_done_callback(lambda _: sibling_finished.set())
+        return await invoke_tool(self, request, *args, **kwargs)
+
+    monkeypatch.setattr(scheduler.ToolEngine, "_invoke_with_optional_events", observe_completion)
 
     class ChildLLM:
         async def generate_stream(self, messages, tools=None, **kwargs):
@@ -158,6 +169,7 @@ async def test_child_deadline_preserves_committed_work_and_only_resumes_pending_
     task = asyncio.create_task(collect())
     try:
         await asyncio.wait_for(blocked.wait(), timeout=5)
+        await asyncio.wait_for(sibling_finished.wait(), timeout=5)
         assert (tmp_path / "output" / "first.txt").read_text() == "first retained"
         now = 1500
         await asyncio.wait_for(wrapping_up.wait(), timeout=5)
