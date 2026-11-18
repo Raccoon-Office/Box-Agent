@@ -259,6 +259,37 @@ MCP 进程 cwd 与任务 cwd 可以不同。Agent 消费任务目录内的 `file
 
 ---
 
+## 独立运行包资源布局
+
+独立 runtime 把只读资源放在 `bin/` 同级，CLI 和 ACP 使用同一套定位规则：
+
+```text
+box-agent-runtime/
+├── manifest.json
+├── bin/
+│   ├── box-agent-acp[.exe]
+│   └── _internal/                 # Python 模块、库及 MCP 静态资源
+├── skills/                        # 随包内置 Skill、脚本、引用文件和 _manifest.json
+└── config/                        # 随包默认提示词、配置示例和 MCP 示例
+```
+
+定位以当前可执行文件所在的 `bin/` 为依据，不依赖进程工作目录或 `manifest.json`。
+打包运行时，可执行文件未位于 `bin/` 会报告布局错误，不回退查找包内旧资源。
+`get_skill` 返回新资源目录中的路径，后续读取和脚本执行沿用这套路径；内置
+Skill 的写保护也覆盖新位置。显式的 `tools.skills_dir`、宿主
+`BOX_AGENT_BUILTIN_SKILLS_DIR` 和用户配置优先级保持原有语义。
+未设置 `BOX_AGENT_HOME` 时，显式相对 Skill 路径仍优先查找工作目录；
+未显式配置 `tools.skills_dir` 时，独立 runtime 默认使用随包 `skills/`。
+
+这里的 `config/` 是发行资源，不是用户状态目录。实际 `config.yaml`、认证、
+MCP 配置及会话状态仍使用原有用户目录或显式 `BOX_AGENT_HOME`；启用独立
+profile 后，不会从运行包回退读取认证或 MCP 配置。
+
+源码和 pip 安装仍使用 `box_agent/skills`、`box_agent/config`，Python 包和
+`mcp_servers` 的位置不变。更新独立 runtime 必须一起交付 `bin/`、`skills/`
+和 `config/`；只替换旧二进制不足以启用新布局。Windows `--exe-only` 构建及
+安装也会同步更新这两份资源。该布局不承诺缩短宿主自行选择的运行包父目录。
+
 ## 安全约束（最低限度）
 
 - **`_meta.env_context.extras`** 不会进入 system prompt（仅入后端日志），但仍然在 ACP 入站记录中可见。**不要传 token / API key / 用户隐私字段。**

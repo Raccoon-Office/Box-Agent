@@ -1854,7 +1854,7 @@ def _ensure_user_mcp_config() -> Path:
     if target.exists():
         return target
 
-    example = Config.get_package_dir() / "config" / "mcp-example.json"
+    example = Config.get_bundled_config_dir() / "mcp-example.json"
     if example.exists():
         shutil.copy2(example, target)
     else:
@@ -1870,7 +1870,7 @@ def _enable_playwright_in_mcp(mcp_path: Path) -> None:
     servers = data.setdefault("mcpServers", {})
     entry = servers.get("playwright")
     if entry is None:
-        example_path = Config.get_package_dir() / "config" / "mcp-example.json"
+        example_path = Config.get_bundled_config_dir() / "mcp-example.json"
         example = json.loads(example_path.read_text(encoding="utf-8"))
         entry = example.get("mcpServers", {}).get("playwright")
         if entry is None:

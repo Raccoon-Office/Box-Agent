@@ -8416,6 +8416,18 @@ async def test_acp_prompt_and_bash_env_include_self_managed_node_runtime(tmp_pat
 @pytest.mark.asyncio
 async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
+    # Frozen mode needs the release resources beside its bin/ entry point.
+    runtime = tmp_path / "runtime"
+    executable = runtime / "bin" / ("box-agent-acp.exe" if os.name == "nt" else "box-agent-acp")
+    executable.parent.mkdir(parents=True)
+    executable.write_text("frozen entry point fixture", encoding="utf-8")
+    bundled_config = runtime / "config"
+    bundled_config.mkdir()
+    (bundled_config / "system_prompt.md").write_text(
+        (Config.get_package_dir() / "config" / "system_prompt.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (runtime / "skills").mkdir()
     node_root = tmp_path / "node-runtime"
     node_bin = node_root / "versions" / "node-v22-test-darwin-arm64" / "bin"
     node = node_bin / "node"
@@ -8439,8 +8451,8 @@ async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_pat
         encoding="utf-8",
     )
     monkeypatch.setattr("box_agent.tools.runtime.DEFAULT_NODE_RUNTIME_ROOT", node_root)
-    monkeypatch.setattr("box_agent.tools.runtime.sys.frozen", True, raising=False)
-    monkeypatch.setattr("box_agent.tools.setup.sys.frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
 
     config = Config(
         llm=LLMConfig(api_key="test-key"),
@@ -8454,6 +8466,7 @@ async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_pat
     )
     state = agent._sessions[session.sessionId]
 
+    assert Config.get_bundled_config_dir() == bundled_config.resolve()
     assert "box_agent" in state.agent.system_prompt
     assert "execute_code" in state.agent.system_prompt or "shell python" in state.agent.system_prompt
     assert state.agent.tools["bash"]._subprocess_env["BOX_AGENT_NODE"] == str(node)

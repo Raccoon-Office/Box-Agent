@@ -10,6 +10,8 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
+from .resource_paths import bundled_resource_dir
+
 _HTML_ARTIFACT_METADATA_LIMIT = 16 * 1024 * 1024
 _ROADMAP_LAYOUT_ID = "roadmap-swimlane-v1"
 _ROADMAP_GENERATOR_RE = re.compile(r"^Box Agent Roadmap Artifact v(\d+)$")
@@ -41,7 +43,10 @@ _ROADMAP_JSON_SCRIPT_IDS = frozenset(
 
 @lru_cache(maxsize=1)
 def _roadmap_spec_validator() -> Draft202012Validator:
-    references = Path(__file__).resolve().parent / "skills" / "roadmap" / "references"
+    references = (
+        bundled_resource_dir("skills", package_dir=Path(__file__).resolve().parent)
+        / "roadmap" / "references"
+    )
     draft_schema = json.loads(
         (references / "roadmap-draft.schema.json").read_text(encoding="utf-8")
     )
