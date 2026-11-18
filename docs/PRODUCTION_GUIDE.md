@@ -146,9 +146,9 @@ collection, and runtime-manifest helpers as the generic builder. This keeps the
 
 The Windows-specific `scripts/build_win_runtime.py` defaults to a slim ACP build;
 `--bundled-python-sandbox` produces the full Python/Node/PortableGit bundle.
-`--exe-only` updates only `bin/`, the manifest, and version: it does not install
-stable runtimes. Its selected profile must match the existing manifests in both
-the output directory and any `--install-to` target. Full-bundle incremental builds
+`--exe-only` updates `bin/`, `skills/`, `config/`, the manifest, and version while
+keeping the installed stable runtimes. Its selected profile must match the existing
+manifests in the output directory and any `--install-to` target. Full-bundle incremental builds
 still need `--bundled-python-sandbox`. A profile mismatch, missing manifest, or
 unknown profile is rejected before any build changes. To switch profiles, omit
 `--exe-only` and run a clean build, preferably in a separate output directory.

@@ -104,8 +104,8 @@ dispatch 与 `mcp_servers` 声明一致；不要再维护 Windows 独立副本�
 
 Windows 专用脚本 `scripts/build_win_runtime.py` 默认构建精简 ACP；
 `--bundled-python-sandbox` 构建内含 Python/Node/PortableGit 的完整包。
-`--exe-only` 只更新 `bin/`、manifest 和版本，不安装三件套，因此所选模式必须与
-输出目录及 `--install-to` 目标的已有 manifest 一致。完整包增量重建仍需加
+`--exe-only` 同步更新 `bin/`、`skills/`、`config/`、manifest 和版本，保留已安装的三件套。
+所选模式必须与输出目录及 `--install-to` 目标的已有 manifest 一致。完整包增量重建仍需加
 `--bundled-python-sandbox`。跨模式、清单缺失或模式无法确定时会在任何构建修改前
 报错；需要切换模式时去掉 `--exe-only`，执行一次完整构建，建议使用独立输出目录。
 

@@ -325,7 +325,7 @@ def _replace_exe_only_payload(runtime_dir: Path, target: Path) -> None:
             else:
                 shutil.copy2(source, staging / name)
         target.mkdir(parents=True, exist_ok=True)
-        moved, published = [], []
+        preserve_backup = True
         try:
             for name in names:
                 destination = target / name
@@ -333,27 +333,33 @@ def _replace_exe_only_payload(runtime_dir: Path, target: Path) -> None:
                     raise ValueError(f"Refusing to replace redirected runtime payload: {destination}")
                 if destination.exists():
                     destination.rename(backup / name)
-                    moved.append(name)
                 (staging / name).rename(destination)
-                published.append(name)
-        except Exception as publish_error:
+        except BaseException as publish_error:
             try:
-                for name in reversed(published):
+                # An interrupt can arrive after a rename completes but before
+                # Python resumes. The staging and backup paths record the result.
+                for name in reversed(names):
+                    if (staging / name).exists():
+                        continue
                     destination = target / name
                     if destination.is_dir():
                         _rmtree_with_retry(destination)
                     else:
                         destination.unlink()
-                for name in reversed(moved):
-                    (backup / name).rename(target / name)
-            except Exception as rollback_error:
-                preserve_backup = True
+                for name in reversed(names):
+                    previous = backup / name
+                    if previous.exists():
+                        previous.rename(target / name)
+            except BaseException as rollback_error:
                 raise RuntimeError(
                     f"Runtime payload publication failed ({publish_error!r}); "
                     f"rollback failed ({rollback_error!r}); "
                     f"old payload backup retained at {backup}"
                 ) from rollback_error
+            preserve_backup = False
             raise
+        else:
+            preserve_backup = False
     finally:
         if not preserve_backup:
             _rmtree_with_retry(folder)

@@ -139,13 +139,19 @@ def test_windows_install_rejects_missing_resources_before_touching_destination(t
     assert files(target) == before
 
 
-def test_windows_exe_only_replaces_bin_and_resources_together_and_keeps_stable_tools(tmp_path):
+@pytest.mark.parametrize("old_layout", ["internal", "external"])
+def test_windows_exe_only_replaces_bin_and_resources_together_and_keeps_stable_tools(tmp_path, old_layout):
     source = payload(tmp_path / "source", "new")
     target = payload(tmp_path / "target", "old")
     tool = target / "runtime/python/python.exe"
     tool.parent.mkdir(parents=True)
     tool.write_bytes(b"stable Python")
     (target / "skills/stale.md").write_text("old-only Skill")
+    if old_layout == "internal":
+        internal = target / "bin/_internal/box_agent"
+        internal.mkdir(parents=True)
+        for name in ("skills", "config"):
+            (target / name).rename(internal / name)
 
     build_win_runtime._install_to(source, target, True)
 
@@ -153,6 +159,7 @@ def test_windows_exe_only_replaces_bin_and_resources_together_and_keeps_stable_t
     assert (target / "skills/_manifest.json").read_text() == "new"
     assert (target / "config/config-example.yaml").read_text() == "new"
     assert not (target / "skills/stale.md").exists()
+    assert not (target / "bin/_internal/box_agent/skills").exists()
     assert json.loads((target / "manifest.json").read_text())["version"] == "new"
     assert tool.read_bytes() == b"stable Python"
     assert not list(tmp_path.glob(".box-agent-payload-*"))
@@ -172,6 +179,30 @@ def test_windows_exe_only_publish_failure_restores_old_bin_resources_and_version
     monkeypatch.setattr(Path, "rename", fail_config)
     with pytest.raises(OSError, match="publication failure"):
         build_win_runtime._replace_exe_only_payload(source, target)
+    assert files(target) == before
+    assert not list(tmp_path.glob(".box-agent-payload-*"))
+
+
+@pytest.mark.parametrize("interruption", ["after_backup", "before_publish", "after_publish"])
+def test_windows_exe_only_interruption_restores_previous_payload(tmp_path, monkeypatch, interruption):
+    source = payload(tmp_path / "source", "new")
+    target = payload(tmp_path / "target", "old")
+    before = files(target)
+    rename = Path.rename
+
+    def interrupt_config(self, destination):
+        if self == target / "config" and interruption == "after_backup":
+            rename(self, destination)
+            raise KeyboardInterrupt("interrupted after backing up config")
+        if self.name == "config" and self.parent.name == "new" and interruption != "after_backup":
+            if interruption == "after_publish":
+                rename(self, destination)
+            raise KeyboardInterrupt("interrupted while publishing config")
+        return rename(self, destination)
+
+    monkeypatch.setattr(Path, "rename", interrupt_config)
+    with pytest.raises(KeyboardInterrupt, match="interrupted"):
+        build_win_runtime._install_to(source, target, True)
     assert files(target) == before
     assert not list(tmp_path.glob(".box-agent-payload-*"))
 
@@ -202,7 +233,7 @@ def test_windows_exe_only_build_failure_keeps_the_published_payload(tmp_path, mo
     assert not list(runtime.parent.glob(".box-agent-build-*"))
 
 
-@pytest.mark.parametrize("rollback_failure", ["restore", "remove"])
+@pytest.mark.parametrize("rollback_failure", ["restore", "remove", "interrupt"])
 def test_windows_exe_only_incomplete_rollback_retains_old_backup_and_stable_tools(
     tmp_path, monkeypatch, rollback_failure,
 ):
@@ -219,8 +250,11 @@ def test_windows_exe_only_incomplete_rollback_retains_old_backup_and_stable_tool
     def fail_publication_or_restore(self, destination):
         if self.name == "config" and self.parent.name == "new":
             raise OSError("simulated config publication failure")
-        if rollback_failure == "restore" and self.name == "skills" and self.parent.name == "old":
-            raise PermissionError("simulated old Skills restore failure")
+        if self.name == "skills" and self.parent.name == "old":
+            if rollback_failure == "restore":
+                raise PermissionError("simulated old Skills restore failure")
+            if rollback_failure == "interrupt":
+                raise KeyboardInterrupt("interrupted while restoring old Skills")
         return rename(self, destination)
 
     def fail_rollback_removal(path, **kwargs):
@@ -238,7 +272,8 @@ def test_windows_exe_only_incomplete_rollback_retains_old_backup_and_stable_tool
     backup = backups[0]
     assert str(backup) in str(exc_info.value)
     assert "simulated config publication failure" in str(exc_info.value)
-    assert isinstance(exc_info.value.__cause__, PermissionError)
+    expected_error = KeyboardInterrupt if rollback_failure == "interrupt" else PermissionError
+    assert isinstance(exc_info.value.__cause__, expected_error)
     assert "publication failure" in str(exc_info.value.__cause__.__context__)
     assert (backup / "bin/box-agent-acp.exe").read_text() == "old"
     assert (backup / "skills/_manifest.json").read_text() == "old"
