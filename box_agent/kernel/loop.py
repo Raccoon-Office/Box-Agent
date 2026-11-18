@@ -1411,12 +1411,18 @@ async def _run_agent_loop_impl(
             is_tool_visible=browser_intent_policy.is_tool_visible,
         )
         stable_tool_context = bool(getattr(tool_exposure_manager, "stable_prefix", False))
+        bootstrap_descriptions = getattr(tool_exposure_manager, "pending_bootstrap_descriptions", None)
+        tool_context_added = False
 
         def append_tool_descriptions(history):
-            if stable_tool_context:
-                descriptions = tool_exposure_manager.pending_bootstrap_descriptions(visible_history=history)
+            nonlocal tool_context_added
+            if bootstrap_descriptions is not None:
+                descriptions = bootstrap_descriptions(
+                    visible_history=history, offered_tools=prepared_tools.targets.values(),
+                )
                 history.extend(Message(role="user", source="runtime", name="tool_descriptions",
                                        content=description) for description in descriptions)
+                tool_context_added |= bool(descriptions)
 
         append_tool_descriptions(messages)
         tool_list = list(prepared_tools.definitions)
@@ -1715,14 +1721,17 @@ async def _run_agent_loop_impl(
         # attempts must never publish their provisional projections.
         if materialized_skill_messages:
             messages.extend(materialized_skill_messages)
-        if (materialized_skill_messages or stable_tool_context) and session_log is not None and session_turn is not None:
+        if ((materialized_skill_messages or stable_tool_context or tool_context_added)
+                and session_log is not None and session_turn is not None):
             session_log.append_unlogged_messages(
                 session_log_messages(messages), turn=session_turn, step=step + 1,
             )
             session_log.flush()
 
+        acknowledge_search = getattr(tool_exposure_manager, "acknowledge_search_results", None)
+        if acknowledge_search is not None:
+            acknowledge_search(provider_request_messages)
         if stable_tool_context:
-            tool_exposure_manager.acknowledge_search_results(provider_request_messages)
             tool_exposure_manager.ack_bootstrap_descriptions(
                 message.content for message in provider_request_messages
                 if message.role == "user" and message.source == "runtime"

@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..tool_result_storage import DEFAULT_MAX_RESULT_SIZE_CHARS
 from .base import Tool, ToolResult, build_tool_name_index
 from .mcp_tool_catalog import MCPToolCatalog, MCPToolEntry, _normalize
 
@@ -20,12 +21,73 @@ TOOL_SEARCH_NAME = "tool_search"
 _DISCOVERY_ENTRY_BUDGET_CHARS = 48_000
 _CONNECTOR_CATALOG_BUDGET_CHARS = 8_000
 _CONNECTOR_PURPOSE_CHARS = 160
+_SERVER_INSTRUCTIONS_FIELD = "mcp_server_instructions"
+_SERVER_INSTRUCTIONS_BUDGET_CHARS = 4_096
 _ACTIVATION_COMPANIONS: dict[str, tuple[str, ...]] = {
     # Playwright navigation returns metadata before the page-body snapshot.
     # Exposing one without the other creates a runtime state the model cannot
     # complete once a workflow requires exact-page evidence.
     "managed_browser_navigate": ("managed_browser_snapshot",),
 }
+
+
+def _server_instructions_payload(
+    tools: Iterable[Tool],
+    seen: set[tuple[str, str]],
+    *,
+    max_chars: int,
+) -> dict[str, list[dict[str, str]]]:
+    """Render optional server-supplied hints for tools already offered to this request."""
+    notes: list[dict[str, str]] = []
+    remaining = min(max_chars, _SERVER_INSTRUCTIONS_BUDGET_CHARS) - len(
+        json.dumps({_SERVER_INSTRUCTIONS_FIELD: []})
+    )
+    if remaining <= 0:
+        return {}
+    emitted = set(seen)
+    for tool in tools:
+        instructions = getattr(tool, "mcp_server_instructions", "")
+        server_name = getattr(tool, "server_name", "")
+        if (not isinstance(instructions, str) or not instructions
+                or not isinstance(server_name, str) or not server_name
+                or (server_name, instructions) in emitted):
+            continue
+        note = {"server_name": server_name, "source": "mcp_server", "instructions": instructions}
+        size = len(json.dumps(note, ensure_ascii=False)) + (2 if notes else 0)
+        if size <= remaining:
+            notes.append(note)
+            emitted.add((server_name, instructions))
+            remaining -= size
+    return {_SERVER_INSTRUCTIONS_FIELD: notes} if notes else {}
+
+
+def _server_instruction_keys(content: str) -> set[tuple[str, str]]:
+    if _SERVER_INSTRUCTIONS_FIELD not in content:
+        return set()
+    try:
+        payload = json.loads(content)
+    except (ValueError, RecursionError):
+        return set()
+    notes = payload.get(_SERVER_INSTRUCTIONS_FIELD) if isinstance(payload, dict) else None
+    if not isinstance(notes, list):
+        return set()
+    return {
+        (note["server_name"], note["instructions"])
+        for note in notes
+        if isinstance(note, dict) and note.get("source") == "mcp_server"
+        and isinstance(note.get("server_name"), str) and isinstance(note.get("instructions"), str)
+    }
+
+
+def _visible_server_instruction_keys(messages: Iterable[Message]) -> set[tuple[str, str]]:
+    visible: set[tuple[str, str]] = set()
+    for message in messages:
+        if isinstance(message.content, str) and (
+            (message.role == "tool" and message.name == TOOL_SEARCH_NAME)
+            or (message.role == "user" and message.source == "runtime" and message.name == "tool_descriptions")
+        ):
+            visible.update(_server_instruction_keys(message.content))
+    return visible
 
 
 def _tool_call_description(tool_ref: str, parameters: dict) -> dict:
@@ -86,6 +148,7 @@ class ToolSearchTool(Tool):
         self._delivered_connector_catalogs: dict[
             str, tuple[tuple[tuple[str, int], ...], str]
         ] = {}
+        self._seen_server_instructions: set[tuple[str, str]] = set()
 
     def _entry_is_allowed(self, entry) -> bool:
         if entry.connector_id is None:
@@ -439,6 +502,7 @@ class ToolSearchTool(Tool):
                         hits.append(companion)
                         companion_entries.append(companion)
         activated_results = []
+        activated_mcp_tools = []
         conflicts = []
         protected_names = frozenset(build_tool_name_index(local_tools.values())) | (
             self._protected_names_provider()
@@ -492,6 +556,8 @@ class ToolSearchTool(Tool):
                 self._activated[entry.tool_id] = ActivatedMCPTool(
                     tool_id=entry.tool_id, model_name=entry.model_name, generation=entry.generation,
                 )
+                if getattr(entry.tool, "mcp_server_instructions", ""):
+                    activated_mcp_tools.append(entry.tool)
             activated_results.append(item)
         payload = {
             "success": not conflicts or bool(activated_results),
@@ -578,6 +644,19 @@ class ToolSearchTool(Tool):
                     error="MCP catalog is still loading; retry tool_search shortly.",
                 )
         self._add_connector_catalogs(payload, protected_names)
+        if activated_mcp_tools:
+            max_chars = _DISCOVERY_ENTRY_BUDGET_CHARS - entry_chars
+            if self._stable_manager is None:
+                # Keep optional guidance from turning an inline v1 result into a file reference.
+                max_chars = DEFAULT_MAX_RESULT_SIZE_CHARS - len(json.dumps(payload, ensure_ascii=False))
+            instructions = _server_instructions_payload(
+                activated_mcp_tools, self._seen_server_instructions, max_chars=max_chars,
+            )
+            payload.update(instructions)
+            self._seen_server_instructions.update(
+                (note["server_name"], note["instructions"])
+                for note in instructions.get(_SERVER_INSTRUCTIONS_FIELD, [])
+            )
         conflict_error = None
         if conflicts and not activated_results and not has_candidates:
             conflict_error = (
@@ -651,9 +730,12 @@ class MCPToolExposureManager:
                 scoped._direct_generations[name] = entry.generation if entry is not None and entry.tool is upstream else -1
         return scoped
 
+    def bind_search_tool(self, search_tool: ToolSearchTool) -> None:
+        self._search_tool = search_tool
+
     def enable_stable_prefix(self, search_tool: ToolSearchTool) -> None:
         self.stable_prefix = True
-        self._search_tool = search_tool
+        self.bind_search_tool(search_tool)
         search_tool._stable_manager = self
         # Do not persist only a truncated description while issuing its reference.
         search_tool.max_result_size_chars = float("inf")
@@ -728,6 +810,10 @@ class MCPToolExposureManager:
         Already-prepared request snapshots are immutable and gain no new refs.
         """
         messages = tuple(messages)
+        if self._search_tool is not None:
+            self._search_tool._seen_server_instructions = _visible_server_instruction_keys(messages)
+        if not self.stable_prefix:
+            return
         if self._search_tool is not None and self._search_tool._connector_discovery is not None:
             self._search_tool._connector_discovery.acknowledge(messages)
         visible_catalogs: set[str] = set()
@@ -765,9 +851,18 @@ class MCPToolExposureManager:
             return current is not None and current.tool is tool and self._entry_is_allowed(current)
         return self._live_candidates().get(name) is tool
 
-    def pending_bootstrap_descriptions(self, visible_history: Iterable[Message] | None = None) -> tuple[str, ...]:
+    def pending_bootstrap_descriptions(
+        self,
+        visible_history: Iterable[Message] | None = None,
+        *,
+        offered_tools: Iterable[Tool] = (),
+    ) -> tuple[str, ...]:
         from .local_tool_exposure import DISCOVERABLE_LOCAL_NAMES
 
+        if self._scope_parent is not None:
+            return ()
+        if visible_history is not None:
+            visible_history = tuple(visible_history)
         visible = (self._bootstrap_acked if visible_history is None else {
             message.content for message in visible_history
             if getattr(message, "role", None) == "user"
@@ -777,29 +872,47 @@ class MCPToolExposureManager:
         })
         if visible_history is not None:
             self._bootstrap_acked.intersection_update(visible)
+        seen_instructions = (
+            _visible_server_instruction_keys(visible_history) if visible_history is not None
+            else {key for text in visible for key in _server_instruction_keys(text)}
+        )
+        if not self.stable_prefix:
+            instructions = _server_instructions_payload(
+                (tool for tool in offered_tools
+                 if not self._deferred_mcp or getattr(tool, "mcp_always_load", False)),
+                seen_instructions, max_chars=_SERVER_INSTRUCTIONS_BUDGET_CHARS,
+            )
+            return (json.dumps(instructions, ensure_ascii=False),) if instructions else ()
+
         pending = []
         pending_size = 0
         omitted = 0
-        def queue(text: str) -> None:
+        description_budget = _DISCOVERY_ENTRY_BUDGET_CHARS - 1024
+
+        def queue(text: str) -> bool:
             nonlocal pending_size, omitted
             if text in visible:
-                return
-            if pending_size + len(text) > _DISCOVERY_ENTRY_BUDGET_CHARS - 1024:
+                return True
+            if pending_size + len(text) > description_budget:
                 omitted += 1
-                return
+                return False
             pending.append(text)
             pending_size += len(text)
+            return True
 
-        def render(name: str, description: str, tool: Tool, generation: int | None) -> str:
+        def queue_tool(name: str, description: str, tool: Tool, generation: int | None) -> bool:
             placeholder = "tool:v1:" + "x" * 32
             preview = {"name": name, "description": description,
                        **_tool_call_description(placeholder, tool.parameters)}
             if len(json.dumps(preview, ensure_ascii=False)) > _DISCOVERY_ENTRY_BUDGET_CHARS:
-                return json.dumps({"name": name[:256], "error": "Tool schema exceeds the discovery size limit and cannot be delivered."}, ensure_ascii=False)
-            return json.dumps({"name": name, "description": description,
-                               **self.describe(tool, generation)}, ensure_ascii=False)
-        if self._scope_parent is not None:
-            return ()
+                queue(json.dumps({
+                    "name": name[:256],
+                    "error": "Tool schema exceeds the discovery size limit and cannot be delivered.",
+                }, ensure_ascii=False))
+                return False
+            return queue(json.dumps({"name": name, "description": description,
+                                     **self.describe(tool, generation)}, ensure_ascii=False))
+
         if self._deferred_local_names_provider is not None:
             deferred = self._deferred_local_names_provider()
             for name, tool in self._stable_candidates.items():
@@ -807,13 +920,18 @@ class MCPToolExposureManager:
                         or getattr(tool, "mcp_tool_id", None) is not None
                         or not self.is_discoverable(tool) or not self.is_current_target(name, tool)):
                     continue
-                text = render(name, tool.description, tool, 0)
-                queue(text)
+                queue_tool(name, tool.description, tool, 0)
+        eager_tools = []
         for entry in self._catalog.snapshot():
             if not entry.always_load or entry.name_conflict or not self._entry_is_allowed(entry) or not self.is_discoverable(entry.tool):
                 continue
-            text = render(entry.model_name, entry.description, entry.tool, entry.generation)
-            queue(text)
+            if queue_tool(entry.model_name, entry.description, entry.tool, entry.generation):
+                eager_tools.append(entry.tool)
+        instructions = _server_instructions_payload(
+            eager_tools, seen_instructions, max_chars=description_budget - pending_size,
+        )
+        if instructions:
+            queue(json.dumps(instructions, ensure_ascii=False))
         if omitted:
             notice = json.dumps({"error": "Some tool descriptions were omitted due to the bootstrap size limit. Search exact tool_names to obtain individual schemas.", "omitted_count": omitted}, ensure_ascii=False)
             if notice not in visible:
