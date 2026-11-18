@@ -976,11 +976,23 @@ class MCPTool(Tool):
         self._mcp_server_identity = server_identity
         self.mcp_visibility = tool_visibility(self._mcp_descriptor)
         self.mcp_ui_resource_uri = ui_resource_uri(self._mcp_descriptor)
+        if self._remote_name in {"generate_image", "seko_generate_image"} and (
+            connector_id == "seko"
+            or (connector_id is None and server_name in {"seko", "seko-mcp", "seko-canvas"})
+        ):
+            # Selection guidance belongs to the model/catalog, not the original
+            # descriptor used by MCP Apps and history. Calls remain unchanged.
+            self._description = (
+                "SEKO image generation/editing: use only when the user explicitly selects SEKO "
+                "for this image task or its follow-up edits. Otherwise use the host's default image tool.\n\n"
+                + description
+            )
+            self._search_description = self._description
         if (self.mcp_ui_resource_uri and mcp_apps_host_enabled()
                 and session_lease is None and mcp_tool_allows(self, "model")):
             # Model guidance belongs to the offered description. Preserve the
             # server descriptor and all tool results used by the card/history.
-            self._description = f"{description}\n\n{MCP_APP_MODEL_GUIDANCE}"
+            self._description = f"{self._description}\n\n{MCP_APP_MODEL_GUIDANCE}"
 
     @property
     def name(self) -> str:
@@ -1049,7 +1061,7 @@ class MCPTool(Tool):
 
     @property
     def mcp_search_description(self) -> str:
-        """Keep capability search and short catalogs free of model workflow guidance."""
+        """Keep selection guidance in search/catalogs, excluding App workflow details."""
         return self.description if self._is_hosted_web_search else self._search_description
 
     @property

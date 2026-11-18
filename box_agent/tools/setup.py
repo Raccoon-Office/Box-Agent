@@ -286,8 +286,9 @@ def build_image_generation_prompt(
     if tools is not None and "generate_image" not in tools:
         return (
             "## Native Image Generation\n\n"
-            "- 当前会话没有生图工具，不能通过该工具生成图片。"
-            "用户要求生成位图时不要尝试调用生图工具；用户未禁止时可改用 HTML/SVG、PIL 等方式，"
+            "- 当前会话没有内置生图工具，不能通过该内置工具生成图片。"
+            "用户明确指定其他生图服务时，按统一生图选路规则使用当前可用的对应工具。"
+            "未指定其他服务时，用户未禁止则可改用 HTML/SVG、PIL 等方式，"
             "并说明这是替代方案；用户明确禁止这些回退时如实报告阻塞，不得假装已生成图片。"
         )
     configured = image_generation_service_configured(config, env)
@@ -303,7 +304,7 @@ def build_image_generation_prompt(
         "不由宿主 `env_context` 控制。\n"
         f"- 当前生图服务：{status}\n"
         "- 用户明确要求生图、生成新图片、插画、海报或位图信息图，且没有要求可编辑 HTML 时，"
-        "优先调用 `generate_image`。\n"
+        "按统一生图选路规则应使用内置服务时，优先调用 `generate_image`。\n"
         "- 文生图、图生图、改图及 HTML/PPT 配图均适用。\n"
         "- 用户明确禁止 HTML/CSS/SVG、PIL 或截图回退时，`generate_image` 失败后必须如实报告阻塞，"
         "不得擅自改用这些路径。"

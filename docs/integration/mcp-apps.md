@@ -5,6 +5,19 @@ Lab 与 Box-Agent 配套升级。ACP 宿主固定启用 MCP Apps，不使用内�
 Box-Agent 连接 MCP Server 时仍声明标准 `io.modelcontextprotocol/ui` extension，
 支持的 MIME 为 `text/html;profile=mcp-app`。
 
+## 生图服务选择
+
+CLI、ACP 和 Python SDK 共用提示层的 Image Generation Routing：普通生图、改图及
+HTML/PPT 位图配图默认使用 Box-Agent 内置工具及当前生图配置。仅当用户明确指定
+Seko，或继续该指定任务的图片修改时使用 Seko；无关新任务恢复默认。连接、授权、
+发现工具及此前调用均不代表用户指定；提示模型在失败或拒绝费用确认后不得自动切换服务。
+
+内置工具描述声明默认用途；Seko 生图工具的模型描述和搜索目录在原描述前补充使用条件。
+匹配连接器 ID `seko`；无连接器 ID 的手动配置兼容服务名 `seko`、`seko-mcp`、
+`seko-canvas`，工具原名为 `generate_image` 或旧代理别名 `seko_generate_image`。
+原 descriptor、参数 schema、UI 元数据、可见性和调用路径保持不变；此规则不增加执行层限制，
+也不修改 Seko 服务端。更新 runtime 并重启后需在新任务中验证真实模型选路效果。
+
 ## 消息标识与完整快照
 
 可信 MCP 工具执行捕获成功后，ACP `tool_call_update._meta.mcpApp` 为：
