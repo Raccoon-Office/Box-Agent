@@ -114,6 +114,17 @@ reading tools. Legacy `preloaded_*` fields describe actual delivery, not selecti
 current body visibility, or permission. The final run composition binds Context
 to the session's SkillRuntime and SessionLog while preserving managed capabilities.
 
+### Shell and managed runtime guidance
+
+Session prompt assembly reports the shell selected by the registered `bash` tool
+when it is a built-in BashTool. Directory commands must use that shell's syntax,
+including on Windows where the tool may select Bash or PowerShell. When managed
+Python is ready, invoke it from Bash as `"$BOX_AGENT_PYTHON"` or from PowerShell
+as `& "$env:BOX_AGENT_PYTHON"`; do not assume bare `python` or `python3` resolves
+to the managed interpreter. If the environment tool returns a refreshed `shell`,
+use its latest syntax and Python invocation for subsequent calls. The `bash`
+command parameter schema remains valid across a shell refresh.
+
 ## Managed Python use
 
 ```python
