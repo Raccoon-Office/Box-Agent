@@ -53,13 +53,52 @@ _AUTH_TOKEN = re.compile(
 )
 _URL_USERINFO = re.compile(r"""(://)[^\s/?#@"']+@""")
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*(?:"|\Z)')
+_JSON_STRUCTURE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\]]')
 _JSON_COLON = re.compile(r"\s*:\s*")
 _PEM_MARKER = re.compile(r"-----(BEGIN|END) ((?:[A-Z0-9]+ )*KEY)-----")
+_SCHEMA_LISTS = frozenset(("anyOf", "oneOf", "allOf", "prefixItems", "items"))
 
 
 def _credential_key(key: str) -> bool:
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", key).replace(" ", "-")
     return bool(CREDENTIAL_FIELD.fullmatch(normalized))
+
+
+def _object_schema(value: Any) -> bool:
+    return (isinstance(value, Mapping) and isinstance(value.get("properties"), Mapping)
+            and (value.get("type") == "object" or "$schema" in value))
+
+
+def _field_context(parent: str, key: str) -> str:
+    """Distinguish tool schema declarations from the credentials they describe."""
+    if parent == "properties":
+        return "credential_schema" if _credential_key(key) else "schema"
+    if parent in ("schema", "credential_schema"):
+        if key in ("properties", "patternProperties", "$defs", "definitions"):
+            return "properties"
+        if parent == "credential_schema":
+            if key in ("default", "example", "const"):
+                return "credential"
+            if key in ("enum", "examples"):
+                return "credential_list"
+        if key in _SCHEMA_LISTS or key in ("additionalProperties", "not", "if", "then", "else"):
+            return parent
+    if key in ("tools", "parameters", "input_schema", "inputSchema"):
+        return "possible_schema"
+    return "credential" if _credential_key(key) else ""
+
+
+def _mask_field(context: str, key: str, value: Any) -> Any:
+    if context == "credential_list" and isinstance(value, list):
+        return [_REDACTED for _ in value]
+    if context == "credential_schema":
+        if isinstance(value, bool) or (key in _SCHEMA_LISTS and isinstance(value, list)):
+            return value
+        if isinstance(value, Mapping) and "value" not in value:
+            return value
+    if context == "credential" and key.lower() == "pass" and isinstance(value, bool):
+        return value  # Boolean QA verdict.
+    return _REDACTED
 
 
 def _redact_assignments(text: str) -> str:
@@ -71,6 +110,8 @@ def _redact_assignments(text: str) -> str:
         start = match.end()
         value = _VALUE.match(text, start)
         if not value:
+            continue
+        if match["key"].lower() == "pass" and value[0].lower() in ("true", "false"):
             continue
         quote = '\\"' if value[0].startswith('\\"') else value[0][:1]
         if quote not in ('\\"', '"', "'"):
@@ -187,29 +228,47 @@ def _redact_serialized_argv(match: re.Match) -> str:
     return _JSON_STRING.sub(replace_arg, array)
 
 
-def _redact_json(text: str) -> str:
+def _redact_json(text: str, parsed: dict | list) -> str:
     """Rewrite only credential values, preserving JSON layout and nested argument strings."""
     parts = []
     end = 0
     decoder = json.JSONDecoder()
-    for token in _JSON_STRING.finditer(text):
+    containers = []
+    field_context = "schema" if _object_schema(parsed) else ""
+    for token in _JSON_STRUCTURE.finditer(text):
         if token.start() < end:
+            continue
+        if token[0] in ("[", "{"):
+            # Array members share the schema context of the array (e.g. anyOf).
+            context = containers[-1][1] if containers and containers[-1][0] == "[" else field_context
+            if context == "possible_schema" and token[0] == "{":
+                candidate, _ = decoder.raw_decode(text, token.start())
+                context = "schema" if _object_schema(candidate) else ""
+            containers.append((token[0], context))
+            continue
+        if token[0] in ("]", "}"):
+            containers.pop()
             continue
         value = json.loads(token[0])
         colon = _JSON_COLON.match(text, token.end())
         if colon:
-            if not _credential_key(value):
+            field_context = _field_context(containers[-1][1], value)
+            if field_context not in ("credential", "credential_list", "credential_schema"):
                 continue
             start = colon.end()
-            # A credential field can also contain a number, object or array.
-            _, stop = decoder.raw_decode(text, start)
-            replacement = '"<redacted>"'
+            item, stop = decoder.raw_decode(text, start)
+            clean = _mask_field(field_context, value, item)
+            if clean == item:
+                continue
+            replacement = json.dumps(clean, ensure_ascii=False)
         else:
             clean = redact_diagnostic_text(value)
             if clean == value:
                 continue
             start, stop = token.span()
-            replacement = json.dumps(clean, ensure_ascii=False)
+            # An escaped filesystem surrogate in the original JSON must remain
+            # representable when the diagnostic copy is written to UTF-8 logs.
+            replacement = json.dumps(clean, ensure_ascii=bool(re.search(r"[\ud800-\udfff]", clean)))
         parts.extend((text[end:start], replacement))
         end = stop
     parts.append(text[end:])
@@ -225,11 +284,11 @@ def redact_diagnostic_text(text: str) -> str:
     if (text.lstrip().startswith(("{", "[")) and text.rstrip().endswith(("}", "]"))
             and '"' in text):
         try:
-            json.loads(text)
+            parsed = json.loads(text)
         except (ValueError, RecursionError):
             pass  # Also handle escaped shell fragments and Python reprs.
         else:
-            return _redact_json(text)
+            return _redact_json(text, parsed)
     text = _redact_pem(text)
     if "-" in text:
         text = _redact_command_options(text)
@@ -244,6 +303,10 @@ def redact_diagnostic_text(text: str) -> str:
 class DiagnosticFormatter(logging.Formatter):
     """Apply the same text filter after formatting log arguments and tracebacks."""
 
+    def __init__(self, *args, delegate: logging.Formatter | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._delegate = delegate
+
     def format(self, record: logging.LogRecord) -> str:
         # SDKs pass request options as a mapping to %s. Filter that copy before
         # repr() adds escapes. Preserve the type of other formatting arguments
@@ -256,7 +319,8 @@ class DiagnosticFormatter(logging.Formatter):
                 redact_diagnostic_value(arg) if isinstance(arg, (str, Mapping, list)) else arg
                 for arg in record.args
             )
-        return redact_diagnostic_text(super().format(record))
+        formatted = self._delegate.format(record) if self._delegate is not None else super().format(record)
+        return redact_diagnostic_text(formatted)
 
 
 def _message_text_fields(message):
@@ -308,22 +372,32 @@ def _redact_continuation_quotes(messages: list, cleaned: list) -> None:
                 target[key] = quote
 
 
-def redact_diagnostic_value(value: Any) -> Any:
+def redact_diagnostic_value(value: Any, *, _context: str = "possible_schema") -> Any:
     """Build a JSON-safe diagnostic copy without changing model or tool data."""
     if isinstance(value, Mapping):
+        if _context == "possible_schema":
+            _context = "schema" if _object_schema(value) else ""
         # Reuse the existing provider image handling before traversing large
         # inline images. Leave memory evidence's separate sanitizer unchanged.
         if value.get("type") in ("image", "image_url"):
             from .llm.debug_logging import sanitize_for_logging
 
             value = sanitize_for_logging(value)
-        result = {str(key): _REDACTED if _credential_key(str(key)) else redact_diagnostic_value(item)
-                  for key, item in value.items()}
+        result = {}
+        for key, item in value.items():
+            key = str(key)
+            context = _field_context(_context, key)
+            if context in ("credential", "credential_list", "credential_schema"):
+                masked = _mask_field(context, key, item)
+                if masked is not item:
+                    result[key] = masked
+                    continue
+            result[key] = redact_diagnostic_value(item, _context=context)
         if isinstance(value.get("messages"), list):
             _redact_continuation_quotes(value["messages"], result["messages"])
         return result
     if isinstance(value, (list, tuple)):
-        return [redact_diagnostic_value(item) for item in _redact_argv(value)]
+        return [redact_diagnostic_value(item, _context=_context) for item in _redact_argv(value)]
     if hasattr(value, "model_dump"):
         try:
             return redact_diagnostic_value(value.model_dump(exclude_none=True))

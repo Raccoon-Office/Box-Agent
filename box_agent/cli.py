@@ -542,6 +542,29 @@ class _QuietMemoryLogHandler(RotatingFileHandler):
 
 
 @contextmanager
+def _cli_stderr_logging() -> Iterator[None]:
+    """Filter standalone stderr, including the root handler set up by provider SDKs."""
+    handlers = [
+        handler for handler in logging.root.handlers
+        if type(handler) is logging.StreamHandler and handler.stream is sys.stderr
+    ]
+    if logging.lastResort is not None and logging.lastResort.formatter is None:
+        handlers.append(logging.lastResort)
+    installed = []
+    try:
+        for handler in handlers:
+            previous = handler.formatter
+            formatter = DiagnosticFormatter(delegate=previous)
+            handler.setFormatter(formatter)
+            installed.append((handler, previous, formatter))
+        yield
+    finally:
+        for handler, previous, formatter in installed:
+            if handler.formatter is formatter:
+                handler.setFormatter(previous)
+
+
+@contextmanager
 def _memory_file_logging() -> Iterator[None]:
     """由 CLI 接管记忆日志，直到后台保存清理完成后恢复原有设置。"""
     memory_logger = logging.getLogger("box_agent.memory")
@@ -2843,6 +2866,7 @@ async def run_agent(
                 memory_log_scope.close()
 
 
+@_cli_stderr_logging()
 def main() -> int:
     """Main entry point for CLI"""
     # Parse command line arguments
@@ -2946,12 +2970,6 @@ def main() -> int:
         print(f"{Colors.RED}❌ Workspace config error: {exc}{Colors.RESET}")
         return 1
     # Run the agent (config always loaded from package directory)
-    # The standalone CLI uses logging's default stderr fallback for warnings.
-    # Configure it here so embedded run_agent callers retain their own logging.
-    fallback = logging.lastResort
-    formatter = DiagnosticFormatter()
-    if fallback is not None and fallback.formatter is None:
-        fallback.setFormatter(formatter)
     try:
         return asyncio.run(
             run_agent(
@@ -2969,9 +2987,6 @@ def main() -> int:
         )
     except KeyboardInterrupt:
         return 130
-    finally:
-        if fallback is not None and fallback.formatter is formatter:
-            fallback.setFormatter(None)
 
 
 if __name__ == "__main__":

@@ -352,6 +352,52 @@ def test_cli_hook_warning_keeps_error_and_masks_credential_on_default_stderr(
     assert logging.lastResort is fallback and fallback.formatter is None
 
 
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_cli_filters_sdk_debug_stderr_and_restores_its_formatter(
+    cli_trace_setup, monkeypatch, caplog, capsys, provider,
+):
+    import importlib
+    import logging
+    import sys
+
+    workspace, _ = cli_trace_setup
+    monkeypatch.setattr(cli.Config, "_ensure_user_config", cli.Config.get_default_config_path)
+    monkeypatch.setattr(sys, "argv", ["box-agent", "--workspace", str(workspace), "--task", "test"])
+    monkeypatch.setattr(logging.root, "handlers", [])
+    # Let the installed SDK build the same stderr handler as at CLI startup.
+    monkeypatch.setenv(provider.upper() + "_LOG", "debug")
+    with caplog.at_level(logging.DEBUG, logger=provider), caplog.at_level(logging.DEBUG, logger="httpx"):
+        importlib.import_module(f"{provider}._utils._logs").setup_logging()
+        handler, = logging.root.handlers
+        original = handler.formatter
+        messages = [{"role": "user", "content": "diagnostic password=fixture-sdk-secret"}]
+
+        def reply(request):
+            assert json.loads(request.content)["messages"] == messages
+            return httpx.Response(200, json={"id": "fixture"})
+
+        async def request(*_, **__):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+                if provider == "openai":
+                    from openai import AsyncOpenAI
+
+                    sdk = AsyncOpenAI(api_key="fixture", http_client=client)
+                    await sdk.chat.completions.create(model="fixture", messages=messages)
+                else:
+                    from anthropic import AsyncAnthropic
+
+                    sdk = AsyncAnthropic(api_key="fixture", http_client=client)
+                    await sdk.messages.create(model="fixture", messages=messages, max_tokens=1)
+            return 0
+
+        monkeypatch.setattr(cli, "run_agent", request)
+        assert cli.main() == 0
+    output = capsys.readouterr().err
+    assert handler.formatter is original
+    assert provider + "._base_client:" in output and "Request options:" in output
+    assert "diagnostic password=<redacted>" in output and "fixture-sdk-secret" not in output
+
+
 @pytest.mark.asyncio
 async def test_cli_session_cancellation_does_not_cancel_next_turn(cli_trace_setup, monkeypatch):
     workspace, trace_dir = cli_trace_setup

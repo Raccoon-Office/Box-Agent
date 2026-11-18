@@ -19,6 +19,20 @@ from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 
 
+def test_repaired_tool_arguments_retain_credentials_only_in_the_runtime_result(caplog):
+    from box_agent.llm.openai_client import _repair_tool_call_arguments
+
+    prefix = '{"command":"'
+    userinfo = "https://user:fixture-boundary"
+    # The original 80-character preview ends immediately before @.
+    value = " " * (80 - len(prefix) - len(userinfo)) + userinfo + "@host.invalid"
+    malformed = prefix + value + '",}'
+    assert _repair_tool_call_arguments(malformed, "bash") == prefix + value + '"}'
+    assert "Repaired malformed tool_call arguments" in caplog.text
+    assert "https://<redacted>@" in caplog.text
+    assert "fixture-boundary" not in caplog.text
+
+
 def test_sanitize_for_logging_redacts_auth_headers() -> None:
     payload = {
         "model": "m",

@@ -324,7 +324,9 @@ class SessionTraceWriter:
                     os.O_APPEND | os.O_CREAT | os.O_WRONLY,
                     0o600,
                 )
-                with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                # POSIX file names can contain surrogate-escaped bytes. Keep
+                # them as JSON escapes without dropping the rest of the event.
+                with os.fdopen(descriptor, "a", encoding="utf-8", errors="backslashreplace") as handle:
                     handle.write(line + "\n")
                     handle.flush()
             _maybe_cleanup_session_traces(

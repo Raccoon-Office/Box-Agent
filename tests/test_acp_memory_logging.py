@@ -9,6 +9,64 @@ import pytest
 from box_agent.acp.debug_logger import ACPDebugLogger
 
 
+@pytest.mark.parametrize("level,log_format", [(None, "json"), ("debug", "json"), ("debug", "text")])
+async def test_acp_stream_logs_and_session_trace_with_split_credentials(tmp_path, monkeypatch, capsys, level, log_format):
+    from box_agent.acp import BoxACPAgent
+    from box_agent.llm import LLMClient
+    from box_agent.schema import LLMProvider, LLMResponse, StreamEvent
+    from tests.test_acp import DummyConn, acp_params
+    from tests.test_agent_session import session_config
+
+    # A value without its label must never be sent to a diagnostic sink by itself.
+    parts = ["ordinary opening: pass", "word", "=", "fixture-part-A", "fixture-part-B", " ordinary ending."]
+
+    class Provider:
+        async def generate_stream(self, *args, **kwargs):
+            for part in parts:
+                yield StreamEvent(type="text", delta=part)
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+        async def generate(self, *args, **kwargs):
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
+
+    if level is None:
+        monkeypatch.delenv("BOX_AGENT_LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("BOX_AGENT_LOG_LEVEL", level)
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+    trace_dir = tmp_path / "traces"
+    logfile = tmp_path / "debug.log"
+    monkeypatch.setenv("BOX_AGENT_SESSION_TRACE_DIR", str(trace_dir))
+    monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(logfile))
+    monkeypatch.setenv("BOX_AGENT_LOG_FORMAT", log_format)
+    logger = ACPDebugLogger()
+    monkeypatch.setattr("box_agent.acp.log", logger)
+    conn = DummyConn()
+    model = LLMClient(api_key="test", provider=LLMProvider.OPENAI, model="fixture")
+    model._client = Provider()
+    adapter = BoxACPAgent(conn, session_config(tmp_path), model, [], "system")
+    try:
+        session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})))
+        response = await adapter.prompt(session_id=session.sessionId, prompt=[{"type": "text", "text": "inspect streaming"}])
+        assert response.stopReason == "end_turn"
+        delivered = [u.update.content.text for u in conn.updates if u.update.sessionUpdate == "agent_message_chunk"]
+        assert "".join(delivered) == "".join(parts)
+    finally:
+        await adapter.aclose()
+        logger.close()
+
+    trace_file, = trace_dir.glob("*.jsonl")
+    rows = [json.loads(line) for line in trace_file.read_text().splitlines()]
+    expected = "ordinary opening: password=<redacted> ordinary ending."
+    assert any(r["event"] == "llm.response" and r["data"]["content"] == expected for r in rows)
+    for output in (capsys.readouterr().err, logfile.read_text()):
+        assert "fixture-part-A" not in output and "fixture-part-B" not in output
+        if level == "debug":
+            assert "content/stream" in output and expected in output
+        else:
+            assert "content/stream" not in output
+
+
 @pytest.mark.parametrize("log_format", ["json", "text"])
 def test_command_failure_keeps_arguments_error_and_exit_code(tmp_path, monkeypatch, capsys, log_format):
     monkeypatch.setenv("BOX_AGENT_LOG_LEVEL", "info")

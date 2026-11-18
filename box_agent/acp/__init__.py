@@ -2861,6 +2861,7 @@ class BoxACPAgent:
         state._prompt_in_progress = True
         finished = asyncio.get_running_loop().create_future()
         state._prompt_finished = finished
+        trace_token = None
         try:
             log_store = state.agent.session_log
             turn_id = _meta_string(meta, "turn_id", "turnId")
@@ -2880,7 +2881,12 @@ class BoxACPAgent:
                     log_store.flush()
             if log_store is not None and context:
                 log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
-            return await self._prompt_for_session(params, session_id, state, context, prepared_input)
+            # Routing, memory refresh and final QA handoff run outside the
+            # main model iterator. Their tasks inherit this prompt's writer.
+            turn_id = turn_id or f"{session_id}-turn-{state.turn_counter + 1}"
+            if state.trace_writer is not None:
+                trace_token = set_session_trace_writer(state.trace_writer, turn_id=turn_id)
+            return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
         except Exception as exc:
             if edit is not None:
                 history = state.agent.session_log
@@ -2890,6 +2896,8 @@ class BoxACPAgent:
                 }) from exc
             raise
         finally:
+            if trace_token is not None:
+                reset_session_trace_writer(trace_token)
             state._prompt_in_progress = False
             if not finished.done():
                 finished.set_result(None)
@@ -2964,7 +2972,7 @@ class BoxACPAgent:
             state._history_edit_in_progress = False
 
     async def _prompt_for_session(
-        self, params: PromptRequest, session_id: str, state: SessionState, context: dict[str, Any],
+        self, params: PromptRequest, session_id: str, state: SessionState, turn_id: str, context: dict[str, Any],
         prepared_input: dict[str, Any] | None = None,
     ) -> PromptResponse:
         self._config_for_session(state)
@@ -3193,7 +3201,6 @@ class BoxACPAgent:
             state.continuation_applied = True
         state.turn_counter += 1
         provided_turn_id = _meta_string(prompt_meta, "turn_id", "turnId")
-        turn_id = provided_turn_id or f"{session_id}-turn-{state.turn_counter}"
         provided_task_id = normalize_task_id(
             prompt_meta.get("task_id") or prompt_meta.get("taskId")
         )
@@ -3353,7 +3360,7 @@ class BoxACPAgent:
             turn_id=turn_id,
             turn_id_source="host" if provided_turn_id else "fallback",
             title=state.upstream_title,
-            plan_detection_text=plan_detection_text[:500],
+            plan_detection_text=redact_diagnostic_text(plan_detection_text)[:500],
             host_plan_hint=host_plan_hint,
             force_plan_start=force_plan_start,
             require_plan_approval=require_plan_approval,
@@ -3534,7 +3541,8 @@ class BoxACPAgent:
 
         # Drain any stale injections from a previous turn
         for stale in state.inject_queue.begin_run(discard_pending=True):
-            log.warn("session/inject_stale", session_id=session_id, text=_inject_item_text(stale)[:80])
+            log.warn("session/inject_stale", session_id=session_id,
+                     text=redact_diagnostic_text(_inject_item_text(stale))[:80])
         skillhub_search_tool = state.agent.tools.get("search_skillhub")
         if isinstance(skillhub_search_tool, SkillHubSearchTool):
             skillhub_search_tool.reset_turn()
@@ -5438,12 +5446,9 @@ class BoxACPAgent:
                         case ContentEvent() if event._streaming:
                             # Stream content deltas in real-time
                             if not event._header and event.content:
-                                log.debug(
-                                    "content/stream",
-                                    session_id=session_id,
-                                    chars=len(event.content),
-                                    content=event.content,
-                                )
+                                # Credential labels and values can arrive in different deltas.
+                                # llm/output and the session trace log the assembled text.
+                                log.debug("content/stream", session_id=session_id, chars=len(event.content))
                                 update = update_agent_message(text_block(event.content))
                                 update.field_meta = {"messageDisplay": display_meta}
                                 await self._send(session_id, update)

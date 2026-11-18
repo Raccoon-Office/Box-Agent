@@ -233,3 +233,57 @@ def test_nonstring_credential_in_serialized_tool_arguments():
     text = '{ "token":123,  "authorization": {"id":42}, "state": true }'
     filtered = redact_diagnostic_text(text)
     assert filtered == '{ "token":"<redacted>",  "authorization": "<redacted>", "state": true }'
+
+
+def test_redacting_json_preserves_escaped_filesystem_byte_in_utf8_logs():
+    text = json.dumps({"stderr": "password=fixture-value\nmissing path-\udcff"})
+    sanitized = redact_diagnostic_text(text)
+    assert json.loads(sanitized.encode("utf-8")) == {"stderr": "password=<redacted>\nmissing path-\udcff"}
+
+
+@pytest.mark.parametrize("verdict", [True, False])
+def test_tool_qa_verdict_keeps_boolean_in_trace_and_model_message(tmp_path, verdict):
+    writer = SessionTraceWriter(session_id="qa", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    report = {"pass": verdict, "checks": 3}
+    serialized = json.dumps(report, indent=2)
+    writer.write("tool.response", data={"raw_output": report, "content": serialized})
+    writer.write("llm.request", data={"messages": [{"role": "tool", "content": serialized}]})
+    result, request = (json.loads(line)["data"] for line in writer.file_path.read_text().splitlines())
+    assert result == {"raw_output": report, "content": serialized}
+    assert request["messages"][0]["content"] == serialized
+    assert redact_diagnostic_value({"pass": "fixture-value"}) == {"pass": "<redacted>"}
+
+
+@pytest.mark.parametrize("schema_key", ["parameters", "input_schema", "inputSchema"])
+def test_tool_schema_preserves_credential_declarations_and_filters_actual_values(schema_key):
+    definition = {
+        "type": "string", "description": "Credential supplied by the client.", "minLength": 12,
+        "default": "fixture-default", "example": "fixture-example",
+        "examples": ["fixture-first", "fixture-second"], "enum": ["fixture-choice"],
+        "anyOf": [{"const": "fixture-constant"}, {"pattern": "^[a-z]+$"}],
+    }
+    tool = {"name": "fixture", schema_key: {"type": "object", "properties": {
+        "accessToken": definition, "path": {"type": "string", "default": "readme.md"},
+    }, "required": ["accessToken"]}}
+    payload = {"tools": [tool], "arguments": {"accessToken": "fixture-argument"}}
+    actual = redact_diagnostic_value(payload)
+    encoded = json.dumps(payload, indent=2)
+    assert json.loads(redact_diagnostic_text(encoded)) == actual
+    cleaned = actual["tools"][0][schema_key]
+    assert cleaned["required"] == ["accessToken"] and cleaned["type"] == "object"
+    assert cleaned["properties"]["path"] == {"type": "string", "default": "readme.md"}
+    assert cleaned["properties"]["accessToken"] == {
+        **definition, "default": "<redacted>", "example": "<redacted>",
+        "examples": ["<redacted>", "<redacted>"], "enum": ["<redacted>"],
+        "anyOf": [{"const": "<redacted>"}, {"pattern": "^[a-z]+$"}],
+    }
+    assert actual["arguments"] == {"accessToken": "<redacted>"}
+    assert definition["default"] == "fixture-default"
+
+
+@pytest.mark.parametrize("field", ["tools", "parameters", "input_schema"])
+def test_ordinary_tool_data_named_like_a_schema_still_redacts_credentials(field):
+    record = {field: {"properties": {"token": {"value": "private-fixture", "source": "tool"}}}}
+    expected = {field: {"properties": {"token": "<redacted>"}}}
+    assert redact_diagnostic_value(record) == expected
+    assert json.loads(redact_diagnostic_text(json.dumps(record))) == expected

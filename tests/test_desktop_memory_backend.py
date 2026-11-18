@@ -1276,14 +1276,37 @@ async def test_desktop_acp_trace_preserves_input_output_and_errors(tmp_path, mon
         await process.aclose()
 
 
-async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp_path, monkeypatch, host):
+@pytest.mark.parametrize("job_available", ["refresh", "handoff"])
+async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp_path, monkeypatch, host, job_available):
     from copy import deepcopy
 
     from box_agent.acp import BoxACPAgent
     from box_agent.llm.llm_wrapper import LLMClient
     from box_agent.schema import LLMProvider, LLMResponse
+    from box_agent.session_trace import (
+        SessionTraceWriter, emit_session_trace, reset_session_trace_writer, set_session_trace_writer,
+    )
     from box_agent.tools.base import Tool, ToolResult
     from tests.test_acp import DummyConn
+    from tests.test_desktop_memory_experience import Transport
+
+    job = Transport()
+    release_model = asyncio.Event()
+    proposed = asyncio.Event()
+
+    async def experience_job(operation, payload):
+        if operation != "experience/job":
+            return None
+        if job_available == "handoff" and not any(op == "qa/evidence" for op, _ in host.calls):
+            return None  # The initial refresh finds no pending job.
+        data = await job.request(operation, payload)
+        if payload["action"] == "propose":
+            proposed.set()
+        return httpx.Response(200, json={
+            "protocol": 2, "identity_epoch": host.bootstrap["identity_epoch"], "ok": True, "data": data,
+        })
+
+    host.before = experience_job
 
     class TraceTool(Tool):
         name = "trace_fixture"
@@ -1313,6 +1336,10 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
                 yield StreamEvent(type="finish", finish_reason="stop")
 
         async def generate(self, messages, tools=None, **kwargs):
+            if kwargs["call_kind"] == "memory_experience":
+                assert messages[1].content == job.prompt
+                await release_model.wait()
+                return LLMResponse(content='{"facts":[],"observations":[]}', finish_reason="stop")
             assert kwargs["call_kind"] == "turn_continuation_judge"
             return LLMResponse(content='{"continue":false}', finish_reason="stop")
 
@@ -1334,12 +1361,28 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
             cwd=str(tmp_path), field_meta={"session_id": "trace-session"})))
         state = adapter._sessions[opened.sessionId]
         await state.agent.tools["tool_search"].execute(tool_names=["trace_fixture"])
-        await adapter.prompt(**acp_params(SimpleNamespace(
-            sessionId=opened.sessionId, prompt=[{"type": "text", "text": "Run the trace fixture."}],
-            field_meta={"turn_id": "trace-turn"})))
+        other = SessionTraceWriter(session_id="other-session", acp_session_id="other-acp",
+                                   trace_dir=tmp_path / "diagnostics", enabled=True)
+        # Cover both an unbound caller and one already tracing another session.
+        token = set_session_trace_writer(other, turn_id="other-turn") if job_available == "handoff" else None
+        try:
+            await adapter.prompt(**acp_params(SimpleNamespace(
+                sessionId=opened.sessionId, prompt=[{"type": "text", "text": "Run the trace fixture."}],
+                field_meta={"turn_id": "trace-turn"})))
+            emit_session_trace("caller.after_prompt")
+        finally:
+            if token is not None:
+                reset_session_trace_writer(token)
+        # Complete the background model after the foreground prompt has returned.
+        release_model.set()
+        await asyncio.wait_for(proposed.wait(), timeout=5)
         await asyncio.gather(*tuple(state.memory_runtime.tasks))
+        assert job.proposal == {"facts": [], "observations": []}
+        if token is not None:
+            other_rows = other.file_path.read_text(encoding="utf-8").splitlines()
+            assert [json.loads(line)["event"] for line in other_rows] == ["caller.after_prompt"]
 
-        records = [json.loads(line) for line in state.trace_writer.file_path.read_text().splitlines()]
+        records = [json.loads(line) for line in state.trace_writer.file_path.read_text(encoding="utf-8").splitlines()]
         requests = [row for row in records if row["event"] == "llm.request" and row["data"]["streaming"]]
         by_call = {row["llm_call_id"]: row for row in records if row["event"] == "llm.response"}
         responses = [by_call[row["llm_call_id"]] for row in requests]
@@ -1347,6 +1390,14 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
         judge = next(row for row in records if row["event"] == "llm.request"
                      and row["data"]["call_kind"] == "turn_continuation_judge")
         assert by_call[judge["llm_call_id"]]["data"]["content"] == '{"continue":false}'
+        experience, = [row for row in records if row["event"] == "llm.request"
+                       and row["data"]["call_kind"] == "memory_experience"]
+        experience_reply = by_call[experience["llm_call_id"]]
+        assert experience["session_id"] == experience_reply["session_id"] == "trace-session"
+        assert experience["turn_id"] == experience_reply["turn_id"] == "event"
+        assert experience["data"]["messages"][1]["content"] == job.prompt
+        assert json.loads(experience_reply["data"]["content"]) == job.proposal
+        assert all(row["event"] != "caller.after_prompt" for row in records)
         assert next(row for row in records if row["event"] == "turn.input")["data"]["content"] == "Run the trace fixture."
         for request, response, actual in zip(requests, responses, provider.requests):
             assert request["session_id"] == response["session_id"] == "trace-session"

@@ -389,6 +389,8 @@ and must still protect existing user changes.
 
 Desktop memory sessions use the same trace format and log settings as other sessions. To investigate a turn, compare the messages in `llm.request` (including recalled memory) with the tool arguments, results and subsequent model response. Recognized credentials are masked in diagnostic output. Failed Bash commands include an exit code when supplied by the tool or recoverable from its error message.
 
+Session traces include these bodies at the default log level. Setting `BOX_AGENT_LOG_LEVEL=debug` enables additional diagnostic output. ACP debug logs record the size of each streamed text fragment. The session trace records the assembled reply in `llm.response`, or the text received before an interruption in `llm.error.partial_content`, so credential filtering sees the complete available text.
+
 Run `box-agent trace-viewer` to open the packaged, offline developer viewer. Open `~/.box-agent/log/sessions/` for a newest-first overview of every trace, then select one run to inspect per-turn metrics, LLM/tool waterfalls, raw events, and the complete system → user → assistant/tool → final-response chain. You can still open one `.jsonl` file directly.
 
 Both ACP and CLI create session traces automatically. Each CLI invocation writes
