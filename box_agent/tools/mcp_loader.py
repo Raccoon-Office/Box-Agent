@@ -138,6 +138,7 @@ SessionLease = Callable[[], AbstractAsyncContextManager[Any]]
 
 
 _MODEL_TOOL_NAME_MAX_LENGTH = 64
+_MCP_SERVER_INSTRUCTIONS_MAX_CHARS = 2_048
 _INVALID_MODEL_TOOL_NAME_CHARACTER = re.compile(r"[^a-zA-Z0-9_-]")
 
 
@@ -927,6 +928,7 @@ class MCPTool(Tool):
         session_lease: SessionLease | None = None,
         server_url: str = "",
         legacy_names: tuple[str, ...] = (),
+        server_instructions: str = "",
     ):
         """
         ``session`` is the fixed ClientSession shared by every caller (classic
@@ -954,6 +956,7 @@ class MCPTool(Tool):
         self._concurrency_limiter = concurrency_limiter
         self._mcp_generation = 0
         self._legacy_names = legacy_names
+        self.mcp_server_instructions = server_instructions
 
     @property
     def name(self) -> str:
@@ -1853,7 +1856,13 @@ class MCPServerConnection:
 
                 # Initialize the session
                 stage = "initialize-session"
-                await session.initialize()
+                initialized = await session.initialize()
+                instructions = getattr(initialized, "instructions", None)
+                server_instructions = instructions.strip() if isinstance(instructions, str) else ""
+                if len(server_instructions) > _MCP_SERVER_INSTRUCTIONS_MAX_CHARS:
+                    server_instructions = (
+                        server_instructions[:_MCP_SERVER_INSTRUCTIONS_MAX_CHARS - 1].rstrip() + "…"
+                    )
                 _warn(
                     f"[mcp] connect:initialized server={self.name!r} "
                     f"elapsed_ms={elapsed_ms()}"
@@ -1911,6 +1920,7 @@ class MCPServerConnection:
                     connector_name=self.connector_name,
                     concurrency_limiter=self._concurrency_limiter_for_tool(tool.name),
                     session_lease=session_lease,
+                    server_instructions=server_instructions,
                 )
                 self.tools.append(mcp_tool)
 

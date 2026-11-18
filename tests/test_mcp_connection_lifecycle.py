@@ -30,7 +30,7 @@ def sdk_connection(monkeypatch):
 
     state = SimpleNamespace(scopes=[], owners=[], exits=[], transports=0, stall=None,
                             closing=None, release_close=None, close_error=False, calls=[],
-                            transport_failure=None)
+                            transport_failure=None, server=server)
 
     class ObservedSession(ClientSession):
         async def __aenter__(self):
@@ -89,6 +89,7 @@ async def test_installed_config_loads_namespaced_tools_without_rewriting_config_
     sdk_connection, monkeypatch, tmp_path,
 ):
     _, state = sdk_connection
+    state.server.instructions = "  Echo the value before checking its status.\n"
     config = tmp_path / "mcp.json"
     config.write_text(json.dumps({"mcpServers": {
         name: {"command": "installed-command", "args": ["--existing"],
@@ -113,6 +114,11 @@ async def test_installed_config_loads_namespaced_tools_without_rewriting_config_
         tools = await mcp_loader.load_mcp_tools_async(str(config))
         assert {tool.name for tool in tools} == {"mcp__first__echo", "mcp__second__echo"}
         assert all(tool.mcp_legacy_names == ("echo",) for tool in tools)
+        assert all(tool.mcp_connector_id is None for tool in tools)
+        assert all(
+            entry.tool.mcp_server_instructions == "Echo the value before checking its status."
+            for entry in catalog.snapshot()
+        )
         for conn in mcp_loader._mcp_connections:
             assert conn.command == "installed-command" and conn.args == ["--existing"]
             assert conn.env["EXAMPLE_KEY"] == "test-credential"
@@ -123,6 +129,26 @@ async def test_installed_config_loads_namespaced_tools_without_rewriting_config_
     finally:
         await mcp_loader.cleanup_mcp_connections()
     assert state.transports == 0
+
+
+async def test_stdio_handshake_replaces_and_bounds_server_instructions(sdk_connection):
+    conn, state = sdk_connection
+    state.server.instructions = "  " + "用" * 3_000 + " "
+    try:
+        assert await conn.connect()
+        assert conn.tools[0].mcp_server_instructions == "用" * 2_047 + "…"
+        await conn.disconnect()
+
+        state.server.instructions = "Use the new workflow."
+        assert await conn.connect()
+        assert conn.tools[0].mcp_server_instructions == state.server.instructions
+        await conn.disconnect()
+
+        state.server.instructions = " \n "
+        assert await conn.connect()
+        assert conn.tools[0].mcp_server_instructions == ""
+    finally:
+        await conn.disconnect()
 
 
 async def test_repeated_cross_task_disconnect_closes_real_sdk_scopes(sdk_connection, monkeypatch):

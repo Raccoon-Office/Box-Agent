@@ -559,6 +559,8 @@ class Agent:
                 self.tools["call_tool"] = CallTool()
                 self.mcp_tool_exposure.enable_stable_prefix(self.tools["tool_search"])
                 self.mcp_tool_exposure._live_candidates = lambda tools=self.tools: tools
+            else:
+                self.mcp_tool_exposure.bind_search_tool(self.tools["tool_search"])
         self.tool_result_storage = ToolResultStorage(
             state_path('sessions')
         )
