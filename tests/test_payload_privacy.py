@@ -128,6 +128,47 @@ def test_credential_options_in_structured_and_serialized_argv(args, expected):
     assert redact_diagnostic_text("argv = " + text) == "argv = " + json.dumps(expected, separators=(",  ", ": "))
 
 
+@pytest.mark.parametrize("program,options,expected", [
+    ("curl", ["-ufixtureuser:fixturepass"], ["-u<redacted>"]),
+    ("curl", ["-u", "fixtureuser:fixturepass"], ["-u", "<redacted>"]),
+    ("curl", ["--user=fixtureuser:fixturepass"], ["--user=<redacted>"]),
+    ("curl", ["--user", "fixtureuser:fixturepass"], ["--user", "<redacted>"]),
+    ("utility", ["--password=fixturepass", "--token", "fixturetoken"], ["--password=<redacted>", "--token", "<redacted>"]),
+    ("python", ["-u", "main.py"], ["-u", "main.py"]),
+    ("utility", ["-update", "--user=account"], ["-update", "--user=account"]),
+])
+def test_session_trace_command_options_match_shell_and_argv_copies(tmp_path, program, options, expected):
+    argv = [program, *options, "target"]
+    safe = [program, *expected, "target"]
+    args = {"command": " ".join(argv), "argv": argv, "serialized": json.dumps(argv)}
+    original = json.dumps(args)
+    writer = SessionTraceWriter(session_id="options", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    writer.write("tool.request", data={"arguments": args})
+    logged = json.loads(writer.file_path.read_text())["data"]["arguments"]
+    assert logged == {"command": " ".join(safe), "argv": safe, "serialized": json.dumps(safe)}
+    assert json.dumps(args) == original
+
+
+@pytest.mark.parametrize("command,expected", [
+    ('curl -u user:"fixture secret" host', 'curl -u <redacted> host'),
+    ('curl -u "user":"fixture" host', 'curl -u <redacted> host'),
+    (r'DB_PASSWORD=fixture\ secret utility', 'DB_PASSWORD=<redacted> utility'),
+    ("curl 'https://example.test/?page=1&limit=5' -u user:fixture",
+     "curl 'https://example.test/?page=1&limit=5' -u <redacted>"),
+    ("curl https://example.test/mysql -u user:fixture", "curl https://example.test/mysql -u <redacted>"),
+    ("curl -u user:fixture; python -u main.py", "curl -u <redacted>; python -u main.py"),
+    ("error: curl -u acct:fixture host", "error: curl -u <redacted> host"),
+    ("env TEST_ENV=neutral curl -u acct:fixture host", "env TEST_ENV=neutral curl -u <redacted> host"),
+    ("sudo curl -u acct:fixture host", "sudo curl -u <redacted> host"),
+    ("Please run curl -u acct:fixture host", "Please run curl -u <redacted> host"),
+    ('bash -lc "curl -u acct:fixture host"', 'bash -lc "curl -u <redacted> host"'),
+])
+def test_trace_masks_complete_shell_words_and_preserves_neighboring_arguments(tmp_path, command, expected):
+    writer = SessionTraceWriter(session_id="shell", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    writer.write("tool.request", data={"arguments": {"command": command}})
+    assert json.loads(writer.file_path.read_text())["data"]["arguments"]["command"] == expected
+
+
 def test_standalone_basic_auth_preserves_ordinary_documentation():
     text = "Choose Basic Installation. Support Visual Basic 6.0. Basic read/write. Basic Zm9vOmJhcg== here."
     assert redact_diagnostic_text(text) == text.replace("Zm9vOmJhcg==", "<redacted>")

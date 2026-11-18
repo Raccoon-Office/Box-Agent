@@ -36,11 +36,13 @@ _VALUE = re.compile(
     r"""(?:Bearer|Basic)[ \t]+[^\s,;&"'\]}]+|[^\s,;&"'\]}]+""", re.I,
 )
 _SECRET_FLAG = r"--(?:password|passwd|passphrase|token|api-key|credentials)"
-_CURL_USER = r"(?:-u|--user)"
-_FLAG_VALUE = re.compile(
-    rf"""(?<![\w-])(?P<flag>{_SECRET_FLAG}|{_CURL_USER})(?:[ \t]+|=)"""
-    r"""|(?<![\w-])(?P<mysql>-p)(?=\S)"""
-    r"""|\b(?P<command>(?i:curl|mysql|mariadb))(?:\.exe)?\b|(?P<break>[\n;&|])""",
+_AUTH_COMMANDS = {"curl", "mysql", "mariadb"}
+_SHELL_COMMANDS = {"sh", "bash", "dash", "zsh", "ksh"}
+# Keep shell word spans so masking can preserve the caller's exact spacing.
+# Quoted fragments and escaped characters belong to the same argument.
+_SHELL_TOKEN = re.compile(
+    r"""(?P<boundary>[\n;&|])|(?:\\[\s\S]|"(?:\\[\s\S]|[^"\\])*(?:"|\\?\Z)|"""
+    r"""'[^']*(?:'|\Z)|[^\s;&|"'\\])+"""
 )
 _ARGV_ARRAY = re.compile(r'\[\s*(?:"(?:\\.|[^"\\])*"\s*,\s*)*"(?:\\.|[^"\\])*"\s*\]')
 # An HTTP Cookie header can contain multiple assignments separated by ';'.
@@ -172,40 +174,86 @@ def _redact_pem(text: str) -> str:
 def _redact_command_options(text: str) -> str:
     pieces = []
     end = 0
-    command = ""
-    for match in _FLAG_VALUE.finditer(text):
-        if match.start() < end:
+    command = None
+    mask_next = False
+    shell_script = False
+    for token in _SHELL_TOKEN.finditer(text):
+        word = token[0]
+        if token["boundary"]:
+            command = None
+            mask_next = False
+            shell_script = False
             continue
-        if match["break"] or match["command"]:
-            command = (match["command"] or "").lower()
-            continue
-        if match["mysql"] and command not in ("mysql", "mariadb"):
-            continue
-        if match["flag"] in ("-u", "--user") and command != "curl":
-            continue
-        value = _VALUE.match(text, match.end())
-        if value is None:
-            continue
-        pieces.extend((text[end:value.start()], _REDACTED))
-        end = value.end()
+        if mask_next:
+            replacement = _REDACTED
+            mask_next = False
+        elif shell_script:
+            shell_script = False
+            quote = word[0] if word[0] in ("'", '"') and word.endswith(word[0]) else ""
+            script = word[1:-1] if quote else word
+            replacement = quote + _redact_command_options(script) + quote
+            if replacement == word:
+                continue
+        else:
+            name, equals, value = word.partition("=")
+            if equals and _credential_key(name) and any(c in value for c in ("\\", "'", '"')):
+                # A shell assignment can concatenate quoted / unquoted parts
+                # or escape whitespace. Non-shell assignments use _VALUE below.
+                quote = value[0] if value[0] in ("'", '"') else ""
+                replacement = name + "=" + quote + _REDACTED + quote
+            else:
+                executable = word.strip("'\"").lower().removesuffix(".exe")
+                if command not in _AUTH_COMMANDS and executable in _AUTH_COMMANDS | _SHELL_COMMANDS:
+                    # Diagnostic sentences and wrappers can prefix a command.
+                    # An argument URL/path containing its name cannot select it.
+                    command = executable
+                elif command is None and not (equals and name.isidentifier()):
+                    command = _command_name(word.strip("'\""))
+                if command in _SHELL_COMMANDS and re.fullmatch("-[A-Za-z]*c[A-Za-z]*", word):
+                    shell_script = True
+                    continue
+                prefix = _credential_option(command, word)
+                if prefix is None:
+                    continue
+                if prefix == word and not prefix.endswith("="):
+                    mask_next = True
+                    continue
+                replacement = prefix + _REDACTED
+        pieces.extend((text[end:token.start()], replacement))
+        end = token.end()
     pieces.append(text[end:])
     return "".join(pieces)
 
 
+def _command_name(first: Any) -> str:
+    return first.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe") if isinstance(first, str) else ""
+
+
+def _credential_option(command: str | None, arg: str) -> str | None:
+    flag, equals, _ = arg.partition("=")
+    if re.fullmatch(_SECRET_FLAG, flag) or (command == "curl" and flag in ("-u", "--user")):
+        return flag + equals
+    if command == "curl" and arg.startswith("-u"):
+        return "-u"
+    if command in ("mysql", "mariadb") and arg.startswith("-p") and len(arg) > 2:
+        return "-p"
+    return None
+
+
 def _redact_argv(values: list | tuple) -> list:
     result = list(values)
-    # Only command names at the start of an argv are significant. Other
-    # arrays can contain arbitrary file names or documentation.
     first = values[0] if values else None
-    command = first.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe") if isinstance(first, str) else ""
-    for i, arg in enumerate(values):
+    command = _command_name(first)
+    for i, arg in enumerate(result):
         if not isinstance(arg, str):
             continue
-        if re.fullmatch(_SECRET_FLAG, arg) or (command == "curl" and arg in ("-u", "--user")):
-            if i + 1 < len(values):
-                result[i + 1] = _REDACTED
-        elif command in ("mysql", "mariadb") and arg.startswith("-p") and len(arg) > 2:
-            result[i] = "-p" + _REDACTED
+        prefix = _credential_option(command, arg)
+        if prefix is None:
+            continue
+        if prefix != arg or prefix.endswith("="):
+            result[i] = prefix + _REDACTED
+        elif i + 1 < len(result):
+            result[i + 1] = _REDACTED
     return result
 
 
@@ -290,7 +338,7 @@ def redact_diagnostic_text(text: str) -> str:
         else:
             return _redact_json(text, parsed)
     text = _redact_pem(text)
-    if "-" in text:
+    if "-" in text or "=" in text:
         text = _redact_command_options(text)
     if ":" in text or "=" in text or "：" in text:
         text = _URL_USERINFO.sub(r"\1<redacted>@", text)
