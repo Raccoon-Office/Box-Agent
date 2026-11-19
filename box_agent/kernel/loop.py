@@ -1033,6 +1033,9 @@ async def _run_agent_loop_impl(
         )
         session_log.flush()
 
+    receipt_response: Message | None = None
+    model_receipts: dict[str, dict[str, int]] = {}
+
     def commit_model_response(message: Message) -> None:
         if not (message.content or message.thinking or message.tool_calls):
             return
@@ -1044,9 +1047,14 @@ async def _run_agent_loop_impl(
                 if previous.usage is not None and previous.usage._request_snapshot is not None:
                     previous.usage._request_snapshot = None
                     break
+        receipts = model_receipts if message is receipt_response else {}
         messages.append(message)
         if session_log is not None and session_turn is not None:
+            if receipts:
+                session_log.mark_runtime_input_receipts(message, receipts)
             checkpoint_messages(step + 1)
+        if receipts and isinstance(inject_queue, InjectionManager) and inject_queue.on_model_commit is not None:
+            inject_queue.on_model_commit(receipts)
 
     def validate_followup(result, tool, pending):
         accepted, blocks, tokens = _validate_transient_followup_result(
@@ -1447,6 +1455,11 @@ async def _run_agent_loop_impl(
             if message is not None
         ]
         request_context_messages.extend(correction_messages)
+        if isinstance(inject_queue, InjectionManager):
+            runtime_messages, runtime_events = inject_queue.prepare_request_context(messages)
+            request_context_messages.extend(runtime_messages)
+            for event in runtime_events:
+                yield event
         transient_message = (
             Message(
                 role="user",
@@ -2236,11 +2249,18 @@ async def _run_agent_loop_impl(
         # back to the model just teaches it to keep producing them. Build the
         # message here, then append only in the branches that keep it.
         invalid_tool_ids = not valid_tool_call_ids(response.tool_calls or ())
-        if (callable(on_response_received) and not invalid_tool_ids
+        receipt_response = None
+        model_receipts = {}
+        if (not invalid_tool_ids
                 and response.finish_reason not in {"provider_stale", "length", "max_tokens", "content_filter"}
                 and not (response.truncated_tool_calls or response.stream_dropped_mid_tool or response.oversized_tool_calls)
                 and ((response.content or "").strip() or response.tool_calls)):
-            on_response_received()
+            if callable(on_response_received):
+                on_response_received()
+            if (isinstance(inject_queue, InjectionManager)
+                    and inject_queue.model_response_receipts is not None
+                    and response.finish_reason not in {"error", "cancelled"}):
+                model_receipts = inject_queue.model_response_receipts(provider_request_messages)
 
         assistant_usage = response.usage
         if (assistant_usage is not None and request_usage_snapshot is not None
@@ -2274,6 +2294,9 @@ async def _run_agent_loop_impl(
             )
             yield DoneEvent(stop_reason=StopReason.ERROR, final_content=response.content)
             return
+
+        if model_receipts:
+            receipt_response = assistant_msg
 
         # Raw image blocks are a one-shot request overlay. Retain them only
         # when an empty provider-stale response will be retried verbatim.

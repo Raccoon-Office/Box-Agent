@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Final
 from ...session_log import SessionLogDurabilityError, run_session_write
 from ..base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
 from ..delegated_budget import current_budgets
+from ..permissions import bind_retry_approval, exact_approvals_enabled, exact_filesystem_target
 from ..schema_validation import validate_tool_arguments, ToolSchemaValidationError
 from ..chat_references import bind_chat_references
 
@@ -24,6 +25,26 @@ if TYPE_CHECKING:
 _log = logging.getLogger("box_agent.core")
 
 MAX_TOOL_PERMISSION_RETRIES: Final[int] = 4
+
+
+def _matches_exact_approval(tool: Tool | None, arguments: dict[str, Any], request: dict) -> bool:
+    from ..file.read_tool import ReadTool
+    from ..file_tools import WriteTool
+
+    target = exact_filesystem_target(request)
+    path = arguments.get("path")
+    if target is None or tool is None or tool.name != target.tool_name or not isinstance(path, str):
+        return False
+    try:
+        if type(tool) is ReadTool and target.operation == "read":
+            actual_path = tool._resolve_file_path(path).resolve(strict=False)
+        elif type(tool) is WriteTool and target.operation == "write":
+            actual_path = tool._target(path)
+        else:
+            return False
+        return actual_path == target.path and not actual_path.is_dir()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +66,13 @@ async def invoke_tool_once(
 ) -> ToolResult:
     """Invoke the validated tool interface once, preserving legacy overrides."""
     context = context or ToolInvocationContext()
+    exact = exact_approvals_enabled()
+    if exact and approved_permission_request is not None and not _matches_exact_approval(
+        tool, arguments, approved_permission_request,
+    ):
+        context.budget_charge.release_unexecuted()
+        return ToolResult(success=False, error="Device approval does not match the tool invocation.")
+
     for gate in context.capability_gates:
         check = getattr(gate, "check_invocation", None)
         if check is None:
@@ -97,14 +125,15 @@ async def invoke_tool_once(
             context.budget_charge.release_unexecuted()
             return ToolResult(success=False, error=error)
     try:
-        if approved_permission_request is not None:
+        if approved_permission_request is not None and not exact:
             _approve_tool_permission(tool, approved_permission_request)
         if on_invoke is not None:
             on_invoke()
     except BaseException:
         context.budget_charge.release_unexecuted()
         raise
-    with bind_chat_references(guard, allowed_deletions):
+    with (bind_chat_references(guard, allowed_deletions),
+          bind_retry_approval(approved_permission_request, tool.name)):
         if isinstance(tool, EventEmittingTool) or getattr(tool, "uses_invocation_context", False):
             result = await tool.invoke(arguments, context=context)
         else:
@@ -113,6 +142,8 @@ async def invoke_tool_once(
         await run_session_write(getattr(guard, "log", None), guard.deleted, allowed_deletions)
     if result.permission_request or result._invocation_rejected:
         context.budget_charge.release_unexecuted()
+    if exact and result.permission_request and not _matches_exact_approval(tool, arguments, result.permission_request):
+        result = result.model_copy(update={"permission_request": None})
     return result
 
 
@@ -247,6 +278,9 @@ async def stream_tool_permission_chain(
         and result.permission_request
     ):
         permission_request = result.permission_request
+        if exact_approvals_enabled() and not _matches_exact_approval(tool, arguments, permission_request):
+            result = result.model_copy(update={"permission_request": None})
+            break
         request_key = json.dumps(
             permission_request,
             sort_keys=True,
