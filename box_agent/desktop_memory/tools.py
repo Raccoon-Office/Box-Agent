@@ -28,7 +28,8 @@ class DesktopMemoryTool(Tool):
         return {
             "read": "完整读取 user.md 或 memory.md，保留保护属性及修改规则。只有全文真正进入模型请求后才可修改；预载不代替读取。",
             "write": "完整写入 user.md 或 memory.md；须先完整 memory_read 并取得资格，保护条目不得重写。每次写后必须重新读取。",
-            "edit": "修改 user.md 或 memory.md 的完整条目；须先完整读取。old_text 唯一匹配连续条目，空值追加；new_text 空值删除。保护项不得改删。",
+            "edit": ("追加、替换或删除 user.md 或 memory.md 的完整条目。修改前须先完整 memory_read 同一路径，"
+                     "每次修改成功后须重新读取。保护项不得改删。"),
             "search": "搜索当前轮次来源中的历史记忆，返回有界片段及引用；实时状态仍须核实。",
             "managed_read": "按 entry_ref 和同一文件 version 分段读取用户维护条目，版本改变须重新搜索，不解锁自动核心修改。",
             "experience_search": "检索并校验可复用经验，返回适用的 Observation；独立于普通历史搜索，仅在线云端可用。",
@@ -43,7 +44,17 @@ class DesktopMemoryTool(Tool):
             properties = {"path": path, "content": {"type": "string", "description": "全部 <mem>...</mem> 条目，不带属性"}}
             required = list(properties)
         elif self.operation == "edit":
-            properties = {"path": path, "old_text": {"type": "string"}, "new_text": {"type": "string"}}
+            properties = {
+                "path": path,
+                "old_text": {
+                    "type": "string",
+                    "description": "空字符串表示追加。替换或删除时用完整的 <mem>...</mem> 包裹原正文，唯一匹配连续条目。",
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "新增或替换的内容使用完整的 <mem>...</mem> 条目，标签不带属性，正文非空。空字符串表示删除。",
+                },
+            }
             required = list(properties)
         elif self.operation == "managed_read":
             properties = {"entry_ref": {"type": "string"}, "version": {"type": "string"},
@@ -63,10 +74,25 @@ class DesktopMemoryTool(Tool):
                       "managed_read": self._backend.managed_read, "experience_search": self._backend.experience_search}[self.operation]
             data = await method(**arguments)
             content = model_json(data)
-            return ToolResult(success=True, content=content, model_context=content,
-                              raw_output=data if isinstance(data, dict) else {"results": data})
+            return ToolResult(
+                success=True,
+                content=content,
+                model_context=content,
+                raw_output=data if isinstance(data, dict) else {"results": data},
+                raw_output_notice_in_model=self.operation != "read",
+            )
         except MemoryProxyError as exc:
-            return ToolResult(success=False, error=exc.code, raw_output={"code": exc.code, "outcome": exc.outcome})
+            error = exc.code
+            if exc.code == "CORE_CONTEXT_TOO_LARGE":
+                error = (
+                    "CORE_CONTEXT_TOO_LARGE: 当前会话历史、工具定义与本次记忆全文合计超过安全输入预算。"
+                    "这不等于记忆文件本身过大，也不代表云端读取失败；请先压缩会话或新建短会话，"
+                    "再重新 memory_read。不要据此要求用户删除记忆，也不要在上下文未改变时反复重试。"
+                )
+            elif exc.code == "CORE_READ_REQUIRED" and self.operation in {"write", "edit"}:
+                error = ("CORE_READ_REQUIRED: 请先对同一 path 调用 memory_read，"
+                         "完整读取并核对当前条目后再修改。每次写入成功后都需要重新读取。")
+            return ToolResult(success=False, error=error, raw_output={"code": exc.code, "outcome": exc.outcome})
         except MemoryEditError as exc:
             return ToolResult(success=False, error=str(exc))
         except Exception:

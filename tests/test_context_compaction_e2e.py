@@ -350,3 +350,76 @@ async def test_compaction_rebases_usage_before_rebuilding_request():
         outcome.messages, {}
     )
     assert outcome.estimated_after <= 1_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_chars,overlay_chars", [
+    (57_000, 0), (57_000, 2_400), (59_800, 0),
+], ids=["fits-original-budget", "full-request-overflow", "history-overflow"])
+async def test_forced_compaction_headroom_does_not_replace_the_final_request_budget(
+    monkeypatch, user_chars, overlay_chars,
+):
+    from dataclasses import replace
+
+    from box_agent.kernel.context_engine import REQUEST_INPUT_HEADROOM_TOKENS
+    from box_agent.kernel.loop import MAX_CONTEXT_COMPACTION_ATTEMPTS
+    from box_agent.runtime import run_agent_loop
+
+    class Provider:
+        normal_requests = []
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 2
+
+        async def generate_stream(self, messages, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                yield StreamEvent(type="text", delta="<summary>" + "kept " * 160 + "</summary>")
+            else:
+                self.normal_requests.append(messages)
+                yield StreamEvent(type="text", delta="resumed")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    preparations = []
+    original_prepare = DefaultContextEngine.prepare_request
+
+    def prepare(self, messages, **kwargs):
+        preparations.append(kwargs["token_limit"])
+        if len(preparations) > 1 and overlay_chars:
+            kwargs["extra_messages"] = (*kwargs.get("extra_messages", ()),
+                                        Message(role="user", source="runtime", content="z" * overlay_chars))
+        projection = original_prepare(self, messages, **kwargs)
+        if len(preparations) == 1:
+            assert projection.blocked_reason is None
+            # A one-shot capability recovery uses the shared compaction path.
+            return replace(projection, blocked_reason="Recover context once", budget_blocked=True)
+        return projection
+
+    monkeypatch.setattr(DefaultContextEngine, "prepare_request", prepare)
+    provider = Provider()
+    events = [event async for event in run_agent_loop(
+        llm=provider, tools={}, token_limit=30_000, max_steps=1,
+        messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * user_chars)],
+    )]
+    compactions = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert compactions[0].estimated_after > 30_000 - REQUEST_INPUT_HEADROOM_TOKENS
+    assert set(preparations) == {30_000}
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    if user_chars == 59_800:
+        assert len(compactions) == 1
+        assert compactions[0].estimated_after > 30_000
+        assert preparations == [30_000]
+    else:
+        assert compactions[0].estimated_after <= 30_000
+        assert len(preparations) >= 2
+    if overlay_chars or user_chars == 59_800:
+        assert 1 <= len(compactions) <= MAX_CONTEXT_COMPACTION_ATTEMPTS
+        assert errors and errors[0].error_code == "CONTEXT_INPUT_BUDGET_EXCEEDED"
+        assert not provider.normal_requests
+        assert done.stop_reason == StopReason.ERROR
+    else:
+        assert len(compactions) == 1
+        assert preparations == [30_000, 30_000]
+        assert not errors and len(provider.normal_requests) == 1
+        assert any(message.content == "x" * user_chars for message in provider.normal_requests[0])
+        assert done.stop_reason == StopReason.END_TURN

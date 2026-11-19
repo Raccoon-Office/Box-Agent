@@ -3338,7 +3338,8 @@ class MemsenseMemoryBackend(ExternalMemoryBackend):
     def _parse_core_entries(cls, text: str, *, storage: bool) -> list[_MemsenseCoreEntry]:
         """解析完整条目并验证属性；正文里的其他标签和转义文本保持原样。"""
         error = ("当前存储不是合法的核心记忆格式，无法修改。" if storage else
-                 "记忆必须使用一个或多个完整的 <mem>...</mem> 条目，标签不能带属性，正文不能为空。")
+                 "记忆必须使用一个或多个完整的 <mem>...</mem> 条目，标签不能带属性，正文不能为空。"
+                 "请将格式错误的非空参数改成 <mem>正文</mem> 后再试。")
         entries = []
         position = 0
         for match in cls._STORAGE_ENTRY_RE.finditer(text):

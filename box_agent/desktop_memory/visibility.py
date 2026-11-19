@@ -10,7 +10,7 @@ from typing import Callable
 from uuid import uuid4
 
 from ..context_input import DefaultContextEngine, ModelInputGuard, PreparedContext
-from ..kernel.context_engine import request_input_tokens
+from ..kernel.context_engine import _budget_content_json, _budget_image_tokens, request_input_tokens
 from ..schema import Message
 from .transport import MemoryProxyError
 
@@ -145,20 +145,58 @@ class CoreVisibilityGuard(ModelInputGuard):
 
 
 class DesktopInputGuard(CoreVisibilityGuard):
-    """Reduce optional preload before it could block the ordinary model request."""
+    """Bound memory input and request recovery only after a failed core read."""
 
-    def __init__(self, notify: VisibilityCallback, content_builder: Callable[[int], str]) -> None:
+    def __init__(self, notify: VisibilityCallback, content_builder: Callable[[int], str], *,
+                 can_read: Callable[[], bool] = lambda: True) -> None:
         super().__init__(notify)
         self._content_builder = content_builder
+        self._can_read = can_read
+        self._read_recovery_pending = False
+        self._read_recovery_attempted = False
+
+    def reset(self) -> None:
+        super().reset()
+        self._read_recovery_pending = self._read_recovery_attempted = False
+
+    def admit(self, read: CoreRead) -> None:
+        try:
+            super().admit(read)
+        except MemoryProxyError as exc:
+            if exc.code == "CORE_CONTEXT_TOO_LARGE" and not self._read_recovery_attempted:
+                self._read_recovery_pending = True
+            raise
 
     def _input_tokens(self, messages, definitions) -> int:
         # Nova and other hosted aliases do not expose a verified tokenizer.
         # Byte fallback is conservative for UTF-8/byte-fallback tokenizers and
         # avoids treating Chinese or emoji as chars/4. Never claim exact counts.
-        payload = {"messages": [message.model_dump(exclude_none=True) for message in messages],
+        # Connector recovery already projects the visible snapshot into content;
+        # its per-turn persistence metadata is never sent to the provider.
+        serialized = [message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+                      for message in messages]
+        for message, data in zip(messages, serialized):
+            if isinstance(message.content, list):
+                data["content"] = json.loads(_budget_content_json(message.content))
+        payload = {"messages": serialized,
                    "tools": [tool.to_openai_schema() for tool in definitions]}
         byte_bound = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        byte_bound += sum(_budget_image_tokens(message.content) for message in messages)
         return max(request_input_tokens(messages, definitions), byte_bound)
+
+    def prepare_context(self, projection: PreparedContext) -> PreparedContext:
+        if self._read_recovery_pending:
+            # Consume before the shared loop compacts/reprojects. A byte-bound
+            # failure must not become a permanent ban on model-valid input.
+            self._read_recovery_pending = False
+            self._read_recovery_attempted = True
+            if not projection.blocked_reason and self._can_read():
+                _log.info("memory operation=core_read reason=compaction_requested")
+                projection = replace(
+                    projection, budget_blocked=True, on_committed=None, on_response=None,
+                    blocked_reason="Core memory read exceeded its admission budget. Compact context before retrying memory_read.",
+                )
+        return super().prepare_context(projection)
 
     def project_messages(self, messages, *, tools, token_limit, tail=(), reserve_tokens=0):
         from ..memory import _MEMORY_START, _MEMORY_END, place_memory_block

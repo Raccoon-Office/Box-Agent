@@ -52,6 +52,31 @@ The private diagnostic scope also suppresses raw core-loop and Hook diagnostics,
 
 Bash diagnostics can contain command text and are suppressed in the private scope as well. A Host `MEMORY_SESSION_RETIRED` rejection clears the session's preload and read qualifications. The Host also uses that code when an Experience job's source session is retired; since the response does not distinguish the two cases, this rejection conservatively clears memory for the current turn. After a full batch of three Experience claims, the producer schedules a bounded delayed scan even when every claim returned a job; unknown outcomes still stop advancement.
 
+## Core-read context recovery
+
+Ordinary requests retain the shared model-token budget, including long first
+messages when online memory is enabled. The conservative UTF-8 bound applies to
+optional preload reduction and core-read admission, not to ordinary dispatch.
+Only an actual `CORE_CONTEXT_TOO_LARGE` admission failure requests one shared
+compaction attempt per turn. That recovery signal is consumed before reprojecting;
+the model can receive the failed tool result even if the conservative bound still
+does not fit. A subsequent explicit read is checked again before it can qualify
+a write. Further read failures do not repeatedly force compaction in the same turn.
+Turn reset clears recovery state; unavailable core reads do not request recovery.
+Compaction reserves room for projected request-only input and treats additional
+headroom as a summary target. Once the rebuilt history fits its budget, the loop
+rechecks the complete ordinary request at the original model input limit.
+Request-only input and capability guards still apply.
+Budget serialization excludes the persisted `host_connector_status` metadata;
+snapshots projected into message content remain counted, including after recovery.
+
+Image content uses the shared pixel-token charge instead of base64 byte length;
+the image transport-size preflight remains authoritative for wire size. Full
+read delivery, successful-response qualification, revocation, protected entries
+and revision checks are unchanged. An oversized new read still fails explicitly,
+with guidance that a combined context overflow does not establish an oversized
+memory file. No tool or write is automatically replayed.
+
 ## Verification boundary
 
 Focused checks: `uv run pytest tests/test_desktop_memory_launch.py tests/test_desktop_memory_attempts.py tests/test_desktop_memory_backend.py tests/test_desktop_memory_inputs.py tests/test_desktop_memory_transport.py tests/test_desktop_memory_visibility.py tests/test_desktop_memory_evidence.py tests/test_desktop_memory_experience.py tests/test_desktop_memory_windows_files.py tests/test_cli_config.py -q`.

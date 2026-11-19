@@ -147,7 +147,7 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         self.log_context: dict[str, str] = {}
         self.capabilities = frozenset({"recall", "read", "search", "save", "write", "edit"})
         self.transport = MemoryHostTransport(Path(config.bootstrap_file), config.identity_epoch, on_revoked=self._revoked)
-        self.model_input_guard = DesktopInputGuard(self._visibility, self._preload)
+        self.model_input_guard = DesktopInputGuard(self._visibility, self._preload, can_read=self._can_read_core)
         self.current_scope: TurnScope | None = None
         self._sections: dict[str, Any] = {}
         self._serial = 0
@@ -195,6 +195,13 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         if cloud and not scope.binding["onlineAtStart"]:
             raise MemoryProxyError("MEMORY_OFFLINE")
         return scope
+
+    def _can_read_core(self) -> bool:
+        try:
+            self._binding(cloud=True)
+        except MemoryProxyError:
+            return False
+        return True
 
     async def load_context(self, *, query: str, **context: Any) -> str:
         self.model_input_guard.reset()

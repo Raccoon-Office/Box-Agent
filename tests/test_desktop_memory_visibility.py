@@ -217,6 +217,234 @@ def test_conservative_history_budget_omission_is_diagnosable_without_payload(cap
     assert "PRIVATE_PRELOAD" not in caplog.text and "PRIVATE_HISTORY" not in caplog.text
 
 
+@pytest.mark.parametrize("preload", [False, True])
+async def test_online_memory_does_not_block_a_long_first_message_without_a_core_read(preload):
+    from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
+    from box_agent.memory import place_memory_block
+    from box_agent.runtime import run_agent_loop
+    from box_agent.schema import StreamEvent
+
+    class Provider:
+        requests = []
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 2
+
+        async def generate_stream(self, messages, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                yield StreamEvent(type="text", delta="<summary>preserve the user's message</summary>")
+            else:
+                self.requests.append(messages)
+                yield StreamEvent(type="text", delta="received")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    guard = DesktopInputGuard(lambda *_: None, lambda size: "preload" if size and preload else "")
+    lookup = SimpleNamespace(model_input_guard=guard, auto_match_context=lambda _: [], correction_curator=None)
+    system = (place_memory_block("BASE", "--- MEMORY START ---\npreload\n--- MEMORY END ---", reserve=True)
+              if preload else "BASE")
+    content = "x" * 32000
+    history = [Message(role="system", content=system), Message(role="user", content=content)]
+    provider = Provider()
+    ordinary = DefaultContextEngine(llm=provider).prepare_request(
+        history, prepared_tools=prepare_tools([]), token_limit=30000)
+    assert ordinary.blocked_reason is None
+    events = [event async for event in run_agent_loop(
+        llm=provider, messages=history, tools={}, memory_manager=lookup, token_limit=30000, max_steps=1, logger=None)]
+    assert not [event.message for event in events if isinstance(event, ErrorEvent)]
+    assert not any(isinstance(event, SummarizationEvent) for event in events)
+    assert len(provider.requests) == 1
+    assert provider.requests[0][-1].content == content
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.parametrize("preload", [False, True])
+def test_only_a_failed_core_read_requests_one_compaction_per_turn(preload, caplog):
+    from box_agent.memory import place_memory_block
+
+    llm = SimpleNamespace(estimate_text_tokens=lambda text: len(text.encode("utf-8")) // 2)
+    guard = DesktopInputGuard(lambda *_: None, lambda size: "PRIVATE_PRELOAD" if size and preload else "")
+    engine = DefaultContextEngine(llm=llm)
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    system = (place_memory_block("BASE", "--- MEMORY START ---\nPRIVATE_PRELOAD\n--- MEMORY END ---", reserve=True)
+              if preload else "BASE")
+    history = [Message(role="system", content=system),
+               Message(role="assistant", content="PRIVATE_HISTORY " * 75000),
+               Message(role="user", content="remember")]
+    tools = prepare_tools([])
+    ordinary = DefaultContextEngine(llm=llm).prepare_request(history, prepared_tools=tools, token_limit=810000)
+    assert ordinary.blocked_reason is None
+    request = engine.prepare_request(history, prepared_tools=tools, token_limit=810000)
+    assert request.blocked_reason is None
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
+    recovery = engine.prepare_request(history, prepared_tools=tools, token_limit=810000)
+    assert recovery.budget_blocked and recovery.blocked_reason
+    assert recovery.on_committed is None and recovery.on_response is None
+    assert engine.prepare_request(history, prepared_tools=tools, token_limit=810000).blocked_reason is None
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
+    assert engine.prepare_request(history, prepared_tools=tools, token_limit=810000).blocked_reason is None
+    guard.reset()  # A new turn gets its own bounded recovery attempt.
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
+    assert engine.prepare_request(history, prepared_tools=tools, token_limit=810000).budget_blocked
+    assert "PRIVATE_PRELOAD" not in caplog.text and "PRIVATE_HISTORY" not in caplog.text
+    assert history[1].content == "PRIVATE_HISTORY " * 75000
+
+
+def test_desktop_image_budget_counts_pixels_without_counting_base64_as_text():
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "")
+    image = {"type": "input_image", "media_type": "image/png", "width": 16, "height": 16, "data": "A" * 200000}
+    message = Message(role="user", content=[image])
+    short = message.model_copy(update={"content": [{**image, "data": "AA=="}]})
+    cost = guard._input_tokens([message], [])
+    assert cost == guard._input_tokens([short], [])
+    assert 512 <= cost < 2000
+    assert message.content[0]["data"] == "A" * 200000
+
+
+@pytest.mark.parametrize("after_compaction", [False, True])
+async def test_connector_snapshot_metadata_does_not_block_desktop_request_or_core_read(after_compaction):
+    from box_agent.connector_context import append_connector_status
+
+    snapshot = "<connector-status>\n" + "\n".join(
+        f"service-{index}: synthetic knowledge connector connected" for index in range(120)
+    ) + "\n</connector-status>"
+    history = [Message(role="system", content="BASE")]
+    for index in range(12):
+        content = append_connector_status(history, f"question {index}", snapshot)
+        history.append(Message(role="user", content=content, host_connector_status=snapshot))
+    if after_compaction:
+        history = [history[0], *history[-4:]]  # The visible snapshot was compacted away.
+    before = [message.model_dump() for message in history]
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "")
+    engine = DefaultContextEngine()
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    tools = prepare_tools([])
+    request = engine.prepare_request(history, prepared_tools=tools, token_limit=16000)
+    assert request.blocked_reason is None
+    assert sum(snapshot in message.content for message in request.messages) == 1
+    without_metadata = [message.model_copy(update={"host_connector_status": None}) for message in request.messages]
+    assert guard._input_tokens(request.messages, []) == guard._input_tokens(without_metadata, [])
+    assert [message.model_dump() for message in history] == before
+
+    record = read_record()
+    guard.admit(record)
+    reply = Message(role="tool", name="memory_read", tool_call_id=record.read_id, content=record.model_content)
+    delivered = engine.prepare_request([*history, reply], prepared_tools=tools, token_limit=16000)
+    assert delivered.blocked_reason is None
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
+    delivered.on_committed()
+    delivered.on_response()
+    assert await guard.require(record.path) is record
+
+
+def test_visible_connector_snapshot_still_counts_toward_desktop_budget():
+    snapshot = "<connector-status>\n" + "synthetic connector connected\n" * 1000 + "</connector-status>"
+    history = [Message(role="system", content="BASE"),
+               Message(role="user", content="remember", host_connector_status=snapshot)]
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "")
+    engine = DefaultContextEngine()
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    request = engine.prepare_request(history, prepared_tools=prepare_tools([]), token_limit=16000)
+    assert snapshot in request.messages[-1].content
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
+    assert history[-1].content == "remember" and history[-1].host_connector_status == snapshot
+
+
+async def test_failed_core_read_revokes_grant_without_blocking_ordinary_projection():
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "")
+    engine = DefaultContextEngine(llm=SimpleNamespace(estimate_text_tokens=lambda text: len(text) // 2))
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    messages = [Message(role="system", content="BASE"), Message(role="user", content="remember")]
+    engine.prepare_request(messages, prepared_tools=prepare_tools([]), token_limit=10000)
+    record = read_record()
+    guard.admit(record)
+    delivered = project(engine, messages, record)
+    delivered.on_committed()
+    delivered.on_response()
+    assert await guard.require(record.path) is record
+    ordinary = project(engine, [*messages, Message(role="assistant", content="x" * 14000)], record)
+    assert ordinary.blocked_reason is None
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(read_record())
+    delivered.on_response()
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
+
+
+@pytest.mark.parametrize("summary_fails", [False, True])
+# The longer history misses the recovery headroom target while leaving room
+# for the summary request's own instructions within the full model budget.
+@pytest.mark.parametrize("user_chars", [32_000, 56_400])
+async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_or_repeat_compaction(summary_fails, user_chars):
+    from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent, ToolCallResult
+    from box_agent.runtime import run_agent_loop
+    from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+    from box_agent.tools.base import Tool, ToolResult
+
+    activations = []
+    guard = DesktopInputGuard(lambda *args: activations.append(args), lambda _: "")
+
+    class Reader(Tool):
+        name = "memory_read"
+        description = "Read core memory."
+        parameters = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+
+        async def execute(self, path):
+            try:
+                guard.admit(read_record(path=path))
+            except MemoryProxyError as exc:
+                return ToolResult(success=False, error=exc.code)
+            pytest.fail("The irreducible history must still fail conservative core-read admission")
+
+    class Provider:
+        summary_calls = 0
+        normal_calls = 0
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 2
+
+        async def generate_stream(self, messages, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                self.summary_calls += 1
+                if summary_fails:
+                    raise RuntimeError("synthetic summary unavailable")
+                yield StreamEvent(type="text", delta="<summary>Memory read failed: CORE_CONTEXT_TOO_LARGE.</summary>")
+            else:
+                self.normal_calls += 1
+                assert any(message.role == "user" and message.content == "x" * user_chars for message in messages)
+                if self.normal_calls > 1:
+                    assert any("CORE_CONTEXT_TOO_LARGE" in str(message.content) for message in messages)
+                if self.normal_calls <= 2:
+                    yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                        id=f"read-{self.normal_calls}", type="function",
+                        function=FunctionCall(name="memory_read", arguments={"path": "memory.md"}))])
+                    return
+                yield StreamEvent(type="text", delta="Cannot admit the memory read, but ordinary replies still work.")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    lookup = SimpleNamespace(model_input_guard=guard, auto_match_context=lambda _: [], correction_curator=None)
+    provider = Provider()
+    events = [event async for event in run_agent_loop(
+        llm=provider, tools={"memory_read": Reader()}, memory_manager=lookup, token_limit=30000, max_steps=3, logger=None,
+        messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * user_chars)])]
+    assert not [event.message for event in events if isinstance(event, ErrorEvent)]
+    assert provider.summary_calls == 1 and provider.normal_calls == 3
+    compactions = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert len(compactions) == 1
+    if user_chars > 32000:
+        assert 30000 - REQUEST_INPUT_HEADROOM_TOKENS < compactions[0].estimated_after <= 30000
+    failures = [event for event in events if isinstance(event, ToolCallResult) and not event.success]
+    assert len(failures) == 2 and all(event.error == "CORE_CONTEXT_TOO_LARGE" for event in failures)
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
+    assert not any(event[1] for event in activations)
+
+
 async def test_blocked_model_input_never_grants_visibility(bound):
     guard, _, _, events = bound
     record = read_record()

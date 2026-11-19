@@ -41,6 +41,8 @@ class ToolResult(BaseModel):
     # Tool-owned host projection, used only when the full raw output is saved.
     # Never serialize this private handoff or treat it as the complete result.
     raw_output_preview: dict | None = Field(default=None, exclude=True, repr=False)
+    # A tool that verifies its model reply verbatim can keep storage notices in the event only.
+    raw_output_notice_in_model: bool = Field(default=True, exclude=True, repr=False)
     model_context: str | None = None  # optional compact content for future LLM turns
     # Complete persistable text when ``content`` is intentionally bounded by
     # the tool. The shared result-storage seam consumes it before the

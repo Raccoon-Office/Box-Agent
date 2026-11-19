@@ -6,55 +6,34 @@ keywords: [memory, remember, 记忆, 记住, 保存, 长期记忆, 偏好]
 
 # Memory Guide
 
-You have access to `memory_write`, `memory_read`, and `memory_search` tools for persistent cross-session memory.
+Use the memory tools exposed in the current session. Check the tool schema before choosing how to save.
 
-## Two Types of Memory
+## Path-Based Memory Tools
 
-**Core memory** (`MEMORY.md`) — always recalled at session start:
-- User identity: name, role, team, company
-- Explicit preferences: language, writing style, tools
-- Durable behavioral rules: "don't summarize at the end"
+Use this workflow when `memory_read` and `memory_write` require `path`.
 
-**IMPORTANT**: Core is ONLY for what the user explicitly tells you. Never write your own summaries, inferences, or conclusions to core.
+- `user.md` holds stable user identity, preferences, and collaboration habits supported by explicit user statements.
+- `memory.md` holds confirmed long-term rules, project context the user asks to keep, and confirmed decisions that will affect future work.
 
-**Memory summary** (`memory_summary.md`) — lightweight routing guide:
-- Injected at session start when searchable context exists
-- Helps decide whether a request should call `memory_search`
-- Does not contain full context entries
+These are virtual memory paths. Access them through the memory tools.
 
-**Context / experience memory** (`v2/experiences/<topic>.md`) — searchable on demand:
-- Project context: goals, deadlines, team info
-- Task patterns: report formats, document templates
-- Historical notes: last week's report highlights
-- Key decisions or constraints that may matter in future sessions
-- Previous pitfalls: verified fixes, recurring errors, specific paths, repo/workflow conventions
+Read the same path before editing and follow the rules returned by the read. For an existing path, prefer `memory_edit` to append, replace, or delete individual entries. Each non-empty `old_text` or `new_text` must contain complete `<mem>...</mem>` entries with non-empty bodies and plain tags. For replacement or deletion, copy the exact bodies of the existing consecutive entries into `old_text` and match them uniquely. Leave `old_text` empty to append or `new_text` empty to delete. Respect protected entries.
 
-Context writes are model-merged with existing context when an LLM is available. The model decides whether to add, replace, drop, or no-op; code applies only safe exact-match operations and falls back to append-with-dedup if planning fails.
+Example for an existing `memory.md`:
 
-## When to Save
-
-### Core (`category="core"`) — ONLY when user explicitly states:
-
-1. **Personal info** — "I'm a product manager" → save as core
-2. **Preferences** — "I prefer Chinese, formal tone" → save as core
-3. **Behavioral feedback** — "Don't add emoji" → save as core
-
-### Context (`category="context"`) — save when user mentions:
-
-4. **Project context** — "Q2 goal is launching the data dashboard" → save as context
-5. **Task templates** — "Weekly report should have progress/issues/next week" → save as context
-6. **Key results** — "Last week we completed the API integration" → save as context
-7. **Durable constraints** — "For this project, never use dependency X" → save as context
-
-## How to Save
-
+```python
+memory_read(path="memory.md")
+memory_edit(path="memory.md", old_text="", new_text="<mem>The user confirmed that status reports should include a risks section.</mem>")
+memory_read(path="memory.md")
 ```
-# Core — user identity and preferences
-memory_write(content="- User: Zhang San, Product Dept, Product Manager", category="core")
 
-# Context — project info and patterns; model-merged when possible
-memory_write(content="- Q2 goal: launch data dashboard by 6/30", category="context")
-```
+If the read reports `exists=false`, create that path with `memory_write(path="memory.md", content="<mem>Confirmed long-term rule</mem>")`. A full rewrite requires all entries and is allowed only when the read rules permit it. After a successful write or edit, read the same path again to verify the result and before making another change.
+
+On `CORE_READ_REQUIRED`, call `memory_read` for the same virtual path and review the result before retrying. On a format error, fix the offending argument using a complete `<mem>body</mem>` entry before retrying.
+
+## Category-Based Memory Tools
+
+When the active `memory_write` schema exposes `category`, use `core` for explicit user identity, preferences, and durable behavioral rules. Use `context` for long-term project context, recurring task patterns, and verified decisions. Follow the active tool schema for the write.
 
 ## When to Search
 

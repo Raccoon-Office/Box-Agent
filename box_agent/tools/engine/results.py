@@ -214,6 +214,7 @@ def process_tool_result(
             error=visible_error,
             raw_output=_trace_safe_tool_raw_output(result.raw_output),
             raw_output_preview=result.raw_output_preview,
+            raw_output_notice_in_model=result.raw_output_notice_in_model,
             model_content=tool_message.content,
             original_model_content=original_model_content,
             event_metadata=event_metadata,
