@@ -51,7 +51,7 @@ SDK 0.12.1 与配套 Lab 的接口、生命周期约束和回归矩阵见
 用户选择暂不安装时，宿主验证原回执并发送一次带有稳定 `request_id` 和
 `skip_component_id: "video-generation"` 的 `session/prompt._meta.component_continuation`。
 跳过连接或视频安装的续跑使用已经就绪的能力。若插件不可用或本次跳过了插件，
-`get_skill` 返回当前限制，任务可以继续完成大纲、旁白或分镜。
+`get_skill` 返回当前限制，任务可以继续完成大纲、旁白或分镜。委派的 Skill 也沿用该回合的跳过选择。
 
 ### 按需发现连接器与恢复入口
 

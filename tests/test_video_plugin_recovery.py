@@ -100,6 +100,52 @@ async def test_ready_video_plugin_remains_callable_when_only_connector_setup_was
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ready,skip_video,can_delegate", [
+    ("0", False, False),
+    ("1", True, False),
+    ("1", False, True),
+])
+async def test_delegated_video_skill_honors_continuation(host, tmp_path, monkeypatch, ready, skip_video, can_delegate):
+    from box_agent.tools.base import ToolResult
+    from box_agent.tools.sub_agent_tool import SubAgentTool
+    from tests.test_acp import DoneLLM
+
+    directory = host / "hyperframes-video"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(SKILL)
+    monkeypatch.setenv("BOX_AGENT_VIDEO_RUNTIME_READY", ready)
+    loader = SkillLoader(sources=[(host, "plugin")])
+    reader = GetSkillTool(loader)
+    reader.allow_component_setup = False
+    reader.skip_video_generation = skip_video
+    delegate = SubAgentTool(llm=DoneLLM(), parent_tools={"get_skill": reader}, workspace_dir=str(tmp_path))
+    delegate.set_skill_provider(lambda: loader)
+    child_results = []
+
+    async def run_child(**kwargs):
+        # The runtime may become unavailable between admission and a child reread.
+        monkeypatch.setenv("BOX_AGENT_VIDEO_RUNTIME_READY", "0")
+        child_reader = kwargs["child_tools"]["get_skill"]
+        child_results.append(await child_reader.execute("hyperframes-video"))
+        return ToolResult(success=True, content="Continued with ready tools.")
+
+    monkeypatch.setattr(delegate, "_run_general_loop", run_child)
+    result = await delegate.execute(
+        task="Use the local video method.", skills=["hyperframes-video"], required_tools=["get_skill"],
+    )
+
+    if can_delegate:
+        assert result.success
+        reread, = child_results
+        assert not reread.success and reread.raw_output is None
+        assert "unavailable for this continuation" in reread.error
+    else:
+        assert not child_results
+        assert not result.success and result.raw_output["code"] == "SKILL_RUNTIME_UNAVAILABLE"
+        assert result.raw_output["skill"] == "hyperframes-video"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("skip", ["connector", "component"])
 async def test_acp_continues_video_with_available_tools_after_setup_is_declined(host, tmp_path, skip):
     from box_agent.acp import BoxACPAgent

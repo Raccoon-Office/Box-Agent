@@ -32,6 +32,8 @@ class GetSkillTool(Tool):
         blocked_skill_names: set[str] | frozenset[str] | None = None,
         explicitly_allowed_skill_names: MutableSet[str] | None = None,
         skill_access_filter: Callable[[Any], bool] | None = None,
+        allow_component_setup: bool = True,
+        skip_video_generation: bool = False,
     ):
         self.skill_loader = skill_loader
         self.include_disabled = include_disabled
@@ -40,8 +42,8 @@ class GetSkillTool(Tool):
         self.blocked_skill_names = blocked_skill_names or frozenset()
         self.explicitly_allowed_skill_names = explicitly_allowed_skill_names
         self.skill_access_filter = skill_access_filter
-        self.allow_component_setup = True
-        self.skip_video_generation = False
+        self.allow_component_setup = allow_component_setup
+        self.skip_video_generation = skip_video_generation
 
     @property
     def name(self) -> str:
@@ -78,6 +80,15 @@ class GetSkillTool(Tool):
             "additionalProperties": False,
         }
 
+    def component_requirement(self, skill_name: str, *, catalog=None) -> ToolResult | None:
+        """Apply this reader's setup policy to a Skill with a host component."""
+        from .runtime_components import plugin_skill_requirement
+
+        return plugin_skill_requirement(
+            skill_name, catalog or self.skill_loader,
+            allow_setup=self.allow_component_setup, skip_video=self.skip_video_generation,
+        )
+
     def check_access(self, skill_name: str, *, catalog=None, refresh: bool = True) -> ToolResult | None:
         """Check this reader's current scope without reading or recording a body."""
         from ..skill_dependencies import resolve_required_skills, SkillDependencyError
@@ -92,11 +103,7 @@ class GetSkillTool(Tool):
         if refresh:
             self.skill_loader.maybe_reload()
         loader = catalog or self.skill_loader
-        from .runtime_components import plugin_skill_requirement
-
-        requirement = plugin_skill_requirement(
-            name, loader, allow_setup=self.allow_component_setup, skip_video=self.skip_video_generation,
-        )
+        requirement = self.component_requirement(name, catalog=loader)
         if requirement is not None:
             return requirement
         if self.allowed_skill_names is not None or self.skill_access_filter is not None:
