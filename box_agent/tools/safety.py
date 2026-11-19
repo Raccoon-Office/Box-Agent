@@ -29,8 +29,15 @@ BUILTIN_SKILLS_ROOT = bundled_resource_dir("skills", package_dir=Path(__file__).
 def builtin_skill_write_error(
     path: Path, skills_root: Path | None = None, *, include_ancestors: bool = False,
 ) -> str | None:
-    """Packaged and host-managed Skills are runtime resources, never task output."""
+    """Packaged Skill resources and shared expert caches are never task output."""
     resolved = path.resolve()
+    experts_root = state_path("experts/packages").resolve()
+    if (resolved.is_relative_to(experts_root)
+            or (include_ancestors and experts_root.is_relative_to(resolved))):
+        return (
+            "EXPERT_PACKAGE_READ_ONLY: cached expert files cannot be changed by task tools. "
+            "Write task artifacts in the task workspace."
+        )
     bundled_root = BUILTIN_SKILLS_ROOT.resolve()
     managed_root = skills_root.resolve() if skills_root is not None else None
     contains_managed_source = (

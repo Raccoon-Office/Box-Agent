@@ -244,6 +244,9 @@ from box_agent.run_observer import (
     cleanup_turn_resources,
 )
 from box_agent.experts import ExpertSessionContext
+from box_agent.expert_dependencies import ExpertDependencyError, validate_expert_dependencies
+from box_agent.expert_package_format import ExpertPackageError
+from box_agent.expert_packages import prepare_expert_meta
 from box_agent.llm.reasoning import (
     normalize_raccoon_thinking,
     parse_raccoon_thinking_level,
@@ -1837,6 +1840,7 @@ class BoxACPAgent:
         )
         skills = self._skills_meta()
         response_meta: dict[str, Any] = {
+            "expert_package_download": 1,
             "raccoon_thinking": {"protocol_version": 1},
             "connector_discovery": {"versions": [1]},
             "session_replay": {"protocol_version": 1},
@@ -2051,6 +2055,13 @@ class BoxACPAgent:
                     and raw_skillhub_install == SKILLHUB_INSTALL_CAPABILITY_VERSION
                 )
             env_context = EnvContext.from_meta(meta.get("env_context"))
+            try:
+                meta = await prepare_expert_meta(meta)
+                params.field_meta = meta
+            except ExpertPackageError as exc:
+                raise RequestError(-32602, "Invalid expert selection", {
+                    "code": exc.code, "detail": str(exc),
+                }) from None
             expert_context = ExpertSessionContext.from_meta(meta)
             initial_task_id = normalize_task_id(
                 meta.get("task_id") or meta.get("taskId")
@@ -2325,6 +2336,65 @@ class BoxACPAgent:
                     )
                 )
 
+        from box_agent.tools.connector_discovery import (
+            ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
+        )
+
+        def prepare_connector_discovery(session_log, *, new_session):
+            configured_tool_version = self._config.agent.tool_interface_version
+            discovery_mode = resolve_discovery_mode(
+                session_log,
+                requested=connector_discovery_requested and not utility,
+                new_session=new_session,
+                tool_version=(
+                    session_log.resolve_tool_interface_version(configured_tool_version)
+                    if session_log is not None else configured_tool_version
+                ),
+            )
+            if discovery_mode and connector_discovery_requested and not utility:
+                discovery = ConnectorDiscovery(lambda: selected_connector_ids)
+                discovery.update(meta.get("connector_discovery"))
+                return discovery
+            return None
+
+        connector_discovery = None
+
+        def skill_access_filter(skill):
+            return _connector_skill_is_granted(
+                skill, connector_skill_grants, connector_discovery
+            ) and (connector_discovery is None or _connector_skill_is_available(
+                skill, selected_connector_ids, connector_discovery
+            ))
+
+        async def preflight_expert_dependencies():
+            if expert_context is None:
+                return
+            from box_agent.tools.setup import image_generation_tool_settings
+
+            expert_tools = {tool.name for tool in [*self._base_tools, *tools]}
+            if not utility:
+                expert_tools.add("tool_search")
+                if image_generation_tool_settings(self._config, session_llm)[0]:
+                    expert_tools.add("generate_image")
+            try:
+                await asyncio.to_thread(
+                    validate_expert_dependencies, meta, expert_context, session_skill_loader, expert_tools,
+                    skill_access_filter=skill_access_filter,
+                )
+            except ExpertDependencyError as exc:
+                raise RequestError(-32602, "Expert dependencies are not ready", {
+                    "code": exc.code, "dependencies": exc.dependencies,
+                }) from None
+
+        # Existing logs pin connector mode. Preflight before retiring their live
+        # session; cold sessions use the real opened log below, including resume.
+        bound_state = next((state for handle, state in self._sessions.items()
+                            if state.upstream_session_id == upstream_session_id or handle == session_id), None)
+        expert_preflight_complete = expert_context is not None and bound_state is not None
+        if expert_preflight_complete:
+            connector_discovery = prepare_connector_discovery(bound_state.agent.session_log, new_session=False)
+            await preflight_expert_dependencies()
+
         recovery_prompt = (
             _RECOVERY_PROMPT if upstream_session_id and _RECOVERY_SESSION_ID.fullmatch(upstream_session_id) else None
         )
@@ -2428,24 +2498,9 @@ class BoxACPAgent:
         # the historical direct ``Agent(...)`` call and its test hook.
         state = None
         try:
-            from box_agent.tools.connector_discovery import (
-                ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
-            )
-
-            configured_tool_version = self._config.agent.tool_interface_version
-            discovery_mode = resolve_discovery_mode(
-                session_log,
-                requested=connector_discovery_requested and not utility,
-                new_session=not resumed,
-                tool_version=(
-                    session_log.resolve_tool_interface_version(configured_tool_version)
-                    if session_log is not None else configured_tool_version
-                ),
-            )
-            connector_discovery = None
-            if discovery_mode and connector_discovery_requested and not utility:
-                connector_discovery = ConnectorDiscovery(lambda: selected_connector_ids)
-                connector_discovery.update(meta.get("connector_discovery"))
+            if not expert_preflight_complete:
+                connector_discovery = prepare_connector_discovery(session_log, new_session=not resumed)
+                await preflight_expert_dependencies()
             state = await SessionState.open(
                 config=self._config,
                 runtime=self._plugin_runtime,
@@ -2468,11 +2523,7 @@ class BoxACPAgent:
                     skill_task=self._skill_task, session_log=session_log,
                     workspace_tools_factory=add_workspace_tools,
                     capability_state_provider=self._sub_agent_capability_state,
-                    skill_access_filter=lambda skill: _connector_skill_is_granted(
-                        skill, connector_skill_grants, connector_discovery
-                    ) and (connector_discovery is None or _connector_skill_is_available(
-                        skill, selected_connector_ids, connector_discovery
-                    )),
+                    skill_access_filter=skill_access_filter,
                     skill_catalog_filter=lambda skill: _connector_skill_is_available(
                         skill, selected_connector_ids, connector_discovery
                     ),
