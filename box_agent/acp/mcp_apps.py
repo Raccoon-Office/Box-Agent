@@ -6,6 +6,7 @@ call and the current connection; no independent persistent App registry exists.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -74,8 +75,9 @@ def _saved_snapshot(state: Any, call_id: str) -> dict[str, Any] | None:
 class McpAppsACP:
     """Thin, session-bound adapter over the owning MCP runtime."""
 
-    def __init__(self, sessions: dict[str, Any]) -> None:
+    def __init__(self, sessions: dict[str, Any], on_reconnect: Callable[[], None] | None = None) -> None:
         self.sessions = sessions
+        self._on_reconnect = on_reconnect
         from box_agent.tools.mcp_apps import set_mcp_apps_host_capability
         set_mcp_apps_host_capability(True)
         self._epoch = token_hex(32)
@@ -87,7 +89,6 @@ class McpAppsACP:
                 value = _bounded_copy(snapshot, MAX_SNAPSHOT_BYTES)
                 _string(value.get("toolCallId"))
                 _string(value.get("serverName"))
-                _string(value.get("serverIdentity"), limit=2048)
                 _string(value.get("resourceUri"), limit=2048)
                 if not isinstance(value.get("arguments"), dict) or not isinstance(value.get("result"), dict):
                     raise _error("MCP_APP_INVALID_PAYLOAD")
@@ -119,7 +120,7 @@ class McpAppsACP:
         return session_id, state
 
     @staticmethod
-    def _allowed_connectors(state: Any, params: dict[str, Any]) -> frozenset[str]:
+    def _allowed_connectors(state: Any, params: dict[str, Any], *, selection_only: bool = False) -> frozenset[str]:
         if "connectorContext" not in params:
             return frozenset(getattr(state, "selected_connector_ids", set()))
         # Only the native host supplies this request-local snapshot. It is not
@@ -139,32 +140,41 @@ class McpAppsACP:
             raise _error("MCP_APP_INVALID_REQUEST") from exc
         if selected is None or len(selected) > 100:
             raise _error("MCP_APP_INVALID_REQUEST")
+        if selection_only and not unavailable:
+            return frozenset(selected)
         return frozenset(connector_id for connector_id, _, status in statuses or ()
                          if not unavailable and status == "connected" and connector_id in selected)
 
-    def _resolve(self, params: dict[str, Any], *, bound: bool):
-        from box_agent.tools.mcp_loader import resolve_mcp_app_tool
+    def _history(self, params: dict[str, Any]):
         session_id, state = self._state(params)
         call_id = _string(params.get("toolCallId"))
         snapshot = _saved_snapshot(state, call_id)
         if snapshot is None:
             raise _error("MCP_APP_SNAPSHOT_UNAVAILABLE")
-        tool = resolve_mcp_app_tool(
-            snapshot["serverName"], snapshot["tool"]["name"],
-            server_identity=snapshot["serverIdentity"],
-            allowed_connector_ids=lambda: self._allowed_connectors(state, params), actor="model",
-        )
-        if not tool.mcp_ui_resource_uri:
-            raise _error("MCP_APP_RESOURCE_UNAVAILABLE")
+        return session_id, state, snapshot
+
+    def _resolve(self, params: dict[str, Any], *, bound: bool):
+        from box_agent.tools.mcp_apps import McpAppError
+        from box_agent.tools.mcp_loader import current_mcp_app_binding
+        session_id, state, snapshot = self._history(params)
+        try:
+            binding = current_mcp_app_binding(
+                snapshot["serverName"], lambda: self._allowed_connectors(state, params),
+            )
+        except McpAppError as exc:
+            # A credential update may revoke the old epoch just before its
+            # replacement is published. A new open can retry this transition.
+            if not bound and exc.code == "APP_SERVER_CHANGED":
+                raise _error("APP_SERVER_UNAVAILABLE") from exc
+            raise
         material = json.dumps([
-            self._epoch, session_id, state._mcp_apps_nonce, call_id,
-            tool.mcp_server_identity, tool.mcp_generation, snapshot["resourceUri"],
-            tool.mcp_ui_resource_uri,
+            self._epoch, session_id, state._mcp_apps_nonce, snapshot["toolCallId"],
+            binding.server_identity, binding.generation, snapshot["resourceUri"],
         ], separators=(",", ":"))
         binding_id = sha256(material.encode()).hexdigest()
         if bound and not compare_digest(_string(params.get("bindingId")), binding_id):
             raise _error("MCP_APP_BINDING_EXPIRED")
-        return session_id, state, snapshot, tool, binding_id
+        return session_id, state, snapshot, binding, binding_id
 
     def _assert_current(self, session_id: str, state: Any) -> None:
         if (self.sessions.get(session_id) is not state or getattr(state, "_closed", False)
@@ -183,37 +193,60 @@ class McpAppsACP:
                     return {"cancelled": False}
                 running[1].cancel()
                 return {"cancelled": True}
-            session_id, state, snapshot, tool, binding_id = self._resolve(params, bound=method != "mcp/apps/snapshot")
+            if method == "mcp/apps/snapshot":
+                from box_agent.tools.mcp_loader import prepare_mcp_app_connection
+                session_id, state, saved = self._history(params)
+
+                def selected_connectors():
+                    self._assert_current(session_id, state)
+                    self._history(params)
+                    return self._allowed_connectors(state, params, selection_only=True)
+
+                await prepare_mcp_app_connection(saved["serverName"], selected_connectors, self._on_reconnect)
+                self._assert_current(session_id, state)
+            session_id, state, snapshot, binding, binding_id = self._resolve(params, bound=method != "mcp/apps/snapshot")
             if method == "mcp/apps/snapshot":
                 return {"version": VERSION, "bindingId": binding_id,
                         "resourceUri": snapshot["resourceUri"], "tool": snapshot["tool"],
                         "arguments": snapshot["arguments"], "result": snapshot["result"]}
             if method == "mcp/apps/resource":
                 from box_agent.tools.mcp_apps import McpAppError
-                from box_agent.tools.mcp_loader import read_mcp_app_resource
+                from box_agent.tools.mcp_loader import read_mcp_app_resource, resolve_mcp_app_tool
                 uri = _string(params.get("uri"), limit=2048)
                 initial_ui = uri == snapshot["resourceUri"]
 
-                async def read(resource_uri: str):
+                def allowed_connectors():
+                    return self._allowed_connectors(state, params)
+
+                async def read(resource_uri: str, *, fallback: bool = False):
                     return await read_mcp_app_resource(
-                        snapshot["serverName"], resource_uri, server_identity=tool.mcp_server_identity,
-                        generation=tool.mcp_generation, allowed_connector_ids=lambda: self._allowed_connectors(state, params),
+                        snapshot["serverName"], resource_uri, server_identity=binding.server_identity,
+                        generation=binding.generation, allowed_connector_ids=allowed_connectors,
                         require_ui=initial_ui,
                         # Only the original, persisted call authorizes a historical entry point.
-                        ui_tool_name=snapshot["tool"]["name"] if initial_ui else None,
+                        saved_ui_uri=snapshot["resourceUri"] if initial_ui else None,
+                        ui_tool_name=snapshot["tool"]["name"] if fallback else None,
                     )
 
                 try:
                     result = await read(uri)
                 except McpAppError as exc:
-                    if (not initial_ui or exc.code != "APP_RESOURCE_NOT_FOUND"
-                            or tool.mcp_ui_resource_uri == uri):
+                    if not initial_ui or exc.code != "APP_RESOURCE_NOT_FOUND":
                         raise
-                    # A missing old resource may use this same tool's current UI once.
-                    # Recheck history, identity and binding before the second request.
                     self._resolve(params, bound=True)
+                    try:
+                        tool = resolve_mcp_app_tool(
+                            snapshot["serverName"], snapshot["tool"]["name"], server_identity=binding.server_identity,
+                            generation=binding.generation, allowed_connector_ids=allowed_connectors, actor="model",
+                        )
+                    except McpAppError as lookup_error:
+                        if lookup_error.code in {"APP_TOOL_UNAVAILABLE", "APP_TOOL_NOT_ALLOWED"}:
+                            raise exc from lookup_error
+                        raise
+                    if not tool.mcp_ui_resource_uri or tool.mcp_ui_resource_uri == uri:
+                        raise
                     uri = tool.mcp_ui_resource_uri
-                    result = await read(uri)
+                    result = await read(uri, fallback=True)
                 self._assert_current(session_id, state)
                 self._resolve(params, bound=True)
                 if initial_ui:
@@ -221,7 +254,7 @@ class McpAppsACP:
                     return {**result, "resolvedResourceUri": uri}
                 return result
             if method == "mcp/apps/call":
-                result = await self._call(session_id, state, snapshot, tool, params)
+                result = await self._call(session_id, state, snapshot, binding, params)
                 self._assert_current(session_id, state)
                 self._resolve(params, bound=True)
                 return result
@@ -245,7 +278,7 @@ class McpAppsACP:
                 latest = event["data"]
         return latest
 
-    async def _call(self, session_id: str, state: Any, snapshot: dict, original_tool: Any, params: dict):
+    async def _call(self, session_id: str, state: Any, snapshot: dict, binding: Any, params: dict):
         from box_agent.tools.mcp_loader import resolve_mcp_app_tool
         interaction_id = _string(params.get("interactionId"))
         name = _string(params.get("name"))
@@ -256,8 +289,8 @@ class McpAppsACP:
         # Resolve before any dispatch: includes connector authorization and the
         # App visibility policy, independent of untrusted readOnlyHint values.
         target = resolve_mcp_app_tool(
-            snapshot["serverName"], name, server_identity=original_tool.mcp_server_identity,
-            generation=original_tool.mcp_generation,
+            snapshot["serverName"], name, server_identity=binding.server_identity,
+            generation=binding.generation,
             allowed_connector_ids=lambda: self._allowed_connectors(state, params), actor="app",
         )
         signature = sha256(json.dumps([snapshot["toolCallId"], name, arguments],
@@ -277,7 +310,7 @@ class McpAppsACP:
             raise _error(previous.get("error", "MCP_APP_OUTCOME_UNKNOWN"))
         if self._turn_is_preparing(state):
             raise _error("MCP_APP_SESSION_BUSY")
-        task = asyncio.create_task(self._execute(session_id, state, snapshot, original_tool,
+        task = asyncio.create_task(self._execute(session_id, state, snapshot, binding,
                                                interaction_id, signature, name, target.name, arguments,
                                                lambda: self._allowed_connectors(state, params)),
                                    name="mcp-app-interaction")
@@ -371,7 +404,7 @@ class McpAppsACP:
 
         return arguments, gates, still_authorized
 
-    async def _execute(self, session_id, state, snapshot, original_tool, interaction_id, signature,
+    async def _execute(self, session_id, state, snapshot, binding, interaction_id, signature,
                        name, tool_name, arguments, allowed_connectors):
         from box_agent.tools.mcp_loader import call_mcp_app_tool
         record = {"version": VERSION, "toolCallId": snapshot["toolCallId"],
@@ -403,7 +436,7 @@ class McpAppsACP:
                 )
                 result = await call_mcp_app_tool(
                     snapshot["serverName"], name, arguments,
-                    server_identity=original_tool.mcp_server_identity, generation=original_tool.mcp_generation,
+                    server_identity=binding.server_identity, generation=binding.generation,
                     allowed_connector_ids=allowed_connectors, invocation_context=context,
                     is_cancelled=lambda: revoked() or not still_authorized(),
                 )

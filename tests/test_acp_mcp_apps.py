@@ -337,7 +337,8 @@ async def test_accepted_credential_change_revokes_app_binding_before_reconnect(
             ("call", {"bindingId": snapshot["bindingId"], "interactionId": "after-revoke",
                       "name": "refresh_flights", "arguments": {"previous": 1}}),
         ):
-            with pytest.raises(RequestError, match="APP_SERVER_CHANGED"):
+            expected = "APP_SERVER_UNAVAILABLE" if method == "snapshot" else "APP_SERVER_CHANGED"
+            with pytest.raises(RequestError, match=expected):
                 await host.ext_method(f"mcp/apps/{method}", request(session_id, **extra))
         assert len(calls(record)) == 1
 
@@ -404,8 +405,9 @@ async def test_history_restores_old_resource_or_current_ui_without_rewriting_sna
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         original = await host.ext_method('mcp/apps/snapshot', request(session_id))
         tool = next(t for t in backend.tools if t.remote_name == 'list_flights')
-        current_uri = 'ui://flight-fixture/v2.html'
+        current_uri = 'ui://new-flight-pages/v2.html'
         tool.mcp_ui_resource_uri = current_uri
+        mcp_loader._replace_server_catalog(backend)
         with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
             await host.ext_method('mcp/apps/resource', request(
                 session_id, bindingId=original['bindingId'], uri=original['resourceUri']))
@@ -488,7 +490,7 @@ async def test_history_fallback_rechecks_binding_before_reading_new_page(tmp_pat
         async def read(uri):
             seen.append(uri)
             if change == 'connection':
-                tool._mcp_generation += 1
+                mcp_loader._replace_server_catalog(backend)
             elif change == 'server':
                 backend.server_identity = 'other-server'
             else:
@@ -496,7 +498,7 @@ async def test_history_fallback_rechecks_binding_before_reading_new_page(tmp_pat
             raise McpError(types.ErrorData(code=-32002, message='Resource not found'))
         monkeypatch.setattr(backend.session, 'read_resource', read)
         expected = {'connection': 'MCP_APP_BINDING_EXPIRED', 'history': 'MCP_APP_SNAPSHOT_UNAVAILABLE',
-                    'server': 'APP_SERVER_CHANGED'}[change]
+                    'server': 'MCP_APP_BINDING_EXPIRED'}[change]
         with pytest.raises(RequestError, match=expected):
             await host.ext_method('mcp/apps/resource', request(
                 session_id, bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
@@ -801,61 +803,129 @@ async def test_history_edit_preserves_app_interaction_receipts_after_reload(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["unchanged", "env", "headers", "args"])
-async def test_history_rebind_requires_same_connection_identity(tmp_path, monkeypatch, change):
-    async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
-        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
-        env, headers = dict(backend.env), dict(backend.headers)
-        if change == 'env':
-            env['DB_PATH'] = str(tmp_path / 'other.sqlite')
-        elif change == 'headers':
-            headers['X-Tenant'] = 'other-tenant'
+@pytest.mark.parametrize("legacy", [False, True], ids=["new", "legacy"])
+async def test_saved_result_survives_restart_and_reauthorization_without_reexecuting(
+    tmp_path, monkeypatch, legacy,
+):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, backend, session_id, record):
+        session_log = host._sessions[session_id].agent.session_log
+        saved = deepcopy(next(iter(session_log.events_of_type(SNAPSHOT_EVENT)))["data"])
+        assert not {"serverIdentity", "serverOrigin", "connectorId"}.intersection(saved)
+        if legacy:
+            saved["toolId"] = "mcp:flight-fixture/list_flights"  # Pre-namespace display alias.
+            session_log.append(SNAPSHOT_EVENT, {**saved, "serverIdentity": "old-grant",
+                "connectorId": "old-connector", "serverOrigin": "https://previous.example"}, ignorable=True)
+            session_log.flush()
+        old = await host.ext_method("mcp/apps/snapshot", request(session_id))
         await backend.disconnect()
-        args = ['-u', *backend.args] if change == 'args' else backend.args
+        await host.load_session(str(tmp_path), session_id)
+        with pytest.raises(RequestError, match="APP_SERVER_UNAVAILABLE"):
+            await host.ext_method("mcp/apps/snapshot", request(session_id))
         replacement = mcp_loader.MCPServerConnection(backend.name, command=backend.command,
-            args=args, env=env, headers=headers, connect_timeout=10)
-        monkeypatch.setattr(mcp_loader, '_mcp_connections', [replacement])
+            args=backend.args, env=backend.env, headers={"Authorization": "Bearer renewed-fixture"},
+            connect_timeout=10)
+        monkeypatch.setattr(mcp_loader, "_mcp_connections", [replacement])
         try:
             assert await replacement.connect(), replacement.last_error
             mcp_loader._replace_server_catalog(replacement)
-            params = request(session_id, bindingId=snapshot['bindingId'], interactionId='after-reconnect',
-                             name='refresh_flights', arguments={'previous': 1})
-            if change == 'unchanged':
-                with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
-                    await host.ext_method('mcp/apps/call', params)
-                restored = await host.ext_method('mcp/apps/snapshot', request(session_id))
-                assert restored['result'] == snapshot['result']
-                resource = await host.ext_method('mcp/apps/resource', request(session_id,
-                    bindingId=restored['bindingId'], uri=restored['resourceUri']))
-                assert resource['contents'][0]['mimeType'] == 'text/html;profile=mcp-app'
-                assert [item['name'] for item in calls(record)] == ['list_flights']
-                assert len(llm.requests) == 2
-                await host.ext_method('mcp/apps/call', {**params, 'bindingId': restored['bindingId']})
-                assert [item['name'] for item in calls(record)] == ['list_flights', 'refresh_flights']
-            else:
-                with pytest.raises(RequestError, match='APP_SERVER_CHANGED'):
-                    await host.ext_method('mcp/apps/snapshot', request(session_id))
-                with pytest.raises(RequestError, match='APP_SERVER_CHANGED'):
-                    await host.ext_method('mcp/apps/resource', request(
-                        session_id, bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
-                with pytest.raises(RequestError, match='APP_SERVER_CHANGED'):
-                    await host.ext_method('mcp/apps/call', params)
-                assert [item['name'] for item in calls(record)] == ['list_flights']
+            current = await host.ext_method("mcp/apps/snapshot", request(session_id))
+            assert current["bindingId"] != old["bindingId"]
+            assert current["arguments"] == saved["arguments"]
+            assert current["result"] == saved["result"]
+            with pytest.raises(RequestError, match="BINDING_EXPIRED"):
+                await host.ext_method("mcp/apps/resource", request(session_id,
+                    bindingId=old["bindingId"], uri=old["resourceUri"]))
+            resource = await host.ext_method("mcp/apps/resource", request(session_id,
+                bindingId=current["bindingId"], uri=current["resourceUri"]))
+            assert resource["contents"][0]["mimeType"] == "text/html;profile=mcp-app"
+            assert [i["name"] for i in calls(record)] == ["list_flights"]
+            log = host._sessions[session_id].agent.session_log
+            log.append("surface/reset", {})
+            with pytest.raises(RequestError, match="MCP_APP_SNAPSHOT_UNAVAILABLE"):
+                await host.ext_method("mcp/apps/snapshot", request(session_id))
         finally:
             await replacement.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_legacy_app_snapshot_cannot_establish_a_live_binding(tmp_path, monkeypatch):
-    async with environment(tmp_path, monkeypatch) as (host, _, _, _, session_id, record):
-        session_log = host._sessions[session_id].agent.session_log
-        saved = deepcopy(next(iter(session_log.events_of_type(SNAPSHOT_EVENT)))["data"])
-        # An older snapshot contains a routing digest without credential scope.
-        session_log.append(SNAPSHOT_EVENT, {**saved, "serverIdentity": "a" * 64}, ignorable=True)
-        session_log.flush()
-        with pytest.raises(RequestError, match="APP_SERVER_CHANGED"):
-            await host.ext_method("mcp/apps/snapshot", request(session_id))
+@pytest.mark.parametrize("missing_page", [False, True])
+async def test_history_loads_original_page_after_last_tool_is_removed(tmp_path, monkeypatch, missing_page):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, backend, session_id, record):
+        backend.tools.clear()
+        mcp_loader._replace_server_catalog(backend)
+        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        params = request(session_id, bindingId=snapshot["bindingId"], uri=snapshot["resourceUri"])
+        if missing_page:
+            async def missing(uri):
+                raise McpError(types.ErrorData(code=-32002, message="Resource not found"))
+            monkeypatch.setattr(backend.session, "read_resource", missing)
+            with pytest.raises(RequestError, match="APP_RESOURCE_NOT_FOUND"):
+                await host.ext_method("mcp/apps/resource", params)
+        else:
+            page = await host.ext_method("mcp/apps/resource", params)
+            assert page["contents"][0]["uri"] == snapshot["resourceUri"]
+            assert snapshot["result"]["structuredContent"]["revision"] == 1
+        assert [item["name"] for item in calls(record)] == ["list_flights"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit_history", [False, True])
+async def test_history_open_waits_for_target_publication_and_rechecks_history(tmp_path, monkeypatch, edit_history):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, backend, session_id, record):
+        release = asyncio.Event()
+        async def publish():
+            await release.wait()
+            mcp_loader._mcp_connections.append(backend)
+        monkeypatch.setattr(mcp_loader, "_mcp_connections", [])
+        task = asyncio.create_task(publish())
+        monkeypatch.setattr(mcp_loader, "_mcp_initial_connections", {backend.name: task})
+        opening = asyncio.create_task(host.ext_method("mcp/apps/snapshot", request(session_id)))
+        try:
+            await asyncio.sleep(0)
+            assert not opening.done()
+            if edit_history:
+                host._sessions[session_id].agent.session_log.append("surface/reset", {})
+            release.set()
+            if edit_history:
+                with pytest.raises(RequestError, match="MCP_APP_SNAPSHOT_UNAVAILABLE"):
+                    await opening
+            else:
+                assert (await opening)["result"]["structuredContent"]["revision"] == 1
+        finally:
+            release.set()
+            await asyncio.gather(task, opening, return_exceptions=True)
         assert len(calls(record)) == 1
+
+
+@pytest.mark.asyncio
+async def test_history_open_renews_changed_hosted_login_without_a_prompt(tmp_path, monkeypatch):
+    async with environment(tmp_path, monkeypatch) as (host, _, llm, backend, session_id, record):
+        first = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        login_file = tmp_path / "auth.json"
+        def login(token):
+            login_file.write_text(json.dumps({"access_token": token, "office_identity": "fixture"}))
+        login("fixture-before")
+        auth = mcp_loader.DynamicBearerAuth(auth_file=str(login_file))
+        auth.app_scope = auth.current_app_scope()
+        monkeypatch.setattr(backend, "auth", auth)
+        login("fixture-after")
+        renewals = []
+        async def reconnect(name, *, expected_session):
+            assert expected_session is backend.session
+            renewals.append(name)
+            auth.app_scope = auth.current_app_scope()
+            mcp_loader._replace_server_catalog(backend)
+            return {"success": True}
+        monkeypatch.setattr(mcp_loader, "reconnect_mcp_server", reconnect)
+        stale = request(session_id, bindingId=first["bindingId"], uri=first["resourceUri"])
+        with pytest.raises(RequestError, match="APP_SERVER_CHANGED"):
+            await host.ext_method("mcp/apps/resource", stale)
+        assert not renewals
+        current = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        assert current["bindingId"] != first["bindingId"] and current["result"] == first["result"]
+        page = await host.ext_method("mcp/apps/resource", {**stale, "bindingId": current["bindingId"]})
+        assert page["contents"][0]["uri"] == first["resourceUri"]
+        assert renewals == [backend.name] and len(llm.requests) == 2 and len(calls(record)) == 1
 
 
 @pytest.mark.asyncio
