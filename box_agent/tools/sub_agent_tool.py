@@ -778,6 +778,8 @@ class SubAgentTool(EventEmittingTool):
     def _validate_skill_scope(
         bundle: ResolvedCapabilityBundle,
         parent_tools: dict[str, Tool],
+        *,
+        catalog=None,
     ) -> CapabilityFailure | None:
         # Delegating a body is a read too, even when the child has no tools.
         # Use the parent's actual configured policy, without inventing a
@@ -810,6 +812,17 @@ class SubAgentTool(EventEmittingTool):
                     retryable=False,
                     details={"skill": skill.name},
                 )
+            if isinstance(skill_tool, GetSkillTool) and (
+                not skill_tool.allow_component_setup or skill_tool.skip_video_generation
+            ):
+                requirement = skill_tool.component_requirement(skill.name, catalog=catalog)
+                if requirement is not None:
+                    return CapabilityFailure(
+                        code="SKILL_RUNTIME_UNAVAILABLE",
+                        message=requirement.error or f"Skill '{skill.name}' is unavailable for this continuation.",
+                        retryable=False,
+                        details={"skill": skill.name},
+                    )
         return None
 
     @staticmethod
@@ -820,7 +833,15 @@ class SubAgentTool(EventEmittingTool):
             if not isinstance(tool, (GetSkillTool, ListSkillsTool)):
                 continue
             allowed = assigned if tool.allowed_skill_names is None else assigned & tool.allowed_skill_names
-            tool_type = GetSkillTool if isinstance(tool, GetSkillTool) else ListSkillsTool
+            if isinstance(tool, GetSkillTool):
+                tool_type = GetSkillTool
+                reader_options = {
+                    "allow_component_setup": tool.allow_component_setup,
+                    "skip_video_generation": tool.skip_video_generation,
+                }
+            else:
+                tool_type = ListSkillsTool
+                reader_options = {"skill_filter": tool.skill_filter}
             scoped[name] = tool_type(
                 tool.skill_loader,
                 include_disabled=tool.include_disabled,
@@ -828,8 +849,7 @@ class SubAgentTool(EventEmittingTool):
                 blocked_skill_names=frozenset(tool.blocked_skill_names),
                 explicitly_allowed_skill_names=set(tool.explicitly_allowed_skill_names or ()) & allowed,
                 skill_access_filter=tool.skill_access_filter,
-                **({"skill_filter": tool.skill_filter}
-                   if isinstance(tool, ListSkillsTool) else {}),
+                **reader_options,
             )
         return scoped
 
@@ -1649,7 +1669,7 @@ class SubAgentTool(EventEmittingTool):
         )
         if isinstance(resolved, CapabilityFailure):
             return self._failure_result(resolved, parsed)
-        scope_failure = self._validate_skill_scope(resolved, live_tools)
+        scope_failure = self._validate_skill_scope(resolved, live_tools, catalog=skill_loader)
         if scope_failure is not None:
             return self._failure_result(scope_failure, parsed)
         child_tools = self._apply_write_scopes(self._scope_skill_tools(resolved), parsed)

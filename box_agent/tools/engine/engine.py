@@ -429,7 +429,7 @@ class DefaultToolEngine:
             summary.successful_tools.add(call.name)
             if (result.content or "").strip() and not search_files_result_is_empty(result):
                 summary.made_progress = True
-            if call.allowed and getattr(call.target, "ends_turn_on_success", False):
+            if call.allowed and call.target is not None and call.target.ends_turn_after_success(result):
                 summary.completed_turn_ending_tool = call.name
         content, error = result.content, result.error
         text_resolution = None

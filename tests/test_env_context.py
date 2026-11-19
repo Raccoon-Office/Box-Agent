@@ -337,7 +337,7 @@ def test_prompt_renders_hyperframes_available_policy() -> None:
     assert "available=true" in out
     assert "version=0.7.20" in out
     assert "browser=managed-headless-shell" in out
-    assert "不要否认视频工具" in out
+    assert "短片或可渲染 HTML 动画已选用本地 HyperFrames 方案时" in out
     assert "优先保真录制原页面的真实渲染结果" in out
     assert "不要重写文案、重做布局或生成相似页面" in out
     assert "直接采集原 HTML 帧并用 ffmpeg 编码" in out
@@ -377,6 +377,16 @@ def test_prompt_renders_hyperframes_unavailable_policy() -> None:
     assert "available=false" in out
     assert "ffmpeg=false" in out
     assert "已安装但当前不可用" in out
+
+
+def test_hyperframes_setup_guidance_is_scoped_to_the_chosen_local_route() -> None:
+    ctx = EnvContext.from_meta({
+        "hyperframes": {"installed": True, "available": False, "setup_supported": True},
+    })
+    out = build_env_context_prompt(ctx)
+
+    assert "用户明确选择本地 HyperFrames 或要求安装，且本次未跳过设置时" in out
+    assert "调用 get_skill('hyperframes-video')" in out
 
 
 def test_hyperframes_absent_fields_skipped() -> None:

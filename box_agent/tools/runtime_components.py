@@ -5,14 +5,23 @@ import os
 from .base import ToolResult
 
 
-def plugin_skill_requirement(name: str, loader) -> ToolResult | None:
+def plugin_skill_requirement(
+    name: str, loader, *, allow_setup: bool = True, skip_video: bool = False,
+) -> ToolResult | None:
     """The desktop opts in; CLI and older hosts keep their existing Skill behavior."""
-    if name != "hyperframes-video" or "BOX_AGENT_PLUGIN_SKILLS_DIR" not in os.environ:
+    if name != "hyperframes-video" or (not skip_video and "BOX_AGENT_PLUGIN_SKILLS_DIR" not in os.environ):
         return None
     skill = loader.get_skill(name)
-    if (os.environ.get("BOX_AGENT_VIDEO_RUNTIME_READY") == "1" and skill is not None
+    if (not skip_video and os.environ.get("BOX_AGENT_VIDEO_RUNTIME_READY") == "1" and skill is not None
             and skill.source == "plugin" and not skill.broken):
         return None
+    if skip_video or not allow_setup:
+        return ToolResult(
+            success=False,
+            error="Local video generation is unavailable for this continuation.",
+            model_context="Continue the original task with ready tools. Finish any independent work, "
+                          "such as the script and storyboard, and explain remaining limits. Do not request setup again.",
+        )
     return runtime_component_required(
         "video-generation", code="VIDEO_GENERATION_SETUP_REQUIRED",
         message="Video generation requires its host runtime and plugin-owned hyperframes-video Skill.",
