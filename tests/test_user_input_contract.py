@@ -385,7 +385,11 @@ async def test_required_image_budget_failure_never_calls_provider(tmp_path):
     await agent.aadd_user_input(UserInput(({'type': 'image', 'mimeType': block['media_type'], 'data': block['data']},)))
     events = [event async for event in agent.run_events()]
     assert not llm.requests
-    assert 'INPUT_IMAGE_NOT_ADOPTED' in str(events)
+    from box_agent.events import ErrorEvent
+    error = next(event for event in events if isinstance(event, ErrorEvent))
+    assert error.error_code == 'INPUT_IMAGE_NOT_ADOPTED'
+    assert error.message == 'INPUT_IMAGE_NOT_ADOPTED:required_image_unavailable_or_over_budget'
+    assert error.error_details == {'reason': error.message}
     assert not any(event['type'] == 'input/adopted' for event in log.events)
     log.close()
 
@@ -484,3 +488,24 @@ async def test_failed_input_preparation_does_not_claim_the_turn_was_accepted(tmp
     assert result.stop_reason == 'end_turn'
     assert len([e for e in agent.session_log.events if e['type'] == 'turn/binding']) == 1
     await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_required_image_failure_returns_stable_acp_code_and_original_diagnostics(tmp_path):
+    from box_agent.config import ImageContextConfig
+    llm = CaptureLLM()
+    llm.capabilities = {'image_input': True}
+    host = adapter(tmp_path, llm)
+    try:
+        session = await host.new_session(str(tmp_path))
+        host._sessions[session.session_id].agent.image_context.config = ImageContextConfig(max_encoded_bytes=1)
+        block = image_block()
+        result = await host.prompt(session.session_id, [
+            {'type': 'image', 'mimeType': block['media_type'], 'data': block['data']},
+        ])
+        assert not llm.requests
+        assert result.field_meta['ok'] is False
+        assert result.field_meta['errorCode'] == 'INPUT_IMAGE_NOT_ADOPTED'
+        assert result.field_meta['error'] == 'INPUT_IMAGE_NOT_ADOPTED:required_image_unavailable_or_over_budget'
+    finally:
+        await host.aclose()
