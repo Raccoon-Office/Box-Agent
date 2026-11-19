@@ -86,7 +86,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["box_agent*"]
-exclude = ["tests*"]
+exclude = ["tests*", "box_agent.experts*"]
 
 # Include skills directory (git submodule) as package data
 # After moving submodule to box_agent/skills
@@ -98,6 +98,8 @@ box_agent = [
     "skills/**/*.pyc",
     "skills/**/*.pyo",
     "skills/**/__pycache__/*",
+    "experts/*",
+    "experts/**/*",
     "trace_viewer/__pycache__/*",
     "trace_viewer/*.pyc",
     "trace_viewer/*.pyo",
