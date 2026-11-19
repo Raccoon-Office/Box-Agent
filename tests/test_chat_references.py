@@ -41,19 +41,24 @@ async def test_cleanup_block_preserves_file_and_provides_actionable_scratch_guid
     assert result.permission_request is None
 
 
-@pytest.mark.parametrize("relative", ["qa/.check.txt.artifact.json", "qa/.artifact-delivery.json"])
+@pytest.mark.parametrize("relative", [
+    "qa/.check.txt.artifact.json",
+    "qa/.artifact-delivery.json",
+    ".box-agent/session-state.json",
+    ".box-agent/scratch/session/.check.txt.artifact.json",
+])
 def test_protocol_metadata_never_gets_recursive_retention_sidecars(tmp_path, relative):
     from types import SimpleNamespace
 
     path = tmp_path / relative
-    path.parent.mkdir()
+    path.parent.mkdir(parents=True)
     data = '{"type":"intermediate_asset"}'
     path.write_text(data, encoding="utf-8")
     guard = ChatReferences(tmp_path)
     guard.retain(path)
     guard.retain_text(f"[Workflow metadata]({relative})")
     guard.retain_output({"type": "artifact", "path": str(path)})
-    retain_chat_file(path)
+    retain_chat_file(path, tmp_path)
     assert guard.paths == set()
     assert not metadata_path(path).exists()
     assert path.read_text(encoding="utf-8") == data

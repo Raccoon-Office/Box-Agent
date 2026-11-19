@@ -538,7 +538,7 @@ async def test_acp_uses_saved_code_type_when_host_omits_session_mode(tmp_path, m
     assert "BOX_AGENT_OUTPUT_DIR" not in bash_tool._subprocess_env
     scratch_dir = Path(bash_tool._subprocess_env["BOX_AGENT_SCRATCH_DIR"])
     assert scratch_dir.is_dir()
-    assert scratch_dir.parent == workspace / ".box-agent-scratch"
+    assert scratch_dir.parent == workspace / ".box-agent" / "scratch"
     assert "Software Engineering Mode (code_agent)" in state.agent.system_prompt
     assert "Project Workspace Mode" in state.agent.system_prompt
 
@@ -5714,7 +5714,7 @@ async def test_acp_deprecated_artifact_mode_is_ignored(tmp_path, capsys):
     assert "BOX_AGENT_OUTPUT_DIR" not in bash_tool._subprocess_env
     scratch_dir = Path(bash_tool._subprocess_env["BOX_AGENT_SCRATCH_DIR"])
     assert scratch_dir.is_dir()
-    assert scratch_dir.parent == tmp_path / ".box-agent-scratch"
+    assert scratch_dir.parent == tmp_path / ".box-agent" / "scratch"
     assert "不要默认创建或使用 `output/`" in state.agent.system_prompt
     assert "{SANDBOX_INFO}" not in state.agent.system_prompt
     assert "artifact_mode" not in session.field_meta
@@ -5785,6 +5785,156 @@ async def test_acp_turn_cleanup_preserves_running_session_scratch(
         await asyncio.wait_for(second_turn, timeout=5)
 
     assert not second_file.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stream_finishes", "cache_write_fails", "html_with_empty_style"),
+    [(False, False, False), (True, False, False), (True, True, False), (True, False, True)],
+    ids=["stream-error", "completed", "retention-cache-write-error", "empty-html-style"],
+)
+async def test_acp_turn_cleanup_preserves_preview_linked_in_reply(
+    tmp_path, monkeypatch, stream_finishes, cache_write_fails, html_with_empty_style,
+):
+    class PreviewLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            prefix = "[Preview](" if cache_write_fails else "![Preview]("
+            yield StreamEvent(type="text", delta=prefix)
+            yield StreamEvent(type="text", delta=f"{preview.as_uri()})")
+            if html_with_empty_style:
+                yield StreamEvent(type="text", delta=f" [Second preview]({other_preview.as_uri()})")
+            if stream_finishes:
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, PreviewLLM(), [], "system")
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"}))
+    )
+    scratch = agent._sessions[session.sessionId].skill_scratch_dir.path
+    assert not (tmp_path / ".box-agent-scratch").exists()
+    preview = scratch / "shown.png"
+    preview_content = b"shown preview"
+    disposable = scratch / "unshown.png"
+    disposable.write_bytes(b"temporary preview")
+    if cache_write_fails:
+        from box_agent import artifact_publication
+
+        stylesheet = tmp_path / "style.css"
+        stylesheet.write_text("body {}", encoding="utf-8")
+        preview = scratch / "shown.html"
+        preview_content = f'<link rel="stylesheet" href="{stylesheet.as_uri()}">'.encode()
+
+        def fail_cache_write(*args, **kwargs):
+            raise PermissionError("workspace retention cache is read-only")
+
+        monkeypatch.setattr(artifact_publication, "write_metadata", fail_cache_write)
+    if html_with_empty_style:
+        preview = scratch / "shown.html"
+        preview_content = b"<div style>Preview</div>"
+        other_preview = scratch / "second.png"
+        other_preview.write_bytes(b"second preview")
+    preview.write_bytes(preview_content)
+
+    response = await agent.prompt(
+        **acp_params(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "Show the preview"}], field_meta={},
+        ))
+    )
+
+    assert response.field_meta["lastStopReason"] == ("end_turn" if stream_finishes else "error")
+    assert preview.exists()
+    assert preview.read_bytes() == preview_content
+    if html_with_empty_style:
+        assert other_preview.read_bytes() == b"second preview"
+    assert not disposable.exists()
+
+
+@pytest.mark.asyncio
+async def test_acp_scratch_reply_completes_when_unrelated_report_cache_cannot_be_written(
+    tmp_path, monkeypatch,
+):
+    from box_agent import artifact_publication
+
+    class PreviewLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            yield StreamEvent(
+                type="text",
+                delta=f"[Preview]({preview.as_uri()}) and [Report]({report.as_uri()})",
+            )
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, PreviewLLM(), [], "system")
+    session = await agent.new_session(**acp_params(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"session_mode": "general", "session_id": "scratch-preview"},
+    )))
+    state = agent._sessions[session.sessionId]
+    preview = state.skill_scratch_dir.path / "preview.png"
+    preview.write_bytes(b"preview")
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"report")
+    write_metadata = artifact_publication.write_metadata
+
+    def fail_report_cache(path, *args, **kwargs):
+        if path == report:
+            raise PermissionError("report cache is read-only")
+        return write_metadata(path, *args, **kwargs)
+
+    monkeypatch.setattr(artifact_publication, "write_metadata", fail_report_cache)
+    response = await agent.prompt(**acp_params(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Show the preview and report"}], field_meta={},
+    )))
+
+    assert response.field_meta["lastStopReason"] == "end_turn"
+    assert preview.read_bytes() == b"preview"
+    recorded = list(state.agent.session_log.events_of_type("chat/reference"))
+    assert [event["data"]["paths"] for event in recorded] == [[str(preview)]]
+
+
+@pytest.mark.asyncio
+async def test_acp_scratch_cleanup_preserves_preview_link_split_across_text_continuation(tmp_path):
+    class PreviewLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            text, finish = (prefix, "length") if self.calls == 1 else (suffix, "stop")
+            yield StreamEvent(type="text", delta=text)
+            yield StreamEvent(type="finish", finish_reason=finish)
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, PreviewLLM(), [], "system")
+    session = await agent.new_session(**acp_params(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"session_mode": "general"},
+    )))
+    scratch = agent._sessions[session.sessionId].skill_scratch_dir.path
+    preview = scratch / "preview.png"
+    preview.write_bytes(b"preview")
+    prefix = f"![Preview]({preview.as_uri().removesuffix('.png')}"
+    suffix = ".png)"
+
+    response = await agent.prompt(**acp_params(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Show the preview"}], field_meta={},
+    )))
+
+    assert response.field_meta["lastStopReason"] == "end_turn"
+    chunks = [u.update for u in conn.updates if u.update.sessionUpdate == "agent_message_chunk"]
+    links = [u for u in chunks if u.content.text in (prefix, suffix)]
+    assert [u.content.text for u in links] == [prefix, suffix]
+    assert len({u.field_meta["messageDisplay"]["messageId"] for u in links}) == 1
+    assert preview.read_bytes() == b"preview"
 
 
 @pytest.mark.asyncio
@@ -8528,7 +8678,7 @@ async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(
     assert bash_env["BOX_AGENT_NPM"] == str(npm_path)
     assert bash_env["BOX_AGENT_NPX"] == str(npx_path)
     scratch_dir = state.skill_scratch_dir.path
-    assert scratch_dir.parent == workspace / ".box-agent-scratch"
+    assert scratch_dir.parent == workspace / ".box-agent" / "scratch"
     assert bash_env["BOX_AGENT_SCRATCH_DIR"] == str(scratch_dir)
     assert execute_code_env["BOX_AGENT_SCRATCH_DIR"] == str(scratch_dir)
     assert bash_env["BOX_AGENT_WORKSPACE_DIR"] == str(workspace.resolve())

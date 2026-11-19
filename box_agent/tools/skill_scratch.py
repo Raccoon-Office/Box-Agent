@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from weakref import WeakValueDictionary
 
-from ..artifact_publication import ChatReferenceScanError, retained_chat_file_in
+from ..artifact_metadata import _profile_directory
+from ..artifact_publication import ChatReferenceScanError, WORKSPACE_SCRATCH_PATH, retained_chat_file_in
 
 
 SKILL_SCRATCH_DIR_NAME = ".box-agent-scratch"
@@ -19,6 +21,30 @@ class SkillScratchDirectory:
     path: Path
     device: int
     inode: int
+    _protected_references: set[Path] = field(default_factory=set, init=False, repr=False, compare=False)
+
+
+_active_scratch_dirs: WeakValueDictionary[Path, SkillScratchDirectory] = WeakValueDictionary()
+
+
+def _scratch_owner(path: Path) -> SkillScratchDirectory | None:
+    for parent in (path, *path.parents):
+        scratch = _active_scratch_dirs.get(parent)
+        if scratch is not None:
+            return scratch
+    return None
+
+
+def protect_scratch_reference(path: Path) -> None:
+    """Preserve a chat path during scratch cleanup."""
+    if (scratch := _scratch_owner(path)) is not None:
+        scratch._protected_references.add(path)
+
+
+def release_scratch_reference(path: Path) -> None:
+    """Release a scratch path after a confirmed chat-reference deletion."""
+    if (scratch := _scratch_owner(path)) is not None:
+        scratch._protected_references.discard(path)
 
 
 def _absolute_without_resolving(path: Path) -> Path:
@@ -30,6 +56,18 @@ def _is_link_or_reparse_point(stats: os.stat_result) -> bool:
         return True
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return bool(getattr(stats, "st_file_attributes", 0) & reparse_flag)
+
+
+def workspace_scratch_root(workspace: Path) -> Path:
+    profile = _profile_directory()
+    if workspace.resolve() / ".box-agent" == profile:
+        try:
+            if _is_link_or_reparse_point(profile.lstat()):
+                # Keep scratch workspace-local when the global profile was relocated.
+                return workspace / SKILL_SCRATCH_DIR_NAME
+        except FileNotFoundError:
+            pass
+    return workspace / WORKSPACE_SCRATCH_PATH
 
 
 def _prepare_real_directory_chain(root: Path, relative_path: Path) -> os.stat_result:
@@ -80,11 +118,13 @@ def prepare_skill_scratch_dir(
     stats = _prepare_real_directory_chain(workspace_root, relative_path)
     if os.name != "nt":
         scratch_dir.chmod(0o700)
-    return SkillScratchDirectory(
+    scratch = SkillScratchDirectory(
         path=scratch_dir,
         device=stats.st_dev,
         inode=stats.st_ino,
     )
+    _active_scratch_dirs[scratch_dir] = scratch
+    return scratch
 
 
 def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
@@ -102,8 +142,22 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
     ):
         raise RuntimeError(f"Skill scratch root must be a real directory: {scratch_dir}")
 
+    references = scratch._protected_references
+    for path in tuple(references):
+        try:
+            path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            references.discard(path)
+        except OSError:
+            # An inaccessible preview must stay protected for later cleanups.
+            continue
+    if scratch_dir in references:
+        return []
+    protected_entries = {path.relative_to(scratch_dir).parts[0] for path in references}
     removed: list[str] = []
     for entry in scratch_dir.iterdir():
+        if entry.name in protected_entries:
+            continue
         try:
             retained = retained_chat_file_in(entry)
         except ChatReferenceScanError:

@@ -14,6 +14,7 @@ from . import artifact_metadata as storage
 SUFFIX = ".artifact.json"
 SCOPE_FILE = ".artifact-delivery.json"
 STAGING_DIRECTORY = ".box-agent-staging"
+WORKSPACE_SCRATCH_PATH = Path(".box-agent", "scratch")
 MAX_HASH_BYTES = 64 * 1024 * 1024
 _REFERENCE_SCAN_MAX_ENTRIES = 10_000
 _REFERENCE_SCAN_TIMEOUT_SECONDS = 0.5
@@ -28,7 +29,9 @@ def is_publication_sidecar(path: Path) -> bool:
     return name.startswith(".") and name.endswith(SUFFIX) and len(name) > len(SUFFIX) + 1
 
 
-def is_publication_metadata(path: Path, workspace: str | Path | None = None) -> bool:
+def is_publication_metadata(
+    path: Path, workspace: str | Path | None = None, *, allow_scratch: bool = False,
+) -> bool:
     """Reserved publication records are protocol data, never deliverables."""
     if path.name == SCOPE_FILE or is_publication_sidecar(path):
         return True
@@ -36,7 +39,8 @@ def is_publication_metadata(path: Path, workspace: str | Path | None = None) -> 
         try:
             relative = path.absolute().relative_to(Path(workspace).absolute())
             if relative.parts and relative.parts[0] == ".box-agent":
-                return True
+                if not allow_scratch or not relative.is_relative_to(WORKSPACE_SCRATCH_PATH):
+                    return True
         except ValueError:
             pass
     return (any(path.parts[index:index + 2] == (".box-agent", "artifact-metadata")
@@ -93,7 +97,7 @@ def write_metadata(path: Path, value: dict, workspace: str | Path | None = None)
 
 def retain_chat_file(path: Path, workspace: str | Path | None = None) -> None:
     """Cache retention without promoting a file's delivery placement."""
-    if is_publication_metadata(path, workspace) or not path.resolve().name:
+    if is_publication_metadata(path, workspace, allow_scratch=True) or not path.resolve().name:
         return
     value = storage.read_metadata(path, workspace)
     if (value.get("retain_for_chat") is not True

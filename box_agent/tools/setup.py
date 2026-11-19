@@ -74,7 +74,7 @@ from box_agent.tools.ripgrep_tool import (
 )
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
 from box_agent.tools.skill_execution_env import build_skill_execution_env
-from box_agent.tools.skill_scratch import SKILL_SCRATCH_DIR_NAME, prepare_skill_scratch_dir
+from box_agent.tools.skill_scratch import prepare_skill_scratch_dir, workspace_scratch_root
 from box_agent.tools.mcp_config_tool import McpConfigTool
 from box_agent.tools.schedule_tool import CreateScheduledTaskTool
 from box_agent.tools.skill_tool import create_skill_tools
@@ -731,7 +731,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # a process owner. Other sessions may keep using the same workspace.
     skill_scratch_dir = prepare_skill_scratch_dir(
         workspace_dir,
-        scratch_root_dir=workspace_dir / SKILL_SCRATCH_DIR_NAME / uuid4().hex,
+        scratch_root_dir=workspace_scratch_root(workspace_dir) / uuid4().hex,
     )
     runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
     if config.tools.enable_bash:

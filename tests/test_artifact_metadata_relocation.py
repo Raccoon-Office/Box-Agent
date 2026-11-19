@@ -9,8 +9,13 @@ import pytest
 
 from box_agent import artifact_metadata as storage
 from box_agent.artifact_publication import is_publication_metadata, retained_chat_file_in
-from box_agent.tools.chat_references import ChatReferences, chat_mutation_error
+from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.tools.chat_references import (
+    ChatReferences, chat_mutation_error, retain_scratch_chat_references,
+)
 from box_agent.tools.publish_artifact_tool import PublishArtifactTool
+from box_agent.tools.setup import add_workspace_tools
+from box_agent.tools.skill_scratch import cleanup_skill_scratch_dir
 
 
 def redirect_directory(link: Path, target: Path) -> None:
@@ -32,6 +37,29 @@ def relocated_profile(tmp_path, monkeypatch, request):
     target.mkdir(parents=True)
     redirect_directory(profile, target)
     return profile, target
+
+
+def test_relocated_profile_parent_can_keep_a_session_preview(relocated_profile):
+    profile, target = relocated_profile
+    workspace = profile.parent
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    scratch = add_workspace_tools([], config, workspace)
+    assert scratch.path.is_relative_to(workspace.resolve())
+    assert not scratch.path.is_relative_to(target.resolve())
+    preview = scratch.path / "preview.png"
+    preview.write_bytes(b"preview")
+    disposable = scratch.path / "temporary.txt"
+    disposable.write_text("temporary", encoding="utf-8")
+
+    retain_scratch_chat_references(workspace, f"[Preview]({preview.as_uri()})")
+    cleanup_skill_scratch_dir(scratch)
+
+    assert preview.read_bytes() == b"preview"
+    assert not disposable.exists()
 
 
 @pytest.mark.parametrize("descriptor_io", [True, False])

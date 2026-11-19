@@ -8,18 +8,23 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from collections.abc import Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
+from heapq import merge
 from html.parser import HTMLParser
 import json
+import logging
 import os
 from pathlib import Path
 import re
+from stat import S_ISREG
 from typing import Any
 from urllib.parse import unquote, urlsplit
 import zipfile
+import zlib
 from xml.etree import ElementTree
 
 from ..artifact_metadata import read_metadata as read_file_metadata, legacy_metadata_path, remove_metadata
@@ -27,13 +32,16 @@ from ..artifact_publication import (
     retain_chat_file, retained_chat_file_in,
     retained_chat_files_in, ChatReferenceScanError, is_publication_metadata,
 )
+from ..session_log import SessionLogDurabilityError
 from .base import ToolResult
 from .shell_inspection import inspect_shell_command
+from .skill_scratch import protect_scratch_reference, release_scratch_reference, workspace_scratch_root
 
 
 _CURRENT: ContextVar[tuple["ChatReferences", frozenset[Path]] | None] = ContextVar(
     "chat_references", default=None,
 )
+_log = logging.getLogger(__name__)
 _CSS_URL = re.compile(r'''(?:url\(\s*|@import\s+)(?:"([^"]+)"|'([^']+)'|([^\s)"';]+))''', re.I)
 _JS_IMPORT = re.compile(r'''(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bfetch\s*\(\s*|new\s+(?:URL|Worker)\s*\(\s*)["']([^"']+)["']''')
 _MARKDOWN_LINK = re.compile(r'''!?\[[^\]\n]*\]\(\s*<?([^>\n]+?)>?(?:\s+["'][^\n]*["'])?\s*\)''')
@@ -61,7 +69,7 @@ class _HTMLLinks(HTMLParser):
                 self.links.append(attrs[key])
         if attrs.get("srcset"):
             self.links.extend(part.strip().split()[0] for part in attrs["srcset"].split(",") if part.strip())
-        self.links.extend(_css_links(attrs.get("style", "")))
+        self.links.extend(_css_links(attrs.get("style") or ""))
 
 
 def _local_path(value: str, base: Path, root: Path) -> Path | None:
@@ -87,6 +95,53 @@ def _local_path(value: str, base: Path, root: Path) -> Path | None:
         return None
     path = Path(os.path.abspath(path if path.is_absolute() else base / path))
     return path if path.name and path != root else None
+
+
+def _text_reference_paths(content: str, root: Path, *, require_file: bool = True) -> set[Path]:
+    links = _MARKDOWN_LINK.findall(content)
+    links += re.findall(r'''(?:local-file|file)://[^\s<>"'`\)\]]+''', content)
+    links += re.findall(re.escape(str(root)) + r'''/[^\n<>"'`]{1,512}?\.[a-zA-Z0-9]{1,10}(?=[\s\]\)},;]|$)''', content)
+    paths: set[Path] = set()
+    for link in links:
+        try:
+            path = _local_path(link, root, root)
+            if path is not None and (not require_file or path.is_file()):
+                paths.add(path)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return paths
+
+
+def _resolve_reference_path(path: Path) -> Path | None:
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    # Filesystem roots must not reach the per-file metadata writer.
+    return resolved if resolved.name else None
+
+
+def retain_scratch_chat_references(
+    workspace: str | Path, content: str, session_log=None,
+) -> None:
+    """Record chat links before the host can clean session scratch."""
+    root = Path(workspace).resolve()
+    paths = _text_reference_paths(content, root, require_file=False)
+    if paths:
+        # Deduplicate against durable reference facts without replaying messages
+        # or rebuilding unrelated caches at the end of the turn.
+        references = ChatReferences(root, session_log=session_log, restore_history=False)
+        references._retain_paths(paths, scratch_only=True)
+
+
+def _declared_dependencies(path: Path, root: Path, *, base: Path | None = None) -> set[Path]:
+    explicit = read_file_metadata(path, root).get("dependencies", [])
+    if not isinstance(explicit, list):
+        return set()
+    return {
+        candidate for link in explicit if isinstance(link, str)
+        if (candidate := _local_path(link, base or path.parent, root)) is not None
+    }
 
 
 def local_dependencies(path: Path, root: Path) -> set[Path]:
@@ -119,10 +174,8 @@ def local_dependencies(path: Path, root: Path) -> set[Path]:
                     for node in ElementTree.fromstring(archive.read(info)).iter():
                         if node.attrib.get("TargetMode") == "External" and node.attrib.get("Target"):
                             links.append(node.attrib["Target"])
-    explicit = read_file_metadata(path, root).get("dependencies", [])
-    if isinstance(explicit, list):
-        links.extend(link for link in explicit if isinstance(link, str))
-    return {candidate for link in links if (candidate := _local_path(link, base, root)) is not None}
+    embedded = {candidate for link in links if (candidate := _local_path(link, base, root)) is not None}
+    return embedded | _declared_dependencies(path, root, base=base)
 
 
 @dataclass(frozen=True)
@@ -284,15 +337,18 @@ def mutations(tool_name: str, arguments: dict, root: Path, *, python_runtime=Fal
 
 
 class ChatReferences:
-    def __init__(self, workspace: str | Path, messages=(), session_log=None) -> None:
+    def __init__(
+        self, workspace: str | Path, messages=(), session_log=None, *, restore_history: bool = True,
+    ) -> None:
         self.root = Path(workspace).resolve()
+        self._scratch_root = workspace_scratch_root(self.root)
         self.messages = messages
         self.log = session_log
         parent = _CURRENT.get()
         self._authority = parent[0] if parent else None
         self.paths: set[Path] = self._authority.paths.copy() if self._authority else set()
         self.denials: set[tuple[str, str]] = self._authority.denials if self._authority else set()
-        self._restore()
+        self._restore(restore_history=restore_history)
         self._seen_assistant_messages = {id(message) for message in self.messages if getattr(message, "role", "") == "assistant"}
         self._check_lock = asyncio.Lock()
 
@@ -300,6 +356,16 @@ class ChatReferences:
         if self.log is not None and callable(getattr(self.log, "append", None)):
             self.log.append(kind, data, ignorable=True)
             self.log.flush()
+
+    def _cache_reference(self, path: Path, *, scratch_reference: bool) -> None:
+        try:
+            if path.exists():
+                retain_chat_file(path, self.root)
+        except OSError as error:
+            if not scratch_reference:
+                raise
+            protect_scratch_reference(path)
+            _log.warning("Could not cache scratch chat reference for %s: %s", path, error)
 
     def _references_in_text(self, content) -> set[Path]:
         if isinstance(content, list):
@@ -317,29 +383,62 @@ class ChatReferences:
             return paths
         if not isinstance(content, str):
             return set()
-        links = _MARKDOWN_LINK.findall(content)
-        links += re.findall(r'''(?:local-file|file)://[^\s<>"'`\)\]]+''', content)
-        links += re.findall(re.escape(str(self.root)) + r'''/[^\n<>"'`]{1,512}?\.[a-zA-Z0-9]{1,10}(?=[\s\]\)},;]|$)''', content)
-        return {path for link in links if (path := _local_path(link, self.root, self.root)) is not None and path.is_file()}
+        return _text_reference_paths(content, self.root)
 
-    def _restore(self) -> None:
+    def _restore_events(self, restore_history: bool) -> Iterable[dict]:
+        events_of_type = getattr(self.log, "events_of_type", None)
+        if not restore_history and callable(events_of_type):
+            try:
+                yield from merge(
+                    events_of_type("chat/reference"),
+                    events_of_type("chat/reference_deleted"),
+                    key=lambda event: event["seq"],
+                )
+            except SessionLogDurabilityError:
+                # Let the subsequent append surface the error after protecting the files.
+                pass
+            return
         events = getattr(self.log, "events", ()) if self.log is not None else ()
+        if isinstance(events, (list, tuple)):
+            yield from events
+
+    def _restore(self, *, restore_history: bool) -> None:
         legacy: set[Path] = set()
         deleted: set[Path] = set()
+        scratch_references: set[Path] = set()
         temporary_calls: set[str] = set()
-        for event in events if isinstance(events, (list, tuple)) else ():
+        for event in self._restore_events(restore_history):
             data = event.get("data", {})
             if event.get("type") == "chat/reference":
+                recorded: set[Path] = set()
                 for value in data.get("paths", []):
-                    if isinstance(value, str):
-                        path = Path(os.path.abspath(value))
-                        if path.name and (not path.exists() or path.resolve().name):
-                            self.paths.add(path)
+                    if not isinstance(value, str):
+                        continue
+                    path = Path(os.path.abspath(value))
+                    if not path.name:
+                        continue
+                    if restore_history:
+                        try:
+                            if path.exists() and not path.resolve().name:
+                                continue
+                        except OSError:
+                            # Temporary inspection failure cannot discard a recorded path.
+                            pass
+                    recorded.add(path)
+                self.paths.update(recorded)
+                if restore_history and any(path.is_relative_to(self._scratch_root) for path in recorded):
+                    scratch_references.update(recorded)
             elif event.get("type") == "chat/reference_deleted":
-                released = {Path(path).resolve() for path in data.get("paths", [])}
+                # The original symlink target and its alias are recorded separately.
+                # A later file at the same path must not reinterpret the deletion.
+                released = {
+                    Path(os.path.abspath(value)) for value in data.get("paths", [])
+                    if isinstance(value, str)
+                }
                 self.paths.difference_update(released)
+                scratch_references.difference_update(released)
                 deleted.update(released)
-            elif event.get("type") in {"tool/result", "assistant/message", "user/message"}:
+            elif restore_history and event.get("type") in {"tool/result", "assistant/message", "user/message"}:
                 message = data if event.get("type") == "user/message" else data.get("message", {})
                 result = data.get("result", {})
                 raw = result.get("raw_output") or {}
@@ -354,15 +453,21 @@ class ChatReferences:
                                 path = _local_path(raw[key], self.root, self.root)
                                 if path and path.is_file():
                                     legacy.add(path)
+        if not restore_history:
+            return
         for message in self.messages:
             if getattr(message, "role", "") in {"assistant", "tool", "user"} and getattr(message, "tool_call_id", None) not in temporary_calls:
                 legacy.update(self._references_in_text(message.content))
+        recorded_references = self.paths.copy()
         for path in legacy - self.paths - deleted:
             self.retain(path)
         # Rebuild missing caches from durable facts, including after compaction.
-        for path in self.paths:
-            if path.exists():
-                retain_chat_file(path, self.root)
+        for path in recorded_references:
+            in_scratch = path.is_relative_to(self._scratch_root)
+            if in_scratch and not self._is_shared_scratch_directory(path):
+                # exists() can hide a temporary access failure during cache rebuild.
+                protect_scratch_reference(path)
+            self._cache_reference(path, scratch_reference=in_scratch or path in scratch_references)
 
     def retain_text(self, content) -> None:
         for path in self._references_in_text(content):
@@ -377,39 +482,101 @@ class ChatReferences:
                         self.retain(path)
 
     def retain(self, path: Path) -> None:
-        path = Path(os.path.abspath(path))
-        if not path.is_file():
-            return
+        self._retain_paths((path,))
+
+    def _retain_paths(self, paths: Iterable[Path], *, scratch_only: bool = False) -> None:
+        absolute_paths = (Path(os.path.abspath(path)) for path in paths)
+        references = [
+            (path, self._reference_closure(path, scratch_only=scratch_only))
+            for path in absolute_paths
+        ]
+        scratch_paths = {
+            candidate for _, closure in references for candidate in closure
+            if candidate.is_relative_to(self._scratch_root)
+        }
+        # Cleanup needs the paths used in chat. Cache keys follow symlinks,
+        # and a failed log write must leave every already exposed preview intact.
+        for candidate in scratch_paths:
+            protect_scratch_reference(candidate)
+        for path, closure in references:
+            scratch_reference = not scratch_paths.isdisjoint(closure)
+            if scratch_only and not scratch_reference:
+                continue
+            if closure - self.paths:
+                self._append("chat/reference", {"root": str(path), "paths": sorted(map(str, closure))})
+                self.paths.update(closure)
+            for candidate in closure:
+                self._cache_reference(candidate, scratch_reference=scratch_reference)
+
+    def _is_shared_scratch_directory(self, path: Path, *, include_ancestors: bool = True) -> bool:
+        return (
+            path.parent == self._scratch_root or path == self._scratch_root
+            or (include_ancestors and self._scratch_root.is_relative_to(path))
+        )
+
+    def _reference_closure(self, path: Path, *, scratch_only: bool) -> set[Path]:
         pending, closure = [path], set()
+        bundle_parents: set[Path] = set()
+        workspace_only = scratch_only and not path.is_relative_to(self._scratch_root)
         while pending:
             candidate = pending.pop()
-            if (candidate in closure or is_publication_metadata(candidate, self.root)
-                    or is_publication_metadata(candidate.resolve(), self.root)):
+            if (candidate in closure
+                    or is_publication_metadata(candidate, self.root, allow_scratch=True)):
                 continue
-            closure.add(candidate)
-            closure.add(candidate.resolve())
+            resolved = None
+            try:
+                resolved = candidate.resolve()
+                if not resolved.name or is_publication_metadata(resolved, self.root, allow_scratch=True):
+                    continue
+                if workspace_only:
+                    if candidate == path and resolved.is_relative_to(self._scratch_root):
+                        workspace_only = False
+                    elif not (resolved.is_relative_to(self.root) or candidate.is_relative_to(self._scratch_root)):
+                        continue
+                try:
+                    is_file = S_ISREG(candidate.stat().st_mode)
+                except (FileNotFoundError, NotADirectoryError):
+                    is_file = False
+            except (OSError, RuntimeError, ValueError):
+                # Keep known scratch entries without caching an unverified file.
+                for known in (candidate, resolved):
+                    if (known is not None and known.is_relative_to(self._scratch_root)
+                            and not self._is_shared_scratch_directory(known)):
+                        protect_scratch_reference(known)
+                continue
+            if candidate == path and not is_file:
+                return set()
+            if not is_file and any(self._is_shared_scratch_directory(item) for item in (candidate, resolved)):
+                continue
+            closure.update((candidate, resolved))
             if len(closure) > 2048:
-                closure.update(item.parent for item in pending)
-                closure.add(candidate.parent)
+                bundle_parents.update(item.parent for item in pending)
+                bundle_parents.add(candidate.parent)
                 break
-            if candidate.is_file():
+            if is_file:
                 try:
                     pending.extend(local_dependencies(candidate, self.root) - closure)
-                except (OSError, ValueError, ElementTree.ParseError, zipfile.BadZipFile):
+                except (OSError, RuntimeError, ValueError, ElementTree.ParseError, zipfile.BadZipFile, zlib.error):
                     # An unreadable/oversized dependency manifest must fail
                     # closed. Retain its bundle directory rather than guessing
                     # that the unresolved neighboring files are disposable.
-                    closure.add(candidate.parent)
-        # Root links (including symlinks and fallback parents) must not protect
-        # the entire filesystem or reach the per-file metadata writer.
-        closure = {candidate for candidate in closure if candidate.resolve().name}
-        new = closure - self.paths
-        if new:
-            self._append("chat/reference", {"root": str(path), "paths": sorted(map(str, closure))})
-            self.paths.update(closure)
-        for candidate in closure:
-            if candidate.exists():
-                retain_chat_file(candidate, self.root)
+                    bundle_parents.add(candidate.parent)
+                    try:
+                        pending.extend(_declared_dependencies(candidate, self.root) - closure)
+                    except (OSError, RuntimeError, ValueError):
+                        pass
+        scratch_related = scratch_only or any(item.is_relative_to(self._scratch_root) for item in closure)
+        for parent in bundle_parents:
+            resolved = _resolve_reference_path(parent)
+            if resolved is None:
+                continue
+            if any(
+                self._is_shared_scratch_directory(candidate, include_ancestors=scratch_related)
+                for candidate in (parent, resolved)
+            ):
+                continue
+            closure.add(parent)
+        return closure
 
     def affected(self, path: Path) -> set[Path]:
         lexical = Path(os.path.abspath(path))
@@ -561,6 +728,7 @@ class ChatReferences:
                 remove_metadata(path, self.root)
                 # Release existing legacy caches only after durable deletion.
                 legacy_metadata_path(path).unlink(missing_ok=True)
+                release_scratch_reference(path)
 
     def denied(self, request: dict) -> None:
         data = request.get("chat_reference_delete", {})
