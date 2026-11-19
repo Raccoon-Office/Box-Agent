@@ -137,11 +137,12 @@ async def test_clear_plan(writer, reader):
     assert read_result.raw_output["plan"] is None
 
 
-def test_plan_write_description_keeps_plan_separate_from_progress(writer):
+def test_plan_write_description_guides_ordinary_tasks_to_execute(writer):
     description = writer.description
 
     assert "user-visible plan" in description
-    assert "not an execution progress tracker" in description
+    assert "explicitly asks to plan first" in description
+    assert "For ordinary requests, proceed with the task" in description
     assert "use todo_write separately" in description
     assert "short messages like" in description
 

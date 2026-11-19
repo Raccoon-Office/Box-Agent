@@ -123,15 +123,19 @@ class CompletionChecks:
 
     def close(self) -> None:
         """A terminal run ends the pending task, without leaking it into a new one."""
-        if not self._enabled:
-            return
-        if self._pending_state(self._tools, self.context) is not None:
-            self.context.record("completion.closed", {})
-        for tool in self._tools.values():
+        if self._enabled:
+            self.close_pending(self._tools, self.context)
+
+    @classmethod
+    def close_pending(cls, tools: Mapping, context: CompletionContext) -> None:
+        """Discard a suspended task before starting unrelated work."""
+        if cls._pending_state(tools, context) is not None:
+            context.record("completion.closed", {})
+        for tool in tools.values():
             states = getattr(tool, "_pending_completion_states", {})
-            pending = states.get(id(self.context.resume_scope))
-            if pending is not None and pending[0] is self.context.resume_scope:
-                states.pop(id(self.context.resume_scope))
+            pending = states.get(id(context.resume_scope))
+            if pending is not None and pending[0] is context.resume_scope:
+                states.pop(id(context.resume_scope))
 
     async def include_inputs(self, tools: Mapping, context: CompletionContext) -> None:
         """Extend capability gates after a user supplement, preserving receipts."""

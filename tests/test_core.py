@@ -54,26 +54,47 @@ from box_agent.tools.sub_agent_tool import SubAgentTool
 # ── Helpers ─────────────────────────────────────────────────────
 
 
-def test_text_requests_plan_start_handles_short_plan_phrases():
+def test_text_requests_plan_start_distinguishes_plan_first_from_plan_content():
     for text in [
         "计划 plan",
         "计划",
         "plan",
+        "/plan 重构这个模块",
+        "Plan mode: refactor this module",
         "使用plan 生成一个内马尔图片",
         "出一个计划我看一下",
+        "先给我一个执行计划，确认后执行",
+        "帮我研究这个问题，先规划一下再执行",
+        "请先帮我规划一下这个任务",
+        "先计划再执行",
         "please make a plan first",
+        "Please first make a plan",
+        "Draft a plan before making changes",
     ]:
-        assert text_requests_plan_start(text)
+        assert text_requests_plan_start(text), text
 
     for text in [
         "普通聊天，不需要计划",
         "不用 plan，直接执行",
+        "直接执行，无需先规划",
         "planet",
         "做一份 15 页售前竞标方案 PPT",
+        "把这份周计划总结成一句话",
+        "制定一份下季度招聘计划",
+        "按执行方案修复问题",
+        "使用 plan 模板生成摘要",
+        "看一下为什么每次任务都规划",
+        "总结这句话“这是一项任务，请先规划”",
+        "Summarize the previous plan",
+        "Read release.plan first",
+        "Plan first quarter sales",
+        "First create a plan.md file",
+        "Explain what `plan first` means",
+        "Translate 'Before working, plan first'",
         "ok",
         "好的",
     ]:
-        assert not text_requests_plan_start(text)
+        assert not text_requests_plan_start(text), text
 
 
 def test_short_acknowledgement_and_non_task_reply_detection():

@@ -152,13 +152,13 @@ def render_planning_tools(tools: Collection[str] | None) -> str:
     plan, todo = _has(tools, "plan_write"), _has(tools, "todo_write")
     if plan and todo:
         text = (
-            "用户要求方案或需要先展示范围、步骤、验证和风险时，在工具可用时用 `plan_write`；"
+            "用户明确要求先展示执行计划或修改当前计划时用 `plan_write`。普通任务直接执行。"
             "≥3 步的执行进度用 `todo_write`。Plan 表达方法，Todo 只记录进度，"
             "不是事实证据或结论来源；" + _SCHEMA_NOTE
         )
     elif plan:
         text = (
-            "用户要求方案或需要先展示范围、步骤、验证和风险时用 `plan_write`。"
+            "用户明确要求先展示执行计划或修改当前计划时用 `plan_write`。普通任务直接执行。"
             "Plan 表达方法，不是事实证据或结论来源；" + _SCHEMA_NOTE
         )
     elif todo:

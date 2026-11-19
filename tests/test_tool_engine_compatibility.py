@@ -408,6 +408,15 @@ def _assert_schema_contract(tools, profile):
     expected["create_scheduled_task"]["schema"] = _apply_schedule_schema_changes(
         expected["create_scheduled_task"]["schema"],
     )
+    plan_schema = expected["plan_write"]["schema"]
+    plan_schema["description"] = plan_schema["description"].replace(
+        "when the user asks for a plan/proposal, when the approach needs to be shown before "
+        "substantial work, or when the host UI should render a plan card. This is not an "
+        "execution progress tracker; use todo_write",
+        "when the user explicitly asks to plan first or to revise the current execution plan, "
+        "or when the host requires a plan card. For ordinary requests, proceed with the task "
+        "and use todo_write",
+    )
     # Preserve the old fixture and enumerate the Skill Engine's public additions.
     expected["list_skills"] = deepcopy(_LIST_SKILLS_SCHEMA)
     expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)

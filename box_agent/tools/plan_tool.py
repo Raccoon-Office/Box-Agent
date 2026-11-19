@@ -210,9 +210,9 @@ class PlanWriteTool(Tool):
     def description(self) -> str:
         return (
             "Publish a structured, user-visible plan for the current task. Use this "
-            "when the user asks for a plan/proposal, when the approach needs to be "
-            "shown before substantial work, or when the host UI should render a plan "
-            "card. This is not an execution progress tracker; use todo_write "
+            "when the user explicitly asks to plan first or to revise the current "
+            "execution plan, or when the host requires a plan card. For ordinary "
+            "requests, proceed with the task and use todo_write "
             "separately to track completed/in-progress/pending work. Do not use this "
             "for greetings, acknowledgements, approval replies, or short messages like "
             "ok, continue, confirmed, 好的, 收到, or 继续 unless they also contain a new "

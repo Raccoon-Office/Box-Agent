@@ -170,7 +170,8 @@ async def test_restore_rejects_wrong_workspace_without_mutating_files(lab):
 
 
 @pytest.mark.asyncio
-async def test_plan_gate_blocks_write_until_explicit_approval(lab):
+@pytest.mark.parametrize('follow_up', ['approve', 'new-task'])
+async def test_explicit_plan_gate_allows_approval_or_a_new_task(lab, follow_up):
     root, model, create = lab
     engine = await create()
     workspace = root / 'workspace'
@@ -179,15 +180,25 @@ async def test_plan_gate_blocks_write_until_explicit_approval(lab):
                  tool('plan_write', action='set', title='Contract plan',
                       steps=[{'title': 'Write the approved result'}], verification=['Read the file']),
                  {'text': 'Awaiting approval.'})
-    await engine.prompt(session, 'plan', forcePlanStart=True, requirePlanApproval=True)
+    await engine.prompt(session, 'plan', input_context={
+        'schemaVersion': 1, 'userRequest': 'Please plan first.',
+    })
     assert not (workspace / 'must-wait.txt').exists()
     plans = [n['params']['update'].get('rawOutput', {}) for n in engine.notifications
              if 'update' in n.get('params', {})]
     assert any(p.get('type') == 'plan_snapshot' and
                p.get('approval', {}).get('state') == 'pending' for p in plans)
-    model.script('approved', tool('write_file', path='must-wait.txt', content='APPROVED_PLAN'), {'text': 'Done.'})
-    await engine.prompt(session, 'approved', planApproval={'decision': 'approved'})
-    assert (workspace / 'must-wait.txt').read_text() == 'APPROVED_PLAN'
+    if follow_up == 'approve':
+        model.script('approved', tool('write_file', path='must-wait.txt', content='APPROVED_PLAN'), {'text': 'Done.'})
+        await engine.prompt(session, 'approved', planApproval={'decision': 'approved'})
+        assert (workspace / 'must-wait.txt').read_text() == 'APPROVED_PLAN'
+    else:
+        model.script('new-task', tool('write_file', path='summary.txt', content='SUMMARY'), {'text': 'Done.'})
+        await engine.prompt(session, 'new-task', forcePlanStart=True, input_context={
+            'schemaVersion': 1, 'userRequest': 'Summarize the project plan in a new file.',
+        })
+        assert (workspace / 'summary.txt').read_text() == 'SUMMARY'
+        assert not (workspace / 'must-wait.txt').exists()
 
 
 @pytest.mark.asyncio

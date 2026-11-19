@@ -201,7 +201,9 @@ When the user explicitly asks to plan first, Box-Agent may emit an early skeleto
 }
 ```
 
-Hosts can force this plan flow deterministically without relying on user text heuristics by passing `_meta.forcePlanStart: true` (or `_meta.force_plan_start: true`) on `session/prompt`. The same flag can be set on `session/new` as a session default. Box-Agent emits the early `action: "start"` skeleton before the LLM call and injects hidden guidance requiring the model to publish the full plan through `plan_write`; if the model answers without a plan first, Box-Agent gives it one hidden retry before ending the turn.
+ACP starts this flow when the current user request explicitly asks to plan first, for example `先规划一下`, `plan first`, or `/plan`. The `_meta.forcePlanStart` and `_meta.force_plan_start` fields are compatibility hints. Box-Agent emits the early `action: "start"` skeleton before the model call and requires the model to publish the full plan through `plan_write`. If it answers before publishing a plan, Box-Agent gives it one retry.
+
+An explicit planning turn waits for confirmation unless the host sends `_meta.autoApprovePlan: true` or its equivalent `_meta.auto_approve_plan`. A confirmation reply continues the pending plan, and an explicit request such as `修改当前计划` can revise it. An ordinary request in the same session supersedes the pending plan and executes immediately. A model-initiated `plan_write` during an ordinary turn can publish a snapshot while execution continues.
 
 The full plan later replaces the skeleton with `action: "set"`:
 

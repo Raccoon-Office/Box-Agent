@@ -257,11 +257,12 @@ async def test_handoff_preserves_pending_plan_without_requiring_approval(
     assert not any("Call `plan_write`" in m.content for m in state.agent.messages)
 
     async def next_local_turn(*args, **kwargs):
-        assert kwargs["require_plan_approval"] is True
-        return "waiting_for_user"
+        assert kwargs["require_plan_approval"] is False
+        assert state.pending_plan_approval is None
+        return "end_turn"
     monkeypatch.setattr(adapter, "_run_turn", next_local_turn)
-    response = await send(adapter, session_id, marker=False, text="Continue locally")
-    assert response.field_meta["runStatus"] == "waiting_for_user"
+    response = await send(adapter, session_id, marker=False, text="Summarize this paragraph")
+    assert response.field_meta["runStatus"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -359,9 +360,12 @@ async def test_handoff_cannot_rewrite_the_pending_plan(handoff_session, monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pause_tool", ["plan_write", "request_user_input"])
 @pytest.mark.parametrize("outcome", ["success", "invalid_json", "cancelled", "error"])
-@pytest.mark.parametrize("resume", ["memory", "reload", "validate"])
+@pytest.mark.parametrize(("pause_tool", "resume"), [
+    (tool, mode)
+    for tool in ("plan_write", "request_user_input")
+    for mode in ("memory", "reload", "validate")
+] + [("plan_write", "new_task")])
 async def test_handoff_preserves_paused_table_checks_for_local_resume(
     tmp_path, monkeypatch, pause_tool, outcome, resume,
 ):
@@ -421,7 +425,11 @@ async def test_handoff_preserves_paused_table_checks_for_local_resume(
     )
     try:
         session_id = (await adapter.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
-        await adapter.prompt(session_id=session_id, prompt=[text_block(f"Process {path} completely")])
+        original_request = (
+            f"Plan first, then process {path} completely"
+            if pause_tool == "plan_write" else f"Process {path} completely"
+        )
+        await adapter.prompt(session_id=session_id, prompt=[text_block(original_request)])
         state = adapter._sessions[session_id]
         paused_events = deepcopy([
             event for event in state.agent.session_log.events if event["type"].startswith("completion.")
@@ -452,12 +460,27 @@ async def test_handoff_preserves_paused_table_checks_for_local_resume(
         if outcome == "invalid_json":
             assert response.field_meta["errorCode"] == "invalid_cloud_handoff"
 
+        if resume == "new_task":
+            phase = "resume"
+            llm.output = "The new task is complete."
+            response = await adapter.prompt(
+                session_id=session_id, prompt=[text_block("Summarize this paragraph")],
+            )
+            assert response.field_meta["ok"] is True
+            assert state.pending_plan_approval is None
+            assert [
+                event for event in state.agent.session_log.events if event["type"].startswith("completion.")
+            ][-1]["type"] == "completion.closed"
+            return
+
         if resume != "memory":
             await adapter.load_session(cwd=str(tmp_path), session_id=session_id, mcp_servers=[])
         phase = "validate" if resume == "validate" else "resume"
         llm.output = "Done"
+        approval = {"planApproval": {"decision": "approved"}} if pause_tool == "plan_write" else {}
         response = await adapter.prompt(
             session_id=session_id, prompt=[text_block("Continue the original task")], autoApprovePlan=True,
+            **approval,
         )
         resumed_checks = [
             event["data"] for event in adapter._sessions[session_id].agent.session_log.events

@@ -1941,24 +1941,25 @@ class PlanAfterRetryLLM:
 
 
 class PlanApprovalThenEchoLLM:
-    def __init__(self):
+    def __init__(self, *, revise=False):
         self.calls = 0
+        self.revise = revise
 
     async def generate_stream(self, messages, tools, **_):
         self.calls += 1
-        if self.calls == 1:
+        if self.calls == 1 or (self.revise and self.calls == 3):
             yield StreamEvent(
                 type="finish",
                 finish_reason="tool_use",
                 tool_calls=[
                     ToolCall(
-                        id="plan-approval",
+                        id=f"plan-approval-{self.calls}",
                         type="function",
                         function=FunctionCall(
                             name="plan_write",
                             arguments={
                                 "action": "set",
-                                "title": "Approval-gated plan",
+                                "title": "Approval-gated plan" if self.calls == 1 else "Revised plan",
                                 "objective": "Wait for host approval before echoing.",
                                 "steps": [{"title": "Call echo after approval"}],
                             },
@@ -8684,7 +8685,7 @@ async def test_acp_prompt_meta_force_plan_start_is_hint_only(tmp_path):
     response = await agent.prompt(
         **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
-            prompt=[{"text": "介绍一下太阳系"}],
+            prompt=[{"text": "把这份周计划总结成一句话"}],
             field_meta={"forcePlanStart": True},
         ))
     )
@@ -8895,7 +8896,8 @@ async def test_acp_prompt_text_plan_request_auto_approves_with_meta(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_organic_plan_write_waits_for_approval_without_meta(tmp_path):
+@pytest.mark.parametrize("meta", [{}, {"autoApprovePlan": True}])
+async def test_acp_ordinary_task_executes_after_model_writes_plan(tmp_path, meta):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
@@ -8906,56 +8908,102 @@ async def test_acp_organic_plan_write_waits_for_approval_without_meta(tmp_path):
     agent = BoxACPAgent(conn, config, llm, [EchoTool()], "system")
 
     session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    state = agent._sessions[session.sessionId]
+    state.agent.local_tool_exposure.require_tools(["plan_write"])
     response = await agent.prompt(
         **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "生成一份分析报告"}],
-            field_meta={},
+            field_meta=meta,
         ))
     )
 
     assert response.stopReason == "end_turn"
-    assert llm.calls == 1
-    state = agent._sessions[session.sessionId]
-    assert state.pending_plan_approval is not None
-    assert state.pending_plan_approval["state"] == "pending"
-    assert any(
-        getattr(update.update, "rawOutput", None)
-        and update.update.rawOutput.get("type") == "plan_snapshot"
-        and update.update.rawOutput.get("approval", {}).get("state") == "pending"
+    assert llm.calls == 3
+    assert state.pending_plan_approval is None
+    plan_outputs = [
+        update.update.rawOutput
         for update in conn.updates
-    )
-    assert not any(
+        if isinstance(getattr(update.update, "rawOutput", None), dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+    ]
+    assert [output["action"] for output in plan_outputs] == ["set"]
+    assert "approval" not in plan_outputs[0]
+    assert any(
         getattr(update.update, "toolCallId", "") == "echo-after-approval"
+        and getattr(update.update, "status", None) == "completed"
         for update in conn.updates
     )
 
 
 @pytest.mark.asyncio
-async def test_acp_organic_plan_write_auto_approves_with_meta(tmp_path):
+@pytest.mark.parametrize("new_request", [
+    "把这段文字简化",
+    "把这份周计划总结成一句话",
+    "修改计划.md 中的错别字",
+])
+async def test_acp_new_task_executes_while_previous_plan_was_pending(tmp_path, new_request):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=10, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     conn = DummyConn()
     llm = PlanApprovalThenEchoLLM()
     agent = BoxACPAgent(conn, config, llm, [EchoTool()], "system")
 
-    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    session = await agent.new_session(cwd=str(tmp_path), mcp_servers=[])
+    await agent.prompt(session_id=session.session_id, prompt=[text_block("先规划文档审阅")])
+    state = agent._sessions[session.session_id]
+    assert state.pending_plan_approval["state"] == "pending"
+    conn.updates.clear()
+
     response = await agent.prompt(
-        **acp_params(SimpleNamespace(
-            sessionId=session.sessionId,
-            prompt=[{"text": "生成一份分析报告"}],
-            field_meta={"autoApprovePlan": True},
-        ))
+        session_id=session.session_id, prompt=[text_block(new_request)], forcePlanStart=True,
     )
 
     assert response.stopReason == "end_turn"
-    assert llm.calls >= 3
-    state = agent._sessions[session.sessionId]
+    assert response.field_meta["messageDisplay"]["finalMessageIds"]
+    assert llm.calls == 3
     assert state.pending_plan_approval is None
+    assert not any(
+        isinstance(getattr(update.update, "rawOutput", None), dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+        for update in conn.updates
+    )
     assert any(
+        getattr(update.update, "toolCallId", "") == "echo-after-approval"
+        and getattr(update.update, "status", None) == "completed"
+        for update in conn.updates
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_text", [
+    "请修改当前计划，把第二步删掉",
+    "请把上面的计划第二步改成先核对资料",
+    "Revise the current plan to include a test",
+])
+async def test_acp_explicit_plan_revision_waits_for_a_new_confirmation(tmp_path, request_text):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(tool_interface_version=1, max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, PlanApprovalThenEchoLLM(revise=True), [EchoTool()], "system")
+    session = await agent.new_session(cwd=str(tmp_path), mcp_servers=[])
+    await agent.prompt(session_id=session.session_id, prompt=[text_block("先出一个计划")])
+    state = agent._sessions[session.session_id]
+    original_approval = state.pending_plan_approval["request_id"]
+    conn.updates.clear()
+
+    await agent.prompt(session_id=session.session_id, prompt=[text_block(request_text)])
+
+    assert state.pending_plan_approval["state"] == "pending"
+    assert state.pending_plan_approval["request_id"] != original_approval
+    assert state.pending_plan_approval["title"] == "Revised plan"
+    assert not any(
         getattr(update.update, "toolCallId", "") == "echo-after-approval"
         and getattr(update.update, "status", None) == "completed"
         for update in conn.updates

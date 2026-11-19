@@ -134,6 +134,7 @@ from box_agent.tools.skillhub_install_tool import (
     SkillHubInstallTool,
 )
 from box_agent.tools.mcp_loader import close_browser_session
+from box_agent.tools.completion_checks import CompletionChecks, CompletionContext
 from box_agent.tools.browser_runtime_scope import (
     release_browser_runtime,
     reset_browser_host_binding,
@@ -146,6 +147,7 @@ from box_agent.tools.browser_runtime_scope import (
 from box_agent.config import Config, derive_context_token_limit
 from box_agent.turn_policy import (
     text_is_short_acknowledgement,
+    text_requests_plan_revision,
     text_requests_plan_start,
 )
 from box_agent.events import (
@@ -3303,8 +3305,6 @@ class BoxACPAgent:
                 plan_detection_text,
             )
         plan_approval_approved = _plan_approval_is_approved(plan_approval)
-        if plan_approval_approved:
-            state.pending_plan_approval = None
         auto_approve_plan = not cloud_handoff and _meta_bool(
             prompt_meta,
             "auto_approve_plan",
@@ -3312,13 +3312,14 @@ class BoxACPAgent:
             "skip_plan_approval",
             "skipPlanApproval",
         )
-        if auto_approve_plan and state.pending_plan_approval is not None and not plan_approval_approved:
-            state.pending_plan_approval = None
         session_force_plan_start = state.force_plan_start
         if session_force_plan_start and not cloud_handoff:
             state.force_plan_start = False
-        prompt_requests_plan_start = (
-            not cloud_handoff and text_requests_plan_start(plan_detection_text)
+        revises_pending_plan = (
+            not cloud_handoff
+            and not plan_approval_approved
+            and state.pending_plan_approval is not None
+            and text_requests_plan_revision(plan_detection_text)
         )
         prompt_force_plan_hint = _meta_bool(
             prompt_meta,
@@ -3327,18 +3328,11 @@ class BoxACPAgent:
         )
         host_plan_hint = session_force_plan_start or prompt_force_plan_hint
         force_plan_start = (
-            False
-            if plan_approval_approved
-            else prompt_requests_plan_start
+            not cloud_handoff
+            and not plan_approval_approved
+            and (revises_pending_plan or text_requests_plan_start(plan_detection_text))
         )
-        require_plan_approval = not cloud_handoff and (
-            (force_plan_start and not auto_approve_plan)
-            or (
-                state.pending_plan_approval is not None
-                and not plan_approval_approved
-                and not auto_approve_plan
-            )
-        )
+        require_plan_approval = force_plan_start and not auto_approve_plan
         prompt_goal_request = _goal_request_from_meta(prompt_meta)
         if prompt_goal_request is not None:
             goal_result = self._apply_goal_action(state.agent, prompt_goal_request)
@@ -3531,6 +3525,18 @@ class BoxACPAgent:
             host_connector_status=host_connector_status, **image_kwargs,
         )
 
+        if not cloud_handoff and state.pending_plan_approval is not None:
+            if not (plan_approval_approved or revises_pending_plan):
+                CompletionChecks.close_pending(
+                    state.agent.tools,
+                    CompletionContext(
+                        (), lambda: state.cancelled, state.agent.session_log, turn_id,
+                        resume_scope=state.agent.messages,
+                    ),
+                )
+            if not revises_pending_plan or auto_approve_plan:
+                state.pending_plan_approval = None
+
         # Drain any stale injections from a previous turn
         for stale in state.inject_queue.begin_run(discard_pending=True):
             log.warn("session/inject_stale", session_id=session_id, text=_inject_item_text(stale)[:80])
@@ -3584,7 +3590,6 @@ class BoxACPAgent:
                     force_plan_start=force_plan_start,
                     require_plan_approval=require_plan_approval,
                     plan_approval=plan_approval,
-                    auto_approve_plan=auto_approve_plan,
                     plan_start_text=plan_detection_text,
                     explicitly_selected_skill_names=explicitly_selected_skill_names,
                     ui_language=ui_language,
@@ -3626,7 +3631,6 @@ class BoxACPAgent:
                         task_context=task_context,
                         turn_id=turn_id,
                         billing_session_id=billing_session_id,
-                        auto_approve_plan=auto_approve_plan,
                         plan_start_text=plan_detection_text,
                         clear_prompt_grants=False,
                     )
@@ -4866,7 +4870,6 @@ class BoxACPAgent:
         force_plan_start: bool = False,
         require_plan_approval: bool = False,
         plan_approval: dict[str, Any] | None = None,
-        auto_approve_plan: bool = False,
         plan_start_text: str | None = None,
         explicitly_selected_skill_names: tuple[str, ...] = (),
         ui_language: str = "zh",
@@ -5357,7 +5360,6 @@ class BoxACPAgent:
             require_plan_approval=require_plan_approval,
             plan_approval=plan_approval,
             plan_start_text=plan_start_text,
-            pause_after_plan_write=not auto_approve_plan,
             web_search_total_limit=web_search_total_limit_for_active_skills(
                 (
                     run_handle.skill_selector.matched_skill_names
