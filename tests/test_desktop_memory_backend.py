@@ -291,6 +291,39 @@ async def test_model_read_qualification_controls_remote_write_and_is_consumed(ho
         await manager.aclose()
 
 
+async def test_desktop_edit_guides_format_correction_and_read_after_write(host):
+    manager = backend(host)
+    try:
+        engine, history = await start_turn(manager)
+        tools = {tool.name: tool for tool in create_memory_tools(manager)}
+        edit = tools["memory_edit"]
+        for name in ("old_text", "new_text"):
+            assert "<mem>...</mem>" in edit.parameters["properties"][name]["description"]
+
+        await qualify(manager, engine, history)
+        original = host.files["memory.md"]
+        malformed = await edit.execute(path="memory.md", old_text="", new_text="<mem>新增")
+        assert not malformed.success
+        assert "改成 <mem>正文</mem> 后再试" in malformed.error
+        assert host.files["memory.md"] == original
+
+        written = await edit.execute(path="memory.md", old_text="", new_text="<mem>新增</mem>")
+        assert written.success
+        denied = await edit.execute(path="memory.md", old_text="", new_text="<mem>再次写入</mem>")
+        assert not denied.success
+        assert denied.raw_output == {"code": "CORE_READ_REQUIRED", "outcome": "not_sent"}
+        assert "同一 path 调用 memory_read" in denied.error
+        assert sum(operation == "core/mutate" for operation, _ in host.calls) == 1
+
+        readback = await tools["memory_read"].execute(path="memory.md")
+        assert readback.success
+        assert readback.raw_output["revision"] == written.raw_output["revision"]
+        assert readback.raw_output["content"].startswith(original)
+        assert "新增</mem>" in readback.raw_output["content"]
+    finally:
+        await manager.aclose()
+
+
 async def test_protected_entries_cannot_be_edited_or_rewritten_even_with_forged_old_attributes(host):
     manager = backend(host)
     try:
