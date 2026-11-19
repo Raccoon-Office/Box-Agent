@@ -48,6 +48,10 @@ SDK 0.12.1 与配套 Lab 的接口、生命周期约束和回归矩阵见
 代码为 `VIDEO_GENERATION_SETUP_REQUIRED`。模型解释后结束回合，宿主等待用户点击安装。
 宿主刷新进程环境并在同一产品会话发送一次短继续消息；保留历史、产物及当前连接器选择，
 不重放原请求或附件。`video` 仍仅表示 `read_video` 所需的 ffmpeg/ffprobe。
+用户选择暂不安装时，宿主验证原回执并发送一次带有稳定 `request_id` 和
+`skip_component_id: "video-generation"` 的 `session/prompt._meta.component_continuation`。
+跳过连接或视频安装的续跑使用已经就绪的能力。若插件不可用或本次跳过了插件，
+`get_skill` 返回当前限制，任务可以继续完成大纲、旁白或分镜。委派的 Skill 也沿用该回合的跳过选择。
 
 ### 按需发现连接器与恢复入口
 
@@ -65,6 +69,12 @@ SDK 0.12.1 与配套 Lab 的接口、生命周期约束和回归矩阵见
 能力声明和快照；旧宿主重绑时使用 legacy 行为，保留已存的模式供受支持宿主恢复。
 `session/new` 可同时传新快照与旧 `connector_statuses`，以支持工具接口 v1 回退。
 新模式不会把旧完整状态清单注入模型。
+
+用户在任务暂停时选择暂不连接或使用，宿主验证原任务的可信回执后，在同一会话发送一次继续请求。
+`session/prompt._meta.connector_continuation` 带有稳定 `request_id` 和 `skip_connector_id`。
+续跑回合排除该连接器，只搜索已就绪的其余连接器，不产生新的连接准备回执。
+任务可以使用现有工具或直接回答，可先完成独立部分并说明剩余限制。
+下一条普通消息按该回合的连接器选择和实时状态处理。
 
 ```json
 {
@@ -120,7 +130,8 @@ state_revision 是非负 JavaScript 安全整数，同一绑定内不可回退�
   "version": 1,
   "connector_id": "tmeet",
   "action": "connect",
-  "state_revision": 1
+  "state_revision": 1,
+  "wait_for_user": true
 }
 ```
 
@@ -130,6 +141,11 @@ action 为 `connect`（未配置）、`enable`（已配置但禁用）、`reauth
 未知和进行中状态优先于配置标志，授权失效优先于禁用。
 server_name、tool_names、混合查询和不唯一的名称不会生成设置回执；现有 MCP 工具
 的 count、top_k、精确 scope、schema 与 tool_ref 语义保持不变。
+
+`wait_for_user: true` 表示 Agent 保存当前工具结果后以 `waiting_for_user` 停止本轮，
+同批后续工具及下一轮模型调用都不执行。宿主可立即展示一个就绪操作入口，用户确认且所需能力
+就绪后在原会话继续，暂缓时不发送继续消息。旧版回执可缺省此字段，沿用回合完成后的恢复入口。
+当视频制作未指定服务或本地方案时，提示词建议先发现 SEKO；明确指定的方案优先。
 
 发现不授予权限。`selected_connector_ids` 是选择状态的唯一来源；执行还要求当前
 快照 configured/enabled/connected/execution_ready，并保留实际 MCP runtime 与工具

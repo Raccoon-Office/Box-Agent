@@ -160,6 +160,16 @@ class ToolSearchTool(Tool):
             return True
         return entry.connector_id in self._allowed_connector_ids_provider()
 
+    def invocation_may_require_user_input(self, arguments: dict[str, Any]) -> bool:
+        # Connector lookups can return a user-action receipt. Keep their batch
+        # serial so later calls cannot start before we know whether to wait.
+        connector = arguments.get("connector")
+        return self._connector_discovery is not None and isinstance(connector, str) and bool(connector.strip())
+
+    def ends_turn_after_success(self, result: ToolResult) -> bool:
+        receipt = result.raw_output or {}
+        return receipt.get("type") == "connector_action_required" and receipt.get("wait_for_user") is True
+
     def _add_tool_catalogs(self, payload: dict, protected_names: frozenset[str]) -> None:
         """Append bounded sibling metadata without activating or issuing refs."""
         connector_ids = {

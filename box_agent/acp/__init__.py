@@ -3004,9 +3004,25 @@ class BoxACPAgent:
         _bind_user_source_text(state, source_binding_text)
         cloud_handoff = prompt_meta.get("cloudHandoff") is True
         if not state.utility_session:
+            from box_agent.tools.skill_tool import GetSkillTool
+
+            connector_choice = prompt_meta.get("connector_continuation")
+            skipped_connector_id = None
+            if isinstance(connector_choice, dict) and _meta_string(connector_choice, "request_id"):
+                connector_id = connector_choice.get("skip_connector_id")
+                if isinstance(connector_id, str) and _CONNECTOR_ID_PATTERN.fullmatch(connector_id):
+                    skipped_connector_id = connector_id
+            component_choice = prompt_meta.get("component_continuation")
+            skip_video = (isinstance(component_choice, dict) and bool(_meta_string(component_choice, "request_id"))
+                          and component_choice.get("skip_component_id") == "video-generation")
             discovery = getattr(state.agent, "connector_discovery", None)
             if discovery is not None:
-                discovery.update(prompt_meta.get("connector_discovery"))
+                discovery.update(prompt_meta.get("connector_discovery"),
+                                 skipped_connector_id=skipped_connector_id, ready_only=skip_video)
+            skill_tool = state.agent.tools.get("get_skill")
+            if isinstance(skill_tool, GetSkillTool):
+                skill_tool.allow_component_setup = not (skip_video or skipped_connector_id)
+                skill_tool.skip_video_generation = skip_video
             selected_connector_ids = _connector_ids_from_meta(prompt_meta)
             if selected_connector_ids is not None:
                 state.selected_connector_ids.clear()

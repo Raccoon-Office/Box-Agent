@@ -502,11 +502,11 @@ def _format_hyperframes(state: HyperFramesState) -> list[str]:
     lines = [f"- 视频生成（HyperFrames）状态：{', '.join(parts)}"]
     if state.available is True:
         lines.append(
-            "  - 用户要求生成视频、动画、MP4/GIF、motion graphics、短片或可渲染 HTML 动画时，"
-            "不要否认视频工具；优先加载 `hyperframes-video` skill。"
+            "  - 当视频、动画、MP4/GIF、motion graphics、短片或可渲染 HTML 动画已选用本地 HyperFrames 方案时，"
+            "先加载 `hyperframes-video` skill，并遵循其工作流。"
         )
         lines.append(
-            "  - 用户要求把现有 HTML、网页、页面或站点转成视频时，优先保真录制原页面的真实渲染结果；"
+            "  - 用本地方案把现有 HTML、网页、页面或站点转成视频时，优先保真录制原页面的真实渲染结果；"
             "不要重写文案、重做布局或生成相似页面。若 HyperFrames wrapper/iframe 抽帧为空白或内容不一致，"
             "改用托管 Chromium/Playwright 直接采集原 HTML 帧并用 ffmpeg 编码。"
         )
@@ -532,8 +532,9 @@ def _format_hyperframes(state: HyperFramesState) -> list[str]:
         )
     elif state.setup_supported:
         lines.append(
-            "  - 视频插件尚未完整就绪。用户要求生成视频时，调用 get_skill('hyperframes-video') "
-            "取得宿主的安装/修复入口；说明需要准备后结束本回合，等待用户操作。"
+            "  - 本地视频插件尚未就绪。用户明确选择本地 HyperFrames 或要求安装，且本次未跳过设置时，"
+            "调用 get_skill('hyperframes-video') 取得宿主的安装/修复入口并等待用户操作。"
+            "跳过连接或安装后，使用已就绪的工具完成能够交付的部分。"
             "不要自行安装依赖、下载替代技能或承诺已完成渲染。"
         )
     elif state.installed is True:

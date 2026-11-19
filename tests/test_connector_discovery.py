@@ -112,6 +112,7 @@ async def test_unconnected_discovery_returns_candidates_without_activating_or_gr
     result = await search.execute(query="会议纪要")
     payload = json.loads(result.content)
     assert result.success and result.raw_output is None
+    assert not search.ends_turn_after_success(result)
     assert payload["connector_candidates"][0]["action"] == "connect"
     assert payload["catalog_tool_count"] == payload["matched_count"] == payload["activated_count"] == 0
     assert payload["activated"] == [] and not active and not manager._stable_refs
@@ -119,9 +120,29 @@ async def test_unconnected_discovery_returns_candidates_without_activating_or_gr
     explicit = await search.execute(connector="tmeet")
     assert explicit.success
     assert explicit.raw_output == {"type": "connector_action_required", "version": 1,
-                                   "connector_id": "tmeet", "action": "connect", "state_revision": 1}
+                                   "connector_id": "tmeet", "action": "connect", "state_revision": 1,
+                                   "wait_for_user": True}
+    assert search.ends_turn_after_success(explicit)
     assert not discovery.permitted("tmeet")
     assert "tool_ref" not in explicit.content and "input_schema" not in explicit.content
+
+
+@pytest.mark.asyncio
+async def test_decline_filters_unready_and_skipped_candidates_before_ranking():
+    # The only ready alternative would normally rank behind the four exact names.
+    ready_state = {"configured": True, "enabled": True, "status": "connected", "execution_ready": True}
+    entries = [entry(f"legal-{index}", name="Law", description="Law", **ready_state if index == 0 else {})
+               for index in range(4)]
+    entries.append(entry("reference", name="Public references", description="Law", **ready_state))
+    discovery, search, _, _ = search_fixture(entries, selected={"legal-0", "reference"})
+    discovery.update(snapshot(entries), skipped_connector_id="legal-0")
+    assert [item["id"] for item in discovery.search(["law"])] == ["reference"]
+    result = await search.execute(query="law")
+    assert [item["id"] for item in json.loads(result.content)["connector_candidates"]] == ["reference"]
+    assert not discovery.permitted("legal-0")
+    discovery.update(snapshot(entries))
+    assert discovery.permitted("legal-0")
+    assert [item["id"] for item in discovery.search(["law"])] == ["legal-0", "legal-1", "legal-2"]
 
 
 @pytest.mark.asyncio
@@ -199,8 +220,7 @@ async def test_candidate_count_and_serialized_budget_do_not_scale_with_catalog(c
     assert len(json.dumps(extra, ensure_ascii=False)) <= RESULT_BUDGET
     assert all(len(row.get("purpose", "")) <= 160 for row in payload["connector_candidates"])
     assert len(PROMPT) <= 600
-    assert "After requesting setup, finish independent work, end the turn and wait" in PROMPT
-    assert "do not repeatedly search alternatives" in PROMPT
+    assert "The setup receipt pauses the task for the user's choice" in PROMPT
 
 
 def test_cli_skill_requires_current_selection_readiness_and_its_named_entry():
