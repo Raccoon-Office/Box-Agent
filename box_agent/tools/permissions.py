@@ -26,6 +26,9 @@ import os
 import re
 import sys
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -44,6 +47,69 @@ log = logging.getLogger(__name__)
 FILESYSTEM_READ = "filesystem.read"
 FILESYSTEM_WRITE = "filesystem.write"
 MEMORY_OPENCLAW_IMPORT = "memory.openclaw_import"
+
+
+_approval_turn: ContextVar[str | None] = ContextVar("device_approval_turn", default=None)
+_EXACT_FILESYSTEM_OPERATIONS = {"read_file": "read", "write_file": "write"}
+
+
+@dataclass
+class _FilesystemApproval:
+    path: Path
+    operation: str
+    tool_name: str
+    active: bool = True
+
+
+_filesystem_approval: ContextVar[_FilesystemApproval | None] = ContextVar(
+    "filesystem_approval", default=None,
+)
+
+
+@contextmanager
+def scoped_exact_approvals(turn_id: str | None):
+    token = _approval_turn.set(turn_id)
+    try:
+        yield
+    finally:
+        _approval_turn.reset(token)
+
+
+def exact_approvals_enabled() -> bool:
+    return approval_turn_id() is not None
+
+
+def approval_turn_id() -> str | None:
+    return _approval_turn.get()
+
+
+def exact_filesystem_target(request: dict) -> _FilesystemApproval | None:
+    approved = request.get("exactFilesystem")
+    if not isinstance(approved, dict):
+        return None
+    path, operation, tool_name = (approved.get(k) for k in ("path", "operation", "toolName"))
+    if (request.get("scope") != "filesystem" or request.get("requested_scope") != "user_home"
+            or not isinstance(path, str) or not Path(path).is_absolute()
+            or not isinstance(tool_name, str) or tool_name not in _EXACT_FILESYSTEM_OPERATIONS
+            or _EXACT_FILESYSTEM_OPERATIONS[tool_name] != operation
+            or request.get("path") != path or request.get("operation") != operation):
+        return None
+    return _FilesystemApproval(Path(path), operation, tool_name)
+
+
+@contextmanager
+def bind_retry_approval(request: dict | None, tool_name: str):
+    """Expose a trusted approval only inside the matching tool invocation."""
+    grant = exact_filesystem_target(request) if request and exact_approvals_enabled() else None
+    if grant is not None and grant.tool_name != tool_name:
+        grant = None
+    token = _filesystem_approval.set(grant)
+    try:
+        yield
+    finally:
+        if grant is not None:
+            grant.active = False
+        _filesystem_approval.reset(token)
 
 
 class CapabilityPolicy(BaseModel):
@@ -306,6 +372,13 @@ class PermissionEngine:
         if tool_name == "bash" and self._is_bash_product_path(path):
             return PermissionDecision(allowed=True)
 
+        grant = _filesystem_approval.get()
+        if grant is not None and grant.active:
+            if (grant.path == resolved and grant.operation == operation and grant.tool_name == tool_name
+                    and self._is_under_home(resolved) and not resolved.is_dir()):
+                return PermissionDecision(allowed=True)
+            return PermissionDecision(allowed=False, reason="Device approval does not match the filesystem access.")
+
         # Directory-level grants take precedence over scope checks. These are
         # recorded by the negotiator after the user approves a permission
         # request; subsequent reads under the granted directory must succeed
@@ -324,6 +397,12 @@ class PermissionEngine:
             return PermissionDecision(allowed=True)
 
         escalation = self._compute_escalation(resolved, scope, requested_path=path)
+        exact = exact_approvals_enabled()
+        if exact and (
+            _EXACT_FILESYSTEM_OPERATIONS.get(tool_name) != operation or not self._is_under_home(resolved)
+            or resolved.is_dir()
+        ):
+            escalation = None
 
         if escalation is None:
             log.warning(
@@ -354,6 +433,14 @@ class PermissionEngine:
                 "temporary_supported": True,
                 "persistent_supported": True,
                 "persistent_label": "始终允许此目录",
+                **({
+                    "persistent_supported": False,
+                    "operation": operation,
+                    "path": str(resolved),
+                    "exactFilesystem": {
+                        "path": str(resolved), "operation": operation, "toolName": tool_name,
+                    },
+                } if exact else {}),
             },
         )
 
