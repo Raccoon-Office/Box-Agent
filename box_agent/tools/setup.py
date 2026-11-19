@@ -270,6 +270,28 @@ def image_generation_service_configured(
     return bool(resolve_image_generation_endpoint(configured_endpoint, env))
 
 
+def image_generation_tool_settings(
+    config: Config,
+    llm: Any | None = None,
+) -> tuple[bool, str | None, str]:
+    """Resolve registration settings without constructing workspace tools."""
+    image_generation_config = getattr(config, "image_generation", None)
+    image_configured = image_generation_service_configured(config)
+    image_unavailable_reason = "no image_generation.endpoint configured"
+    image_endpoint = getattr(image_generation_config, "endpoint", "") or None
+    if image_configured and getattr(getattr(config, "officev3", None), "use_default_image_generation_preset", False):
+        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+            image_endpoint = resolve_image_generation_endpoint(image_endpoint)
+        image_endpoint = align_hosted_image_endpoint(
+            image_endpoint or "", getattr(llm, "api_base", "") or "",
+        )
+        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true" and not image_endpoint:
+            # Do not let GenerateImageTool fall back to an old environment endpoint.
+            image_configured = False
+            image_unavailable_reason = "private managed image endpoint is outside the service boundary"
+    return image_configured, image_endpoint, image_unavailable_reason
+
+
 def build_image_generation_prompt(
     config: Config,
     env: Mapping[str, str] | None = None,
@@ -889,9 +911,11 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:
+        sandbox_runtime_env = runtime_context.env()
+        sandbox_runtime_env["PYTHONDONTWRITEBYTECODE"] = "1"
         sandbox_tool = JupyterSandboxTool(
             workspace_dir=str(workspace_dir),
-            runtime_env=runtime_context.env(),
+            runtime_env=sandbox_runtime_env,
             process_owner_id=process_owner_id,
             skill_scratch_dir=skill_scratch_dir,
         )
@@ -937,19 +961,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Only register when an endpoint is configured (via config or env): an
     # unconfigured generate_image can only fail on every call and wastes steps.
     image_generation_config = getattr(config, "image_generation", None)
-    image_configured = image_generation_service_configured(config)
-    image_unavailable_reason = "no image_generation.endpoint configured"
-    image_endpoint = getattr(image_generation_config, "endpoint", "") or None
-    if image_configured and getattr(getattr(config, "officev3", None), "use_default_image_generation_preset", False):
-        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
-            image_endpoint = resolve_image_generation_endpoint(image_endpoint)
-        image_endpoint = align_hosted_image_endpoint(
-            image_endpoint or "", getattr(llm, "api_base", "") or "",
-        )
-        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true" and not image_endpoint:
-            # Do not let GenerateImageTool fall back to an old environment endpoint.
-            image_configured = False
-            image_unavailable_reason = "private managed image endpoint is outside the service boundary"
+    image_configured, image_endpoint, image_unavailable_reason = image_generation_tool_settings(config, llm)
     if image_configured:
         tools.append(
             GenerateImageTool(

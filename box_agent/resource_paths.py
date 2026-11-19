@@ -21,7 +21,7 @@ def bundled_resource_dir(name: str, *, package_dir: Path | None = None) -> Path:
         executable = Path(sys.executable).resolve()
         if executable.parent.name != "bin":  # /box-agent-runtime/bin/box-agent-acp
             raise ValueError(f"Invalid runtime layout: executable must be inside bin/: {executable}")
-        resource = executable.parent.parent / name  # box-agent-runtime/skills   box-agent-runtime/config
+        resource = executable.parent.parent / name  # box-agent-runtime/{skills,config}
         if resource.resolve() != resource:
             raise ValueError(f"Bundled resource directory must not be redirected: {name}")
         return resource

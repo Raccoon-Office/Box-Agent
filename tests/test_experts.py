@@ -1,6 +1,7 @@
 
 from tests.acp_helpers import acp_params
 from acp.schema import SessionNotification
+from acp import RequestError
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,16 @@ class DummyConn:
     async def session_update(self, session_id, update, **meta):
         payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
         self.updates.append(payload)
+
+
+def _agent_with_selected_pptx(config, tmp_path):
+    skills = tmp_path / "installed-skills"
+    skills.mkdir()
+    _write_skill(skills, "pptx")
+    loader = SkillLoader(skills)
+    loader.discover_skills()
+    return BoxACPAgent(DummyConn(), config, DoneLLM(),
+                       [GetSkillTool(loader), ListSkillsTool(loader)], "base system", skill_loader=loader)
 
 
 def _write_skill(root, name: str, description: str = "") -> None:
@@ -155,7 +166,7 @@ async def test_acp_session_injects_expert_prompt_and_returns_meta(tmp_path) -> N
         agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_mcp=False),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "base system")
+    agent = _agent_with_selected_pptx(config, tmp_path)
 
     session = await agent.new_session(
         **acp_params(SimpleNamespace(
@@ -186,7 +197,7 @@ async def test_acp_expert_context_is_session_scoped(tmp_path) -> None:
         agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_mcp=False),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "base system")
+    agent = _agent_with_selected_pptx(config, tmp_path)
 
     expert_session = await agent.new_session(
         **acp_params(SimpleNamespace(
@@ -285,19 +296,24 @@ async def test_acp_expert_explicit_selection_only_overrides_profile_block(
         skill_loader=skill_loader,
     )
 
-    session = await agent.new_session(
-        **acp_params(SimpleNamespace(
-            cwd=str(tmp_path),
-            field_meta={
-                "execution_profile": "fast",
-                "expert": {
-                    "id": "research-expert",
-                    "name": "研究专家",
-                    "defaultSkills": [skill_name],
-                },
+    params = acp_params(SimpleNamespace(
+        cwd=str(tmp_path),
+        field_meta={
+            "execution_profile": "fast",
+            "expert": {
+                "id": "research-expert",
+                "name": "研究专家",
+                "defaultSkills": [skill_name],
             },
-        ))
-    )
+        },
+    ))
+    if globally_disabled:
+        with pytest.raises(RequestError) as error:
+            await agent.new_session(**params)
+        assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+        await agent.aclose()
+        return
+    session = await agent.new_session(**params)
 
     state = agent._sessions[session.sessionId]
     get_skill = state.agent.tools["get_skill"]
@@ -895,9 +911,16 @@ async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(
                     tools=ToolsConfig(enable_mcp=False))
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [GetSkillTool(loader)],
                         SKILL_SLOT_SENTINEL, skill_loader=loader)
-    session = await agent.new_session(**acp_params(SimpleNamespace(
-        cwd=str(tmp_path), field_meta={package_kind: profile},
-    )))
+    params = acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={package_kind: profile}))
+    if initial_failure:
+        with pytest.raises(RequestError) as error:
+            await agent.new_session(**params)
+        assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+        assert not agent._sessions
+        assert loader.get_skill("pptx").source == "builtin"
+        await agent.aclose()
+        return
+    session = await agent.new_session(**params)
     state = agent._sessions[session.sessionId]
     skill = state.skill_loader.get_skill("pptx")
     assert skill.source == "expert"
@@ -905,12 +928,6 @@ async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(
     assert loader.get_skill("pptx").source == "builtin"
     normal = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     assert agent._sessions[normal.sessionId].skill_loader.get_skill("pptx").source == "builtin"
-    if initial_failure:
-        assert skill.broken
-        assert state.skill_loader.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") is None
-        result = await state.agent.tools["get_skill"].execute("pptx")
-        assert not result.success and result.raw_output["code"] == "SKILL_BROKEN"
-        return
     assert state.skill_loader.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") == (
         package / "selected/scripts/sync_image_manifest_status.js"
     ).resolve()

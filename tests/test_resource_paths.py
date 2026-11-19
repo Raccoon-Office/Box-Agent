@@ -50,22 +50,23 @@ def test_frozen_executable_outside_bin_reports_invalid_layout(tmp_path, monkeypa
         bundled_resource_dir("config", package_dir=tmp_path / "package")
 
 
-@pytest.mark.parametrize("name", ["../config", "", "mcp_servers", "/skills"])
+@pytest.mark.parametrize("name", ["../config", "", "mcp_servers", "/skills", "experts"])
 def test_resource_names_cannot_escape_the_release(name):
     with pytest.raises(ValueError, match="Unknown bundled resource"):
         bundled_resource_dir(name)
 
 
-def test_release_resource_cannot_redirect_to_a_foreign_directory(tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", ["skills"])
+def test_release_resource_cannot_redirect_to_a_foreign_directory(tmp_path, monkeypatch, name):
     root = frozen_runtime(tmp_path, monkeypatch)
     foreign = tmp_path / "unrelated-data"
     foreign.mkdir()
     try:
-        (root / "skills").symlink_to(foreign, target_is_directory=True)
+        (root / name).symlink_to(foreign, target_is_directory=True)
     except OSError:
         pytest.skip("directory symlinks unavailable on this platform")
     with pytest.raises(ValueError, match="must not be redirected"):
-        bundled_resource_dir("skills")
+        bundled_resource_dir(name)
 
 
 @pytest.mark.parametrize("manifest", [None, '{"name":"other-app"}', '[]', 'not-json'])
