@@ -82,7 +82,80 @@ def test_new_host_prompt_requests_setup_for_video_without_rendering(host):
         "installed": False, "available": False, "setup_supported": True,
     }}))
     assert "get_skill('hyperframes-video')" in prompt
-    assert "结束本回合" in prompt
+    assert "用户明确选择本地 HyperFrames" in prompt
+
+
+@pytest.mark.asyncio
+async def test_ready_video_plugin_remains_callable_when_only_connector_setup_was_skipped(host, monkeypatch):
+    directory = host / "hyperframes-video"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(SKILL)
+    monkeypatch.setenv("BOX_AGENT_VIDEO_RUNTIME_READY", "1")
+    tool = GetSkillTool(SkillLoader(sources=[(host, "plugin")]))
+    tool.allow_component_setup = False
+    assert (await tool.execute("hyperframes-video")).success
+    tool.skip_video_generation = True
+    skipped = await tool.execute("hyperframes-video")
+    assert not skipped.success and skipped.raw_output is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skip", ["connector", "component"])
+async def test_acp_continues_video_with_available_tools_after_setup_is_declined(host, tmp_path, skip):
+    from box_agent.acp import BoxACPAgent
+    from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+    from tests.test_acp import DoneLLM, DummyConn
+    from tests.test_acp_connector_discovery import config, create, prompt
+    from tests.test_connector_discovery import entry, snapshot
+
+    class VideoLLM(DoneLLM):
+        pending = []
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if self.pending:
+                name, arguments = self.pending.pop(0)
+                self.calls += 1
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                    id=f"video-{self.calls}", type="function",
+                    function=FunctionCall(name=name, arguments=arguments),
+                )])
+            else:
+                async for event in super().generate_stream(messages, tools, **kwargs):
+                    yield event
+
+    def receipts():
+        outputs = [notification.model_dump(by_alias=True, exclude_none=True)["update"].get("rawOutput")
+                   for notification in conn.updates]
+        return [output["type"] for output in outputs if isinstance(output, dict)
+                and output.get("type") in {"connector_action_required", "runtime_component_required"}]
+
+    loader = SkillLoader(sources=[(host, "plugin")])
+    llm, conn = VideoLLM(), DummyConn()
+    agent = BoxACPAgent(conn, config(tmp_path), llm, [GetSkillTool(loader)], "system", skill_loader=loader)
+    catalog = snapshot([entry("seko", kind="mcp", skills=[])])
+    search = ("tool_search", {"connector": "seko"})
+    skill = ("get_skill", {"skill_name": "hyperframes-video"})
+    initial_receipt = "connector_action_required" if skip == "connector" else "runtime_component_required"
+    try:
+        session = await create(agent, tmp_path, catalog=catalog)
+        llm.pending = [search if skip == "connector" else skill]
+        await prompt(agent, session.sessionId, "制作视频。", metadata={"connector_discovery": catalog})
+        assert receipts() == [initial_receipt]
+        choice = ({"connector_continuation": {"request_id": "skip", "skip_connector_id": "seko"}}
+                  if skip == "connector" else
+                  {"component_continuation": {"request_id": "skip", "skip_component_id": "video-generation"}})
+        llm.pending = [skill, search, ("write_file", {"path": "storyboard.md", "content": "Opening shot"})]
+        resumed = await prompt(agent, session.sessionId, "跳过设置，继续原任务。", metadata={
+            "connector_discovery": catalog, **choice,
+        })
+        assert resumed.field_meta["runStatus"] == "completed"
+        assert receipts() == [initial_receipt]
+        assert (tmp_path / "storyboard.md").read_text() == "Opening shot"
+        llm.pending = [skill]
+        await prompt(agent, session.sessionId, "这次安装本地视频插件。", metadata={"connector_discovery": catalog})
+        assert receipts() == [initial_receipt, "runtime_component_required"]
+    finally:
+        await agent.aclose()
 
 
 def test_plugin_source_cannot_escape_active_profile(host, monkeypatch, tmp_path):

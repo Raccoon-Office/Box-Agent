@@ -40,6 +40,8 @@ class GetSkillTool(Tool):
         self.blocked_skill_names = blocked_skill_names or frozenset()
         self.explicitly_allowed_skill_names = explicitly_allowed_skill_names
         self.skill_access_filter = skill_access_filter
+        self.allow_component_setup = True
+        self.skip_video_generation = False
 
     @property
     def name(self) -> str:
@@ -92,7 +94,9 @@ class GetSkillTool(Tool):
         loader = catalog or self.skill_loader
         from .runtime_components import plugin_skill_requirement
 
-        requirement = plugin_skill_requirement(name, loader)
+        requirement = plugin_skill_requirement(
+            name, loader, allow_setup=self.allow_component_setup, skip_video=self.skip_video_generation,
+        )
         if requirement is not None:
             return requirement
         if self.allowed_skill_names is not None or self.skill_access_filter is not None:

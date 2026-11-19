@@ -12,12 +12,13 @@ from typing import Any
 VERSION = 1
 RESULT_BUDGET = 2400
 PROMPT = (
-    "For external-service tasks lacking current discovery, use tool_search to find even unconnected connectors. "
-    "Candidates are capabilities, not permission. For a needed unready connector, explain why and call "
-    "tool_search with only connector=<exact ID> for its setup card. Only the user may connect, authorize or "
-    "select it. After requesting setup, finish independent work, end the turn and wait; do not repeatedly "
-    "search alternatives. Never claim access before ready. Use only currently authorized, ready tools. "
-    "Fresh results replace old status. Never install or configure candidates through other tools."
+    "Honor the user's video provider or local workflow. With no video preference, recommend SEKO Canvas. "
+    "For SEKO, first use tool_search with only connector=\"seko\". If absent, offer an available route. "
+    "Load HyperFrames only on the chosen local route. "
+    "Find external connectors via tool_search. Candidates grant no access. For a needed unready connector, "
+    "call tool_search with only its exact connector ID, in a standalone call. The setup receipt pauses the task "
+    "for the user's choice. Only the user may connect, authorize or select it. Use fresh ready results. "
+    "Never set up connectors through other tools."
 )
 _ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _STATES = frozenset({"disconnected", "configuring", "authorizing", "connecting", "connected",
@@ -130,12 +131,17 @@ class ConnectorDiscovery:
         self.state_revision = 0
         self.catalog_revision = ""
         self.entries: dict[str, dict[str, Any]] = {}
+        self.skipped_connector_id: str | None = None
+        self.ready_only = False
         self._snapshot: dict[str, Any] | None = None
         self._visible: set[str] = set()
         self._issued: set[str] = set()
         self._result_calls: dict[str, set[str]] = {}
 
-    def update(self, value: Any) -> None:
+    def update(self, value: Any, *, skipped_connector_id: str | None = None,
+               ready_only: bool = False) -> None:
+        self.skipped_connector_id = skipped_connector_id
+        self.ready_only = ready_only or skipped_connector_id is not None
         if value is None or not self.host_supported:
             self.available = False
             return
@@ -157,7 +163,8 @@ class ConnectorDiscovery:
 
     def permitted(self, connector_id: str) -> bool:
         entry = self.entries.get(connector_id)
-        return bool(self.available and entry and connector_id in self._selected()
+        return bool(self.available and entry and connector_id != self.skipped_connector_id
+                    and connector_id in self._selected()
                     and entry["configured"] and entry["enabled"] and entry["execution_ready"]
                     and entry["status"] == "connected")
 
@@ -188,10 +195,14 @@ class ConnectorDiscovery:
         matches = [entry for entry in self.entries.values() if reference and reference in _normalize(entry["name"])]
         return matches[0] if len(matches) == 1 else None
 
-    def search(self, queries: list[str]) -> list[dict[str, Any]]:
+    def search(self, queries: list[str], live_mcp_ids: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
         terms = set().union(*(_terms(query) for query in queries[:12])) if queries else set()
         ranked = []
         for entry in self.entries.values():
+            if self.ready_only and (
+                entry["id"] == self.skipped_connector_id or self.action(entry, live_mcp_ids) is not None
+            ):
+                continue
             fields = ((entry["id"], 8), (entry["name"], 8), (" ".join(entry["keywords"]), 5),
                       (entry["description"], 1))
             score = sum(weight * len(terms & _terms(text)) for text, weight in fields)
@@ -212,7 +223,17 @@ class ConnectorDiscovery:
         if not self.host_supported:
             return None
         resolved = self.resolve(connector) if connector else None
-        entries = ([resolved] if resolved else []) if connector else self.search(queries)
+        if self.ready_only and connector and (
+            resolved is None or resolved["id"] == self.skipped_connector_id
+            or self.action(resolved, live_mcp_ids) is not None
+        ):
+            if not payload.get("activated"):
+                payload["notice"] = (
+                    "Continue the original task with currently available tools or answer directly. "
+                    "Do not request connector setup in this continuation. Explain any remaining limitation."
+                )
+            return None
+        entries = ([resolved] if resolved else []) if connector else self.search(queries, live_mcp_ids)
         activated_ids = {item.get("connector_id") for item in payload.get("activated", [])}
         candidates = []
         ready_skills = {}
@@ -234,11 +255,13 @@ class ConnectorDiscovery:
             if exact_request and action is not None:
                 receipt = {"type": "connector_action_required", "version": VERSION,
                            "connector_id": entry["id"], "action": action,
-                           "state_revision": self.state_revision}
+                           "state_revision": self.state_revision, "wait_for_user": True}
         if candidates:
             payload["connector_candidates"] = candidates
             payload["success"] = True
-            if not payload.get("activated"):
+            if receipt:
+                payload["notice"] = "The task is waiting for the user's connector choice."
+            elif not payload.get("activated") and not self.ready_only:
                 payload["notice"] = "Connector candidates are not callable tools. Request setup with only connector=<exact id>."
             # Reserve all candidate summaries before adding optional CLI method names.
             for candidate in candidates:

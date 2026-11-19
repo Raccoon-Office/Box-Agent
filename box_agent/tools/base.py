@@ -182,6 +182,10 @@ class Tool:
         """Classify an invocation before scheduling a potentially interactive batch."""
         return self.may_require_user_input
 
+    def ends_turn_after_success(self, result: ToolResult) -> bool:
+        """Whether a trusted successful result requires a user response before continuing."""
+        return self.ends_turn_on_success
+
     def compaction_state(self) -> tuple[str, str] | None:
         """Return trusted read-only runtime state for history compaction."""
 
