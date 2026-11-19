@@ -872,6 +872,14 @@ class SessionLog:
             raise ValueError("model round must be a nonnegative integer")
         self._message_metadata(message)["modelRound"] = round_number
 
+    def mark_runtime_input_receipts(
+        self, message: Message, receipts: dict[str, dict[str, int]],
+    ) -> None:
+        """Commit request receipts in the same log record as the assistant response."""
+        if message.role != "assistant":
+            raise ValueError("runtime input receipts require an assistant message")
+        self._message_metadata(message)["runtimeInputReceipts"] = deepcopy(receipts)
+
     def _append_message_event(
         self, event_type: str, data: dict[str, Any], *, message: Message,
         surface_op: str | dict[str, Any], source_event_seqs: list[int] | None = None,
