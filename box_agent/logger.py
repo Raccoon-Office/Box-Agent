@@ -259,15 +259,18 @@ class AgentLogger:
             return
 
         try:
-            with open_private_log(self.log_file, "a") as f:
-                f.write("\n" + "-" * 80 + "\n")
-                f.write(f"[{self.log_index}] {log_type}\n")
-                f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
-                f.write("-" * 80 + "\n")
-                f.write(content + "\n")
-        except OSError:
+            handle = open_private_log(self.log_file, "a")
+        except PermissionError:
             self.log_file = None
             logger.warning("Agent run log unavailable", exc_info=True)
+            return
+
+        with handle as f:
+            f.write("\n" + "-" * 80 + "\n")
+            f.write(f"[{self.log_index}] {log_type}\n")
+            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
+            f.write("-" * 80 + "\n")
+            f.write(content + "\n")
 
     def get_log_file_path(self) -> Path | None:
         """Get current log file path"""

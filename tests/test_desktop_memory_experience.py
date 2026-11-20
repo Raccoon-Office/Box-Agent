@@ -387,10 +387,13 @@ async def test_background_experience_keeps_inherited_trace_and_exact_model_paylo
     assert request["llm_call_id"] == response["llm_call_id"]
     assert request["data"]["request_session_id"] == "delivery-session"
     assert request["data"]["call_kind"] == "memory_experience"
-    assert request["data"]["messages"] == [
-        message.model_dump(exclude_none=True, exclude={"host_connector_status"})
-        for message in provider.calls[0]["messages"]
-    ]
+    expected = []
+    for message in provider.calls[0]["messages"]:
+        recorded = message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+        if message.role == "user":
+            recorded["source"] = message.source
+        expected.append(recorded)
+    assert request["data"]["messages"] == expected
     assert request["data"]["messages"][1]["content"] == transport.prompt
     assert response["data"]["content"] == provider.content
     assert transport.proposal == json.loads(provider.content)

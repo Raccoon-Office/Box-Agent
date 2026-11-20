@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -25,9 +26,14 @@ def make_private_log_dir(path: Path) -> None:
 
 
 def _private_log_descriptor(path: str, flags: int) -> int:
-    descriptor = os.open(
-        path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600,
-    )
+    try:
+        descriptor = os.open(
+            path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600,
+        )
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PermissionError("Diagnostic file is a symbolic link") from exc
+        raise
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -48,8 +54,8 @@ def _private_log_descriptor(path: str, flags: int) -> int:
             api = WindowsFileAPI()
             try:
                 validate_private_acl(*api.security(msvcrt.get_osfhandle(descriptor)), api.user_sid())
-            except ValueError as exc:
-                raise PermissionError("Diagnostic file has a shared access list") from exc
+            except (OSError, ValueError) as exc:
+                raise PermissionError("Could not verify a private diagnostic file ACL") from exc
     except BaseException:
         os.close(descriptor)
         raise

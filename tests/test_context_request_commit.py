@@ -122,22 +122,22 @@ async def test_restored_host_material_survives_failed_request_commit_and_retry(t
 
 @pytest.mark.asyncio
 async def test_restored_material_survives_request_logger_write_failure_and_retry(tmp_path, monkeypatch):
-    import builtins
     import box_agent.logger as logger_module
 
     monkeypatch.setattr(logger_module, "state_path", lambda name: tmp_path / name)
     logger = logger_module.AgentLogger()
     logger.start_new_run()
     failed = False
+    open_log = logger_module.open_private_log
 
-    def fail_request_open(path, mode="r", *args, **kwargs):
+    def fail_request_open(path, mode, **kwargs):
         nonlocal failed
         if path == logger.log_file and mode == "a" and not failed:
             failed = True
             raise OSError("request log disk full")
-        return builtins.open(path, mode, *args, **kwargs)
+        return open_log(path, mode, **kwargs)
 
-    monkeypatch.setattr(logger_module, "open", fail_request_open, raising=False)
+    monkeypatch.setattr(logger_module, "open_private_log", fail_request_open)
     log = SessionLog.create(tmp_path / "sessions", session_id="request-logger", cwd=tmp_path)
     provider = CapturingProvider()
     agent = Agent(llm_client=provider, system_prompt="BASE", tools=[], session_log=log,
