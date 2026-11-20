@@ -203,6 +203,7 @@ def test_source_skill_lookup_retains_cwd_and_profile_semantics(tmp_path, monkeyp
 @pytest.mark.parametrize("defer", [False, True])
 async def test_complete_skill_setup_reads_sibling_resources_with_all_sources(release, defer):
     from box_agent.tools.setup import await_skill_discovery, initialize_base_tools
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
     from box_agent.tools.skill_tool import GetSkillTool
 
     runtime, _, profile = release
@@ -212,14 +213,23 @@ async def test_complete_skill_setup_reads_sibling_resources_with_all_sources(rel
         "skills": [{"name": "fixture", "path": "fixture/SKILL.md"}],
     }), encoding="utf-8")
     write_method(profile / "skills", "user-method")
-    write_method(profile / "connectors/skills", "connector-method")
+    connector = write_method(profile / "connectors/skills", "connector-method")
     _, loader, mcp, task = await initialize_base_tools(
         config_for(profile), output=lambda *_: None, defer_skills=defer,
     )
     assert mcp is None
     await await_skill_discovery(task)
     assert loader is not None
-    assert {"fixture", "user-method", "connector-method"} <= set(loader.loaded_skills)
+    assert {"fixture", "user-method"} <= set(loader.loaded_skills)
+    assert "connector-method" not in loader.loaded_skills
+    listed = await ListSkillsTool(loader).execute(query="connector-method")
+    assert listed.success, listed.error
+    entry, = [row for row in listed.raw_output["skills"] if row["name"] == "connector-method"]
+    assert entry["source"] == "connector"
+    connected = await GetSkillTool(loader).execute(skill_name=entry["skill_name"])
+    assert connected.success, connected.error
+    assert connected.raw_output["skill_reference"]["path"] == str(connector / "SKILL.md")
+    assert "connector-method" not in loader.loaded_skills
     result = await GetSkillTool(loader).execute(skill_name="fixture")
     assert result.success, result.error
     assert result.raw_output["skill_reference"]["path"] == str(method / "SKILL.md")

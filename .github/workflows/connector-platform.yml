@@ -12,6 +12,7 @@ on:
       - 'tests/test_connector*.py'
       - 'tests/test_acp*.py'
       - 'tests/test_skill_catalog_tool.py'
+      - 'tests/test_skill_resource_layout.py'
       - 'tests/test_mcp_connection_lifecycle.py'
       - '.github/workflows/connector-platform.yml'
 
@@ -43,3 +44,4 @@ jobs:
           tests/test_connector_skill_versions.py
           tests/test_connector_skill_source.py
           tests/test_skill_catalog_tool.py::test_same_named_connector_files_are_individually_readable_and_scoped
+          tests/test_skill_resource_layout.py::test_complete_skill_setup_reads_sibling_resources_with_all_sources
