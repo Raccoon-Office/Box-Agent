@@ -1,0 +1,10 @@
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -219,6 +219,7 @@
+         async activate() { await call('browser.activate', this.#handle); }
+         async click(target, options = {}) { await call('browser.click', this.#handle, {target, options}); }
+         async fill(target, text) { await call('browser.fill', this.#handle, {target, text}); }
++        async hover(target) { await call('browser.hover', this.#handle, {target}); }
+         async typeText(text) { await call('browser.typeText', this.#handle, {text}); }
+         async pressKey(key) {
+             const parsed = parsePressKey(arguments, 'Tab');

@@ -1,0 +1,31 @@
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -20,6 +20,7 @@
+     await selfTest();
+     process.stdout.write('CUA_REPL_OK\n');
+ } else {
++    const capability = process.env.MAC_CUA_CAPABILITY || 'all';
+     const socket = new net.Socket({fd: Number(process.env.MAC_CUA_REPL_FD), readable: true, writable: true});
+     const send = value => socket.write(JSON.stringify(value) + '\n');
+     const scope = new AsyncLocalStorage();
+@@ -205,8 +206,9 @@
+         async getState(opts) {
+             opts = options(opts, ['emit']);
+             await writeDocumentation();
+-            const apps = await call('listApps');
+-            const state = {apps, browsers: await call('browser.availability')};
++            const apps = capability === 'browser' ? [] : await call('listApps');
++            const browsers = capability === 'cua' ? [] : await call('browser.availability');
++            const state = capability === 'browser' ? {browsers} : capability === 'cua' ? {apps} : {apps, browsers};
+             if (opts.emit !== false) write(state);
+             return state;
+         },
+@@ -217,6 +219,8 @@
+             return new App(result.handle);
+         },
+     };
++    if (capability === 'cua') delete cua.getBrowser;
++    if (capability === 'browser') { delete cua.getApp; delete cua.listApps; }
+     const output = new PassThrough();
+     const r = repl.start({input: new PassThrough(), output, terminal: false, prompt: '', useGlobal: false});
+     Object.assign(r.context, {cua, Uint8Array, nodeRepl: {write, emitImage}});

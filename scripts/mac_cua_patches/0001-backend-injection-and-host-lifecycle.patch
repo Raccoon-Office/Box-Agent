@@ -1,0 +1,93 @@
+--- a/cua_adapter/cua_service.py
++++ b/cua_adapter/cua_service.py
+@@ -25,8 +25,17 @@
+     """Independent supervisor: blocked JS cannot block its wall-clock deadline."""
+ 
+     def __init__(self, driver_factory, node, script, evidence_dir=None, *, browser_config=None,
+-                 browser_client_factory=None, documentation=None, adapter_factory, action_error, result_data,
++                 browser_client_factory=None, documentation=None, browser_backend_factory=None,
++                 capability="all", dispatch_check=None, worker_env=None, worker_cwd=None,
++                 adapter_factory, action_error, result_data,
+                  evidence_contract, mcp_client, driver_timeout_seconds):
++        if capability not in {'all', 'cua', 'browser'}:
++            raise ValueError('Invalid REPL capability')
++        self.capability = capability
++        self.browser_backend_factory = browser_backend_factory
++        self.dispatch_check = dispatch_check
++        self.worker_env, self.worker_cwd = worker_env, worker_cwd
++        self.cancelled = threading.Event()
+         self.factory, self.node, self.script = driver_factory, node, str(script)
+         self.evidence_dir = Path(evidence_dir) if evidence_dir else None
+         self.worker = self.connection = self.adapter = self.log = None
+@@ -57,6 +66,12 @@
+             for state in self.adapter.handles.values():
+                 state.pop('fallback_origin', None)
+                 state.pop('popup_focus_relation', None)
++        if self.browser_backend_factory is not None:
++            if self.browser is None:
++                self.browser = self.browser_backend_factory()
++            return self.browser.control(method, handle, args, deadline=deadline)
++        if self.capability == 'browser':
++            raise ValueError('Browser backend injection is required; no harness fallback')
+         if not self.browser_config:
+             if method == 'browser.availability':
+                 return []
+@@ -77,11 +92,12 @@
+         if self.worker:
+             return
+         parent, child = socket.socketpair()
+-        env = {k: v for k, v in os.environ.items() if k not in {'OPENAI_API_KEY', 'OPENAI_BASE_URL'}}
++        env = dict(self.worker_env) if self.worker_env is not None else {k: v for k, v in os.environ.items() if k not in {'OPENAI_API_KEY', 'OPENAI_BASE_URL'}}
++        env['MAC_CUA_CAPABILITY'] = self.capability
+         env['MAC_CUA_REPL_FD'] = str(child.fileno())
+         try:
+             self.worker = subprocess.Popen([self.node, self.script], pass_fds=(child.fileno(),),
+-                stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr, env=env)
++                stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr, env=env, cwd=self.worker_cwd)
+         except BaseException:
+             parent.close()
+             raise
+@@ -138,6 +154,10 @@
+             evidence=self.log, deadline=deadline, cell=self.serial,
+             invocation_id=self.invocation_id)
+         return self.adapter
++
++    def abort(self):
++        # Do not close the adapter concurrently with an in-flight native action.
++        self.cancelled.set()
+ 
+     def execute(self, code, title=None, timeout_ms=60000):
+         if not isinstance(code, str) or not code.strip() or type(timeout_ms) is not int or not 1 <= timeout_ms <= 120000:
+@@ -157,13 +177,15 @@
+             self._start_cell_receipt(code)
+             self.send({'kind': 'execute', 'cell': cell, 'code': code})
+             while True:
++                if self.cancelled.is_set():
++                    raise RuntimeError('Cell cancelled; dispatched effects may be unknown. Observe before retrying.')
+                 remaining = deadline - time.monotonic()
+                 if remaining <= 0:
+                     raise TimeoutError('JS timed out; already dispatched effects may be unknown. Session reset; do not replay.')
+                 try:
+-                    message = self.inbox.get(timeout=remaining)
++                    message = self.inbox.get(timeout=min(remaining, 0.1))
+                 except queue.Empty:
+-                    raise TimeoutError('JS timed out; already dispatched effects may be unknown. Session reset; do not replay.')
++                    continue
+                 if isinstance(message, Exception):
+                     raise message
+                 if message.get('cell') != cell:
+@@ -181,6 +203,14 @@
+                     break
+                 elif message['kind'] == 'call':
+                     try:
++                        method = message['method']
++                        if method != 'documentation':
++                            is_browser = method.startswith('browser.')
++                            if ((self.capability == 'cua' and is_browser)
++                                    or (self.capability == 'browser' and not is_browser)):
++                                raise ValueError('CapabilityDenied: method is outside this REPL')
++                            if self.dispatch_check is not None:
++                                self.dispatch_check(method, message.get('handle'), message.get('args', {}))
+                         if message['method'] == 'documentation':
+                             if self.documentation is not None:
+                                 value = self.documentation

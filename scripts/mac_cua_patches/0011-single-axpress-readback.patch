@@ -1,0 +1,21 @@
+--- a/cua_adapter/cua_driver.py
++++ b/cua_adapter/cua_driver.py
+@@ -140,6 +140,18 @@
+             self.record({'phase': 'error', **entry})
+             raise
+         if failed(result):
++            # The pinned Driver reports this AX reply as text, even when a modal opened.
++            if (name == 'click' and 'element_token' in args and args.get('count', 1) == 1
++                    and args.get('action', 'press') == 'press' and args.get('button', 'left') == 'left'
++                    and any(item.get('type') == 'text' and item.get('text', '').strip()
++                            == 'AX action failed: AXUIElementPerformAction(AXPress) returned -25204'
++                            for item in result.get('content', []))):
++                raise ActionError({
++                    **result, 'structuredContent': {**data(result), 'effect': 'unverifiable'},
++                    'content': [*result['content'], {'type': 'text', 'text':
++                        '动作可能已生效，先读回界面。请在下一次调用中执行 await app.getAXState() '
++                        '或 await app.getAXStateAndScreenshot()，确认界面变化后再决定是否需要点击。'}],
++                })
+             # Only this exact daemon rejection proves the action never ran.
+             # Restore the reported identity: sessionless tools use the MCP id.
+             if recover_session and name not in {'start_session', 'end_session'}:
