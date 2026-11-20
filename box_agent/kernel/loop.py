@@ -1875,6 +1875,7 @@ async def _run_agent_loop_impl(
             request_usage_snapshot = capture_request_usage(
                 provider_request_messages, len(messages), tool_list, llm,
             )
+            continuation_history = tuple(provider_request_messages)
             llm_stream = llm.generate_stream(**stream_kwargs)
             async with aclosing(_stream_with_activity(
                 llm_stream,
@@ -2727,13 +2728,13 @@ async def _run_agent_loop_impl(
                 )
                 return
 
-            # assistant_msg was appended above; pass the live transcript so the
-            # judge can fork it without reconstructing or duplicating candidate
-            # text.  The judge request itself is kept out of this list.
+            # Check the effective request the model saw, not raw history that
+            # may retain removed legacy Skill text. Append the complete candidate
+            # once; the judge forks this view without mutating durable history.
             try:
                 continuation = await turn_continuation.evaluate(
                     llm=llm,
-                    messages=messages,
+                    messages=[*continuation_history, assistant_msg],
                     facts=ContinuationJudgeFacts(
                         user_request=continuation_user_request,
                         decision_tool_available=(

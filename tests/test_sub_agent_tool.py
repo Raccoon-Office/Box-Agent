@@ -1479,11 +1479,13 @@ async def test_oversized_child_skill_bundle_requires_granted_read_capability(tmp
 
     llm = AsyncMock()
     llm.estimate_text_tokens = lambda text: len(text.encode("utf-8")) // 3
-    llm.generate.return_value = LLMResponse(content="done", finish_reason="stop")
+    llm.generate.return_value = LLMResponse(content='{"continue":false}', finish_reason="stop")
     llm.generate_stream = capture
     parent_tools = {"get_skill": GetSkillTool(loader), "list_skills": ListSkillsTool(loader),
                     "read_file": ReadTool(workspace_dir=str(tmp_path))}
-    tool = SubAgentTool(llm=llm, parent_tools=parent_tools, token_limit=3000, workspace_dir=str(tmp_path))
+    # Leave room for the normal request and completion check; the full Skill
+    # still exceeds this budget and must require an explicitly granted reader.
+    tool = SubAgentTool(llm=llm, parent_tools=parent_tools, token_limit=5000, workspace_dir=str(tmp_path))
     tool.set_skill_provider(lambda: loader)
     result = await tool.execute(task="Apply this method", skills=["large"],
                                 required_tools=["read_file" if reader == "batch_read_file" else reader] if reader else [],
@@ -1495,6 +1497,10 @@ async def test_oversized_child_skill_bundle_requires_granted_read_capability(tmp
         assert "LONG-METHOD-RULE" not in str(requests)
         assert "Read the assigned Skills before applying their steps" in requests[0][1].content
         assert "large" in requests[0][1].content
+        llm.generate.assert_awaited_once()
+        judge_messages = llm.generate.await_args.args[0]
+        assert "LONG-METHOD-RULE" not in str(judge_messages)
+        assert judge_messages[-2].content == "done"
         if reader == "read_file":
             assert str(directory / "SKILL.md") in requests[0][1].content
     else:

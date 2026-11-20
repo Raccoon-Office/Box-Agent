@@ -35,8 +35,11 @@ class BudgetModel:
         self.followup = followup
         self.summary_calls = 0
         self.request_sizes = []
+        self.judge_requests = []
 
-    async def generate(self, **kwargs):
+    async def generate(self, messages, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            self.judge_requests.append([message.model_copy(deep=True) for message in messages])
         return LLMResponse(content='{"continue":false}', finish_reason="stop")
 
     async def generate_stream(self, messages, tools=None, **kwargs):
@@ -59,6 +62,9 @@ class BudgetModel:
 class FollowupTool(Tool):
     transient_followup_allowed = True
 
+    def __init__(self, text_chars=27000):
+        self.text_chars = text_chars
+
     @property
     def name(self):
         return "request_followup"
@@ -73,7 +79,7 @@ class FollowupTool(Tool):
 
     async def execute(self):
         return ToolResult(success=True, content="Ready.", transient_followup_content=[
-            {"type": "text", "text": "T" * 27000},
+            {"type": "text", "text": "T" * self.text_chars},
         ])
 
 
@@ -127,14 +133,26 @@ def test_followup_admission_uses_the_complete_request_counter(blocks):
         assert projection.budget_blocked is (expected > limit)
 
 
-async def test_child_compacts_history_with_the_full_followup_budget():
+@pytest.mark.parametrize("followup_chars, completion_fits", [(18000, True), (27000, False)])
+async def test_child_compacts_history_with_the_full_followup_budget(followup_chars, completion_fits):
     model = BudgetModel(followup=True)
     history = child_history()
     system, latest_user = history[0], history[-1]
-    result = await run_child(model, history, {"request_followup": FollowupTool()})
-    assert result.success, result.error
+    result = await run_child(model, history, {"request_followup": FollowupTool(followup_chars)})
+    assert result.success is completion_fits, result.error
     assert model.summary_calls == 1
     assert len(model.request_sizes) == 2 and max(model.request_sizes) <= 50000
+    assert result.raw_output["model_calls"] == 2
+    assert history[-1].content == "Completed verification."
+    if completion_fits:
+        assert len(model.judge_requests) == 1
+        assert any("T" * followup_chars in str(message.content) for message in model.judge_requests[0])
+        assert model.judge_requests[0][-2].content == "Completed verification."
+    else:
+        # Main execution fits, but its one-shot followup plus the full judge
+        # instruction and framing reserve do not. Keep the answer, not a restart.
+        assert result.raw_output["error_code"] == "TURN_COMPLETION_CHECK_INPUT_BUDGET_EXCEEDED"
+        assert model.judge_requests == []
     assert system in history and latest_user in history
     assert not any(isinstance(message.content, list) for message in history)
     assert any(message.tool_calls and message.tool_calls[0].id == "followup" for message in history)
