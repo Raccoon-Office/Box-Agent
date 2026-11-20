@@ -1425,6 +1425,7 @@ async def _run_agent_loop_impl(
                     visible_history=history, offered_tools=prepared_tools.targets.values(),
                 )
                 history.extend(Message(role="user", source="runtime", name="tool_descriptions",
+                                       runtime_kind="tool_descriptions" if stable_tool_context else None,
                                        content=description) for description in descriptions)
                 tool_context_added |= bool(descriptions)
 

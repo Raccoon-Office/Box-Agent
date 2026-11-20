@@ -83,6 +83,13 @@ Version 1 retains session-level deduplication without history-based redelivery.
 
 Skill recommendations are bounded runtime messages, not system prompt changes. They are snapshots of the current visible recommendations, and later snapshots supersede earlier ones. Use `list_skills` for the full catalog and `get_skill` for the chosen Skill's instructions. Skill metadata and instructions do not grant tools or permissions. Selected or restored guidance is delivered as durable runtime messages or bounded reading instructions; long guidance can require paged reading.
 
+New version 2 catalog and tool-description messages record `source: runtime` and
+`runtime_kind` in Session Log and the `llm.request` trace. The model receives
+a host-reference label with the Skill catalog and corresponding fields within
+tool-description JSON. Messages saved before these fields were introduced keep
+their original wire content. Reordering the same rendered Skill recommendations
+reuses the previous snapshot.
+
 Compaction does not promote discoveries into the system prompt or top-level tool definitions. It restores complete, acknowledged tool descriptions (including schemas and existing refs) at the message tail when missing. Current definition, visibility, permission and connection-generation checks still apply; stale or unacknowledged discoveries are not restored. Required/always-load descriptions also retain their existing recovery path. Compaction alone does not disconnect MCP or issue new references.
 
 A new turn only marks earlier Skill reads as candidates for cleanup; it never deletes or rewrites their historical messages. Current explicit selections, pending restores and methods actually read/reused this turn are protected. When there is no current method signal, retain earlier methods conservatively: a turn boundary alone does not prove a task switch. At actual compaction, reclaimable bodies become revision/path/reread notices, while current verified pages are retained or restored within the reference budget. Never restore unread pages or treat a summary as a complete method. If a body cannot fit or its source changed, retain a reading notice instead. This policy also applies to forced compaction; it does not introduce a new manual trigger.

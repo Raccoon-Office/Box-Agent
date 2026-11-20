@@ -918,7 +918,7 @@ class OpenAIClient(LLMClientBase):
                 api_messages.append(
                     {
                         "role": "user",
-                        "content": self._convert_input_content(msg.content),
+                        "content": self._convert_input_content(msg.model_content()),
                     }
                 )
 

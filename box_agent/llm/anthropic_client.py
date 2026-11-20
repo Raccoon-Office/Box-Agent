@@ -301,7 +301,7 @@ class AnthropicClient(LLMClientBase):
                     api_messages.append(
                         {
                             "role": msg.role,
-                            "content": self._convert_input_content(msg.content),
+                            "content": self._convert_input_content(msg.model_content()),
                         }
                     )
 

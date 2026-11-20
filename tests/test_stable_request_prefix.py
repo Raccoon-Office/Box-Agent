@@ -5,8 +5,9 @@ import pytest
 
 from box_agent.agent import Agent
 from box_agent.llm.anthropic_client import AnthropicClient
+from box_agent.llm.llm_wrapper import _trace_request_message
 from box_agent.llm.openai_client import OpenAIClient
-from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.session_log import SessionLog
 from box_agent.skill_runtime import SkillRuntime
 from box_agent.tools.base import Tool, ToolResult
@@ -180,6 +181,51 @@ async def test_stable_public_agent_keeps_wire_prefix_and_replays_skill_tail(tmp_
         log.close()
 
 
+def test_skill_catalog_reuses_snapshot_when_only_recommendation_order_changes():
+    class CatalogSelector:
+        rows = ('{"name":"first"}', '{"name":"second"}')
+        version = "initial"
+
+        def render_catalog(self, user_input, *, refresh):
+            return "\n".join(self.rows)
+
+        def catalog_scope_version(self):
+            return self.version
+
+    selector = CatalogSelector()
+    runtime = SkillRuntime(None)
+    original = runtime.catalog_message(selector, [], "first")
+    assert original.source == "runtime" and original.runtime_kind == "skill_catalog"
+    selector.rows = tuple(reversed(selector.rows))
+    assert runtime.catalog_message(selector, [original], "second") is None
+    selector.version = "updated"
+    assert runtime.catalog_message(selector, [original], "second") is not None
+
+
+def test_model_requests_label_host_references_and_traces_preserve_user_origin():
+    legacy = Message(role="user", source="runtime", content="previous catalog")
+    user = Message(role="user", content="actual input")
+    catalog = Message(role="user", source="runtime", runtime_kind="skill_catalog", content="current catalog")
+    descriptor = Message(role="user", source="runtime", name="tool_descriptions",
+                         runtime_kind="tool_descriptions", content='{"name":"lookup"}')
+    messages = [legacy, user, catalog, descriptor]
+    expected = [
+        legacy.content, user.content,
+        "[Host runtime reference source=runtime kind=skill_catalog]\ncurrent catalog",
+        '{"name": "lookup", "source": "runtime", "runtime_kind": "tool_descriptions"}',
+    ]
+    _, openai_items = OpenAIClient.__new__(OpenAIClient)._convert_messages(messages)
+    assert openai_items == [{"role": "user", "content": text} for text in expected]
+    _, anthropic_items = AnthropicClient.__new__(AnthropicClient)._convert_messages(messages)
+    assert anthropic_items == [{"role": "user", "content": [
+        {"type": "text", "text": text} for text in expected
+    ]}]
+    origins = [_trace_request_message(message) for message in messages]
+    assert [item["source"] for item in origins] == ["runtime", "user", "runtime", "runtime"]
+    assert [item.get("runtime_kind") for item in origins] == [None, None, "skill_catalog", "tool_descriptions"]
+    assert [item["content"] for item in origins] == [message.content for message in messages]
+
+
 @pytest.mark.asyncio
 async def test_host_required_tool_bootstrap_routes_after_durable_descriptor(tmp_path):
     class BootstrapModel(ScriptedModel):
@@ -188,7 +234,11 @@ async def test_host_required_tool_bootstrap_routes_after_durable_descriptor(tmp_
             if len(self.requests) == 1:
                 descriptor = next(m for m in messages if m.role == 'user' and m.source == 'runtime'
                                   and m.name == 'tool_descriptions')
-                assert any(event['type'] == 'user/message' and event['data'].get('content') == descriptor.content
+                assert descriptor.runtime_kind == 'tool_descriptions'
+                assert any(event['type'] == 'user/message'
+                           and event['data'].get('content') == descriptor.content
+                           and event['data'].get('source') == 'runtime'
+                           and event['data'].get('runtime_kind') == 'tool_descriptions'
                            for event in self.log.events)
                 ref = json.loads(descriptor.content)['tool_ref']
                 yield StreamEvent(type='finish', finish_reason='tool_use', tool_calls=[ToolCall(

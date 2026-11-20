@@ -764,6 +764,7 @@ prepare_resume 修复未闭合生命周期后写入的恢复边界；不是关�
 | role | string；Surface 接受 user/assistant/tool，system 通常进入 request/header.system |
 | content | string 或内容块 object[]；新结构化用户消息保存原文字串，有序附件另在 input_facts |
 | source | user/runtime；模型对象默认排除序列化，user/message 写入时显式补回 |
+| runtime_kind | 可选 skill_catalog/tool_descriptions，用于 v2 宿主 Skill 目录和工具描述。请求适配器以此生成宿主引用标签。旧消息可以省略该字段 |
 | thinking | 可选 string，助手思考内容 |
 | tool_calls | 可选数组，每项 `{id,type:"function",function:{name,arguments}}`；arguments 为已解析的参数对象（dict[str, Any]），不能传 JSON 字符串 |
 | tool_call_id / name | 可选 string，tool 回复的调用ID/工具名 |

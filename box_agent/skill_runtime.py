@@ -61,9 +61,11 @@ class SkillRuntime:
         previous = next((message.content for message in reversed(messages)
                          if message.role == "user" and message.source == "runtime"
                          and isinstance(message.content, str) and message.content.startswith(marker)), None)
-        if previous == content:
+        # The bounded preview renders each recommendation as one JSON line.
+        # Reordering the same preview does not require another snapshot.
+        if previous is not None and sorted(previous.splitlines()) == sorted(content.splitlines()):
             return None
-        return Message(role="user", source="runtime", content=content)
+        return Message(role="user", source="runtime", runtime_kind="skill_catalog", content=content)
 
     def begin_turn(self) -> None:
         # Mark only: normal requests retain their exact historical prefix.

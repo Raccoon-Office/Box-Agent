@@ -136,10 +136,8 @@ _SUMMARY_REQUEST = (
 def _summary_message_text(msg: Message) -> str:
     """Serialize one history message for the local deterministic fallback."""
 
-    if isinstance(msg.content, str):
-        content = msg.content
-    else:
-        content = _budget_content_json(msg.content)
+    model_content = msg.model_content()
+    content = model_content if isinstance(model_content, str) else _budget_content_json(model_content)
 
     details = [f"role={msg.role}"]
     if msg.name:
@@ -279,10 +277,11 @@ def _deterministic_history_fallback(messages: list[Message]) -> str:
 def _message_chars(message: Message) -> int:
     """Return deterministic serialized size for char/4 pressure estimates."""
 
-    if isinstance(message.content, str):
-        total = len(message.content)
+    content = message.model_content()
+    if isinstance(content, str):
+        total = len(content)
     else:
-        total = len(_budget_content_json(message.content)) + _budget_image_tokens(message.content) * 4
+        total = len(_budget_content_json(content)) + _budget_image_tokens(content) * 4
     if message.thinking:
         total += len(message.thinking)
     if message.tool_calls:

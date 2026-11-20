@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
@@ -124,6 +125,7 @@ class Message(BaseModel):
 
     role: str  # "system", "user", "assistant", "tool"
     source: Literal["user", "runtime"] = Field(default="user", exclude=True)
+    runtime_kind: Literal["skill_catalog", "tool_descriptions"] | None = None
     content: str | list[dict[str, Any]]  # Can be string or list of content blocks
     thinking: str | None = None  # Extended thinking content for assistant messages
     tool_calls: list[ToolCall] | None = None
@@ -144,6 +146,21 @@ class Message(BaseModel):
     # without persisting them in durable traces. Excluded from serialization so
     # this remains an internal observability directive.
     trace_redact_content: bool = Field(default=False, exclude=True)
+
+    def model_content(self) -> str | list[dict[str, Any]]:
+        """Label new host references without rewriting persisted message content."""
+        if (self.role == "user" and self.source == "runtime"
+                and self.runtime_kind is not None and isinstance(self.content, str)):
+            if self.runtime_kind == "tool_descriptions":
+                try:
+                    descriptor = json.loads(self.content)
+                except json.JSONDecodeError:
+                    descriptor = None
+                if isinstance(descriptor, dict):
+                    descriptor.update(source=self.source, runtime_kind=self.runtime_kind)
+                    return json.dumps(descriptor, ensure_ascii=False)
+            return f"[Host runtime reference source=runtime kind={self.runtime_kind}]\n{self.content}"
+        return self.content
 
 
 class LLMResponse(BaseModel):
