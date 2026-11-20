@@ -11,7 +11,6 @@ from scripts.generate_skills_manifest import (
 EXPECTED_BUILTIN_SKILLS = {
     "browser-use": "browser-use/SKILL.md",
     "computer-use": "computer-use/SKILL.md",
-    "mac-cua": "mac-cua/SKILL.md",
     "office-gui-basics": "office-gui-basics/SKILL.md",
     "data-dashboard": "data-dashboard/SKILL.md",
     "docx": "document-skills/docx/SKILL.md",

@@ -1,5 +1,7 @@
 # macOS CUA App adaptor
 
+> 历史实现说明。当前原生应用入口是 `computer-use` Skill 和 `cua_repl_js`。桌面通过 `BOX_AGENT_CUA_RUNTIME_CONFIG` 提供 Driver 和私有连接地址。下文的独立 MCP 启动命令及工具注册方式已退役。
+
 macOS 上启用 CUA 后，`computer-use` 提供 App 级 MCP 工具：`list_apps`、`get_app`、`list_windows`、`get_state`、`click`、`drag`、`scroll`、`set_value`、`type_text`、`paste`、`press_key`。adaptor 连接现有 CuaDriver；原生 helper 补充部分 AX 和后台输入能力，Driver 安装包不变。
 
 ## 注册和连接

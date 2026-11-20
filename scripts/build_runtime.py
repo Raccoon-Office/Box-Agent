@@ -203,6 +203,25 @@ def env_flag(name: str) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def pyinstaller_vendor_args(project_root: Path, *, plat: str) -> list[str]:
+    """Include the macOS REPL resources that are loaded from filesystem paths."""
+    if plat != "darwin":
+        return []
+    package = Path("box_agent/_vendor/mac_cua")
+    assets = (
+        "manifest.json",
+        "cua_api.md",
+        "cua_images.py",
+        "cua_adapter/cua_evidence.py",
+        "cua_adapter/cua_repl.mjs",
+    )
+    args = []
+    for asset in assets:
+        relative = package / asset
+        args.extend(["--add-data", f"{project_root / relative}{os.pathsep}{relative.parent}"])
+    return args
+
+
 def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list[str]:
     """Return PyInstaller hidden imports for the ACP runtime build."""
     hidden_imports = [
@@ -222,8 +241,10 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
         "box_agent.mcp_servers",
         "box_agent.mcp_servers.web_extract",
         "box_agent.mcp_servers.web_extract_server",
-        "box_agent.mcp_servers.cua_adapter",
-        "box_agent.mcp_servers.cua_server",
+        "box_agent.plugins.repl",
+        "box_agent.plugins.repl.runtime",
+        "box_agent.plugins.repl.tools",
+        "box_agent._vendor.mac_cua.cua_adapter.cua_adapter",
         "box_agent.retry",
         "box_agent.schema",
         "box_agent.tools",
@@ -738,7 +759,6 @@ def build_runtime(
 
     entry_point = project_root / "box_agent" / "acp" / "runtime_entry.py"
 
-    # Skills and config are published as external resources beside bin/.
     hidden_imports = pyinstaller_hidden_imports(
         external_python_sandbox=external_python_sandbox
     )
@@ -761,6 +781,7 @@ def build_runtime(
         "--distpath", str(dist_dir),
         "--workpath", str(output_dir / "pyinstaller_build"),
         "--specpath", str(output_dir),
+        *pyinstaller_vendor_args(project_root, plat=plat),
         *hidden_args,
         *collect_args,
         *exclude_args,

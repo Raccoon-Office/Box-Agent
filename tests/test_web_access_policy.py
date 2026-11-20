@@ -232,7 +232,7 @@ async def test_default_session_keeps_policy_when_catalog_tools_arrive(tmp_path, 
         for prompt, names in llm.requests:
             assert "tool_search" in names
             assert prompt.count("## Web Access Routing") == 1
-        assert ("managed_browser_navigate" in llm.requests[-1][1]) is (version == 1)
+        assert "managed_browser_navigate" not in llm.requests[-1][1]
         assert ("call_tool" in llm.requests[-1][1]) is (version == 2)
     finally:
         await session.aclose()

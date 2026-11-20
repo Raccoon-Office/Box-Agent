@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from subprocess import CompletedProcess
 import sys
@@ -77,7 +78,8 @@ def test_resource_copy_refuses_a_link_outside_the_source_tree(tmp_path):
     assert foreign.read_text() == "must not be packaged"
 
 
-def test_linux_assembly_keeps_resources_beside_bin_and_mcp_inside_the_frozen_package(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target", ["linux-x64", "darwin-arm64"])
+def test_runtime_assembly_keeps_config_and_skills_beside_bin(tmp_path, monkeypatch, target):
     project = source_tree(tmp_path / "source")
     captured = []
 
@@ -95,9 +97,21 @@ def test_linux_assembly_keeps_resources_beside_bin_and_mcp_inside_the_frozen_pac
     monkeypatch.setattr(build_runtime, "require_supported_build_process", lambda *args: None)
     monkeypatch.setattr(build_runtime, "verify_entry_binary_arch", lambda *args, **kwargs: None)
     monkeypatch.setattr(build_runtime.subprocess, "run", fake_run)
-    archive = build_runtime.build_runtime("test-version", tmp_path / "output", target="linux-x64")
+    archive = build_runtime.build_runtime("test-version", tmp_path / "output", target=target)
 
-    assert "--add-data" not in captured
+    assets = [value for flag, value in zip(captured, captured[1:]) if flag == "--add-data"]
+    if target.startswith("darwin"):
+        vendor = Path("box_agent/_vendor/mac_cua")
+        expected = [
+            vendor / "manifest.json",
+            vendor / "cua_api.md",
+            vendor / "cua_images.py",
+            vendor / "cua_adapter/cua_evidence.py",
+            vendor / "cua_adapter/cua_repl.mjs",
+        ]
+        assert assets == [f"{project / path}{os.pathsep}{path.parent}" for path in expected]
+    else:
+        assert assets == []
     pairs = list(zip(captured, captured[1:]))
     assert ("--collect-data", "box_agent.mcp_servers") in pairs
     runtime = archive.parent / "box-agent-runtime"

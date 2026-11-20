@@ -1,9 +1,4 @@
-"""Public browser tool names and MCP transport aliases.
-
-MCP servers keep their native transport names.  The agent exposes a stable,
-user-oriented namespace so the model can tell which browser state a tool will
-touch before reading its description.
-"""
+"""Stable names for the internal managed and user Browser MCP backends."""
 
 from __future__ import annotations
 
@@ -63,7 +58,7 @@ _BROWSER_TOOL_REFERENCE_RE = re.compile(r"\bbrowser_[A-Za-z0-9_]+\b")
 
 
 def public_browser_tool_name(server_name: str, remote_name: str) -> str:
-    """Return the model-facing name for a browser MCP tool."""
+    """Return the backend name used by Browser REPL for a browser MCP tool."""
     if server_name == "playwright" and remote_name.startswith("browser_"):
         return f"{MANAGED_BROWSER_PREFIX}{remote_name.removeprefix('browser_')}"
     if server_name == "browser-gateway":
@@ -155,5 +150,5 @@ def public_browser_tool_parameters(
 
 
 def is_browser_tool_name(name: str) -> bool:
-    """Return whether a name denotes a public browser tool."""
+    """Return whether a name belongs to either Browser backend."""
     return name.startswith((MANAGED_BROWSER_PREFIX, USER_BROWSER_PREFIX))

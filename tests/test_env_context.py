@@ -222,7 +222,7 @@ def test_prompt_declares_lark_user_identity_policy() -> None:
     assert "OAuth 命令不接受 `--as user`" in out
     assert "lark-cli auth login --no-wait --json" in out
     assert "`verification_url`" in out
-    assert "`user_browser_open_tab_and_read`" in out
+    assert "`browser_repl_js`（user 模式）" in out
     assert "浏览器工具成功后才能声称已打开" in out
 
 

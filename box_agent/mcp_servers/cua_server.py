@@ -1,40 +1,28 @@
-"""Expose the native App adapter as a stdio MCP server for Box-Agent.
-
-mac-cua wraps the same adapter in a persistent JavaScript REPL. Box-Agent has
-no REPL tool, so each App method becomes one direct MCP tool keyed by the App
-reference name returned from ``get_app``.
-"""
+"""Legacy direct-tool definitions retained for adapter regression coverage."""
 
 from __future__ import annotations
 
-import asyncio
 import copy
 from contextlib import asynccontextmanager
 import json
-import os
 import time
 import uuid
 from typing import Any
 
 from mcp.server.lowlevel import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 
 from box_agent.plugins.cua.runtime.coordinator import SerialCoordinator
-from box_agent.plugins.cua.runtime.connection import DEFAULT_DRIVER, DRIVER_ENV, DriverConnection
 from box_agent.plugins.cua.structured_result import cua_structured_payload
 
 from box_agent.mcp_servers.cua_adapter import (
     DRIVER_TIMEOUT_SECONDS,
     ActionError,
     Adapter,
-    McpClient,
     clear_image,
     data,
 )
 
-# Optional directory for raw driver call/result evidence (one JSONL per server process).
-EVIDENCE_ENV = "BOX_AGENT_CUA_EVIDENCE_DIR"
 CALL_TIMEOUT_SECONDS = 120
 
 INSTRUCTIONS = """Native macOS App control. Start with get_app("Microsoft Word") (name, bundle ID or
@@ -436,31 +424,3 @@ def build_server(service: CuaService, coordinator: SerialCoordinator | None = No
         return await coordinator.call(name, arguments or {})
 
     return server
-
-
-def main() -> None:
-    connection = DriverConnection.from_environment(os.environ)
-    evidence = None
-    if os.environ.get(EVIDENCE_ENV):
-        directory = os.path.expanduser(os.environ[EVIDENCE_ENV])
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        evidence = open(os.path.join(directory, f"cua-driver-{os.getpid()}.jsonl"), "a", encoding="utf-8")
-    service = CuaService(lambda timeout: McpClient(connection.command(), timeout=timeout), evidence)
-    coordinator = SerialCoordinator(service.call_result,
-                                    invalidate=service.invalidate_after_cancellation, close=service.close)
-    server = build_server(service, coordinator)
-
-    async def run() -> None:
-        async with stdio_server() as (read, write):
-            await server.run(read, write, server.create_initialization_options())
-
-    try:
-        asyncio.run(run())
-    finally:
-        coordinator.close()
-        if evidence is not None:
-            evidence.close()
-
-
-if __name__ == "__main__":
-    main()

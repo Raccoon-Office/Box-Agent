@@ -69,7 +69,6 @@ async def test_preparation_preserves_legacy_order_schemas_and_aliases(
     expected_names.add("query_jsonl")  # The existing file configuration supplies JSONL directly.
     expected_names.add("validate_table")
     expected_names.add("publish_artifact")
-    expected_names.add("ensure_cua_ready")
     expected_names.add("read_video")
     expected_names.update(_EMAIL_SCHEMAS)
     if not all_capabilities:

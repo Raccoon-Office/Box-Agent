@@ -24,10 +24,10 @@ def test_wrapper_and_readiness_use_identical_resolved_driver_command(mode):
                                driver_path='/host/driver', endpoint='/host/private.sock')
     service = CuaService(CuaConfig(runtime=runtime))
     try:
-        expected = service.driver_server_config
+        expected = service.driver_command()
         connection = DriverConnection.from_environment({
             HOST_RUNTIME_ENV: runtime.model_dump_json(), DRIVER_ENV: '/wrong/driver'})
-        assert connection.command() == [expected['command'], *expected['args']]
+        assert connection.command() == expected
         assert ('--embedded' in connection.command()) is (mode == 'external')
     finally:
         service.adapter.cleanup()
@@ -49,22 +49,3 @@ def test_legacy_wrapper_launch_without_host_config_is_preserved():
     assert DriverConnection.from_environment({}).command() == [DEFAULT_DRIVER, 'mcp']
     assert DriverConnection.from_environment({DRIVER_ENV: '/custom/driver'}).command() == [
         '/custom/driver', 'mcp']
-
-
-@pytest.mark.parametrize('frozen', [False, True])
-def test_app_interface_wraps_the_same_host_endpoint(monkeypatch, frozen):
-    import sys
-    monkeypatch.setattr(sys, 'frozen', frozen, raising=False)
-    runtime = CuaRuntimeConfig(enabled=True, mode='external',
-                               driver_path='/host/driver', endpoint='/host/private.sock')
-    service = CuaService(CuaConfig(tool_interface='app', runtime=runtime))
-    try:
-        config = service.server_config
-        assert config['command'] == sys.executable
-        assert config['args'] == (['--cua-mcp'] if frozen else
-                                  ['-m', 'box_agent.mcp_servers.cua_server'])
-        connection = DriverConnection.from_environment(config['env'])
-        expected = service.driver_server_config
-        assert connection.command() == [expected['command'], *expected['args']]
-    finally:
-        service.adapter.cleanup()
