@@ -27,7 +27,8 @@ already-delivered route and complete schema named by the continuation verdict.
 Hidden, changed or expired routes are excluded. This hint neither grants permission
 nor increases the retry budget. An empty response after tool use also permits
 remaining authorized work instead of forcing a premature final summary; completed
-actions must not be repeated.
+actions must not be repeated. A verdict that only asks to restate an already
+delivered single-line JSON object is ignored.
 
 Discovery returns bounded, complete schema entries. Oversized or omitted entries receive a notice rather than an executable reference. Required tool descriptions are delivered again after compaction removes them. Execution events, permission checks, budgets and hooks retain the real target's identity, while model history retains the original `call_tool` call and call ID.
 

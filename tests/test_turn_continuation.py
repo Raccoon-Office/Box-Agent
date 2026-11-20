@@ -111,6 +111,25 @@ async def test_legacy_scalar_judge_arguments_remain_supported() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("candidate", "next_action", "continue_expected"),
+    [
+        ('{"total":35,"ticket":"LT-927"}',
+         'Return the same final JSON as plain text: {"ticket":"LT-927","total":35}.', False),
+        ('{"total":35}', '再次输出一行 JSON。', False),
+        ('{"total":"35"}', '返回最终结果 {"total":35}', True),
+        ('{"total":35}', 'Save {"total":35} to the requested report.json using write_file.', True),
+        ('```json\n{"total":35}\n```', '返回一行 JSON {"total":35}', True),
+    ],
+)
+async def test_judge_ignores_only_restatement_of_an_already_delivered_json(candidate, next_action, continue_expected):
+    llm = JudgeLLM(json.dumps({"continue": True, "next_action": next_action}))
+    assert await model_says_continue(
+        llm, messages=_history("返回一行 JSON。", candidate),
+    ) is continue_expected
+
+
+@pytest.mark.asyncio
 async def test_judge_redacts_hidden_reasoning_and_multimodal_payloads() -> None:
     llm = JudgeLLM('{"continue":false}')
     messages = [
@@ -408,6 +427,31 @@ class SearchTool(Tool):
 
 async def _collect_events(generator):
     return [event async for event in generator]
+
+
+@pytest.mark.asyncio
+async def test_loop_finishes_after_one_answer_when_judge_repeats_its_json() -> None:
+    answer = '{"ticket":"LT-927","batch":"VXR-67","total":35}'
+
+    class RestatementJudge(MockLLM):
+        async def generate(self, messages, tools=None, **kwargs):
+            return LLMResponse(content=json.dumps({
+                "continue": True,
+                "next_action": f"重新以纯文本一行 JSON（不带 Markdown 围栏）返回最终结果 {answer}",
+            }), finish_reason="stop")
+
+    llm = RestatementJudge([LLMResponse(content=answer, finish_reason="stop")])
+    messages = [Message(role="system", content="system"),
+                Message(role="user", content="只回一行 JSON。")]
+    tool = SearchTool()
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=messages, tools={tool.name: tool}, max_steps=5,
+    ))
+
+    assert llm.calls == 1
+    assert [message.content for message in messages if message.role == "assistant"] == [answer]
+    assert not any(isinstance(event, InjectedMessageEvent) for event in events)
+    assert events[-1] == DoneEvent(stop_reason=StopReason.END_TURN, final_content=answer)
 
 
 @pytest.mark.asyncio
