@@ -72,6 +72,7 @@ def app_connection(monkeypatch):
     session = Session()
     connection = mcp_loader.MCPServerConnection("flights", command="fake", connector_id="travel")
     connection.server_identity = "stable-flight-source"
+    connection.app_generation = 7
     connection.session = session
     connection.tools = [make_tool(session, connector_id="travel"),
                         make_tool(session, "refresh", ["app"], connector_id="travel"),
@@ -302,7 +303,7 @@ async def test_parallel_results_capture_private_data_without_model_raw_output():
         "call-1": "11-20", "call-2": "11-21",
     }
     assert all(item["result"]["_meta"]["private"] == SECRET for item in snapshots)
-    assert all(item["serverIdentity"] == "stable-flight-source" for item in snapshots)
+    assert all("serverIdentity" not in item for item in snapshots)
 
 
 @pytest.mark.asyncio
@@ -330,18 +331,16 @@ async def test_resource_read_reuses_connection_and_listing_security_metadata(app
 
 
 @pytest.mark.asyncio
-async def test_saved_ui_entry_uses_original_tool_authority_after_resource_upgrade(app_connection):
+async def test_only_saved_ui_entry_survives_tool_retirement(app_connection):
     connection, session = app_connection
-    for tool in connection.tools:
-        tool.mcp_ui_resource_uri = 'ui://flights/v2.html'
+    connection.tools.clear()
     result = await mcp_loader.read_mcp_app_resource(
-        'flights', URI, **bound_arguments(), ui_tool_name='search')
+        'flights', URI, **bound_arguments(), saved_ui_uri=URI)
     assert result['contents'][0]['uri'] == URI
     assert result['contents'][0]['_meta']['ui']['csp']['connectDomains'] == ['https://flights.example']
-    for name in ['missing', 'refresh']:
-        with pytest.raises(mcp_apps.McpAppError, match='APP_RESOURCE_NOT_ALLOWED'):
-            await mcp_loader.read_mcp_app_resource(
-                'flights', URI, **bound_arguments(), ui_tool_name=name)
+    with pytest.raises(mcp_apps.McpAppError, match='APP_RESOURCE_NOT_ALLOWED'):
+        await mcp_loader.read_mcp_app_resource(
+            'flights', 'ui://different/page', **bound_arguments(), saved_ui_uri=URI)
     assert session.calls == []
 
 
@@ -375,7 +374,7 @@ async def test_resource_not_found_classification_does_not_mask_other_errors(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('change', ['connector', 'generation', 'visibility'])
+@pytest.mark.parametrize('change', ['connector', 'generation'])
 async def test_historical_resource_read_rechecks_authority_after_response(app_connection, change):
     connection, session = app_connection
     allowed = {'travel'}
@@ -384,16 +383,14 @@ async def test_historical_resource_read_rechecks_authority_after_response(app_co
         response = await original(uri)
         if change == 'connector':
             allowed.clear()
-        elif change == 'generation':
-            connection.tools[0]._mcp_generation += 1
         else:
-            connection.tools[0].mcp_visibility = frozenset({'app'})
+            connection.app_generation += 1
         return response
     session.read_resource = read
     with pytest.raises(mcp_apps.McpAppError, match='APP_CONNECTOR_DISABLED|APP_BINDING_EXPIRED'):
         await mcp_loader.read_mcp_app_resource('flights', URI, **{
             **bound_arguments(), 'allowed_connector_ids': lambda: frozenset(allowed),
-        }, ui_tool_name='search')
+        }, saved_ui_uri=URI)
 
 
 @pytest.mark.asyncio
@@ -672,78 +669,6 @@ async def test_hosted_search_rechecks_app_admission_after_reconnect_lock_wait(mo
 @pytest.fixture
 def identity_enabled(monkeypatch):
     monkeypatch.setattr(mcp_apps, "_host_enabled", True)
-
-
-def test_app_binding_fingerprint_survives_profile_reload(identity_enabled):
-    config = {"command": "flight-server", "env": {"DATA_SOURCE": "fixture-private-config"}}
-    identity = mcp_loader.MCPServerConnection("flights", **config).server_identity
-    assert identity.startswith("mcp-app-v2:")
-    assert "fixture-private-config" not in identity
-    mcp_apps._binding_key.cache_clear()
-    assert mcp_loader.MCPServerConnection("flights", **config).server_identity == identity
-
-
-@pytest.mark.parametrize("change", [
-    {"name": "other-flights"}, {"connection_type": "sse"},
-    {"command": "other-server"}, {"args": ["--other"]},
-    {"url": "https://other.example/mcp"}, {"connector_id": "other-connector"},
-])
-def test_service_routing_changes_invalidate_app_server_identity(identity_enabled, change):
-    config = {"name": "flights", "command": "flight-server", "args": ["--mode", "test"]}
-    original = mcp_loader.MCPServerConnection(**config)
-    changed = mcp_loader.MCPServerConnection(**{**config, **change})
-    assert changed.server_identity != original.server_identity
-
-
-@pytest.mark.parametrize("change", ["env", "headers", "owner", "config_id", "source_path"])
-def test_only_connection_context_changes_invalidate_app_identity(tmp_path, monkeypatch, identity_enabled, change):
-    from dataclasses import replace
-    from box_agent.tools.mcp_sources import ResolvedMcpServer
-
-    monkeypatch.setattr(mcp_loader, '_mcp_auth_file', None)
-    monkeypatch.setattr(mcp_loader, '_mcp_auth_token', None)
-    monkeypatch.setattr(mcp_loader, '_mcp_credential_targets', {})
-    config = ({'command': 'fixture-server', 'env': {'DB_PATH': 'A.sqlite'}} if change == 'env'
-              else {'url': 'https://fixture.example/mcp', 'headers': {'X-Tenant': 'A'}})
-    definition = ResolvedMcpServer(name='data', config=config, owner='user', config_id='custom-mcp:data',
-        connector_id=None, connector_name=None, source_path=str(tmp_path / 'mcp.json'), fingerprint='unused')
-    original = mcp_loader._build_connection(definition)
-    if change == 'env':
-        changed = replace(definition, config={**config, 'env': {'DB_PATH': 'B.sqlite'}})
-    elif change == 'headers':
-        changed = replace(definition, config={**config, 'headers': {'X-Tenant': 'B'}})
-    elif change == 'owner':
-        changed = replace(definition, owner='system', config_id='system:data')
-    elif change == 'config_id':
-        changed = replace(definition, config_id='custom-mcp:renamed')
-    else:
-        changed = replace(definition, source_path=str(tmp_path / 'another-mcp.json'))
-    changed_identity = mcp_loader._build_connection(changed).server_identity
-    assert (changed_identity != original.server_identity) == (change in {"env", "headers"})
-    reordered = replace(definition, config=dict(reversed(list(config.items()))))
-    assert mcp_loader._build_connection(reordered).server_identity == original.server_identity
-
-
-def test_runtime_credentials_and_reference_are_bound_to_app_identity(monkeypatch, identity_enabled):
-    from dataclasses import replace
-    from box_agent.tools.mcp_sources import ResolvedMcpServer
-
-    monkeypatch.setattr(mcp_loader, '_mcp_auth_file', None)
-    monkeypatch.setattr(mcp_loader, '_mcp_auth_token', None)
-    credentials = {'travel-token': {'Authorization': 'Bearer before-refresh'}}
-    monkeypatch.setattr(mcp_loader, '_mcp_runtime_credentials', credentials)
-    definition = ResolvedMcpServer(name='travel', owner='connector', config_id='connector:travel',
-        connector_id='travel', connector_name='Travel', source_path='<runtime:connector>', fingerprint='old',
-        config={'url': 'https://fixture.example/mcp', 'headers': {'X-Tenant': 'A'},
-                'credentialRef': 'travel-token', '_connectorId': 'travel'})
-    original = mcp_loader._build_connection(definition)
-    credentials['travel-token'] = {'Authorization': 'Bearer after-refresh'}
-    refreshed = mcp_loader._build_connection(replace(definition, fingerprint='refreshed'))
-    assert refreshed.headers['Authorization'] != original.headers['Authorization']
-    assert refreshed.server_identity != original.server_identity
-    credentials['other-account'] = dict(credentials['travel-token'])
-    changed_reference = replace(definition, config={**definition.config, 'credentialRef': 'other-account'})
-    assert mcp_loader._build_connection(changed_reference).server_identity != refreshed.server_identity
 
 
 @pytest.mark.asyncio

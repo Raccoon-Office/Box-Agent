@@ -1197,11 +1197,12 @@ async def test_initialize_base_tools_can_gate_mcp_until_protocol_ready(
     monkeypatch,
 ):
     from box_agent.tools import setup as setup_module
-    from box_agent.tools import mcp_tool_catalog
+    from box_agent.tools import mcp_loader, mcp_tool_catalog
 
-    # The fake loader below does not run the real catalog readiness cleanup.
-    # Keep its pending discovery local to this test, including when xdist
-    # schedules MCP source tests next on the same worker/event-loop lifecycle.
+    # The fake loader never publishes discovery. Isolate its readiness event
+    # and task map as well as its catalog from subsequent event loops.
+    monkeypatch.setattr(mcp_loader, "_mcp_initial_connections_ready", None)
+    monkeypatch.setattr(mcp_loader, "_mcp_initial_connections", {})
     monkeypatch.setattr(mcp_tool_catalog, "_CATALOG", mcp_tool_catalog.MCPToolCatalog())
     # CUA registration/lifecycle is covered separately. This fake MCP load
     # must not leave a real process-wide CUA service for a later test to start.

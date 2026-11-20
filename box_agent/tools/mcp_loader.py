@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from secrets import token_hex
 from typing import Any, Literal
 
 import httpx
@@ -113,7 +114,7 @@ from .browser_tool_names import (
 from .mcp_bootstrap import is_default_hosted_search_url
 from .mcp_apps import (
     MCP_APP_MODEL_GUIDANCE,
-    MCPAppsClientSession, McpAppError, UI_MIME_TYPE, app_server_identity, bounded_json,
+    MCPAppsClientSession, McpAppError, UI_MIME_TYPE, bounded_json,
     bind_mcp_app_admission, check_mcp_app_dispatch,
     capture_mcp_app_result, capture_raw_app_result, mcp_app_invocation,
     mcp_app_result_is_host_only, mcp_apps_host_enabled, mcp_tool_allows,
@@ -216,7 +217,7 @@ def _mcp_tool_always_load(server_name: str, tool: Any, server_default: bool) -> 
 def _replace_server_catalog(connection: "MCPServerConnection") -> None:
     connection._app_epoch = _mcp_connection_epochs.get(connection.name)
     catalog = get_mcp_tool_catalog()
-    catalog.replace_server(connection.name, connection.tools)
+    connection.app_generation = catalog.replace_server(connection.name, connection.tools)
     conflicts = sorted(
         {
             entry.model_name
@@ -1708,7 +1709,6 @@ class MCPServerConnection:
         always_load: bool = False,
         connector_id: str | None = None,
         connector_name: str | None = None,
-        credential_ref: str | None = None,
     ):
         self.name = name
         self.apps_enabled = (
@@ -1735,9 +1735,9 @@ class MCPServerConnection:
         self.always_load = always_load
         self.connector_id = connector_id
         self.connector_name = connector_name
-        self._credential_ref = credential_ref
+        self.app_generation = 0
         self._app_epoch: object | None = None
-        self._set_app_server_identity()
+        self.server_identity = ""
         self._web_search_concurrency_limiter: asyncio.Semaphore | None = None
         self._active_search_calls = 0
         self._search_calls_drained = asyncio.Event()
@@ -1756,22 +1756,6 @@ class MCPServerConnection:
         # client pool that hands every agent session its own BrowserContext.
         self.server_process: ManagedHttpServerProcess | None = None
         self.session_pool: PlaywrightSessionPool | None = None
-
-    def _set_app_server_identity(self, env: dict[str, str] | None = None) -> None:
-        self.server_identity = ""
-        if not self.apps_enabled:
-            return
-        scope = self.auth.app_scope if isinstance(self.auth, DynamicBearerAuth) else None
-        headers = sorted(
-            ((name.lower(), value) for name, value in self.headers.items()), key=lambda pair: pair[0],
-        )
-        try:
-            self.server_identity = app_server_identity([
-                self.name, self.connection_type, self.command, self.args, self.url, self.connector_id,
-                self.env if env is None else env, headers, self._credential_ref, scope,
-            ])
-        except (OSError, ValueError, TypeError):
-            _warn(f"[mcp] App binding unavailable for {self.name!r}")
 
     @property
     def transport_label(self) -> str:
@@ -1941,10 +1925,11 @@ class MCPServerConnection:
         try:
             self.exit_stack = AsyncExitStack()
             session_lease: SessionLease | None = None
+            # A lease identifies this live connection only; it never enters card history.
+            self.server_identity = token_hex(16) if self.apps_enabled else ""
             if self.apps_enabled and isinstance(self.auth, DynamicBearerAuth):
                 self.auth.app_scope_bound = False
                 self.auth.app_scope = self.auth.current_app_scope()
-                self._set_app_server_identity()
 
             # Wrap connection with timeout
             async with _timeout(connect_timeout):
@@ -2219,8 +2204,6 @@ class MCPServerConnection:
             env=env or None,
             cwd=tempfile.gettempdir(),
         )
-        if self.apps_enabled:
-            self._set_app_server_identity({**get_default_environment(), **(env or {})})
         return await self.exit_stack.enter_async_context(stdio_client(server_params))
 
     async def _connect_sse(self):
@@ -2798,7 +2781,6 @@ def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
         always_load=bool(server_config.get("alwaysLoad", False)),
         connector_id=definition.connector_id,
         connector_name=definition.connector_name,
-        credential_ref=definition.config.get("credentialRef"),
     )
 
 
@@ -3502,12 +3484,13 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
 
 
 def _resolve_mcp_app_connection(
-    server_name: str, *, server_identity: str, allowed_connector_ids: frozenset[str] | Callable[[], frozenset[str]],
+    server_name: str, *, server_identity: str | None, allowed_connector_ids: frozenset[str] | Callable[[], frozenset[str]],
 ) -> MCPServerConnection:
     connection = next((item for item in _mcp_connections if item.name == server_name), None)
     if connection is None or connection.session is None or not connection.apps_enabled:
         raise McpAppError("APP_SERVER_UNAVAILABLE")
-    if (not server_identity or connection.server_identity != server_identity
+    if (not connection.server_identity
+            or (server_identity is not None and connection.server_identity != server_identity)
             or connection._app_epoch is not _mcp_connection_epochs.get(server_name)
             or (isinstance(connection.auth, DynamicBearerAuth) and connection.auth.app_scope_changed())):
         raise McpAppError("APP_SERVER_CHANGED")
@@ -3515,6 +3498,58 @@ def _resolve_mcp_app_connection(
     if connection.connector_id is not None and connection.connector_id not in allowed:
         raise McpAppError("APP_CONNECTOR_DISABLED")
     return connection
+
+
+@dataclass(frozen=True)
+class McpAppBinding:
+    server_identity: str
+    generation: int
+
+
+def current_mcp_app_binding(
+    server_name: str, allowed_connector_ids: Callable[[], frozenset[str]],
+) -> McpAppBinding:
+    connection = _resolve_mcp_app_connection(
+        server_name, server_identity=None, allowed_connector_ids=allowed_connector_ids,
+    )
+    return McpAppBinding(connection.server_identity, connection.app_generation)
+
+
+async def prepare_mcp_app_connection(
+    server_name: str, selected_connectors: Callable[[], frozenset[str]], on_reconnect: Callable[[], None] | None,
+) -> None:
+    """Only an unbound historical open may wait for discovery or renew a stale transport."""
+    async with _timeout(15):
+        await wait_for_mcp_server(server_name)
+        connection = next((item for item in _mcp_connections if item.name == server_name), None)
+        if connection is None or connection.session is None:
+            status = _mcp_status.get(server_name)
+            if status and status.auth_status in {401, 403}:
+                raise McpAppError("APP_AUTH_REQUIRED")
+            return
+        if (not connection.apps_enabled or not isinstance(connection.auth, DynamicBearerAuth)
+                or not connection.auth.app_scope_changed()):
+            return
+        selected = selected_connectors()
+        if connection.connector_id is not None and connection.connector_id not in selected:
+            raise McpAppError("APP_CONNECTOR_DISABLED")
+        expected_session = connection.session
+
+        async def renew():
+            try:
+                return await reconnect_mcp_server(server_name, expected_session=expected_session)
+            finally:
+                if on_reconnect is not None:
+                    on_reconnect()
+
+        # Other opens share the reconnect lock. A view timing out must not
+        # cancel the replacement or leave ordinary tools bound to the old session.
+        result = await asyncio.shield(renew())
+        if not result.get("success"):
+            status = _mcp_status.get(server_name)
+            if status and status.auth_status in {401, 403}:
+                raise McpAppError("APP_AUTH_REQUIRED")
+            raise McpAppError("APP_SERVER_UNAVAILABLE")
 
 
 def resolve_mcp_app_tool(
@@ -3535,6 +3570,8 @@ def resolve_mcp_app_tool(
     if len(matches) != 1:
         raise McpAppError("APP_TOOL_UNAVAILABLE")
     tool = matches[0]
+    if tool.mcp_server_identity != connection.server_identity:
+        raise McpAppError("APP_SERVER_CHANGED")
     if generation is not None and tool.mcp_generation != generation:
         raise McpAppError("APP_BINDING_EXPIRED")
     if not mcp_tool_allows(tool, actor):
@@ -3550,24 +3587,26 @@ async def read_mcp_app_resource(
     generation: int,
     allowed_connector_ids: frozenset[str] | Callable[[], frozenset[str]],
     require_ui: bool = True,
+    saved_ui_uri: str | None = None,
     ui_tool_name: str | None = None,
 ) -> dict[str, Any]:
-    """Read on the bound connection; ACP may authorize its saved tool's historical UI."""
+    """Read the session's saved entry or a page currently advertised by its tool."""
     connection = _resolve_mcp_app_connection(
         server_name, server_identity=server_identity,
         allowed_connector_ids=allowed_connector_ids,
     )
-    def owns_resource(tool: MCPTool) -> bool:
-        if ui_tool_name is not None:
-            return (require_ui and bool(tool.mcp_ui_resource_uri)
-                    and tool.remote_name == ui_tool_name and mcp_tool_allows(tool, "model"))
-        return not require_ui or tool.mcp_ui_resource_uri == resource_uri
 
-    owners = [tool for tool in connection.tools if owns_resource(tool)]
-    if not owners:
-        raise McpAppError("APP_RESOURCE_NOT_ALLOWED")
-    if not any(tool.mcp_generation == generation for tool in owners):
-        raise McpAppError("APP_BINDING_EXPIRED")
+    def check_resource() -> None:
+        if connection.app_generation != generation:
+            raise McpAppError("APP_BINDING_EXPIRED")
+        if not require_ui or (resource_uri == saved_ui_uri and resource_uri.startswith("ui://")):
+            return
+        if not any(tool.mcp_ui_resource_uri == resource_uri and (
+            ui_tool_name is None or (tool.remote_name == ui_tool_name and mcp_tool_allows(tool, "model"))
+        ) for tool in connection.tools):
+            raise McpAppError("APP_RESOURCE_NOT_ALLOWED")
+
+    check_resource()
     async with _timeout(connection._get_execute_timeout()):
         try:
             response = await connection.session.read_resource(resource_uri)
@@ -3631,11 +3670,9 @@ async def read_mcp_app_resource(
             server_name, server_identity=server_identity,
             allowed_connector_ids=allowed_connector_ids,
         )
-        if current is not connection or not any(
-            owns_resource(tool) and tool.mcp_generation == generation
-            for tool in current.tools
-        ):
+        if current is not connection:
             raise McpAppError("APP_BINDING_EXPIRED")
+        check_resource()
         try:
             return bounded_json({**value, "contents": contents})
         except (TypeError, ValueError):

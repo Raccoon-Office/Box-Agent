@@ -1307,7 +1307,7 @@ class BoxACPAgent:
         self._system_prompt = system_prompt
         self._sessions: dict[str, SessionState] = {}
         from .mcp_apps import McpAppsACP
-        self._mcp_apps = McpAppsACP(self._sessions)
+        self._mcp_apps = McpAppsACP(self._sessions, self._sync_current_mcp_registries)
         # Background services belong to a product session within this adapter,
         # not its replaceable ACP handle. No per-session owner cache is needed.
         self._process_owner_namespace = uuid4()
@@ -1600,6 +1600,11 @@ class BoxACPAgent:
         self._mcp_controller.session_sync = sync_mcp_tools
         self._mcp_controller.reconcile(mcp_tools)
 
+    def _sync_current_mcp_registries(self) -> None:
+        if not self._config.tools.mcp.deferred_loading_enabled:
+            from box_agent.tools.mcp_loader import get_all_mcp_tools
+            self._sync_mcp_registries(get_all_mcp_tools())
+
     def _sub_agent_capability_state(self) -> str:
         """Expose MCP readiness without leaking configuration or permissions."""
         if self._mcp_loaded or self._mcp_task is None:
@@ -1635,7 +1640,6 @@ class BoxACPAgent:
         if not self._mcp_loaded:
             return []
         from box_agent.tools.mcp_loader import (
-            get_all_mcp_tools,
             get_mcp_tools_for_server,
             reconnect_auth_failed_mcp_servers_if_token_changed,
         )
@@ -1644,9 +1648,7 @@ class BoxACPAgent:
         if not results:
             return []
 
-        if not self._config.tools.mcp.deferred_loading_enabled:
-            all_mcp_tools = get_all_mcp_tools()
-            self._sync_mcp_registries(all_mcp_tools)
+        self._sync_current_mcp_registries()
 
         for result in results:
             name = str(result.get("name") or "")
