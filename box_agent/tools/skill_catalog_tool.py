@@ -48,8 +48,7 @@ class ListSkillsTool(Tool):
             "inspect an internal method or diagnose an unavailable Skill. "
             "This does not load instructions or access "
             "SkillHub. Follow next_offset for more results; if revision changes, restart "
-            "from offset 0. Pass the chosen row's skill_name to get_skill. "
-            "Same-name entries can have different sources and paths."
+            "from offset 0. Use get_skill to read a chosen Skill."
         )
 
     @property
@@ -162,6 +161,8 @@ class ListSkillsTool(Tool):
             "next_offset": next_offset,
             "skills": page,
         }
+        if any(row["skill_name"] != row["name"] for row in page):
+            payload["read_hint"] = "Pass the chosen row's skill_name to get_skill to read that specific file."
         return ToolResult(
             success=True,
             content=json.dumps(payload, ensure_ascii=False, sort_keys=True),

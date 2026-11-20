@@ -45,6 +45,7 @@ async def test_same_named_connector_files_are_individually_readable_and_scoped(t
     first = await payload(listing, query="guide", limit=1)
     second = await payload(listing, query="guide", offset=first["next_offset"], limit=1)
     assert first["revision"] == second["revision"] and first["total"] == 2
+    assert "skill_name" in first["read_hint"] and "skill_name" in second["read_hint"]
     rows = first["skills"] + second["skills"]
     assert {row["ownerId"] for row in rows} == set(files)
     for row in rows:

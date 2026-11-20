@@ -71,7 +71,7 @@ class GetSkillTool(Tool):
             "properties": {
                 "skill_name": {
                     "type": "string",
-                    "description": "Known Skill name or the exact skill_name from a list_skills row.",
+                    "description": "Name of the skill to retrieve (use list_skills to view available skills)",
                 },
                 "offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset; omit to read the whole Skill when it fits."},
                 "limit": {"type": "integer", "minimum": 1, "description": "Maximum lines for a bounded page."},
