@@ -130,6 +130,8 @@ def validate_expert_dependencies(
             binding = bindings[0] if bindings else {}
             source = binding.get("source")
             failure: tuple[str, str] | None = None
+            dependency_error: SkillDependencyError | None = None
+            dependency_name: str | None = None
             if invalid:
                 failure = "conflict", "The selected dependency has an invalid binding identity."
             elif len(distinct) > 1:
@@ -158,10 +160,15 @@ def validate_expert_dependencies(
                         for dependency in resolve_required_skills(skill_loader, [name]):
                             if skill_access_filter is not None and not skill_access_filter(dependency):
                                 failure = "unavailable", f"Required Skill '{dependency.name}' is not enabled for this conversation."
+                                dependency_name = dependency.name
                                 break
                             skill_loader.verify_skill_source(dependency)
                     except SkillDependencyError as exc:
-                        failure = "unavailable", str(exc)
+                        state = {"SKILL_NOT_FOUND": "missing", "SKILL_DISABLED": "disabled",
+                                 "SKILL_BROKEN": "broken"}.get(exc.code, "unavailable")
+                        failure = state, str(exc)
+                        dependency_error = exc
+                        dependency_name = exc.details.get("skill")
             if failure is not None:
                 state, reason = failure
                 item = {
@@ -171,6 +178,10 @@ def validate_expert_dependencies(
                 }
                 if isinstance(binding.get("skillId"), str):
                     item["skillId"] = binding["skillId"]
+                if isinstance(dependency_name, str) and dependency_name:
+                    item["dependencyName"] = dependency_name
+                if dependency_error is not None:
+                    item["dependencyCode"] = dependency_error.code
                 failures.append(item)
     if failures:
         raise ExpertDependencyError(failures)
