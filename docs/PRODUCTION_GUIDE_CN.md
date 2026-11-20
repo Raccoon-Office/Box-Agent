@@ -247,6 +247,12 @@ sub_agent_batch_synthesis_timeout_seconds: 600
 `provider_stale_seconds` 同时限制非流式任务结束检查的总等待时间；
 `BOX_AGENT_PROVIDER_STALE_SECONDS` 可覆盖该值。检查超时返回
 `TURN_COMPLETION_CHECK_TIMEOUT`，任务标记未完成并保留已有输出，不把超时当成完成判定。
+
+候选回答去掉首尾空白后超过 4000 字符时，结束检查副本保留前后各 2000 字符。
+运行时元数据 `candidate_omission_marker` 指向副本中插入的唯一裁剪边界，原回答中的省略符仍属于正文。
+检查规则要求判断模型忽略这处边界及跨越它的编号跳跃，仅依据可见对话中的具体未完成动作请求续执行。
+原回答完整保留在会话中，检查范围限于副本可见的内容。
+
 模型无响应检查按剩余预算唤醒，不会被更长的活动心跳间隔拖后；恢复耗尽后返回
 `LLM_PROVIDER_STALE_TIMEOUT`。标准 ACP 评测默认按模型等待、恢复及结束检查预算计算总时限，
 显式更短时限会记录为预算受限；详见[评测时限说明](../test_workspace/README.md#基础任务验收口径)。

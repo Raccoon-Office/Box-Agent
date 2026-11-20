@@ -162,6 +162,39 @@ async def test_judge_redacts_hidden_reasoning_and_multimodal_payloads() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("length", [4000, 4001])
+@pytest.mark.parametrize("as_blocks", [False, True])
+async def test_judge_identifies_only_the_inserted_omission_marker(length: int, as_blocks: bool) -> None:
+    original_marker = "[...middle omitted by the completion check #1...]"
+    prefix = f'001\n{original_marker}\n003\n{{"candidate_omission_marker": "{original_marker}"}}\n'
+    text = prefix + "甲" * (length - len(prefix))
+    original = f"  {text}\n"
+    messages = _history("完整列出结果。", original)
+    if as_blocks:
+        messages[-1].content = [{"type": "text", "text": original}]
+    before = [message.model_copy(deep=True) for message in messages]
+    llm = JudgeLLM('{"continue":false}')
+
+    assert not await model_says_continue(llm, messages=messages)
+    projected = llm.messages[-2].content
+    instruction = llm.messages[-1]
+    facts = _runtime_facts(instruction)
+    assert instruction.source == "runtime"
+    assert messages == before
+    if length <= 4000:
+        assert "candidate_omission_marker" not in instruction.content
+        assert projected == text
+    else:
+        marker = facts["candidate_omission_marker"]
+        assert marker not in text
+        assert projected == f"{text[:2000]}\n{marker}\n{text[-2000:]}"
+        rule = " ".join(instruction.content.split())
+        assert "Ignore only that boundary and numbering jumps across it" in rule
+        assert "Return false if the suspected gap depends only on hidden text." in rule
+        assert "concrete unfinished action supported by the visible conversation" in rule
+
+
+@pytest.mark.asyncio
 async def test_judge_fails_closed_for_a_tool_call_candidate() -> None:
     llm = JudgeLLM()
     messages = [
@@ -451,6 +484,36 @@ async def test_loop_finishes_after_one_answer_when_judge_repeats_its_json() -> N
     assert llm.calls == 1
     assert [message.content for message in messages if message.role == "assistant"] == [answer]
     assert not any(isinstance(event, InjectedMessageEvent) for event in events)
+    assert events[-1] == DoneEvent(stop_reason=StopReason.END_TURN, final_content=answer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unfinished", [False, True])
+async def test_loop_judges_cropped_answers_and_still_resumes_visible_unfinished_work(unfinished: bool) -> None:
+    rows = "\n".join(f"{index:02d}. " + "活动说明" * 30 for index in range(1, 51))
+    answer = f"{rows}\n清单校验完成。"
+    promise = "我还需要逐条核对清单。"
+    candidate = f"{rows}\n{promise}" if unfinished else answer
+    llm = MockLLM(
+        [
+            LLMResponse(content=candidate, finish_reason="stop"),
+            LLMResponse(content=answer, finish_reason="stop"),
+        ],
+        judge_decisions=[unfinished],
+    )
+    messages = [Message(role="user", content="输出并核对完整的 50 项清单。")]
+    tool = SearchTool()
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=messages, tools={tool.name: tool}, max_steps=5,
+    ))
+
+    marker = llm.judge_requests[0]["candidate_omission_marker"]
+    projected = llm.judge_messages[0][-2].content
+    assert marker in projected and "\n25. " not in projected
+    assert (promise in projected) is unfinished
+    assert [message.content for message in messages if message.role == "assistant"][0] == candidate
+    assert llm.calls == len(llm.judge_messages) == 1 + int(unfinished)
+    assert sum(isinstance(event, InjectedMessageEvent) for event in events) == int(unfinished)
     assert events[-1] == DoneEvent(stop_reason=StopReason.END_TURN, final_content=answer)
 
 
