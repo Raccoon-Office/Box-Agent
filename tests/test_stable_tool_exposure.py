@@ -4,7 +4,7 @@ from collections import OrderedDict
 import pytest
 
 from box_agent.schema import FunctionCall, Message, ToolCall
-from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.base import Tool, ToolInvocationContext, ToolResult
 from box_agent.tools.engine.engine import DefaultToolEngine
 from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
 from box_agent.tools.mcp_tool_search import MCPToolExposureManager, ToolSearchTool
@@ -81,6 +81,75 @@ def test_always_load_ref_is_ineligible_until_description_acknowledged():
     catalog.replace_server("crm", [Remote()])
     assert engine.prepare_tools().resolve_call(call)[2]
     assert len(manager.pending_bootstrap_descriptions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_v2_managed_browser_loads_requested_descriptors_through_tool_search():
+    from tests.test_mcp_tool_search import FakeMCPTool
+
+    catalog, manager, search, engine = make()
+    navigation = FakeMCPTool("managed_browser_navigate", "playwright", always_load=True)
+    snapshot = FakeMCPTool("managed_browser_snapshot", "playwright", always_load=True)
+    click = FakeMCPTool("managed_browser_click", "playwright", always_load=True)
+    catalog.replace_server("playwright", [navigation, snapshot, click])
+    catalog.replace_server("crm", [Remote()])
+    before = engine.prepare_tools()
+    assert [json.loads(text)["name"] for text in manager.pending_bootstrap_descriptions()] == [Remote.name]
+    assert navigation.name not in manager.inherited_tools({})
+    assert navigation.name not in {tool.name for tool in before.definitions}
+
+    result = await search.execute(server_name="playwright", tool_names=[navigation.name])
+    assert result.success
+    descriptors = json.loads(result.content)["activated"]
+    assert [descriptor["name"] for descriptor in descriptors] == [navigation.name, snapshot.name]
+    call = ToolCall(id="invoke", type="function", function=FunctionCall(
+        name="call_tool", arguments={"tool_ref": descriptors[0]["tool_ref"], "arguments_json": "{}"},
+    ))
+    assert engine.prepare_tools().resolve_call(call)[2]
+    manager.record_search_result("search", result.content)
+    manager.acknowledge_search_results([Message(
+        role="tool", name="tool_search", tool_call_id="search", content=result.content,
+    )])
+    after = engine.prepare_tools()
+    resolved, routed, error = after.resolve_call(call)
+    assert routed and error is None
+    assert (await after.routed_targets[navigation.name].invoke(resolved.function.arguments)).success
+    assert manager.inherited_tools({})[navigation.name] is navigation
+    assert manager.inherited_tools({})[snapshot.name] is snapshot
+    assert click.name not in manager.inherited_tools({})
+    assert [item.to_schema() for item in after.definitions] == [item.to_schema() for item in before.definitions]
+
+    legacy = MCPToolExposureManager(catalog, OrderedDict())
+    assert navigation.name in legacy.prepare_tools([]).offered_names
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("click_visible", [True, False])
+async def test_v2_navigation_search_includes_only_allowed_click_companion(click_visible):
+    from tests.test_mcp_tool_search import FakeMCPTool
+
+    catalog, manager, search, engine = make()
+    names = ("managed_browser_navigate", "managed_browser_snapshot", "managed_browser_click")
+    catalog.replace_server("playwright", [FakeMCPTool(name, "playwright") for name in names])
+    before = engine.prepare_tools(is_tool_visible=lambda name: name != names[2] or click_visible)
+    result = await search.invoke(
+        {"tool_names": [names[0]], "server_name": "playwright"},
+        context=ToolInvocationContext(managed_browser_click_requested=True),
+    )
+    descriptors = json.loads(result.content)["activated"]
+    expected = names if click_visible else names[:2]
+    assert result.success
+    assert [descriptor["name"] for descriptor in descriptors] == list(expected)
+    for descriptor in descriptors:
+        assert descriptor["tool_ref"] and descriptor["input_schema"]
+    manager.record_search_result("search", result.content)
+    manager.acknowledge_search_results([Message(
+        role="tool", name="tool_search", tool_call_id="search", content=result.content,
+    )])
+    after = engine.prepare_tools(is_tool_visible=lambda name: name != names[2] or click_visible)
+    assert set(after.routed_targets) >= set(expected)
+    assert (names[2] in after.routed_targets) is click_visible
+    assert [item.to_schema() for item in after.definitions] == [item.to_schema() for item in before.definitions]
 
 
 @pytest.mark.asyncio

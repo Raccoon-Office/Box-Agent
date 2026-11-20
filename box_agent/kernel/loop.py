@@ -1084,6 +1084,7 @@ async def _run_agent_loop_impl(
         commit_result=tool_messages.commit_result,
         validate_followup=validate_followup,
         policy_error=browser_intent_policy.tool_call_error,
+        managed_browser_click_requested=browser_intent_policy.managed_browser_click_requested,
         session_log=session_log,
         completion_gates=completion_checks.gates,
         workspace_dir=workspace_dir,

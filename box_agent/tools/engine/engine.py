@@ -334,6 +334,7 @@ class DefaultToolEngine:
             chat_references=self._references,
             completion_gate=self._context.completion_gates.get(call.name),
             capability_gates=tuple(self._context.completion_gates.values()),
+            managed_browser_click_requested=self._context.managed_browser_click_requested,
         )
 
     def _log_result(self, call: ToolCallRecord, result: ToolResult) -> None:

@@ -65,6 +65,7 @@ class ToolRunContext:
     correction_observer: Callable[[str, ToolResult, str | None, str, dict, bool], CorrectionNotice | None] | None = None
     session_log: Any = None
     completion_gates: dict[str, Any] = field(default_factory=dict)
+    managed_browser_click_requested: bool = False
 
 
 @dataclass(frozen=True, slots=True)

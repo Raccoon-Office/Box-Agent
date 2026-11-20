@@ -103,6 +103,22 @@ _BROWSER_CONTINUATION_RE = re.compile(
     r")(?:一下|下)?(?:吧|呢|好吗|可以吗)?\s*[。.!！?？]?\s*$",
     re.IGNORECASE,
 )
+_CLICK_REQUEST_RE = re.compile(
+    r"(?:^|然后|接着|再|并|后|\b(?:and|then)\s+)\s*"
+    r"(?:(?:请(?:帮我)?|帮我)\s*)?(?:"
+    r"(?:在[^\n，。！？；]{0,24}?(?:页面|网页|浏览器|看板)[里中上]?\s*)?"
+    r"(?:点击|单击|双击)(?!率|数|量|事件|工具|说明|日志)"
+    r"|(?:please\s+)?(?:click|double[- ]click)\s+(?:on\s+)?"
+    r"(?:the\b|this\b|that\b|[\"'`]|(?-i:[A-Z])))",
+    re.IGNORECASE,
+)
+_CLICK_WITHHELD_RE = re.compile(
+    r"(?:不要|别|无需|不用|不需要|请勿|禁止|避免|由我|我来|我会|等我|手动|下(?:一)?轮|下次)"
+    r".{0,20}(?:点击|单击|双击)"
+    r"|\b(?:do\s+not|don['’]t|never|avoid|without|let\s+me|i['’]ll|i\s+will|next\s+turn)"
+    r".{0,32}\b(?:click|clicking|double[- ]click)\b",
+    re.IGNORECASE,
+)
 _CURRENT_PAGE_INTENT_ERROR = (
     "CURRENT_PAGE_INTENT_REQUIRED: the latest user request does not explicitly "
     "refer to the current browser page or continue a recent successful browser "
@@ -193,6 +209,7 @@ class BrowserToolIntentPolicy:
 
     allow_current_page: bool
     human_handoff: bool
+    managed_browser_click_requested: bool = False
 
     @classmethod
     def for_turn(
@@ -215,6 +232,10 @@ class BrowserToolIntentPolicy:
         return cls(
             allow_current_page=allow_current_page,
             human_handoff=human_handoff,
+            managed_browser_click_requested=any(
+                _CLICK_REQUEST_RE.search(clause) and not _CLICK_WITHHELD_RE.search(clause)
+                for clause in re.split(r"[\n，。！？；,;!?]|\.\s+", user_text or "")
+            ),
         )
 
     def is_tool_visible(self, tool_name: str) -> bool:

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..tool_result_storage import DEFAULT_MAX_RESULT_SIZE_CHARS
-from .base import Tool, ToolResult, build_tool_name_index
+from .base import Tool, ToolInvocationContext, ToolResult, build_tool_name_index
 from .mcp_apps import mcp_tool_allows
 from .mcp_tool_catalog import MCPToolCatalog, MCPToolEntry, _normalize
 
@@ -122,6 +122,7 @@ class ToolSearchTool(Tool):
     """Search allowed local/MCP tools and activate usable session hits."""
 
     reserved_deferred_mcp_search = True
+    uses_invocation_context = True
 
     def __init__(
         self,
@@ -348,6 +349,17 @@ class ToolSearchTool(Tool):
             "additionalProperties": False,
         }
 
+    async def _invoke_validated(
+        self,
+        arguments: dict,
+        *,
+        context: ToolInvocationContext | None,
+    ) -> ToolResult:
+        return await self.execute(
+            **arguments,
+            managed_browser_click_requested=bool(context and context.managed_browser_click_requested),
+        )
+
     async def execute(
         self,
         query: str | None = None,
@@ -356,6 +368,8 @@ class ToolSearchTool(Tool):
         server_name: str | None = None,
         connector: str | None = None,
         top_k: int = 1,
+        *,
+        managed_browser_click_requested: bool = False,
     ) -> ToolResult:
         normalized_server_name = (
             server_name.strip()
@@ -510,13 +524,29 @@ class ToolSearchTool(Tool):
             )
         query_matched_count = sum(not entry.tool_id.startswith("local:") for entry in hits)
         local_matched_count = len(hits) - query_matched_count
+        protected_names = frozenset(build_tool_name_index(local_tools.values())) | (
+            self._protected_names_provider()
+            if self._protected_names_provider is not None
+            else frozenset()
+        )
         hit_ids = {entry.tool_id for entry in hits}
         companion_entries = []
-        if not normalized_tool_names and not server_direct and not connector_direct:
+        if not server_direct and not connector_direct:
             for entry in tuple(hits):
                 if entry.tool_id.startswith("local:"):
                     continue
-                for companion_name in _ACTIVATION_COMPANIONS.get(entry.model_name, ()):
+                managed_browser = self._stable_manager is not None and entry.server_name == "playwright"
+                if normalized_tool_names and not managed_browser:
+                    continue
+                if managed_browser and (entry.name_conflict or entry.model_name in protected_names):
+                    continue
+                companion_names = _ACTIVATION_COMPANIONS.get(entry.model_name, ())
+                # The latest user turn can request a click even if the model
+                # searches only for navigation or a snapshot in its first call.
+                if (managed_browser and managed_browser_click_requested
+                        and entry.model_name in {"managed_browser_navigate", "managed_browser_snapshot"}):
+                    companion_names += ("managed_browser_click",)
+                for companion_name in companion_names:
                     companions, _ = self._catalog.lookup_exact(
                         [companion_name],
                         server_name=entry.server_name,
@@ -531,11 +561,6 @@ class ToolSearchTool(Tool):
         activated_results = []
         activated_mcp_tools = []
         conflicts = []
-        protected_names = frozenset(build_tool_name_index(local_tools.values())) | (
-            self._protected_names_provider()
-            if self._protected_names_provider is not None
-            else frozenset()
-        )
         local_activated_count = 0
         omitted_count = 0
         oversized_count = 0
@@ -965,7 +990,8 @@ class MCPToolExposureManager:
                 queue_tool(name, tool.description, tool, 0)
         eager_tools = []
         for entry in self._catalog.snapshot():
-            if not entry.always_load or entry.name_conflict or not self._entry_is_allowed(entry) or not self.is_discoverable(entry.tool):
+            if (not self._is_eager_entry(entry) or entry.name_conflict
+                    or not self._entry_is_allowed(entry) or not self.is_discoverable(entry.tool)):
                 continue
             if queue_tool(entry.model_name, entry.tool.description, entry.tool, entry.generation):
                 eager_tools.append(entry.tool)
@@ -1015,6 +1041,10 @@ class MCPToolExposureManager:
                                         runtime_kind="tool_descriptions",
                                         content=min(descriptions)))
         return restored
+
+    def _is_eager_entry(self, entry: MCPToolEntry) -> bool:
+        # The managed browser stays searchable in v2 after its MCP handshake.
+        return entry.always_load and not (self.stable_prefix and entry.server_name == "playwright")
 
     def _entry_is_allowed(self, entry) -> bool:
         return mcp_tool_allows(entry.tool, "model") and self._connector_is_allowed(entry.connector_id)
@@ -1104,7 +1134,7 @@ class MCPToolExposureManager:
                 continue
             activation = self._activated.get(entry.tool_id)
             activated = activation is not None and activation.generation == entry.generation
-            if not entry.always_load and not activated:
+            if not self._is_eager_entry(entry) and not activated:
                 continue
             visible[entry.model_name] = entry.tool
             generations[entry.model_name] = entry.generation

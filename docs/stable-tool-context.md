@@ -90,6 +90,15 @@ tool-description JSON. Messages saved before these fields were introduced keep
 their original wire content. Reordering the same rendered Skill recommendations
 reuses the previous snapshot.
 
+In the deferred MCP mode of version 2, the managed `playwright` server exposes
+its schemas through `tool_search` even when its host config has `alwaysLoad`
+enabled. Search by capability or by exact names scoped to `playwright`, then use
+`call_tool` with the returned references. A navigation hit includes its page
+snapshot companion, including on an exact lookup. A navigation or snapshot hit
+also includes the click schema when the current user turn explicitly asks to
+click. The same visibility, authorization and discovery budget apply to the
+companions. The MCP connection follows the normal background discovery path.
+
 Compaction does not promote discoveries into the system prompt or top-level tool definitions. It restores complete, acknowledged tool descriptions (including schemas and existing refs) at the message tail when missing. Current definition, visibility, permission and connection-generation checks still apply; stale or unacknowledged discoveries are not restored. Required/always-load descriptions also retain their existing recovery path. Compaction alone does not disconnect MCP or issue new references.
 
 A new turn only marks earlier Skill reads as candidates for cleanup; it never deletes or rewrites their historical messages. Current explicit selections, pending restores and methods actually read/reused this turn are protected. When there is no current method signal, retain earlier methods conservatively: a turn boundary alone does not prove a task switch. At actual compaction, reclaimable bodies become revision/path/reread notices, while current verified pages are retained or restored within the reference budget. Never restore unread pages or treat a summary as a complete method. If a body cannot fit or its source changed, retain a reading notice instead. This policy also applies to forced compaction; it does not introduce a new manual trigger.

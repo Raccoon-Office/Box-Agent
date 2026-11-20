@@ -150,6 +150,7 @@ class ToolInvocationContext:
     # Kept off the public model schema and evaluated before tool side effects.
     capability_gates: tuple[Any, ...] = ()
     parallel_window: ParallelToolWindow | None = None
+    managed_browser_click_requested: bool = False
 
 
 class Tool:

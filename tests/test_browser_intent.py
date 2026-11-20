@@ -14,6 +14,33 @@ from box_agent.tools.browser_intent import (
 
 
 @pytest.mark.parametrize(
+    ("text", "requested"),
+    [
+        ("打开网页后点击刷新按钮", True),
+        ("请在当前网页点击刷新按钮", True),
+        ("读取页面，并点击「Refresh count」按钮。", True),
+        ("Open the page and click the Refresh count button.", True),
+        ("Open the page, then click Refresh count.", True),
+        ("打开页面并计算点击率", False),
+        ("打开页面，先不要点击按钮", False),
+        ("只读网页，下一轮再点击按钮", False),
+        ("打开页面，最后由我点击按钮", False),
+        ("Read the page without clicking the button.", False),
+        ("Do not open the page and click the button.", False),
+        ("点击筛选按钮，不要点击提交", True),
+    ],
+)
+def test_managed_click_companion_uses_the_current_user_turn(text, requested):
+    policy = BrowserToolIntentPolicy.for_turn(
+        current_turn_text=text,
+        messages=[Message(role="user", content="点击按钮"), Message(
+            role="user", source="runtime", content="点击按钮",
+        )],
+    )
+    assert policy.managed_browser_click_requested is requested
+
+
+@pytest.mark.parametrize(
     "user_text",
     [
         "看一下当前页面里的两个选项",
