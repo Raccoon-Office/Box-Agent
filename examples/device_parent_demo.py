@@ -73,6 +73,10 @@ class DeterministicLLM:
                 yield StreamEvent(type="finish", finish_reason="stop")
             return
         if tool_messages:
+            if (self._original_text(facts).strip() == "publish fixture report"
+                    and tool_messages[-1].get("name") == "write_file"):
+                yield self._tool_call("publish_artifact", {"path": "output/result.txt"})
+                return
             instruction = str(tail[0].get("content", "")).lower()
             fallback_requested = "approval write fallback" in instruction
             latest_result = str(tool_messages[-1].get("content", ""))
@@ -121,7 +125,8 @@ class DeterministicLLM:
                 yield self._tool_call("write_file", {"path": path, "content": "ok"})
                 return
             name = "write_file"
-            arguments = {"path": "result.txt", "content": "ok"}
+            filename = "output/result.txt" if self._original_text(facts).strip() == "publish fixture report" else "result.txt"
+            arguments = {"path": filename, "content": "ok"}
         yield self._tool_call(name, arguments)
 
     @staticmethod
@@ -170,6 +175,7 @@ class DeterministicLLM:
             device_id, = eligible_devices
             return self._tool_call("device_subagent_start", {
                 "deviceId": device_id, "instruction": args["instruction"],
+                **({"artifactDelivery": args["artifactDelivery"]} if "artifactDelivery" in args else {}),
             })
         if eligible_devices:
             return StreamEvent(type="text", delta="Multiple devices can execute tasks. Specify a registered deviceName.")

@@ -1650,7 +1650,7 @@ async def test_success_keeps_summary_and_separate_permission_issue_after_reopen(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("aborted", [False, True])
-async def test_wait_uses_ready_final_snapshot_instead_of_timeout_or_failure(aborted):
+async def test_wait_uses_ready_final_snapshot_instead_of_timeout_or_failure(aborted, monkeypatch):
     issue = {"code": "APPROVAL_EXPIRED", "message": "A prior approval expired"}
     first = {**target(), "status": "succeeded", "summary": "Available output",
              "permissionIssue": issue, "toolTrace": ["private"]}
@@ -1665,6 +1665,9 @@ async def test_wait_uses_ready_final_snapshot_instead_of_timeout_or_failure(abor
         return {**envelope, "states": [first, second]}
 
     broker = DeviceDelegations("p", request, lambda: "parent")
+    from unittest.mock import Mock
+    snapshot = Mock(wraps=broker._snapshot)
+    monkeypatch.setattr(broker, "_snapshot", snapshot)
     result = await DeviceTool(broker, "subagent.wait").invoke({
         "targets": [target(), target("other")], "timeoutMs": 0,
     })
@@ -1672,6 +1675,7 @@ async def test_wait_uses_ready_final_snapshot_instead_of_timeout_or_failure(abor
     assert result.raw_output == {"timedOut": False, "results": [{
         key: item for key, item in first.items() if key != "toolTrace"
     }]}
+    assert snapshot.call_count == 2
     assert calls == ["subagent.wait"]
 
 @pytest.mark.asyncio
@@ -2425,8 +2429,16 @@ async def test_trusted_local_answer_keeps_original_device_approval_identity_and_
 
         # Verify the proof is durable and the same logical turn survives binding changes.
         await adapter.resume_session(str(workspace), sid, permissionMode="default")
+        camel_response = {
+            "requestId": call_id, "toolCallId": call_id, "requestType": "input",
+            "decisionKind": "missing_input", "missingFields": ["project_code"],
+            "customText": "Use code RC12", "trigger": "user",
+        }
+        with pytest.raises(RequestError, match="CONTINUATION_INVALID_RESPONSE"):
+            await adapter.prompt(sid, prompt, turnId="bad-type", deviceDelegation=continuation,
+                                 userDecision={**camel_response, "customText": 12})
         result = await adapter.prompt(sid, prompt, turnId="answer", deviceDelegation=continuation,
-                                      userDecision=response)
+                                      userDecision=camel_response if allow else response)
         assert result.field_meta["runStatus"] == "completed"
         assert len(requests) == 1
         approval_sid, approval, options = requests[0]
@@ -2449,7 +2461,7 @@ async def test_trusted_local_answer_keeps_original_device_approval_identity_and_
 
         with pytest.raises(ValueError, match="TURN_ALREADY_ACCEPTED"):
             await adapter.prompt(sid, prompt, turnId="answer", deviceDelegation=continuation,
-                                 userDecision=response)
+                                 userDecision=camel_response if allow else response)
         with pytest.raises(RequestError, match="CONTINUATION_MISMATCH"):
             await adapter.prompt(sid, prompt, turnId="another-answer", deviceDelegation=continuation,
                                  userDecision=response)
@@ -2565,3 +2577,39 @@ async def test_history_edit_redelivers_retained_child_result_when_its_model_rece
     finally:
         await broker.aclose()
         log.close()
+
+
+def test_consumed_child_turn_lookup_uses_restored_index_without_rescanning_operations():
+    log = Log()
+    broker = DeviceDelegations("parent", None, lambda: "p", log)
+    for i in range(128):
+        broker.save({**target(turn=str(i)), "operationId": f"op-{i}", "parentTurnId": "p",
+                     "status": "succeeded", "seq": 2})
+    restored = DeviceDelegations("parent", None, lambda: "p", log)
+
+    class IndexedOperations(dict):
+        def items(self):
+            pytest.fail("a turn lookup rescanned the operation table")
+
+    restored.operations = IndexedOperations(restored.operations)
+    restored.consumed = {op: 2 for op in restored.operations}
+    assert restored.request_injections([]) == ()
+    assert restored._consumed_seq(target(turn="127")) == 2
+    assert restored._operation_for(target(turn="missing")) is None
+
+def test_empty_device_offers_skip_history_hashing(monkeypatch):
+    from box_agent.schema import Message
+
+    broker = DeviceDelegations("p", None, lambda: "parent")
+    history = [Message(role="tool", content="unrelated tool output")]
+    monkeypatch.setattr("box_agent.device_delegation.sha256", lambda *_: pytest.fail("unexpected hash"))
+    assert broker.request_injections(history) == ()
+    assert broker.response_receipts(history) == {}
+
+
+def test_wait_timeout_rejects_malformed_status_before_checking_readiness():
+    broker = DeviceDelegations("p", None, lambda: "parent")
+    with pytest.raises(ValueError, match="invalid device status snapshot"):
+        broker._wait_result({
+            "timedOut": True, "results": [], "states": [{**target(), "status": {}}],
+        }, [target()])
