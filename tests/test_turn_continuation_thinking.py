@@ -11,6 +11,7 @@ from box_agent.events import DoneEvent, StopReason
 from box_agent.llm.llm_wrapper import LLMClient
 from box_agent.schema import LLMProvider, Message
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
+from box_agent.turn_continuation import ContinuationJudgeBudgetExceeded, model_says_continue
 
 
 @pytest.mark.asyncio
@@ -96,3 +97,75 @@ async def test_continuation_judge_matches_current_main_request_thinking_on_wire(
     assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [
         StopReason.END_TURN,
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thinking_enabled", [False, True])
+@pytest.mark.parametrize("over_budget_tokens", [-1, 0, 1])
+async def test_judge_uses_own_output_reserve_once_at_input_budget_boundary(
+    tmp_path, monkeypatch, thinking_enabled, over_budget_tokens,
+):
+    from box_agent.config import derive_context_token_limit
+    from box_agent.kernel import context_engine
+
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "state"))
+    expected_output = 12_288 if thinking_enabled else 8_192
+    input_limit = derive_context_token_limit(20_000, expected_output)
+    estimated = input_limit - context_engine.REQUEST_INPUT_HEADROOM_TOKENS + over_budget_tokens
+    requests = []
+    measurements = []
+    candidate = "完整经营分析。" * 600 + "结论已交付。"
+
+    def measure(messages, tools, *, llm):
+        assert tools is None
+        assert llm.max_output_tokens == expected_output
+        assert llm.context_window == 20_000
+        assert messages[-2].content == candidate
+        measurements.append(messages)
+        return estimated
+
+    monkeypatch.setattr(context_engine, "request_input_tokens", measure)
+
+    async def transport(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        return httpx.Response(200, json={
+            "id": "judge-budget-test", "created": 1, "model": body["model"],
+            "object": "chat.completion",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant", "content": '{"continue":false}',
+            }}],
+        })
+
+    llm = LLMClient(
+        api_key="test", provider=LLMProvider.OPENAI,
+        api_base="https://inference.example/v1", model="SenseNova-Continuation-Test",
+        max_output_tokens=15_000, context_window=20_000,
+    )
+    await llm.aclose()
+    llm._client.client = AsyncOpenAI(
+        api_key="test", base_url=llm.api_base, max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+    )
+    try:
+        arguments = dict(
+            llm=llm,
+            messages=[Message(role="user", content="完成经营分析。"),
+                      Message(role="assistant", content=candidate)],
+            thinking_enabled=thinking_enabled,
+        )
+        if over_budget_tokens > 0:
+            with pytest.raises(ContinuationJudgeBudgetExceeded) as caught:
+                await model_says_continue(**arguments)
+            assert caught.value.estimated_tokens == input_limit + over_budget_tokens
+            assert caught.value.token_limit == input_limit
+            assert not requests
+        else:
+            assert not await model_says_continue(**arguments)
+            assert len(requests) == 1
+            assert requests[0]["max_tokens"] == expected_output
+        assert len(measurements) == 1
+        assert llm.max_output_tokens == 15_000
+        assert llm.context_window == 20_000
+    finally:
+        await llm.aclose()

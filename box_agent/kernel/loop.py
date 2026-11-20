@@ -191,6 +191,7 @@ from ..tools.browser_intent import BrowserToolIntentPolicy
 from ..tool_result_storage import ToolResultStorage
 from ..turn_continuation import (
     ContinuationJudgeFacts,
+    ContinuationJudgeBudgetExceeded,
     ContinuationJudgeTimeout,
     ContinuationLimitReached,
     TurnContinuationController,
@@ -2749,11 +2750,12 @@ async def _run_agent_loop_impl(
                     turn_id=turn_id,
                     title=title,
                     timeout_seconds=effective_provider_stale_seconds,
+                    input_token_limit=token_limit,
                     should_interrupt=lambda: cancelled() or (
                         inject_queue is not None and not inject_queue.empty()
                     ),
                 )
-            except (ContinuationJudgeTimeout, ContinuationLimitReached) as exc:
+            except (ContinuationJudgeTimeout, ContinuationJudgeBudgetExceeded, ContinuationLimitReached) as exc:
                 if cancelled() or (inject_queue is not None and not inject_queue.empty()):
                     continuation = None
                 else:
@@ -2761,6 +2763,13 @@ async def _run_agent_loop_impl(
                         msg = "任务结束检查超时，暂时无法确认任务完成。已有输出已保留，请重试。"
                         code, category = "TURN_COMPLETION_CHECK_TIMEOUT", "timeout"
                         details = {"source": "turn_continuation", "timeoutSeconds": effective_provider_stale_seconds}
+                    elif isinstance(exc, ContinuationJudgeBudgetExceeded):
+                        msg = "任务结束检查输入超出当前模型预算，暂时无法确认任务完成。已有输出已保留，本次未触发自动续执行。"
+                        code, category = "TURN_COMPLETION_CHECK_INPUT_BUDGET_EXCEEDED", "incomplete"
+                        details = {
+                            "source": "turn_continuation", "reason": "input_budget_exceeded",
+                            "estimatedInputTokens": exc.estimated_tokens, "inputTokenLimit": exc.token_limit,
+                        }
                     else:
                         msg = "自动续执行预算已用尽，任务仍未完成。已有输出已保留，请继续任务。"
                         code, category = "TURN_COMPLETION_INCOMPLETE", "incomplete"
