@@ -2305,6 +2305,14 @@ class BoxACPAgent:
             tools.append(runtime_environment_tool)
         session_skill_loader = self._skill_loader
         if expert_context is not None and session_skill_loader is not None:
+            # Uploads can finish after process startup. Prepare from a current
+            # catalog before deriving the expert loader or retiring a live session.
+            validation = await session_skill_loader.avalidate_references((), allow_stale=False)
+            if validation.timed_out:
+                raise RequestError(-32602, "Expert Skill catalog refresh timed out", {
+                    "code": "SKILL_VALIDATION_TIMEOUT",
+                    "detail": "Skill catalog refresh did not finish; retry expert preparation later.",
+                })
             session_skill_loader = await session_skill_loader.awith_expert_skill_sources(
                 expert_context.skill_names(), skill_directories=expert_context.skill_directories,
                 skill_bindings_by_directory=expert_context.skill_bindings_by_directory,
