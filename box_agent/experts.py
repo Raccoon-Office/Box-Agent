@@ -12,6 +12,18 @@ _MAX_ITEMS = 12
 _EXPERT_TEAM_EXECUTION_MODES = {"advisory", "orchestrated", "review_panel"}
 
 
+class ExpertTeamValidationError(ValueError):
+    code = "EXPERT_TEAM_INVALID_MEMBER_REFERENCE"
+
+    def __init__(self, team_id: str, missing_member_ids: list[str]) -> None:
+        self.team_id = team_id
+        self.missing_member_ids = missing_member_ids
+        super().__init__(
+            "Required expert-team workstreams reference undefined members: "
+            + ", ".join(missing_member_ids)
+        )
+
+
 def _clean_text(value: Any, *, max_len: int = _MAX_TEXT) -> str:
     if not isinstance(value, str):
         return ""
@@ -482,6 +494,18 @@ class ExpertTeamProfile:
             for member in (ExpertTeamMember.from_meta(item) for item in raw.get("members", []))
             if member is not None
         ][:_MAX_ITEMS]
+        leader = ExpertTeamMember.from_meta(raw.get("leader"))
+        orchestration = ExpertTeamOrchestration.from_meta(raw.get("orchestration"))
+        if orchestration:
+            member_ids = {member.id for member in members}
+            if leader:
+                member_ids.add(leader.id)
+            missing_member_ids = list(dict.fromkeys(
+                stream.member_id for stream in orchestration.workstreams
+                if stream.required and stream.member_id not in member_ids
+            ))
+            if missing_member_ids:
+                raise ExpertTeamValidationError(team_id, missing_member_ids)
         internal_rules = _rule_list(raw.get("internalRules") or raw.get("internal_rules"))
         review_rules = _remove_known_items(
             _rule_list(raw.get("reviewRules") or raw.get("review_rules")),
@@ -494,10 +518,10 @@ class ExpertTeamProfile:
             team_persona=_rule_text(raw.get("teamPersona") or raw.get("team_persona")),
             starter_prompt=_rule_text(raw.get("starterPrompt") or raw.get("starter_prompt")),
             execution_mode=_clean_execution_mode(raw.get("executionMode") or raw.get("execution_mode")),
-            leader=ExpertTeamMember.from_meta(raw.get("leader")),
+            leader=leader,
             members=members,
             workflow=_rule_list(raw.get("workflow")),
-            orchestration=ExpertTeamOrchestration.from_meta(raw.get("orchestration")),
+            orchestration=orchestration,
             visible_rules=_rule_list(raw.get("visibleRules") or raw.get("visible_rules")),
             internal_rules=internal_rules,
             quality_gates=_rule_list(raw.get("qualityGates") or raw.get("quality_gates")),

@@ -989,3 +989,58 @@ def test_equally_bound_team_packages_preserve_existing_order(tmp_path):
         skill_bindings_by_directory={directory: {"pptx"} for directory in directories},
     )
     assert loader.get_skill("pptx").skill_path == directories[0] / "pptx/SKILL.md"
+
+@pytest.mark.parametrize("team_key", ["expert_team", "expertTeam"])
+@pytest.mark.parametrize("member_key", ["memberId", "member_id"])
+def test_expert_team_rejects_undefined_required_members(team_key, member_key):
+    team = {
+        "id": "review-team", "name": "Review team",
+        "leader": {"id": "lead", "name": "Lead"},
+        "members": [{"id": "present", "name": "Present"}],
+        "orchestration": {"workstreams": [
+            {member_key: " missing ", "title": "Required review", "required": True},
+            {member_key: "missing", "title": "Second review", "required": True},
+            {member_key: "another", "title": "Required delivery", "required": True},
+            {member_key: "optional", "title": "Optional review", "required": False},
+        ]},
+    }
+    with pytest.raises(ValueError) as error:
+        ExpertSessionContext.from_meta({team_key: team})
+    assert error.value.code == "EXPERT_TEAM_INVALID_MEMBER_REFERENCE"
+    assert error.value.team_id == "review-team"
+    assert error.value.missing_member_ids == ["missing", "another"]
+
+
+def test_expert_team_accepts_required_leader_and_member_workstreams():
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "review-team", "name": "Review team",
+        "leader": {"id": " lead ", "name": "Lead"},
+        "members": [{"id": "member", "name": "Member"}],
+        "orchestration": {"workstreams": [
+            {"memberId": "lead", "title": "Framing", "required": True},
+            {"memberId": " member ", "title": "Review", "required": True},
+        ]},
+    }})
+    assert context.team.leader.id == "lead"
+    assert [stream.member_id for stream in context.team.orchestration.workstreams] == ["lead", "member"]
+
+
+@pytest.mark.parametrize("required", [None, False])
+def test_expert_team_preserves_optional_undeclared_workstreams(required):
+    stream = {"memberId": "not-declared", "title": "Optional review"}
+    if required is not None:
+        stream["required"] = required
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "review-team", "name": "Review team",
+        "orchestration": {"workstreams": [stream]},
+    }})
+    assert context.team.orchestration.workstreams[0].member_id == "not-declared"
+    assert context.team.orchestration.workstreams[0].required is False
+
+
+def test_expert_team_without_orchestration_keeps_existing_profile_behavior():
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "legacy-team", "name": "Legacy team", "workflow": ["Review the task."],
+    }})
+    assert context.team.id == "legacy-team"
+    assert context.team.orchestration is None

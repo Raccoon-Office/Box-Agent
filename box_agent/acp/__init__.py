@@ -243,7 +243,7 @@ from box_agent.run_observer import (
     RunObserver,
     cleanup_turn_resources,
 )
-from box_agent.experts import ExpertSessionContext
+from box_agent.experts import ExpertSessionContext, ExpertTeamValidationError
 from box_agent.expert_dependencies import ExpertDependencyError, validate_expert_dependencies
 from box_agent.expert_package_format import ExpertPackageError
 from box_agent.expert_packages import prepare_expert_meta
@@ -2057,12 +2057,17 @@ class BoxACPAgent:
             env_context = EnvContext.from_meta(meta.get("env_context"))
             try:
                 meta = await prepare_expert_meta(meta)
+                expert_context = ExpertSessionContext.from_meta(meta)
                 params.field_meta = meta
+            except ExpertTeamValidationError as exc:
+                raise RequestError(-32602, "Invalid expert team", {
+                    "code": exc.code, "detail": str(exc),
+                    "teamId": exc.team_id, "missingMemberIds": exc.missing_member_ids,
+                }) from None
             except ExpertPackageError as exc:
                 raise RequestError(-32602, "Invalid expert selection", {
                     "code": exc.code, "detail": str(exc),
                 }) from None
-            expert_context = ExpertSessionContext.from_meta(meta)
             initial_task_id = normalize_task_id(
                 meta.get("task_id") or meta.get("taskId")
             ) or ""
