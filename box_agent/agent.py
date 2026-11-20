@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from .events import (
     AgentEvent,
@@ -968,7 +968,8 @@ class Agent:
     async def aadd_user_message(self, content, *, image_content: list[dict[str, Any]] | None = None,
                                 image_source: str = "user_upload", image_context_eligible: bool = True,
                                 host_connector_status: str | None = None,
-                                input_facts: dict[str, Any] | None = None) -> None:
+                                input_facts: dict[str, Any] | None = None,
+                                input_source: Literal["user", "runtime"] = "user") -> None:
         from .api.input import UserInput
         from .input_preparation import prepare_user_input
         value = UserInput.text(content) if isinstance(content, str) else content
@@ -982,7 +983,8 @@ class Agent:
         with self.skill_runtime.reference_scope(validation):
             self.add_user_message(content, image_content=image_content, image_source=image_source,
                                   image_context_eligible=image_context_eligible,
-                                  host_connector_status=host_connector_status, input_facts=input_facts)
+                                  host_connector_status=host_connector_status, input_facts=input_facts,
+                                  **({"input_source": input_source} if input_source != "user" else {}))
 
     async def _prepare_input_attachments(self, record, images):
         from .input_preparation import resource_image_paths
@@ -1019,7 +1021,8 @@ class Agent:
     def add_user_message(self, content, *, image_content: list[dict[str, Any]] | None = None,
                          image_source: str = "user_upload", image_context_eligible: bool = True,
                          host_connector_status: str | None = None,
-                         input_facts: dict[str, Any] | None = None) -> None:
+                         input_facts: dict[str, Any] | None = None,
+                         input_source: Literal["user", "runtime"] = "user") -> None:
         """Add a user message and materialize selected Skills beside it."""
         self._restore_session_surface_after_replay_failure()
         from .api.input import UserInput
@@ -1041,7 +1044,7 @@ class Agent:
         # ContextEngine does not need to rediscover Skill bodies per request.
         materialize = getattr(self.skill_runtime, "materialize_selected_messages", None)
         materialized = materialize(self.messages) if callable(materialize) and not self.stable_prefix else ()
-        user_message = Message(role="user", content=content, host_connector_status=host_connector_status,
+        user_message = Message(role="user", source=input_source, content=content, host_connector_status=host_connector_status,
                                input_facts=input_facts)
         if image_content:
             refs = self.image_context.register(user_message, image_content, source=image_source,
