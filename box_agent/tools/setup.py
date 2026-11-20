@@ -418,15 +418,12 @@ async def initialize_base_tools(
             # lets the host hide them from manual Skill management while the
             # model can still discover and load their workflow guidance.
             connector_skills_dir = state_path("connectors/skills")
-            connector_skills_dir.mkdir(parents=True, exist_ok=True)
 
-            # Preserve the existing user-over-builtin precedence. Connector
-            # companion skills are an additional middle source, so adding the
-            # source cannot replace an already installed user Skill.
+            # Keep regular source precedence; connector names are looked up on demand.
             sources = [
                 (user_skills_dir, "user"),
-                (connector_skills_dir, "connector"),
                 (builtin_dir, "builtin"),
+                (connector_skills_dir, "connector"),
             ]
             plugin_dir = host_plugin_skills_dir()
             if plugin_dir is not None:

@@ -24,6 +24,7 @@ import threading
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
@@ -340,6 +341,18 @@ class SkillValidation:
         return result
 
 
+async def validate_tool_skill_references(loader: "SkillLoader", names: tuple[str, ...]) -> SkillValidation:
+    """Scan connector sources only for an explicitly requested missing name or dependency."""
+    lookup = getattr(loader, "tool_catalog", loader)
+    if lookup is not loader and any(loader.get_skill(name, include_disabled=True) is None for name in names):
+        return await lookup.avalidate_references(names, allow_stale=False)
+    result = await loader.avalidate_references(names, allow_stale=False)
+    if lookup is not loader and any(isinstance(error, SkillDependencyError) and error.code == "SKILL_NOT_FOUND"
+                                    for error in result.references.values()):
+        return await lookup.avalidate_references(names, allow_stale=False)
+    return result
+
+
 class SkillLoader:
     """Skill loader supporting multiple prioritized sources.
 
@@ -376,6 +389,7 @@ class SkillLoader:
             sources = [(legacy, "builtin")]
 
         self._catalog = _SkillCatalog({}, {}, [], [])
+        self._tool_catalog: Optional[SkillLoader] = None
         self._reload_lock = threading.RLock()
         self._validation_local = threading.local()
         self._validation_task: asyncio.Task[SkillValidation] | None = None
@@ -397,6 +411,30 @@ class SkillLoader:
         # run. Reset at the start of each discovery so callers can react to a
         # single pass without seeing stale data from earlier reloads.
         self.parse_errors: List[Tuple[Path, str]] = []
+
+    @cached_property
+    def conversation_catalog(self) -> "SkillLoader":
+        """The catalog refreshed by startup and ordinary turns never scans connector storage."""
+        if not any(entry.source == "connector" for entry in self._sources):
+            return self
+        view = SkillLoader(sources=[], skill_settings_path=self._skill_settings_path)
+        view._sources = [copy.deepcopy(entry) for entry in self._sources if entry.source != "connector"]
+        # Preserve already discovered regular Skills for hosts that pass a warm loader.
+        view.loaded_skills = {name: skill for name, skill in self.loaded_skills.items() if skill.source != "connector"}
+        view._all_skills = {name: skill for name, skill in self._all_skills.items() if skill.source != "connector"}
+        view._force_reload = bool(self._all_skills)
+        # Keep the identity of a recommended regular Skill when a package uses
+        # its name. Explicit lookups can then serve that name without receipt I/O.
+        lookup = SkillLoader(sources=[], skill_settings_path=self._skill_settings_path)
+        lookup._sources = [*copy.deepcopy(view._sources),
+                           *(copy.deepcopy(entry) for entry in self._sources if entry.source == "connector")]
+        lookup._force_reload = True
+        view._tool_catalog = lookup
+        return view
+
+    @property
+    def tool_catalog(self) -> "SkillLoader":
+        return self._tool_catalog or self
 
     # Keep the existing catalog API; discovery publishes all fields together.
     @property
@@ -498,6 +536,15 @@ class SkillLoader:
                 runtime = SkillRuntime(self)
                 results: dict[str, SkillReferenceSnapshot | SkillDependencyError] = {}
                 for name in dict.fromkeys(names):
+                    # A later model request may contain an earlier get_skill result.
+                    # Reuse its verified source facts without reopening connector files.
+                    if self._tool_catalog is not None:
+                        previous = self._tool_catalog._last_validated.get(name)
+                        if isinstance(previous, SkillReferenceSnapshot) and previous.source == "connector":
+                            regular = self.get_skill(name, include_disabled=True)
+                            if regular is None:
+                                results.update(self._tool_catalog._cached_validation((name,)).references)
+                                continue
                     try:
                         for skill in resolve_required_skills(self, [name]):
                             if skill.name not in results:
@@ -715,7 +762,7 @@ class SkillLoader:
         loader = SkillLoader(
             sources=[
                 *((directory, "expert") for directory in package_directories),
-                *((entry.directory, entry.source) for entry in self._sources),
+                *((entry.directory, entry.source) for entry in self.tool_catalog._sources),
                 *extra_sources,
             ],
             skill_settings_path=self._skill_settings_path,
@@ -733,10 +780,12 @@ class SkillLoader:
             bound_name = (skill_bindings_by_path or {}).get(skill_path)
             if isinstance(bound_name, str) and bound_name in entry.bound_skill_names:
                 entry.bound_skill_paths[skill_path] = bound_name
-        for original, entry in zip(self._sources, loader._sources[len(package_directories):]):
+        for original, entry in zip(self.tool_catalog._sources, loader._sources[len(package_directories):]):
             entry.containment_root = original.containment_root
             entry.bound_skill_names = original.bound_skill_names
             entry.bound_skill_paths = dict(original.bound_skill_paths)
+        if self.tool_catalog is not self:
+            loader = loader.conversation_catalog
         loader.discover_skills()
         return loader
 
@@ -748,6 +797,8 @@ class SkillLoader:
         """
         user_skills_dir = state_path('skills')
         for entry in self._sources:
+            if entry.source == "connector":
+                continue
             try:
                 if entry.directory.expanduser().resolve() == user_skills_dir.resolve():
                     return SKILL_SETTINGS_PATH
@@ -1680,7 +1731,7 @@ class SkillSelector:
         blocked_skill_names: Collection[str] = frozenset(),
         explicitly_allowed_skill_names: Collection[str] | None = None,
     ) -> None:
-        self._loader = skill_loader
+        self._loader = skill_loader.conversation_catalog
         self._include_disabled = include_disabled
         self._skill_filter = skill_filter
         self._blocked_skill_names = blocked_skill_names

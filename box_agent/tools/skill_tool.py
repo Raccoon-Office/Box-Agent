@@ -13,7 +13,9 @@ from ..execution_profile import is_skill_blocked
 from ..skill_dependencies import SkillDependencyError
 from .base import Tool, ToolResult, ToolInvocationContext
 from .completion_checks import CompletionCheck, CompletionContext
-from .skill_loader import SKILL_USAGE_GUIDANCE, SkillLoader, SkillSource, SkillValidation
+from .skill_loader import (
+    SKILL_USAGE_GUIDANCE, SkillLoader, SkillSource, SkillValidation, validate_tool_skill_references,
+)
 
 
 class GetSkillTool(Tool):
@@ -35,7 +37,7 @@ class GetSkillTool(Tool):
         allow_component_setup: bool = True,
         skip_video_generation: bool = False,
     ):
-        self.skill_loader = skill_loader
+        self.skill_loader = skill_loader.conversation_catalog
         self.include_disabled = include_disabled
         self.allowed_skill_names = allowed_skill_names
         self.preloaded_skill_hashes = preloaded_skill_hashes
@@ -159,7 +161,7 @@ class GetSkillTool(Tool):
                    or (owner if isinstance(owner, SkillRuntime) else None)
                    or SkillRuntime(self.skill_loader))
         callers = runtime._caller_references((name,)) if isinstance(runtime, SkillRuntime) else {}
-        validation = await self.skill_loader.avalidate_references(() if callers else (name,), allow_stale=False)
+        validation = await validate_tool_skill_references(self.skill_loader, () if callers else (name,))
         if callers:
             if validation.timed_out and (self.allowed_skill_names is not None or self.skill_access_filter is not None):
                 return ToolResult(success=False, error="Skill scope validation did not finish; retry later.",
@@ -219,6 +221,7 @@ def create_skill_tools(
     else:
         loader = SkillLoader(skills_dir=skills_dir or "./skills")
 
+    loader = loader.conversation_catalog
     if not defer_discovery:
         skills = loader.discover_skills()
         import sys as _sys

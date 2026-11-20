@@ -46,6 +46,7 @@ from .file_change_receipts import FileWriteInvocationContext
 from .schema_validation import ToolArgumentIssue
 from .jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from .skill_catalog_tool import ListSkillsTool
+from .skill_loader import validate_tool_skill_references
 from .skill_tool import GetSkillTool
 from .sub_agent_capabilities import (
     BATCH_AGGREGATE_MAX_CHARS,
@@ -1649,7 +1650,7 @@ class SubAgentTool(EventEmittingTool):
 
         skill_loader = self._resolve_skill_loader()
         if parsed.skill_names and skill_loader is not None:
-            validation = await skill_loader.avalidate_references(tuple(parsed.skill_names), allow_stale=False)
+            validation = await validate_tool_skill_references(skill_loader, tuple(parsed.skill_names))
             for name in parsed.skill_names:
                 try:
                     validation.resolve(name)

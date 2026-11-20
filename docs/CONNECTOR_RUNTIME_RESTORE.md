@@ -72,16 +72,21 @@ Conversation connector authorization applies to eager and deferred tools,
 including child inheritance and calls after a selection is revoked. Catalog
 refreshes never add tools to utility sessions, including background discovery.
 
-Package Skills have a separate lifecycle from MCP tools. Both MCP and CLI
-packages install their Skills under
-`<BOX_AGENT_HOME>/connectors/skills/connector-<id>/<skill-id>/SKILL.md`, with
-`source=connector`. The desktop host writes `disable: true` when the connector
-is disabled and removes its owned installation on uninstall. SkillLoader's
-existing refresh and disable handling controls discovery and reads, including
-child delegation; there is no additional MCP-connectivity, connector-selection,
-or conversation-grant requirement for these Skills. A temporary MCP outage does
-not disable guidance. Reading guidance does not grant access to MCP tools.
-Previously delivered guidance remains in conversation history.
+Package Skills have a separate lifecycle from MCP tools. For versioned MCP and CLI
+packages, `connectors/skills/.installations/<id>.json` selects the active revision
+under `connectors/skill-versions/connector-<id>/<revision>/`. Existing installations
+under `connectors/skills/connector-<id>/` are also supported. Paths are relative to
+`BOX_AGENT_HOME`. The desktop host disables or removes the owned Skills when it
+disables or uninstalls a connector.
+
+Automatic recommendations, including those for selected connectors, use only
+regular Skill sources. Startup, session creation, and ordinary prompts never scan
+connector receipts. The model can discover an installed package method through
+`list_skills` and read its current enabled version through `get_skill`. These
+lookups use a separate catalog and lock; another session can chat while a lookup
+is pending. A same-name regular Skill keeps its identity in both recommendations
+and tool reads. Explicit child Skill delegation can use the same sources. A temporary
+MCP outage does not disable guidance. Reading guidance does not grant MCP tools.
 
 This package lifecycle does not change built-in Lark, WeCom, or DingTalk
 integrations, their credentials, or ordinary user/SkillHub Skill settings.

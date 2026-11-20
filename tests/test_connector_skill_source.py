@@ -57,7 +57,7 @@ def test_disabled_connector_skill_stays_out_of_model_catalog(tmp_path: Path) -> 
     assert disabled.disabled is True
 
 
-def test_enabled_connector_skill_is_matched_without_connection_filter(
+def test_enabled_connector_skill_stays_out_of_automatic_recommendations(
     tmp_path: Path,
 ) -> None:
     connector_root = tmp_path / "connectors" / "skills"
@@ -67,9 +67,9 @@ def test_enabled_connector_skill_is_matched_without_connection_filter(
     selector = SkillSelector(loader)
     selector.bind(f"prefix\n\n{SKILL_SLOT_SENTINEL}\n\nsuffix")
 
-    assert "pkulaw" in (selector.update("PKULaw legal search") or "")
+    assert "pkulaw" not in (selector.update("PKULaw legal search") or "")
     selector.update("continue")
-    assert "pkulaw" in selector.matched_skill_names
+    assert selector.matched_skill_names == ()
 
 
 @pytest.mark.asyncio

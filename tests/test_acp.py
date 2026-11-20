@@ -550,7 +550,7 @@ async def test_acp_connector_skills_follow_installed_enablement_not_mcp_status(
     state = agent._sessions[session.sessionId]
     tool = state.agent.tools["get_skill"]
     state.skill_selector.render_catalog("package-fixture")
-    assert "package-guide" in state.skill_selector.matched_skill_names
+    assert "package-guide" not in state.skill_selector.matched_skill_names
     result = await tool.execute(skill_name="package-guide")
     assert result.success is True
     assert "PACKAGE GUIDANCE" in result.content
@@ -558,7 +558,7 @@ async def test_acp_connector_skills_follow_installed_enablement_not_mcp_status(
         sessionId=session.sessionId, prompt=[{"text": "Use the package guide"}],
         field_meta={"selected_skill_names": ["package-guide"]},
     )))
-    assert "package-guide" in state.explicitly_allowed_skill_names
+    assert "package-guide" not in state.explicitly_allowed_skill_names
 
     skill_path.write_text(enabled_content.replace("---\n", "---\ndisable: true\n", 1), encoding="utf-8")
     await state.skill_loader.areload()

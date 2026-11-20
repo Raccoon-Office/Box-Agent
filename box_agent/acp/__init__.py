@@ -1291,7 +1291,7 @@ class BoxACPAgent:
         self._client_info: ClientInfo | None = None
         self._memory = memory_manager
         self._hooks = hooks
-        self._skill_loader = skill_loader
+        self._skill_loader = getattr(skill_loader, "conversation_catalog", skill_loader)
         self._base_mcp_fallback_tools: dict[str, Any] = {}
         self._mcp_controller = MCPRuntimeController(
             base_tools=self._base_tools,

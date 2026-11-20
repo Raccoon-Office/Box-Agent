@@ -26,7 +26,7 @@ class ListSkillsTool(Tool):
         skill_access_filter: Callable[[Any], bool] | None = None,
         skill_filter: Callable[[Any], bool] | None = None,
     ) -> None:
-        self.skill_loader = skill_loader
+        self.skill_loader = skill_loader.conversation_catalog
         self.include_disabled = include_disabled
         self.allowed_skill_names = (
             frozenset(allowed_skill_names) if allowed_skill_names is not None else None
@@ -66,10 +66,10 @@ class ListSkillsTool(Tool):
     def _in_scope(self, name: str) -> bool:
         return self.allowed_skill_names is None or name in self.allowed_skill_names
 
-    def _metadata(self, skill: Skill) -> dict[str, object]:
+    def _metadata(self, skill: Skill, loader: SkillLoader) -> dict[str, object]:
         reason = None
         # include_disabled controls diagnostic visibility, never availability.
-        if self.skill_loader.get_skill(skill.name) is None:
+        if loader.get_skill(skill.name) is None:
             reason = "Skill is disabled by the current configuration."
         elif skill.broken:
             reason = f"Skill is malformed: {skill.broken_reason or 'invalid SKILL.md'}"
@@ -93,17 +93,18 @@ class ListSkillsTool(Tool):
         )
         if issues:
             return self._invalid_arguments_result(issues)
-        await self.skill_loader.areload()
+        loader = self.skill_loader.tool_catalog
+        await loader.areload()
         query = query.strip()
         skills = [
-            skill for skill in self.skill_loader.search_skills(include_disabled=True)
+            skill for skill in loader.search_skills(include_disabled=True)
             if self.skill_filter is None or self.skill_filter(skill)
         ]
         catalog = {
-            skill.name: self._metadata(skill)
+            skill.name: self._metadata(skill, loader)
             for skill in skills if self._in_scope(skill.name)
         }
-        for diagnostic in self.skill_loader.unavailable_skills_metadata():
+        for diagnostic in loader.unavailable_skills_metadata():
             name = str(diagnostic["name"])
             if self._in_scope(name) and (
                 self.skill_filter is None
@@ -132,10 +133,10 @@ class ListSkillsTool(Tool):
         else:
             matches = [
                 catalog[skill.name]
-                for skill in self.skill_loader.search_skills(query, include_disabled=True)
+                for skill in loader.search_skills(query, include_disabled=True)
                 if skill.user_visible and skill.name in catalog and (
                     catalog[skill.name]["available"]
-                    or (self.include_disabled and self.skill_loader.get_skill(skill.name) is None)
+                    or (self.include_disabled and loader.get_skill(skill.name) is None)
                 )
             ]
         page = matches[offset:offset + limit]
