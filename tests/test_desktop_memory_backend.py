@@ -1403,9 +1403,13 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
             assert request["session_id"] == response["session_id"] == "trace-session"
             assert request["turn_id"] == response["turn_id"] == "trace-turn"
             assert request["llm_call_id"] == response["llm_call_id"]
-            assert request["data"]["messages"] == [
-                message.model_dump(exclude_none=True, exclude={"host_connector_status"}) for message in actual
-            ]
+            expected = []
+            for message in actual:
+                recorded = message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+                if message.role == "user":
+                    recorded["source"] = message.source
+                expected.append(recorded)
+            assert request["data"]["messages"] == expected
             assert "user_items-unique-data" in request["data"]["messages"][0]["content"]
         assert requests[0]["llm_call_id"] != requests[1]["llm_call_id"]
         tool_request = next(row for row in records if row["event"] == "tool.request" and row["tool_call_id"] == "trace-call")

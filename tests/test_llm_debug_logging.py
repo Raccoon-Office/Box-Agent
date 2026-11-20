@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -166,6 +168,52 @@ def test_summarize_request_payload_for_logging_compacts_large_messages_and_tools
     assert summarized["tools"][0]["function"]["parameters"]["property_count"] == 25
     assert summarized["tools"][0]["function"]["parameters"]["properties_omitted"] == 5
     assert long_text not in str(summarized)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
+@pytest.mark.parametrize("existing_dir", [False, True])
+def test_agent_run_log_is_private_when_it_records_a_reply(tmp_path, monkeypatch, existing_dir):
+    profile = tmp_path / "profile"
+    log_dir = profile / "log"
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    if existing_dir:
+        log_dir.mkdir(parents=True)
+        log_dir.chmod(0o755)
+
+    previous_umask = os.umask(0o022)
+    try:
+        agent_logger = AgentLogger()
+        agent_logger.start_new_run()
+        agent_logger.log_response("synthetic private reply")
+    finally:
+        os.umask(previous_umask)
+
+    path = agent_logger.get_log_file_path()
+    assert path is not None and "synthetic private reply" in path.read_text(encoding="utf-8")
+    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX file links")
+@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+def test_agent_run_does_not_log_private_text_through_a_replaced_path(tmp_path, monkeypatch, link):
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "profile"))
+    agent_logger = AgentLogger()
+    agent_logger.start_new_run()
+    path = agent_logger.get_log_file_path()
+    assert path is not None
+
+    other = tmp_path / "untouched.txt"
+    other.write_text("untouched", encoding="utf-8")
+    path.unlink()
+    if link == "symlink":
+        path.symlink_to(other)
+    else:
+        os.link(other, path)
+    agent_logger.log_response("synthetic private reply")
+
+    assert other.read_text(encoding="utf-8") == "untouched"
+    assert agent_logger.get_log_file_path() is None
 
 
 def test_agent_logger_summarizes_large_records_by_default(tmp_path, monkeypatch) -> None:

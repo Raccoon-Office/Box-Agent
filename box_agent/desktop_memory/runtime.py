@@ -85,6 +85,11 @@ class DesktopMemoryRuntime(MemoryRuntime):
         self._experience = ExperienceRuntime(backend.transport)
         self._close_tasks: set[asyncio.Task] = set()
 
+    def user_turn_scope(self, turn: _MemoryTurn):
+        from ..payload_privacy import private_payload_scope
+
+        return private_payload_scope()
+
     @staticmethod
     def _attempt_events(log):
         for event in log.events_of_type("memory/desktop-attempt"):

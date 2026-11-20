@@ -26,8 +26,9 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any
 
+from box_agent.log_files import open_private_log
 from box_agent.user_paths import state_path
-from box_agent.payload_privacy import diagnostic_event_fields
+from box_agent.payload_privacy import diagnostic_event_fields, diagnostic_stream_fields
 
 # ── Level constants ──────────────────────────────────────────
 
@@ -74,7 +75,7 @@ class ACPDebugLogger:
         if file_path:
             file_path = str(state_path("log/box-agent.log", file_path))
             try:
-                self._file_handle = open(file_path, "a", encoding="utf-8", buffering=1)  # line-buffered
+                self._file_handle = open_private_log(file_path, "a", buffering=1)
                 self._file_path = file_path
             except Exception:
                 # File open failure must not crash the server
@@ -133,20 +134,20 @@ class ACPDebugLogger:
             if key in fields:
                 fields[key] = _preview(fields[key])
 
-        if self._format == "json":
-            record = {"timestamp": ts, "level": level_name, "event": event, **fields}
-            line = _json.dumps(record, ensure_ascii=False, default=str)
-        else:
-            # text format: timestamp [LEVEL] event key=value key=value ...
-            parts = [f"{ts} [{level_name}] {event}"]
-            for k, v in fields.items():
-                if v is not None and v != "":
-                    parts.append(f"{k}={v}")
-            line = "  ".join(parts)
-
-        line += "\n"
-        self._write_stderr(line)
+        line = self._format_line(ts, level_name, event, fields)
+        stream_fields = diagnostic_stream_fields(fields)
+        self._write_stderr(
+            line if stream_fields is fields else self._format_line(ts, level_name, event, stream_fields)
+        )
         self._write_file(line)
+
+    def _format_line(self, ts: str, level: str, event: str, fields: dict[str, Any]) -> str:
+        if self._format == "json":
+            record = {"timestamp": ts, "level": level, "event": event, **fields}
+            return _json.dumps(record, ensure_ascii=False, default=str) + "\n"
+        parts = [f"{ts} [{level}] {event}"]
+        parts.extend(f"{key}={value}" for key, value in fields.items() if value is not None and value != "")
+        return "  ".join(parts) + "\n"
 
     def _write_stderr(self, line: str) -> None:
         try:

@@ -9672,9 +9672,12 @@ async def test_desktop_acp_keeps_tool_bodies_in_diagnostics_and_original_protoco
         assert result.stopReason == 'end_turn'
         assert llm.saw_result
         assert any(canary in str(update.model_dump()) for update in conn.updates)
-        output = capsys.readouterr().err + (tmp_path / 'runtime.log').read_text()
-        assert 'ordinary ACP memory body' in output
-        assert 'fixture-acp-secret' not in output
-        assert 'payload_redacted' not in output
+        stderr = capsys.readouterr().err
+        detail = (tmp_path / 'runtime.log').read_text()
+        assert 'ordinary ACP memory body' not in stderr
+        assert 'payload_redacted' in stderr
+        assert 'ordinary ACP memory body' in detail
+        assert 'fixture-acp-secret' not in stderr + detail
+        assert 'payload_redacted' not in detail
     finally:
         logger.close()

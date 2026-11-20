@@ -1,6 +1,7 @@
 """Agent run logger"""
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -9,6 +10,7 @@ from .llm.debug_logging import (
     full_payload_logging_enabled,
     summarize_request_payload_for_logging,
 )
+from .log_files import make_private_log_dir, open_private_log
 from .schema import Message, ToolCall
 from .payload_privacy import (
     diagnostic_event_fields,
@@ -16,6 +18,9 @@ from .payload_privacy import (
 )
 
 from box_agent.user_paths import state_path
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentLogger:
@@ -33,30 +38,33 @@ class AgentLogger:
         """
         # Use ~/.box-agent/log/ directory for logs
         self.log_dir = state_path('log')
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.log_file = None
+        self.log_file: Path | None = None
         self.log_index = 0
 
     def start_new_run(self):
         """Start new run, create new log file"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        suffix = 0
-        while True:
-            discriminator = f"_{suffix}" if suffix else ""
-            candidate = self.log_dir / f"agent_run_{timestamp}{discriminator}.log"
-            try:
-                handle = candidate.open("x", encoding="utf-8")
-                break
-            except FileExistsError:
-                suffix += 1
-        self.log_file = candidate
+        self.log_file = None
         self.log_index = 0
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        try:
+            make_private_log_dir(self.log_dir)
+            suffix = 0
+            while True:
+                discriminator = f"_{suffix}" if suffix else ""
+                candidate = self.log_dir / f"agent_run_{timestamp}{discriminator}.log"
+                try:
+                    handle = open_private_log(candidate, "x")
+                    break
+                except FileExistsError:
+                    suffix += 1
 
-        # Write log header
-        with handle as f:
-            f.write("=" * 80 + "\n")
-            f.write(f"Agent Run Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 80 + "\n\n")
+            with handle as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"Agent Run Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 80 + "\n\n")
+            self.log_file = candidate
+        except OSError:
+            logger.warning("Agent run log unavailable", exc_info=True)
 
     def log_request(
         self,
@@ -250,13 +258,17 @@ class AgentLogger:
         if self.log_file is None:
             return
 
-        with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write("\n" + "-" * 80 + "\n")
-            f.write(f"[{self.log_index}] {log_type}\n")
-            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
-            f.write("-" * 80 + "\n")
-            f.write(content + "\n")
+        try:
+            with open_private_log(self.log_file, "a") as f:
+                f.write("\n" + "-" * 80 + "\n")
+                f.write(f"[{self.log_index}] {log_type}\n")
+                f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
+                f.write("-" * 80 + "\n")
+                f.write(content + "\n")
+        except OSError:
+            self.log_file = None
+            logger.warning("Agent run log unavailable", exc_info=True)
 
-    def get_log_file_path(self) -> Path:
+    def get_log_file_path(self) -> Path | None:
         """Get current log file path"""
         return self.log_file

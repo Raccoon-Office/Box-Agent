@@ -71,7 +71,11 @@ from box_agent.agent_session import AgentSession
 from box_agent.cloud_handoff import cloud_handoff_instruction, validate_cloud_handoff
 from box_agent.acp.message_display import MessageDisplay
 from box_agent.injections import InjectionKind, InjectionManager, MessageInjection
-from box_agent.payload_privacy import diagnostic_continuation_quote, redact_diagnostic_text
+from box_agent.payload_privacy import (
+    diagnostic_continuation_quote,
+    private_payload_scope,
+    redact_diagnostic_text,
+)
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
 from box_agent.session_assembly import create_application_runtime
@@ -2886,7 +2890,9 @@ class BoxACPAgent:
             turn_id = turn_id or f"{session_id}-turn-{state.turn_counter + 1}"
             if state.trace_writer is not None:
                 trace_token = set_session_trace_writer(state.trace_writer, turn_id=turn_id)
-            return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
+            config = state.config or self._config
+            with private_payload_scope(config.agent.memory_backend_type == "desktop"):
+                return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
         except Exception as exc:
             if edit is not None:
                 history = state.agent.session_log
@@ -4439,6 +4445,10 @@ class BoxACPAgent:
         return injected
 
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
+        with private_payload_scope(self._config.agent.memory_backend_type == "desktop"):
+            return await self._run_llm_prompt(params)
+
+    async def _run_llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single tool-free completion (titles/summaries/rewrites).
 
         Bypasses ``newSession``: no MCP wait, no skills metadata, no tools, no

@@ -7,6 +7,7 @@ from tests.acp_helpers import acp_params
 import asyncio
 import json
 import os
+import stat
 import time
 from types import SimpleNamespace
 
@@ -56,6 +57,27 @@ class EchoTool(Tool):
 
     async def execute(self, text: str = ""):
         return ToolResult(success=True, content=f"echo:{text}")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
+def test_trace_tightens_existing_file_before_appending_errors(tmp_path):
+    trace_dir = tmp_path / "logs"
+    trace_dir.mkdir()
+    trace_dir.chmod(0o755)
+    writer = SessionTraceWriter(session_id="private", acp_session_id="", trace_dir=trace_dir, enabled=True)
+    writer.file_path.write_text('{"event":"session.start"}\n', encoding="utf-8")
+    writer.file_path.chmod(0o644)
+
+    writer.write("llm.error", data={"error": "synthetic model failure"})
+    writer.write("tool.response", data={"tool_name": "mcp__seko", "success": False, "error": "synthetic video failure"})
+
+    assert stat.S_IMODE(trace_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(writer.file_path.stat().st_mode) == 0o600
+    assert [row["event"] for row in _records(writer)] == ["session.start", "llm.error", "tool.response"]
+    assert [row["data"]["error"] for row in _records(writer)[1:]] == [
+        "synthetic model failure",
+        "synthetic video failure",
+    ]
 
 
 def test_writer_appends_jsonl_and_preserves_ids_with_redaction(tmp_path):

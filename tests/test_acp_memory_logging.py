@@ -1,12 +1,52 @@
 """Diagnostic copies retain payloads while removing credentials."""
 import asyncio
 import json
+import os
+import stat
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
 from box_agent.acp.debug_logger import ACPDebugLogger
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
+@pytest.mark.parametrize("existing_file", [False, True])
+def test_acp_and_provider_log_only_to_owner_accessible_files(tmp_path, monkeypatch, existing_file):
+    from box_agent.llm.debug_logging import log_llm_request
+
+    monkeypatch.setenv("BOX_AGENT_LOG_LEVEL", "debug")
+    monkeypatch.setenv("BOX_AGENT_LLM_DEBUG", "1")
+    acp_file = tmp_path / "acp.log"
+    provider_file = tmp_path / "provider.log"
+    if existing_file:
+        for path in (acp_file, provider_file):
+            path.write_text("older record\n", encoding="utf-8")
+            path.chmod(0o644)
+    previous_umask = os.umask(0o022)
+    try:
+        monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(acp_file))
+        logger = ACPDebugLogger()
+        try:
+            logger.warn("tool/fail", tool_name="mcp__fixture", error="synthetic MCP failure")
+        finally:
+            logger.close()
+
+        monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(provider_file))
+        log_llm_request(
+            provider="openai", mode="utility", api_base="https://example.invalid",
+            params={"messages": [{"role": "user", "content": "synthetic private message"}]},
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert "synthetic MCP failure" in acp_file.read_text(encoding="utf-8")
+    assert "synthetic private message" in provider_file.read_text(encoding="utf-8")
+    for path in (acp_file, provider_file):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        if existing_file:
+            assert path.read_text(encoding="utf-8").startswith("older record\n")
 
 
 @pytest.mark.parametrize("level,log_format", [(None, "json"), ("debug", "json"), ("debug", "text")])
@@ -154,7 +194,8 @@ async def test_prompt_failure_keeps_sanitized_diagnostics_and_releases_reservati
     from tests.test_agent_session import session_config
 
     monkeypatch.setenv("BOX_AGENT_LOG_LEVEL", "debug")
-    monkeypatch.delenv("BOX_AGENT_LOG_FILE", raising=False)
+    logfile = tmp_path / "prompt.log"
+    monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(logfile))
     logger = ACPDebugLogger()
     config = session_config(tmp_path)
     config.agent.memory_backend_type = backend
@@ -177,9 +218,14 @@ async def test_prompt_failure_keeps_sanitized_diagnostics_and_releases_reservati
         assert not state._prompt_in_progress
         assert state._prompt_finished.done()
         output = capsys.readouterr().err
-        assert "fixture prompt failure" in output
+        assert ("fixture prompt failure" in output) is (backend == "local")
+        assert ("payload_redacted" in output) is (backend == "desktop")
+        assert "session/prompt" in output and "s-1" in output
         assert "fixture-prompt-secret" not in output
-        assert "payload_redacted" not in output
+        file_output = logfile.read_text(encoding="utf-8")
+        assert "fixture prompt failure" in file_output
+        assert "fixture-prompt-secret" not in file_output
+        assert "payload_redacted" not in file_output
     finally:
         logger.close()
 

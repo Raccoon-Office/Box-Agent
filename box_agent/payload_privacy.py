@@ -6,13 +6,27 @@ import copy
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 from uuid import uuid4
 
 import yaml
 
 _REDACTED = "<redacted>"
+_PRIVATE = ContextVar("private_diagnostic_stream", default=False)
+_STREAM_METADATA_FIELDS = {
+    "timestamp", "level", "event", "session_id", "turn_id", "tool_call_id",
+    "tool_name", "tool_id", "server_name", "step", "success", "user_visible",
+    "duration_ms", "elapsed_ms", "cancelled", "exit_code",
+}
+_PRIVATE_LOGGER_NAMES = {
+    "box_agent.core", "box_agent.kernel.loop", "box_agent.hooks",
+    "box_agent.tools.bash_tool", "box_agent.tools.mcp_result_hooks", "httpx",
+}
+_PRIVATE_LOGGER_PREFIXES = ("openai.", "anthropic.", "httpcore.", "box_agent.llm.")
+
 CREDENTIAL_FIELD = re.compile(
     r"(?i)(?!(?:[\w.-]+[_.-])?(?:total|input|output|prompt|completion)[_.-]token$)"
     r"(?:[\w.-]+[_.-])?(?:authorization|(?:set[_.-]?)?cookie|password\d*|pgpassword|passwd|pwd|pass|passphrase|credentials|"
@@ -730,6 +744,12 @@ class DiagnosticFormatter(logging.Formatter):
         # repr() adds escapes. Preserve the type of other formatting arguments
         # (notably integer %d) and other handlers' original record.
         record = copy.copy(record)
+        if _PRIVATE.get() and (
+            record.name in _PRIVATE_LOGGER_NAMES or record.name.startswith(_PRIVATE_LOGGER_PREFIXES)
+        ):
+            record.msg = "<private diagnostic payload omitted>"
+            record.args = ()
+            record.exc_info = record.exc_text = record.stack_info = None
         if isinstance(record.args, Mapping):
             record.args = redact_diagnostic_value(record.args)
         elif isinstance(record.args, tuple):
@@ -846,3 +866,29 @@ def diagnostic_event_fields(event: str, fields: Mapping[str, Any]) -> dict[str, 
         if match:
             result["exit_code"] = int(match[1])
     return result
+
+
+@contextmanager
+def private_payload_scope(enabled: bool = True) -> Iterator[None]:
+    """Limit stream diagnostics while the conversation is private."""
+    if not enabled:
+        yield
+        return
+    token = _PRIVATE.set(True)
+    try:
+        yield
+    finally:
+        _PRIVATE.reset(token)
+
+
+def diagnostic_stream_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Omit bodies from streams that a host might copy to a general log."""
+    if not _PRIVATE.get():
+        return fields
+    return {
+        **{
+            key: value for key, value in fields.items()
+            if key in _STREAM_METADATA_FIELDS and isinstance(value, (str, int, float, bool))
+        },
+        "payload_redacted": True,
+    }

@@ -337,6 +337,22 @@ def test_native_windows_everyone_read_grant_is_rejected_before_payload_read(tmp_
         module.read_private_bootstrap(path, 65536, api=api)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows DACL enforcement")
+def test_diagnostic_append_requires_private_windows_acl(tmp_path):
+    from box_agent.log_files import open_private_log
+
+    path, _, grant_world = native_fixture(tmp_path)
+    with open_private_log(path, "a") as stream:
+        stream.write("synthetic diagnostic")
+    before = path.read_bytes()
+    assert before.endswith(b"synthetic diagnostic")
+    grant_world(path)
+    with pytest.raises(PermissionError):
+        with open_private_log(path, "a") as stream:
+            stream.write("must not reach the file")
+    assert path.read_bytes() == before
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows file link metadata")
 def test_native_windows_hardlinked_bootstrap_is_rejected(tmp_path):
     path, api, _ = native_fixture(tmp_path)

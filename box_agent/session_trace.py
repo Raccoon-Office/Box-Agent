@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 from uuid import uuid4
 
+from .log_files import open_private_log
 from .payload_privacy import diagnostic_event_fields
 
 from box_agent.user_paths import state_path
@@ -319,14 +320,8 @@ class SessionTraceWriter:
             line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str)
             with _WRITE_LOCK:
                 self.trace_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                descriptor = os.open(
-                    self.file_path,
-                    os.O_APPEND | os.O_CREAT | os.O_WRONLY,
-                    0o600,
-                )
-                # POSIX file names can contain surrogate-escaped bytes. Keep
-                # them as JSON escapes without dropping the rest of the event.
-                with os.fdopen(descriptor, "a", encoding="utf-8", errors="backslashreplace") as handle:
+                # Surrogate-escaped file names remain readable as JSON escapes.
+                with open_private_log(self.file_path, "a", errors="backslashreplace") as handle:
                     handle.write(line + "\n")
                     handle.flush()
             _maybe_cleanup_session_traces(

@@ -224,6 +224,7 @@ class _StubAgent:
 
     ext_method = BoxACPAgent.ext_method
     _llm_prompt = BoxACPAgent._llm_prompt
+    _run_llm_prompt = BoxACPAgent._run_llm_prompt
     _llm_for_binding = BoxACPAgent._llm_for_binding
     _utility_llm_for_meta = BoxACPAgent._utility_llm_for_meta
 
@@ -373,9 +374,11 @@ async def test_desktop_title_diagnostics_keep_qa_and_scrub_credentials_without_c
             assert 'error' in result
         else:
             assert result['text'] == canary
-        output = capsys.readouterr().err + (tmp_path / 'title.log').read_text()
-        assert 'ordinary title QA' in output
-        assert 'fixture-title-secret' not in output
-        assert 'payload_redacted' not in output
+        stderr = capsys.readouterr().err
+        log = (tmp_path / 'title.log').read_text()
+        assert 'ordinary title QA' not in stderr
+        assert 'ordinary title QA' in log
+        assert 'fixture-title-secret' not in stderr + log
+        assert 'payload_redacted' not in log
     finally:
         logger.close()

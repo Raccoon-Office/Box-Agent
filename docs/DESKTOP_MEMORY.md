@@ -42,7 +42,10 @@ Hosts must implement the named proxy operations and enforce identity, session, r
 
 ## Diagnostics and revocation
 
-ACP and CLI record desktop turns in the session trace at the default log level. Trace events include user input, the messages and memory supplied to the model, and tool arguments and results. Background Experience calls scheduled during refresh or QA handoff inherit the session writer. Look for a request with `call_kind: memory_experience` and the job's event ID as its `turn_id`, then match its response by `llm_call_id`. Run logs and provider debug logs follow their normal level, preview and full-payload settings. Credential filtering applies to diagnostic output.
+ACP and CLI record desktop turns in the session trace at the default log level. Trace events include user input, the messages and memory supplied to the model, and tool arguments and results. Background Experience calls scheduled during refresh or QA handoff inherit the session writer. Look for a request with `call_kind: memory_experience` and the job's event ID as its `turn_id`, then match its response by `llm_call_id`. Run logs and provider debug logs follow their normal level, preview and full-payload settings. Credential filtering applies to diagnostic output. On POSIX, the run log directory, new trace directories
+and detailed log files are restricted to their owner. On Windows, the writer checks the file's inherited access
+list before adding details. Desktop stderr carries event metadata so hosts can
+record it independently of the detailed files.
 
 After authentication, identity or memory-disable rejection, final input projection removes the owned preload block before checking whether the request fits its budget. It does not rewrite durable history. Utility sessions keep memory tools, extraction and persistence disabled; existing local host metadata used for UI guidance remains compatible, while desktop utility sessions retain no usable backend.
 
