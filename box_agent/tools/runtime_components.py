@@ -9,9 +9,13 @@ def plugin_skill_requirement(
     name: str, loader, *, allow_setup: bool = True, skip_video: bool = False,
 ) -> ToolResult | None:
     """The desktop opts in; CLI and older hosts keep their existing Skill behavior."""
-    if name != "hyperframes-video" or (not skip_video and "BOX_AGENT_PLUGIN_SKILLS_DIR" not in os.environ):
+    if not skip_video and "BOX_AGENT_PLUGIN_SKILLS_DIR" not in os.environ:
         return None
     skill = loader.get_skill(name)
+    if name != "hyperframes-video" and not (
+        skill and skill.declared_skill and skill.declared_skill.name == "hyperframes-video"
+    ):
+        return None
     if (not skip_video and os.environ.get("BOX_AGENT_VIDEO_RUNTIME_READY") == "1" and skill is not None
             and skill.source == "plugin" and not skill.broken):
         return None

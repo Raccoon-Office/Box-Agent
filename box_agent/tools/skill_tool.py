@@ -71,7 +71,7 @@ class GetSkillTool(Tool):
             "properties": {
                 "skill_name": {
                     "type": "string",
-                    "description": "Name of the skill to retrieve (use list_skills to view available skills)",
+                    "description": "Known Skill name or the exact skill_name from a list_skills row.",
                 },
                 "offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset; omit to read the whole Skill when it fits."},
                 "limit": {"type": "integer", "minimum": 1, "description": "Maximum lines for a bounded page."},
@@ -98,13 +98,16 @@ class GetSkillTool(Tool):
         name = skill_name.strip()
         if self.allowed_skill_names is not None and name not in self.allowed_skill_names:
             return ToolResult(success=False, error="Skill is outside this task's assigned scope.")
-        if is_skill_blocked(name, self.blocked_skill_names, self.explicitly_allowed_skill_names):
+        loader = catalog or self.skill_loader
+        selected = loader.get_skill(name, include_disabled=True)
+        declared_name = selected.declared_skill.name if selected and selected.declared_skill else None
+        if is_skill_blocked(name, self.blocked_skill_names, self.explicitly_allowed_skill_names,
+                            declared_name=declared_name):
             return ToolResult(success=False, error=(
                 f"Skill '{name}' is disabled by the active execution profile unless the user explicitly requests it. "
                 "Continue with bounded direct work and do not retry loading this Skill."))
         if refresh:
             self.skill_loader.maybe_reload()
-        loader = catalog or self.skill_loader
         requirement = self.component_requirement(name, catalog=loader)
         if requirement is not None:
             return requirement
@@ -116,7 +119,7 @@ class GetSkillTool(Tool):
             if self.allowed_skill_names is not None and any(skill.name not in self.allowed_skill_names for skill in dependencies):
                 return ToolResult(success=False, error="Required Skill is outside this task's assigned scope.")
             for skill in dependencies:
-                if self.skill_access_filter is not None and not self.skill_access_filter(skill):
+                if self.skill_access_filter is not None and not self.skill_access_filter(skill.declared_skill or skill):
                     return ToolResult(success=False, error=(
                         f"Skill '{skill.name}' is not enabled for this conversation. "
                         "Connector Skills can only be enabled through the conversation connector picker."

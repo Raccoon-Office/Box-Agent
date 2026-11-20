@@ -84,8 +84,11 @@ regular Skill sources. Startup, session creation, and ordinary prompts never sca
 connector receipts. The model can discover an installed package method through
 `list_skills` and read its current enabled version through `get_skill`. These
 lookups use a separate catalog and lock; another session can chat while a lookup
-is pending. A same-name regular Skill keeps its identity in both recommendations
-and tool reads. Explicit child Skill delegation can use the same sources. A temporary
+is pending. When several visible methods share a name with a connector Skill,
+`list_skills` returns a row for each file. Pass the chosen row's `skill_name` to
+`get_skill`. A regular Skill keeps its short name. Each colliding connector row
+identifies its active `SKILL.md` by path. After a package version change, list
+again to obtain its current path. Explicit child Skill delegation can use the same sources. A temporary
 MCP outage does not disable guidance. Reading guidance does not grant MCP tools.
 
 This package lifecycle does not change built-in Lark, WeCom, or DingTalk

@@ -34,6 +34,35 @@ def make_tool(loader, **kwargs):
     return ListSkillsTool(loader, **kwargs)
 
 
+async def test_same_named_connector_files_are_individually_readable_and_scoped(tmp_path):
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    root = tmp_path / "connectors"
+    files = {owner: write_skill(root / f"connector-{owner}", "guide", body=f"BODY_{owner}")
+             for owner in ("alpha", "beta")}
+    loader = SkillLoader(sources=[(root, "connector")], skill_settings_path=tmp_path / "settings.json")
+    listing = make_tool(loader)
+    first = await payload(listing, query="guide", limit=1)
+    second = await payload(listing, query="guide", offset=first["next_offset"], limit=1)
+    assert first["revision"] == second["revision"] and first["total"] == 2
+    rows = first["skills"] + second["skills"]
+    assert {row["ownerId"] for row in rows} == set(files)
+    for row in rows:
+        owner, selector = row["ownerId"], row["skill_name"]
+        assert row["name"] == "guide" and selector == str(files[owner])
+        result = await GetSkillTool(loader).invoke({"skill_name": selector})
+        assert result.success and f"BODY_{owner}" in result.content
+        for policy in ({"allowed_skill_names": {"guide"}}, {"blocked_skill_names": {"guide"}},
+                       {"blocked_skill_names": {selector}},
+                       {"skill_access_filter": lambda skill: skill.name != "guide"}):
+            assert not (await GetSkillTool(loader, **policy).invoke({"skill_name": selector})).success
+    files["alpha"].unlink()
+    assert not (await GetSkillTool(loader).invoke({"skill_name": str(files["alpha"])})).success
+    remaining = await payload(listing, query="guide")
+    assert [(row["name"], row["skill_name"]) for row in remaining["skills"]] == [("guide", "guide")]
+    assert (await GetSkillTool(loader).invoke({"skill_name": str(files["beta"])})).success
+
+
 async def payload(tool, **arguments):
     result = await tool.invoke(arguments)
     assert result.success, result.error

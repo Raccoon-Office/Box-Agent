@@ -105,7 +105,13 @@ async def test_connector_receipt_io_is_confined_to_explicit_skill_lookup(tmp_pat
         release.set()
         assert (await lookup).raw_output["skills"][0]["name"] == "meeting-guide"
         same_name = await state.agent.tools["list_skills"].execute(query="other-guide")
-        assert same_name.raw_output["skills"][0]["source"] == regular_source
+        rows = same_name.raw_output["skills"]
+        assert [(row["name"], row["source"]) for row in rows] == [
+            ("other-guide", regular_source), ("other-guide", "connector"),
+        ]
+        for row, body in zip(rows, ("REGULAR_METHOD", "PACKAGE_DUPLICATE")):
+            read_result = await state.agent.tools["get_skill"].execute(skill_name=row["skill_name"])
+            assert read_result.success and body in read_result.content
         model.read_next = True
         await prompt(host, session.sessionId, "read the meeting guide")
         assert any(m["role"] == "tool" and "PACKAGE_METHOD" in str(m.get("content"))
@@ -115,12 +121,15 @@ async def test_connector_receipt_io_is_confined_to_explicit_skill_lookup(tmp_pat
         # without hitting disk again, even though this name is never recommended.
         verified = await state.skill_loader.avalidate_references(("meeting-guide",))
         assert verified.resolve("meeting-guide").source == "connector"
+        qualified = rows[1]["skill_name"]
+        assert (await state.skill_loader.avalidate_references((qualified,))).resolve(qualified).path == str(duplicate)
         await prompt(host, session.sessionId, "meeting-guide", metadata={"selected_connector_ids": ["tmeet"]})
         assert "is no longer available" not in json.dumps(model.requests[-1]["messages"])
         assert "meeting-guide" not in state.skill_selector.matched_skill_names
         assert not entered.is_set()
         receipt.write_text("{}")
         assert not (await state.agent.tools["get_skill"].execute(skill_name="meeting-guide")).success
+        assert not (await state.agent.tools["get_skill"].execute(skill_name=qualified)).success
     finally:
         release.set()
         if lookup is not None:

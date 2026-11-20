@@ -224,6 +224,8 @@ class Skill:
     broken: bool = False
     broken_reason: Optional[str] = None
     instruction_digest: Optional[str] = None
+    # A path-qualified tool read retains the declared Skill for name-based policies.
+    declared_skill: Optional["Skill"] = field(default=None, repr=False, compare=False)
 
     @property
     def user_visible(self) -> bool:
@@ -390,6 +392,7 @@ class SkillLoader:
 
         self._catalog = _SkillCatalog({}, {}, [], [])
         self._tool_catalog: Optional[SkillLoader] = None
+        self._index_connector_paths = False
         self._reload_lock = threading.RLock()
         self._validation_local = threading.local()
         self._validation_task: asyncio.Task[SkillValidation] | None = None
@@ -429,6 +432,7 @@ class SkillLoader:
         lookup._sources = [*copy.deepcopy(view._sources),
                            *(copy.deepcopy(entry) for entry in self._sources if entry.source == "connector")]
         lookup._force_reload = True
+        lookup._index_connector_paths = True
         view._tool_catalog = lookup
         return view
 
@@ -1016,6 +1020,7 @@ class SkillLoader:
     def _discover_skills(self) -> List[Skill]:
         loaded: Dict[str, Skill] = {}
         all_skills: Dict[str, Skill] = {}
+        connector_paths: Dict[str, Skill] = {}
         sources = copy.deepcopy(self._sources)
         previous_by_path = {skill.skill_path: skill for skill in self._all_skills.values()}
         selected_bound_names: set[str] = set()
@@ -1101,6 +1106,9 @@ class SkillLoader:
                     continue
 
                 all_skills[skill.name] = skill
+                if self._index_connector_paths and skill.source == "connector":
+                    path = str(skill_file.absolute())
+                    connector_paths[path] = skill
                 if bound_package_skill:
                     selected_bound_names.add(skill.name)
 
@@ -1118,6 +1126,14 @@ class SkillLoader:
             entry.signature = signature
             entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
 
+        # Keep short-name precedence. Only explicitly discovered files get path selectors.
+        for path, skill in connector_paths.items():
+            if path in all_skills:
+                continue
+            qualified = replace(skill, name=path, declared_skill=skill)
+            all_skills[path] = qualified
+            if not skill.disabled and skill.name not in disabled_skill_names:
+                loaded[path] = qualified
         self._catalog = _SkillCatalog(loaded, all_skills, sources, self.parse_errors,
                                      settings_signature)
         discovered = list(loaded.values())
@@ -1530,7 +1546,7 @@ class SkillLoader:
         scored: List[Tuple[int, Skill]] = []
         for skill in skill_pool.values():
             try:
-                name_overlap = len(query_tokens & _tokenize(skill.name))
+                name_overlap = len(query_tokens & _tokenize((skill.declared_skill or skill).name))
                 if skill.broken:
                     # Diagnostics must not match unrelated query words.
                     score = name_overlap * 5

@@ -36,6 +36,7 @@ from ..events import (
     ThinkingEvent,
     WebSearchEvent,
 )
+from ..execution_profile import is_skill_blocked
 from ..llm.model_routing import resolve_model_client
 from ..llm.capabilities import bound_context_token_limit
 from ..schema import Message
@@ -791,7 +792,8 @@ class SubAgentTool(EventEmittingTool):
         if skill_tool is None:
             return None
         for skill in bundle.skills:
-            if skill_tool.skill_access_filter is not None and not skill_tool.skill_access_filter(skill):
+            declared = skill.declared_skill or skill
+            if skill_tool.skill_access_filter is not None and not skill_tool.skill_access_filter(declared):
                 return CapabilityFailure(
                     code="SKILL_NOT_ENABLED_FOR_CONVERSATION",
                     message=f"Skill '{skill.name}' is not enabled for this conversation.",
@@ -805,8 +807,8 @@ class SubAgentTool(EventEmittingTool):
                     retryable=False,
                     details={"skill": skill.name},
                 )
-            if (skill.name in skill_tool.blocked_skill_names
-                    and skill.name not in (skill_tool.explicitly_allowed_skill_names or ())):
+            if is_skill_blocked(skill.name, skill_tool.blocked_skill_names, skill_tool.explicitly_allowed_skill_names,
+                                declared_name=declared.name):
                 return CapabilityFailure(
                     code="SKILL_PROFILE_BLOCKED",
                     message=f"Required Skill '{skill.name}' is blocked by the parent's execution profile.",
