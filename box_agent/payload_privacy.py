@@ -1,91 +1,894 @@
-"""Capability-scoped diagnostic payload omission; model/session data stay intact."""
+"""Credential filtering for diagnostic copies of agent payloads."""
 
-from contextlib import contextmanager
-from contextvars import ContextVar
+import ast
+import base64
+import copy
+import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
+from uuid import uuid4
 
+import yaml
 
-_PRIVATE = ContextVar("private_diagnostic_payload", default=False)
-
-_DIAGNOSTIC_FIELDS = {
-    "session_id", "turn_id", "tool_call_id", "tool_name", "tool_id", "server_name",
-    "step", "success", "user_visible", "duration_ms", "elapsed_ms", "cancelled",
+_REDACTED = "<redacted>"
+_PRIVATE = ContextVar("private_diagnostic_stream", default=False)
+_STREAM_METADATA_FIELDS = {
+    "timestamp", "level", "event", "session_id", "turn_id", "tool_call_id",
+    "tool_name", "tool_id", "server_name", "step", "success", "user_visible",
+    "duration_ms", "elapsed_ms", "cancelled", "exit_code",
 }
-_ERROR_LIMIT = 8192
-_CREDENTIAL = re.compile(
-    r"(?i)(\b(?:[\w-]*(?:token|password|secret)|api[_-]?key|authorization|cookie)"
-    r"[\"']?\s*[:=]\s*)(?:[\"'][^\"']*[\"']|(?:Bearer|Basic)\s+[^\s]+|[^\s]+)"
+_PRIVATE_LOGGER_NAMES = {
+    "box_agent.core", "box_agent.kernel.loop", "box_agent.hooks",
+    "box_agent.tools.bash_tool", "box_agent.tools.mcp_result_hooks", "httpx",
+}
+_PRIVATE_LOGGER_PREFIXES = ("openai.", "anthropic.", "httpcore.", "box_agent.llm.")
+
+CREDENTIAL_FIELD = re.compile(
+    r"(?i)(?!(?:[\w.-]+[_.-])?(?:total|input|output|prompt|completion)[_.-]token$)"
+    r"(?:[\w.-]+[_.-])?(?:authorization|(?:set[_.-]?)?cookie|password\d*|pgpassword|passwd|pwd|pass|passphrase|credentials|"
+    r"(?:api|access|private|secret|db|encryption|signing|ssh)[_.-]?key(?:[_.-]?id)?|"
+    r"(?:(?:access|refresh|session|auth|bearer|api)[_.-]?)?token|"
+    r"(?:client[_.-]?)?secret|secret[_.-]?access[_.-]?key|密码|密钥|令牌)"
 )
+KNOWN_TOKEN_PATTERN = (
+    r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+    r"glpat-[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]{12,}|"
+    r"sk_live_[A-Za-z0-9_]+|hf_[A-Za-z0-9_]+|npm_[A-Za-z0-9_]+|"
+    r"(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b"
+)
+# Providers use case-sensitive prefixes. Evidence capture uses the same
+# vocabulary with its own conservative, case-insensitive policy.
+_KNOWN_TOKEN = re.compile(KNOWN_TOKEN_PATTERN)
+_ASSIGNMENT = re.compile(
+    r'''(?<![\w.-])(?P<key>"(?:\\u[0-9a-f]{4}|[\w.-])+"|(?:api|access|private|secret)[ \t]+key|[\w.-]+)'''
+    r"""(?P<separator>\\?["']?[ \t]*[:=：][ \t]*)""", re.I,
+)
+_VALUE = re.compile(
+    # A partial provider response can end in a quoted credential.
+    r"""\\\"(?:[^"\\]|\\(?!"))*(?:\\\"|\Z)|"""
+    r""""(?:\\.|[^"\\])*(?:"|\\?\Z)|'(?:\\.|[^'\\])*(?:'|\\?\Z)|"""
+    r"""(?:Bearer|Basic)[ \t]+[^\s,;&"'\]}]+|[^\s,;&"'\]}]+""", re.I,
+)
+_AUTH_COMMANDS = {"curl", "mysql", "mariadb"}
+_SHELL_COMMANDS = {"sh", "bash", "dash", "zsh", "ksh"}
+# Keep shell word spans so masking can preserve the caller's exact spacing.
+# Quoted fragments and escaped characters belong to the same argument.
+_SHELL_TOKEN = re.compile(
+    r"""(?P<boundary>[\n;&|])|(?:\\[\s\S]|"(?:\\[\s\S]|[^"\\])*(?:"|\\?\Z)|"""
+    r"""'[^']*(?:'|\Z)|[^\s;&|"'\\])+"""
+)
+# A diagnostic prefix may contain an ordinary contraction. Once a command or
+# credential option is active, apostrophes retain their shell quoting meaning.
+_DIAGNOSTIC_TOKEN = re.compile(r"\b[A-Za-z]+(?:'[A-Za-z]+)+(?=$|[\s.,:!?])|" + _SHELL_TOKEN.pattern)
+_ARGV_ARRAY = re.compile(r'\[\s*(?:"(?:\\.|[^"\\])*"\s*,\s*)*"(?:\\.|[^"\\])*"\s*\]')
+_AUTH_HEADER = r"(?:proxy-)?authorization"
+# A raw HTTP header lasts until the line break, even for authentication
+# schemes with several space-, comma- or semicolon-separated parameters.
+_SENSITIVE_HEADER_LINE = re.compile(
+    rf"^([ \t]*(?:\[(?:trace|debug|info|warn(?:ing)?|error|critical)\][ \t]+)?"
+    rf"(?:[<>][ \t]+)?(?:set-cookie|cookie|{_AUTH_HEADER})[ \t]*:[ \t]*)[^\r\n]*", re.I | re.M,
+)
+_CURL_HEADER_OPTION = re.compile(r"-H|--(?:proxy-)?header(?:=|$)")
+_CURL_AUTH_VALUE = re.compile(rf"""(?P<quote>["']?){_AUTH_HEADER}[ \t]*:[ \t]*""", re.I)
+_COOKIE_HEADER = re.compile(
+    r"""\b((?:set-cookie|cookie)[ \t]*:[ \t]*)(?:(?<==)"[^"\r\n]*"|(?<==)'[^'\r\n]*'|[^\r\n"'])+""", re.I,
+)
+_AUTH_TOKEN = re.compile(
+    r"\b(Bearer|Basic)([ \t]+)([a-z0-9._~+/=-]+)", re.IGNORECASE | re.ASCII,
+)
+_URL_USERINFO = re.compile(r"""(://)[^\s/?#@"']+@""")
+# A signed object-storage URL is a bearer credential until it expires. Mask
+# its signature and session-credential query parameters wherever the URL
+# appears: raw, JSON/HTML-escaped, or percent-encoded inside another URL.
+_SIGNED_URL_PARAM = re.compile(
+    r"(?P<prefix>(?:[?&;]|&amp;|\\u0026|%26|%3F))"
+    r"(?P<name>sig|q-signature|(?:x-(?:amz|goog|oss|cos|obs)-)?(?:signature|credential|security-token))"
+    r"(?P<separator>=|%3D)(?:(?!%2[36]|\\u0026)[^\s&#\"'<>\\\])}`,;])+",
+    re.I,
+)
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*(?:"|\Z)')
+_JSON_STRUCTURE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\]]')
+_OPEN_CONTAINER = re.compile(r"[\[{]")
+_CONTAINER_TOKEN = re.compile(
+    r'''\\[\s\S]|"(?:\\[\s\S]|[^"\\])*(?:"|\\?\Z)|'(?:\\[\s\S]|[^'\\])*(?:'|\\?\Z)|[{}\[\]]'''
+)
+_JSON_COLON = re.compile(r"\s*:\s*")
+_PEM_MARKER = re.compile(r"-----(BEGIN|END) ((?:[A-Z0-9]+ )*KEY)-----")
+_SCHEMA_LISTS = frozenset(("anyOf", "oneOf", "allOf", "prefixItems", "items"))
+_LINE_BREAK = re.compile(r"\r\n|[\r\n]")
+_MAPPING_PREFIX = re.compile(r"[ \t]*(?:-[ \t]+)*['\"]?")
+_TOML_MULTILINE_END = re.compile(r'\\[\s\S]|"{3,5}')
 
 
-def private_tool_diagnostics(event: str, fields: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep command failure details without retaining the surrounding payload."""
-    result = {
-        key: value for key, value in fields.items()
-        if key in _DIAGNOSTIC_FIELDS and isinstance(value, (str, int, float, bool))
-    }
-    result["payload_redacted"] = True
-    if fields.get("tool_name") not in {"bash", "bash_output"}:
-        return result
-    if event not in {"tool.response", "tool/fail"}:
-        return result
-    if event == "tool.response" and fields.get("success") is not False:
-        return result
-    exit_code = fields.get("exit_code")
-    if type(exit_code) is int:
-        result["exit_code"] = exit_code
-    error = fields.get("error")
-    if not isinstance(error, str):
-        return result
-    match = re.match(r"Command failed with exit code (-?\d+)\b", error)
-    if "exit_code" not in result and match:
-        result["exit_code"] = int(match.group(1))
-    error = re.sub(r"(?im)\b(?:set-cookie|cookie)\s*:[^\r\n]*", "cookie: <redacted>", error)
-    error = re.sub(r"(?i)\b(Bearer|Basic)\s+\S+", r"\1 <redacted>", error)
-    error = re.sub(r"(?s)-----BEGIN .*?KEY-----.*?-----END .*?KEY-----", "<redacted>", error)
-    error = re.sub(r"(https?://)[^\s]+@", r"\1<redacted>@", error)
-    error = _CREDENTIAL.sub(r"\1<redacted>", error)
-    if len(error) > _ERROR_LIMIT:
-        error = (
-            error[:_ERROR_LIMIT // 2] + "\n...[error truncated]...\n"
-            + error[-_ERROR_LIMIT // 2:]
-        )
-    result["error"] = error
+def _credential_key(key: str) -> bool:
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", key).replace(" ", "-")
+    return bool(CREDENTIAL_FIELD.fullmatch(normalized))
+
+
+def _object_schema(value: Any) -> bool:
+    return (isinstance(value, Mapping) and isinstance(value.get("properties"), Mapping)
+            and (value.get("type") == "object" or "$schema" in value))
+
+
+def _field_context(parent: str, key: str) -> str:
+    """Distinguish tool schema declarations from the credentials they describe."""
+    if parent == "properties":
+        return "credential_schema" if _credential_key(key) else "schema"
+    if parent in ("schema", "credential_schema"):
+        if key in ("properties", "patternProperties", "$defs", "definitions"):
+            return "properties"
+        if parent == "credential_schema":
+            if key in ("default", "example", "const"):
+                return "credential"
+            if key in ("enum", "examples"):
+                return "credential_list"
+        if key in _SCHEMA_LISTS or key in ("additionalProperties", "not", "if", "then", "else"):
+            return parent
+    if key in ("tools", "parameters", "input_schema", "inputSchema"):
+        return "possible_schema"
+    return "credential" if _credential_key(key) else ""
+
+
+def _mask_field(context: str, key: str, value: Any) -> Any:
+    if context == "credential_list" and isinstance(value, list):
+        return [_REDACTED for _ in value]
+    if context == "credential_schema":
+        if isinstance(value, bool) or (key in _SCHEMA_LISTS and isinstance(value, list)):
+            return value
+        if isinstance(value, Mapping) and "value" not in value:
+            return value
+    if context == "credential" and key.lower() == "pass" and isinstance(value, bool):
+        return value  # Boolean QA verdict.
+    return _REDACTED
+
+
+def _container_end(text: str, start: int) -> int:
+    """Find the end of a composite value, including an unfinished value at EOF."""
+    closing = ["}" if text[start] == "{" else "]"]
+    for token in _CONTAINER_TOKEN.finditer(text, start + 1):
+        if token[0] in ("{", "["):
+            closing.append("}" if token[0] == "{" else "]")
+        elif token[0] in ("}", "]"):
+            if token[0] != closing.pop():
+                return len(text)
+            if not closing:
+                return token.end()
+    return len(text)
+
+
+def _yaml_field_end(text: str, start: int, indent: int) -> int:
+    """Bound an embedded mapping entry independently of surrounding log prose."""
+    newline = _LINE_BREAK.search(text, start)
+    if not newline:
+        return len(text)
+    end = newline.start()
+    header = text[start:end].lstrip()
+    indentless_list = not header or header.startswith("#")
+    while newline:
+        beginning = newline.end()
+        newline = _LINE_BREAK.search(text, beginning)
+        stop = newline.start() if newline else len(text)
+        line = text[beginning:stop]
+        content = line.lstrip(" \t")
+        if not content:
+            continue
+        depth = len(line) - len(content)
+        if content.startswith("#") and depth <= indent:
+            continue
+        sequence_item = content == "-" or content.startswith(("- ", "-\t"))
+        if depth < indent or (depth == indent and not (indentless_list and sequence_item)):
+            break
+        end = stop
+    return end
+
+
+def _yaml_value_edit(text: str, start: int, indent: int, key: str) -> tuple[int, int, str] | None:
+    end = _yaml_field_end(text, start, indent)
+    prefix = " " * indent + "field: "
+    fragment = prefix + text[start:end]
+    # Parse events, never construct YAML objects or resolve aliases. Marks
+    # locate the value even for tags, block collections and folded scalars.
+    try:
+        events = iter(yaml.parse(fragment, Loader=yaml.SafeLoader))
+        for _ in range(4):  # stream, document, mapping, synthetic field name
+            next(events)
+        value = next(events)
+        last = value
+        if isinstance(value, yaml.events.CollectionStartEvent):
+            depth = 1
+            while depth:
+                last = next(events)
+                depth += isinstance(last, yaml.events.CollectionStartEvent)
+                depth -= isinstance(last, yaml.events.CollectionEndEvent)
+        # An invalid continuation may follow an otherwise complete scalar.
+        # Check the rest before relying on that scalar's end mark.
+        if not isinstance(next(events), yaml.events.MappingEndEvent):
+            return start, end, _REDACTED
+        for _ in events:
+            pass
+        offset = start - len(prefix)
+        first = offset + value.start_mark.index
+        stop = offset + last.end_mark.index
+        if first == stop or (key.lower() == "pass" and isinstance(value, yaml.events.ScalarEvent)
+                             and value.style is None and value.value.lower() in ("true", "false")):
+            return None
+        if isinstance(value, yaml.events.ScalarEvent) and value.style in ("|", ">"):
+            # Keep the header's inline comment when collapsing its body.
+            header = text[first:stop].splitlines()[0]
+            comment = re.search(r"[ \t]+#.*", header)
+            return first, stop, _REDACTED + (comment[0] if comment else "")
+        # An indentless sequence is valid below a key; its replacement scalar
+        # needs indentation. Other nodes retain their original leading spaces.
+        replacement = _REDACTED
+        if value.start_mark.line and value.start_mark.column <= indent:
+            replacement = " " * (indent + 2 - value.start_mark.column) + replacement
+        if isinstance(value, yaml.events.ScalarEvent) and value.style in ('"', "'"):
+            replacement = value.style + replacement + value.style
+        return first, stop, replacement
+    except (yaml.YAMLError, StopIteration, RecursionError, ValueError):
+        # A tool may emit half a config file. Hide the suspected value through
+        # its indented body, retaining the next independent diagnostic line.
+        return start, end, _REDACTED
+
+
+def _redact_config_values(text: str) -> str:
+    parts = []
+    end = 0
+    for match in _ASSIGNMENT.finditer(text):
+        if match.start() < end:
+            continue
+        key = match["key"]
+        if key.startswith('"'):
+            try:
+                key = json.loads(key)
+            except ValueError:
+                continue
+        if not _credential_key(key):
+            continue
+        start = match.end()
+        if "=" in match["separator"] and text.startswith(('"""', "'''"), start):
+            quote = text[start:start + 3]
+            if quote == '"""':
+                close = next((m for m in _TOML_MULTILINE_END.finditer(text, start + 3)
+                              if m[0].startswith('"')), None)
+            else:
+                close = re.compile("'{3,5}").search(text, start + 3)
+            edit = start, close.end() if close else len(text), quote[0] + _REDACTED + quote[0]
+        elif ":" in match["separator"]:
+            beginning = max(text.rfind("\n", 0, match.start()), text.rfind("\r", 0, match.start())) + 1
+            header = _SENSITIVE_HEADER_LINE.match(text, beginning)
+            if header and (text.startswith(_REDACTED, start)
+                           or re.match(r"[A-Za-z][\w.-]*[ \t]+\S", text[start:header.end()])):
+                # A raw HTTP auth scheme has a physical line boundary. The
+                # following indented line may be an ordinary Python traceback.
+                continue
+            before = text[beginning:match.start()]
+            if not _MAPPING_PREFIX.fullmatch(before):
+                # Valid flow containers have already been parsed. An unfinished
+                # fragment may still contain a multiword credential value.
+                flow = before.rstrip(" \t'\"").endswith(("{", ",")) and "{" in before
+                if not flow and (start == len(text) or text[start] not in "|>\r\n"):
+                    continue
+                before = before[:len(before) - len(before.lstrip(" \t"))]
+            edit = _yaml_value_edit(text, start, len(before.rstrip("'\"")), key)
+        else:
+            continue
+        if edit:
+            first, stop, replacement = edit
+            parts.extend((text[end:first], replacement))
+            end = stop
+    if not parts:
+        return text
+    return "".join((*parts, text[end:]))
+
+
+def _redact_assignments(text: str) -> str:
+    pieces = []
+    end = 0
+    for match in _ASSIGNMENT.finditer(text):
+        if match.start() < end:
+            continue
+        key = match["key"]
+        if key.startswith('"'):
+            try:
+                key = json.loads(key)
+            except ValueError:
+                continue  # A quoted label in ordinary text need not be valid JSON.
+        if not _credential_key(key.removeprefix("--")):
+            continue
+        start = match.end()
+        if ":" in match["separator"] and text.startswith("#", start):
+            beginning = max(text.rfind("\n", 0, match.start()), text.rfind("\r", 0, match.start())) + 1
+            if _MAPPING_PREFIX.fullmatch(text[beginning:match.start()]):
+                continue  # A YAML header comment before a value on a subsequent line.
+        if text[start:start + 1] in ("{", "["):
+            pieces.extend((text[end:start], '"<redacted>"'))
+            end = _container_end(text, start)
+            continue
+        value = _VALUE.match(text, start)
+        if not value:
+            continue
+        if key.lower() == "pass" and value[0].lower() in ("true", "false"):
+            continue
+        quote = '\\"' if value[0].startswith('\\"') else value[0][:1]
+        if quote not in ('\\"', '"', "'"):
+            quote = ""
+        pieces.extend((text[end:start], quote + _REDACTED + quote))
+        end = value.end()
+    if not pieces:
+        return text
+    pieces.append(text[end:])
+    return "".join(pieces)
+
+
+def _redact_auth_token(match: re.Match) -> str:
+    scheme, space, token = match.groups()
+    if scheme.lower() == "bearer":
+        if token.rstrip(".").lower() == "token":  # Common in prose, e.g. "set a Bearer token".
+            return match[0]
+    else:
+        # Basic credentials encode user:password. Preserve ordinary phrases like
+        # "basic ideas", but honor apparent credentials even outside a header.
+        try:
+            if b":" not in base64.b64decode(token.rstrip("."), validate=True):
+                return match[0]
+        except ValueError:
+            return match[0]
+    return scheme + space + _REDACTED + token[len(token.rstrip(".")):]
+
+
+def _redact_provider_token(match: re.Match) -> str:
+    token = match[0]
+    if token.startswith(("npm_", "hf_")):
+        # Both prefixes also identify ordinary environment variables and API
+        # names. Keep those readable, including npm_config_* and hf_hub_*.
+        suffix = token.partition("_")[2]
+        if len(suffix) < 20 or ("_" in suffix and (suffix.islower() or not any(c.isdigit() for c in suffix))):
+            return token
+    return _REDACTED
+
+
+def _redact_pem(text: str) -> str:
+    if "-----BEGIN " not in text:
+        return text
+    parts = []
+    label = None
+    end = 0
+    for marker in _PEM_MARKER.finditer(text):
+        if label is None and marker[1] == "BEGIN":
+            parts.extend((text[end:marker.start()], _REDACTED))
+            label = marker[2]
+        elif label == marker[2] and marker[1] == "END":
+            end = marker.end()
+            label = None
+    if label is None:
+        parts.append(text[end:])
+    return "".join(parts)
+
+
+def _redact_command_options(text: str) -> str:
+    pieces = []
+    end = 0
+    command = None
+    mask_next = None
+    shell_script = False
+    position = 0
+    while position < len(text):
+        lexer = _SHELL_TOKEN if mask_next or command in _AUTH_COMMANDS else _DIAGNOSTIC_TOKEN
+        token = lexer.search(text, position)
+        if token is None:
+            break
+        position = token.end()
+        word = token[0]
+        if "\\\n" in word and "'" not in word:
+            # A shell line continuation contributes no argument characters.
+            # Keep waiting for the value of --user across a continued line.
+            word = word.replace("\\\n", "")
+            if not word:
+                continue
+        if token["boundary"]:
+            command = None
+            mask_next = None
+            shell_script = False
+            continue
+        if mask_next:
+            replacement = _redact_option_value(mask_next, word)
+            mask_next = None
+        elif shell_script:
+            shell_script = False
+            quote = word[0] if word[0] in ("'", '"') and word.endswith(word[0]) else ""
+            script = word[1:-1] if quote else word
+            replacement = quote + _redact_command_options(script) + quote
+        else:
+            name, equals, value = word.partition("=")
+            if equals and _credential_key(name) and any(c in token[0] for c in ("\\", "'", '"')):
+                # A shell assignment can concatenate quoted / unquoted parts
+                # or escape whitespace. Non-shell assignments use _VALUE below.
+                quote = value[0] if value[0] in ("'", '"') else ""
+                replacement = name + "=" + quote + _REDACTED + quote
+            else:
+                executable = word.strip("'\"").lower().removesuffix(".exe")
+                if command not in _AUTH_COMMANDS and executable in _AUTH_COMMANDS | _SHELL_COMMANDS:
+                    # Diagnostic sentences and wrappers can prefix a command.
+                    # An argument URL/path containing its name cannot select it.
+                    command = executable
+                elif command is None and not (equals and name.isidentifier()):
+                    command = _command_name(word.strip("'\""))
+                if command in _SHELL_COMMANDS and re.fullmatch("-[A-Za-z]*c[A-Za-z]*", word):
+                    shell_script = True
+                    continue
+                prefix = _credential_option(command, word)
+                if prefix is None:
+                    continue
+                if prefix == word and not prefix.endswith("="):
+                    mask_next = prefix
+                    continue
+                replacement = prefix + _redact_option_value(prefix, word[len(prefix):])
+        if replacement == word:
+            continue
+        pieces.extend((text[end:token.start()], replacement))
+        end = token.end()
+    pieces.append(text[end:])
+    return "".join(pieces)
+
+
+def _command_name(first: Any) -> str:
+    return first.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe") if isinstance(first, str) else ""
+
+
+def _credential_option(command: str | None, arg: str) -> str | None:
+    flag, equals, _ = arg.partition("=")
+    if flag.startswith("--") and not flag.startswith(("--no-", "--ask-")) and _credential_key(flag[2:]):
+        return flag + equals
+    if command == "curl" and flag in ("-u", "--user"):
+        return flag + equals
+    if command == "curl" and arg.startswith("-u"):
+        return "-u"
+    if command == "curl" and (header := _CURL_HEADER_OPTION.match(arg)):
+        return header[0]
+    if command in ("mysql", "mariadb") and arg.startswith("-p") and len(arg) > 2:
+        return "-p"
+    return None
+
+
+def _redact_option_value(option: str, value: Any) -> Any:
+    if not _CURL_HEADER_OPTION.fullmatch(option):
+        return _REDACTED
+    header = _CURL_AUTH_VALUE.match(value) if isinstance(value, str) else None
+    if header is None:
+        return value
+    # A shell header argument may be quoted. Keep that argument's delimiters
+    # and field name, and leave the next header or URL untouched.
+    return header[0] + _REDACTED + header["quote"]
+
+
+def _redact_argv(values: list | tuple) -> list:
+    result = list(values)
+    first = values[0] if values else None
+    command = _command_name(first)
+    for i, arg in enumerate(result):
+        if not isinstance(arg, str):
+            continue
+        prefix = _credential_option(command, arg)
+        if prefix is None:
+            continue
+        if prefix != arg or prefix.endswith("="):
+            result[i] = prefix + _redact_option_value(prefix, arg[len(prefix):])
+        elif i + 1 < len(result):
+            result[i + 1] = _redact_option_value(prefix, result[i + 1])
     return result
 
 
-def private_payloads() -> bool:
-    return _PRIVATE.get()
+def _redact_serialized_argv(match: re.Match) -> str:
+    array = match[0]
+    try:
+        args = json.loads(array)
+    except ValueError:
+        return array
+    clean = _redact_argv(args)
+    if clean == args:
+        return array
+    # Keep whitespace and original escape spelling for unaffected options.
+    replacements = iter(zip(args, clean))
+
+    def replace_arg(token: re.Match) -> str:
+        original, filtered = next(replacements)
+        return token[0] if original == filtered else json.dumps(filtered)
+
+    return _JSON_STRING.sub(replace_arg, array)
 
 
-class _SDKFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        return not private_payloads()
+def _redact_json(text: str, parsed: dict | list) -> str:
+    """Rewrite only credential values, preserving JSON layout and nested argument strings."""
+    parts = []
+    end = 0
+    decoder = json.JSONDecoder()
+    containers = []
+    field_context = "schema" if _object_schema(parsed) else ""
+    for token in _JSON_STRUCTURE.finditer(text):
+        if token.start() < end:
+            continue
+        if token[0] in ("[", "{"):
+            # Array members share the schema context of the array (e.g. anyOf).
+            context = containers[-1][1] if containers and containers[-1][0] == "[" else field_context
+            if context == "possible_schema" and token[0] == "{":
+                candidate, _ = decoder.raw_decode(text, token.start())
+                context = "schema" if _object_schema(candidate) else ""
+            containers.append((token[0], context))
+            continue
+        if token[0] in ("]", "}"):
+            containers.pop()
+            continue
+        value = json.loads(token[0])
+        colon = _JSON_COLON.match(text, token.end())
+        if colon:
+            field_context = _field_context(containers[-1][1], value)
+            if field_context not in ("credential", "credential_list", "credential_schema"):
+                continue
+            start = colon.end()
+            item, stop = decoder.raw_decode(text, start)
+            clean = _mask_field(field_context, value, item)
+            if clean == item:
+                continue
+            replacement = json.dumps(clean, ensure_ascii=False)
+        else:
+            clean = redact_diagnostic_text(value)
+            if clean == value:
+                continue
+            start, stop = token.span()
+            # An escaped filesystem surrogate in the original JSON must remain
+            # representable when the diagnostic copy is written to UTF-8 logs.
+            replacement = json.dumps(clean, ensure_ascii=bool(re.search(r"[\ud800-\udfff]", clean)))
+        parts.extend((text[end:start], replacement))
+        end = stop
+    parts.append(text[end:])
+    return "".join(parts)
 
 
-_FILTER = _SDKFilter()
+def _json_literal(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _json_literal(item) for key, item in value.items())
+    if isinstance(value, list):
+        return all(_json_literal(item) for item in value)
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _filter_yaml_structure(text: str) -> str | None:
+    """Use YAML source marks and the JSON field policy for flow maps and tool schemas."""
+    try:
+        root = yaml.compose(text, Loader=yaml.BaseLoader)
+    except (yaml.YAMLError, RecursionError, ValueError):
+        return None
+    if not isinstance(root, (yaml.MappingNode, yaml.SequenceNode)):
+        return None
+    edits = []
+    labels = []
+    prefix = "BoxTraceYamlKey"
+    if prefix in text:
+        prefix += uuid4().hex
+    pending = [(root, "possible_schema")]
+    seen = set()
+    while pending:
+        node, context = pending.pop()
+        if id(node) in seen:
+            continue  # Composing does not expand alias graphs; neither should traversal.
+        seen.add(id(node))
+        if isinstance(node, yaml.SequenceNode):
+            pending.extend((child, context) for child in node.value)
+            continue
+        if not isinstance(node, yaml.MappingNode):
+            continue
+        pairs = [(k, v) for k, v in node.value if isinstance(k, yaml.ScalarNode)]
+        if context == "possible_schema":
+            fields = {k.value: v for k, v in pairs}
+            schema = isinstance(fields.get("properties"), yaml.MappingNode) and (
+                getattr(fields.get("type"), "value", None) == "object" or "$schema" in fields)
+            context = "schema" if schema else ""
+        for field, value in pairs:
+            key = field.value
+            child_context = _field_context(context, key)
+            if child_context not in ("credential", "credential_schema", "credential_list"):
+                pending.append((value, child_context))
+                continue
+            if field.start_mark.index > value.start_mark.index:
+                continue  # An alias points to an earlier anchor, not a value span here.
+            if isinstance(value, yaml.MappingNode):
+                shape = {k.value: None for k, _ in value.value if isinstance(k, yaml.ScalarNode)}
+            elif isinstance(value, yaml.SequenceNode):
+                shape = [None] * len(value.value)
+            elif not value.style and value.value.lower() in ("true", "false"):
+                shape = value.value.lower() == "true"
+            else:
+                shape = value.value
+            masked = _mask_field(child_context, key, shape)
+            if masked is shape or node.flow_style:
+                # Protect processed entries from the incomplete-fragment fallback.
+                label = f"{prefix}{len(labels)}X"
+                labels.append((label, text[field.start_mark.index:field.end_mark.index]))
+                edits.append((field.start_mark.index, field.end_mark.index, label))
+            if masked is shape:
+                pending.append((value, child_context))
+            elif node.flow_style or context == "credential_schema":
+                # Other block-style entries are handled with their header
+                # comments and the same-line HTTP boundary by the text filter.
+                first, stop = value.start_mark.index, value.end_mark.index
+                stop = first + len(text[first:stop].rstrip(" \t\r\n"))
+                replacement = json.dumps(masked, ensure_ascii=False)
+                if value.start_mark.line > field.start_mark.line and value.start_mark.column <= field.start_mark.column:
+                    replacement = " " * (field.start_mark.column + 2 - value.start_mark.column) + replacement
+                edits.append((first, stop, replacement))
+    if not edits:
+        # A parsed flow document still needs its ordinary text filters, but
+        # sending it back through fragment discovery would parse it twice.
+        return _redact_plain_text(text) if root.flow_style else None
+    pieces = []
+    end = 0
+    for first, stop, replacement in sorted(edits):
+        if first >= end:
+            pieces.extend((text[end:first], replacement))
+            end = stop
+    pieces.append(text[end:])
+    cleaned = _redact_plain_text("".join(pieces))
+    if labels:
+        cleaned = re.sub(prefix + r"(\d+)X", lambda m: labels[int(m[1])][1], cleaned)
+    return cleaned
+
+
+def _filter_embedded_containers(text: str) -> str:
+    """Filter structured fragments and retain enclosing shell/header/field context."""
+    pieces: list[str] = []
+    fragments: list[str] = []
+    # Opaque words let the outer filters consume a whole argument, e.g.
+    # credentials={...}, while preserving the formatting of unrelated fragments.
+    prefix = "BoxTraceFragment"
+    if prefix in text:
+        prefix += uuid4().hex
+    end = scan = 0
+    while match := _OPEN_CONTAINER.search(text, scan):
+        start = match.start()
+        scan = _container_end(text, start)
+        fragment = text[start:scan]
+        if '"' not in fragment and "'" not in fragment and ":" not in fragment:
+            continue
+        try:
+            parsed = json.loads(fragment)
+        except (ValueError, RecursionError):
+            if fragment[-1] not in "}]":
+                continue
+            # Python SDKs also format request dictionaries with repr().
+            try:
+                parsed = ast.literal_eval(fragment) if "'" in fragment else None
+            except (ValueError, TypeError, SyntaxError, RecursionError):
+                parsed = None
+            # The structured filter handles JSON values. Preserve other Python
+            # representations such as tuples and sets in ordinary error text.
+            if parsed is None:
+                filtered = _filter_yaml_structure(fragment)
+                if filtered is None:
+                    continue
+            elif not isinstance(parsed, (dict, list)) or not _json_literal(parsed):
+                continue
+            else:
+                cleaned = redact_diagnostic_value(parsed)
+                filtered = fragment if cleaned == parsed else repr(cleaned)
+        else:
+            filtered = _redact_json(fragment, parsed)
+        pieces.extend((text[end:start], f"{prefix}{len(fragments)}X"))
+        fragments.append(filtered)
+        end = scan
+    if not fragments:
+        return _redact_plain_text(text)
+    pieces.append(text[end:])
+    masked = _redact_plain_text("".join(pieces))
+    return re.sub(prefix + r"(\d+)X", lambda m: fragments[int(m[1])], masked)
+
+
+def redact_diagnostic_text(text: str) -> str:
+    """Mask recognized credential values while preserving surrounding diagnostics."""
+    # Query parameters keep their delimiters, so every later parser (JSON,
+    # YAML, argv, plain text) sees the same structure with the value masked.
+    if "=" in text or "%3D" in text or "%3d" in text:
+        text = _SIGNED_URL_PARAM.sub(r"\g<prefix>\g<name>\g<separator><redacted>", text)
+    # Inspect serialized arguments one string at a time. Running header regexes
+    # on the encoded object could swallow a JSON-escaped newline or delimiter.
+    if "[" in text and "-" in text:
+        text = _ARGV_ARRAY.sub(_redact_serialized_argv, text)
+    whole_container = text.lstrip().startswith(("{", "[")) and text.rstrip().endswith(("}", "]"))
+    if whole_container and '"' in text:
+        try:
+            parsed = json.loads(text)
+        except (ValueError, RecursionError):
+            pass  # Also handle escaped shell fragments and Python reprs.
+        else:
+            return _redact_json(text, parsed)
+    # A bare YAML flow value can contain a literal apostrophe. Parse that
+    # document before the embedded-fragment scanner treats it as an open quote.
+    if ":" in text and (
+        "properties" in text or (whole_container and re.search(r"[{,]\s*[\w.-]+\s*:", text))
+    ):
+        cleaned = _filter_yaml_structure(text)
+        if cleaned is not None:
+            return cleaned
+    if ('"' in text or "'" in text or ":" in text) and ("{" in text or "[" in text):
+        return _filter_embedded_containers(text)
+    return _redact_plain_text(text)
+
+
+def _redact_plain_text(text: str) -> str:
+    if ":" in text or '"""' in text or "'''" in text:
+        text = _redact_config_values(text)
+    text = _redact_pem(text)
+    if "-" in text or "=" in text:
+        text = _redact_command_options(text)
+    if ":" in text or "=" in text or "：" in text:
+        text = _URL_USERINFO.sub(r"\1<redacted>@", text)
+        text = _SENSITIVE_HEADER_LINE.sub(r"\1<redacted>", text)
+        text = _COOKIE_HEADER.sub(r"\1<redacted>", text)
+        text = _redact_assignments(text)
+    return _KNOWN_TOKEN.sub(_redact_provider_token, _AUTH_TOKEN.sub(_redact_auth_token, text))
+
+
+class DiagnosticFormatter(logging.Formatter):
+    """Apply the same text filter after formatting log arguments and tracebacks."""
+
+    def __init__(self, *args, delegate: logging.Formatter | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._delegate = delegate
+
+    def format(self, record: logging.LogRecord) -> str:
+        # SDKs pass request options as a mapping to %s. Filter that copy before
+        # repr() adds escapes. Preserve the type of other formatting arguments
+        # (notably integer %d) and other handlers' original record.
+        record = copy.copy(record)
+        if _PRIVATE.get() and (
+            record.name in _PRIVATE_LOGGER_NAMES or record.name.startswith(_PRIVATE_LOGGER_PREFIXES)
+        ):
+            record.msg = "<private diagnostic payload omitted>"
+            record.args = ()
+            record.exc_info = record.exc_text = record.stack_info = None
+        if isinstance(record.args, Mapping):
+            record.args = redact_diagnostic_value(record.args)
+        elif isinstance(record.args, tuple):
+            record.args = tuple(
+                redact_diagnostic_value(arg) if isinstance(arg, (str, Mapping, list)) else arg
+                for arg in record.args
+            )
+        if isinstance(record.msg, str) and _SENSITIVE_HEADER_LINE.match(record.msg):
+            # A formatter may add a timestamp/level before a raw HTTP header.
+            # Filter its message while the header's line boundary is intact.
+            record.msg = redact_diagnostic_text(record.getMessage())
+            record.args = ()
+        formatted = self._delegate.format(record) if self._delegate is not None else super().format(record)
+        return redact_diagnostic_text(formatted)
+
+
+def _message_text_fields(message):
+    content = message.get("content")
+    if isinstance(content, str):
+        yield message, "content"
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, Mapping) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                yield block, "text"
+
+
+def diagnostic_continuation_quote(prompt: str, reply: str) -> str | None:
+    """Filter a runtime quote when its 40-character cut removed a credential label."""
+    from .loop_guards import truncation_continuation_text
+
+    tail = reply.rstrip()[-40:]
+    if not tail or prompt != truncation_continuation_text(tail):
+        return None
+    safe = redact_diagnostic_text(reply).rstrip()
+    if safe.endswith(tail):
+        return None
+    quoted = redact_diagnostic_text(tail)
+    if not safe.endswith(quoted):
+        # The quote begins inside a credential. Keep the suffix after its
+        # marker without introducing text from before the original cut.
+        for start in range(len(quoted) + 1):
+            candidate = _REDACTED + quoted[start:]
+            if safe.endswith(candidate):
+                quoted = candidate
+                break
+        else:
+            quoted = _REDACTED
+    return truncation_continuation_text(quoted)
+
+
+def _redact_continuation_quotes(messages: list, cleaned: list) -> None:
+    for index in range(1, len(messages)):
+        reply, prompt = messages[index - 1], messages[index]
+        if not (isinstance(reply, Mapping) and reply.get("role") == "assistant"
+                and isinstance(prompt, Mapping) and prompt.get("role") == "user"):
+            continue
+        # Provider wire messages omit source and may wrap text in blocks. An
+        # exact match against the preceding reply identifies the runtime quote.
+        original = "".join(block[key] for block, key in _message_text_fields(reply))
+        for (block, key), (target, _) in zip(_message_text_fields(prompt), _message_text_fields(cleaned[index])):
+            quote = diagnostic_continuation_quote(block[key], original)
+            if quote is not None:
+                target[key] = quote
+
+
+def redact_diagnostic_value(value: Any, *, _context: str = "possible_schema") -> Any:
+    """Build a JSON-safe diagnostic copy without changing model or tool data."""
+    if isinstance(value, Mapping):
+        if _context == "possible_schema":
+            _context = "schema" if _object_schema(value) else ""
+        # Reuse the existing provider image handling before traversing large
+        # inline images. Leave memory evidence's separate sanitizer unchanged.
+        if value.get("type") in ("image", "image_url"):
+            from .llm.debug_logging import sanitize_for_logging
+
+            value = sanitize_for_logging(value)
+        result = {}
+        for key, item in value.items():
+            key = str(key)
+            context = _field_context(_context, key)
+            if context in ("credential", "credential_list", "credential_schema"):
+                masked = _mask_field(context, key, item)
+                if masked is not item:
+                    result[key] = masked
+                    continue
+            result[key] = redact_diagnostic_value(item, _context=context)
+        if isinstance(value.get("messages"), list):
+            _redact_continuation_quotes(value["messages"], result["messages"])
+        return result
+    if isinstance(value, (list, tuple)):
+        return [redact_diagnostic_value(item, _context=_context) for item in _redact_argv(value)]
+    if hasattr(value, "model_dump"):
+        try:
+            return redact_diagnostic_value(value.model_dump(exclude_none=True))
+        except Exception:
+            pass
+    if hasattr(value, "to_schema"):
+        try:
+            return redact_diagnostic_value(value.to_schema())
+        except Exception:
+            pass
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return redact_diagnostic_text(str(value))
+
+
+def diagnostic_event_fields(event: str, fields: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep the payload and recover missing exit codes from legacy shell errors."""
+    result = redact_diagnostic_value(fields)
+    if (event in {"tool.response", "tool/fail"} and fields.get("tool_name") in ("bash", "bash_output")
+            and (event == "tool/fail" or fields.get("success") is False)
+            and type(fields.get("exit_code")) is not int and isinstance(fields.get("error"), str)):
+        match = re.match(r"Command failed with exit code (-?[0-9]{1,10})\b", fields["error"])
+        if match:
+            result["exit_code"] = int(match[1])
+    return result
 
 
 @contextmanager
-def private_payload_scope():
-    """Suppress unsafe SDK diagnostics only inside a capability's async scope."""
-    # Core, Hook, Bash and MCP adapter diagnostics can contain raw payloads.
-    names = {
-        "box_agent.core", "box_agent.hooks", "box_agent.tools.bash_tool", "box_agent.tools.mcp_result_hooks",
-        "httpx", "httpcore.connection",
-        "httpcore.http11", "httpcore.http2", "httpcore.proxy",
-        "openai._base_client", "anthropic._base_client",
-    }
-    for name in tuple(logging.Logger.manager.loggerDict):
-        if name.startswith(("openai.", "anthropic.", "httpcore.", "box_agent.llm.")):
-            names.add(name)
-    for name in names:
-        logging.getLogger(name).addFilter(_FILTER)
+def private_payload_scope(enabled: bool = True) -> Iterator[None]:
+    """Limit stream diagnostics while the conversation is private."""
+    if not enabled:
+        yield
+        return
     token = _PRIVATE.set(True)
     try:
         yield
     finally:
         _PRIVATE.reset(token)
+
+
+def diagnostic_stream_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Omit bodies from streams that a host might copy to a general log."""
+    if not _PRIVATE.get():
+        return fields
+    return {
+        **{
+            key: value for key, value in fields.items()
+            if key in _STREAM_METADATA_FIELDS and isinstance(value, (str, int, float, bool))
+        },
+        "payload_redacted": True,
+    }

@@ -14,6 +14,7 @@ from typing import Any
 from openai import AsyncOpenAI, BadRequestError, DefaultAsyncHttpxClient
 
 from ..auth import is_private_service_url
+from ..payload_privacy import redact_diagnostic_text
 from ..retry import RetryConfig, StreamInterrupted, async_retry, is_retryable_stream_error
 from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from ..tools.argument_limits import (
@@ -513,7 +514,7 @@ def _repair_tool_call_arguments(
         json.loads(fixed)
         logger.warning(
             "Repaired malformed tool_call arguments for %r: %s -> %s",
-            tool_name, raw_stripped[:80], fixed[:80],
+            tool_name, redact_diagnostic_text(raw_stripped)[:80], redact_diagnostic_text(fixed)[:80],
         )
         return fixed
     except json.JSONDecodeError:

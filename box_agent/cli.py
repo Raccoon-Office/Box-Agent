@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -74,7 +74,7 @@ from box_agent.llm.model_routing import resolve_model_client
 from box_agent.llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS
 from box_agent.schema import LLMProvider, Message
 from box_agent.session_trace import SessionTraceWriter, traced_session_turn
-from box_agent.payload_privacy import private_payload_scope
+from box_agent.payload_privacy import DiagnosticFormatter, private_payload_scope
 from box_agent.tools.base import Tool
 from box_agent.tools.browser_runtime_scope import set_browser_session_key
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
@@ -270,10 +270,9 @@ def _config_display_value(value: Any, parts: list[str]) -> Any:
 
 @contextmanager
 def _cli_traced_turn(writer: SessionTraceWriter, *, content: str, desktop: bool):
-    """Protect both the trace's entry and exit, including exceptional exits."""
-    with private_payload_scope() if desktop else nullcontext():
-        with traced_session_turn(writer, content=content) as turn:
-            yield turn
+    """Use private diagnostic streams for desktop turns."""
+    with private_payload_scope(desktop), traced_session_turn(writer, content=content) as turn:
+        yield turn
 
 
 def _config_error_details(error: Exception) -> str:
@@ -550,6 +549,29 @@ class _QuietMemoryLogHandler(RotatingFileHandler):
 
 
 @contextmanager
+def _cli_stderr_logging() -> Iterator[None]:
+    """Filter standalone stderr, including the root handler set up by provider SDKs."""
+    handlers = [
+        handler for handler in logging.root.handlers
+        if type(handler) is logging.StreamHandler and handler.stream is sys.stderr
+    ]
+    if logging.lastResort is not None and logging.lastResort.formatter is None:
+        handlers.append(logging.lastResort)
+    installed = []
+    try:
+        for handler in handlers:
+            previous = handler.formatter
+            formatter = DiagnosticFormatter(delegate=previous)
+            handler.setFormatter(formatter)
+            installed.append((handler, previous, formatter))
+        yield
+    finally:
+        for handler, previous, formatter in installed:
+            if handler.formatter is formatter:
+                handler.setFormatter(previous)
+
+
+@contextmanager
 def _memory_file_logging() -> Iterator[None]:
     """由 CLI 接管记忆日志，直到后台保存清理完成后恢复原有设置。"""
     memory_logger = logging.getLogger("box_agent.memory")
@@ -563,7 +585,7 @@ def _memory_file_logging() -> Iterator[None]:
             log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
             encoding="utf-8", delay=True,
         )
-        handler.setFormatter(logging.Formatter(
+        handler.setFormatter(DiagnosticFormatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         ))
     except OSError:
@@ -2369,8 +2391,10 @@ async def run_agent(
                     no_progress_limit=agent_session.config.agent.goal_autopilot_no_progress_turns,
                 )
                 try:
-                    with _cli_traced_turn(trace_writer, content=task,
-                                          desktop=agent_session.config.agent.memory_backend_type == "desktop") as traced_turn:
+                    with _cli_traced_turn(
+                        trace_writer, content=task,
+                        desktop=agent_session.config.agent.memory_backend_type == "desktop",
+                    ) as traced_turn:
                         async with memory_user_turn(
                             agent_session, user_text=task, session_id=logical_session_id,
                             turn_id=traced_turn.turn_id,
@@ -2762,8 +2786,10 @@ async def run_agent(
                     esc_thread.start()
 
                     try:
-                        with _cli_traced_turn(trace_writer, content=user_input,
-                                              desktop=agent_session.config.agent.memory_backend_type == "desktop") as traced_turn:
+                        with _cli_traced_turn(
+                            trace_writer, content=user_input,
+                            desktop=agent_session.config.agent.memory_backend_type == "desktop",
+                        ) as traced_turn:
                             agent_task = asyncio.create_task(
                                 _run_session_turn(
                                     agent_session,
@@ -2853,6 +2879,7 @@ async def run_agent(
                 memory_log_scope.close()
 
 
+@_cli_stderr_logging()
 def main() -> int:
     """Main entry point for CLI"""
     # Parse command line arguments

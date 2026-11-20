@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +19,22 @@ from box_agent.llm.debug_logging import (
 from box_agent.llm.openai_client import OpenAIClient
 from box_agent.logger import AgentLogger
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
+from box_agent.session_trace import SessionTraceWriter
 from box_agent.tools.base import Tool, ToolResult
+
+
+def test_repaired_tool_arguments_retain_credentials_only_in_the_runtime_result(caplog):
+    from box_agent.llm.openai_client import _repair_tool_call_arguments
+
+    prefix = '{"command":"'
+    userinfo = "https://user:fixture-boundary"
+    # The original 80-character preview ends immediately before @.
+    value = " " * (80 - len(prefix) - len(userinfo)) + userinfo + "@host.invalid"
+    malformed = prefix + value + '",}'
+    assert _repair_tool_call_arguments(malformed, "bash") == prefix + value + '"}'
+    assert "Repaired malformed tool_call arguments" in caplog.text
+    assert "https://<redacted>@" in caplog.text
+    assert "fixture-boundary" not in caplog.text
 
 
 def test_sanitize_for_logging_redacts_auth_headers() -> None:
@@ -36,6 +54,39 @@ def test_sanitize_for_logging_redacts_auth_headers() -> None:
     assert sanitized["extra_headers"]["Authorization"] == "<redacted>"
     assert sanitized["extra_headers"]["x-api-key"] == "<redacted>"
     assert sanitized["extra_headers"]["X-Trace"] == "keep"
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("Authorization", 'Digest username="example", realm="test", response="fixture-value"'),
+    ("Proxy-Authorization", "AWS4-HMAC-SHA256 Credential=fixture-value, SignedHeaders=host;date, Signature=fixture-value"),
+    ("Authorization", "Token fixture-value"),
+])
+@pytest.mark.parametrize("prefix", ["> ", "[INFO] "])
+def test_trace_preserves_http_headers_after_a_multiword_authorization_value(tmp_path, name, value, prefix):
+    writer = SessionTraceWriter(session_id="headers", acp_session_id="", enabled=True, trace_dir=tmp_path)
+    content = f"HTTP diagnostic\r\n{prefix}{name}: {value}\r\n> X-Request-ID: req-3\r\nPermission denied"
+    writer.write("tool.response", data={"content": content})
+    recorded = json.loads(writer.file_path.read_text())["data"]["content"]
+    assert recorded == content.replace(value, "<redacted>")
+    assert "fixture-value" in content
+
+
+@pytest.mark.parametrize(("flag", "separate"), [
+    ("-H", True), ("-H", False), ("--header", True), ("--header=", False), ("--proxy-header", True),
+])
+def test_trace_filters_only_the_authentication_value_in_curl_header_arguments(tmp_path, flag, separate):
+    writer = SessionTraceWriter(session_id="curl", acp_session_id="", enabled=True, trace_dir=tmp_path)
+    value = 'Digest username="example", response="fixture-value"'
+    header = f"Proxy-Authorization: {value}"
+    following = ["-H", "X-Request-ID: req-3", "https://example.invalid/path"]
+    argv = ["curl", *([flag, header] if separate else [flag + header]), *following]
+    command = f"curl {flag}{' ' if separate else ''}'{header}' -H '{following[1]}' {following[2]}"
+    arguments = {"command": command, "argv": argv}
+    writer.write("tool.request", data={"arguments": arguments})
+    recorded = json.loads(writer.file_path.read_text())["data"]["arguments"]
+    assert recorded["command"] == command.replace(value, "<redacted>")
+    assert recorded["argv"] == [arg.replace(value, "<redacted>") for arg in argv]
+    assert value in arguments["command"] and any(value in arg for arg in arguments["argv"])
 
 
 @pytest.mark.parametrize(
@@ -117,6 +168,52 @@ def test_summarize_request_payload_for_logging_compacts_large_messages_and_tools
     assert summarized["tools"][0]["function"]["parameters"]["property_count"] == 25
     assert summarized["tools"][0]["function"]["parameters"]["properties_omitted"] == 5
     assert long_text not in str(summarized)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
+@pytest.mark.parametrize("existing_dir", [False, True])
+def test_agent_run_log_is_private_when_it_records_a_reply(tmp_path, monkeypatch, existing_dir):
+    profile = tmp_path / "profile"
+    log_dir = profile / "log"
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    if existing_dir:
+        log_dir.mkdir(parents=True)
+        log_dir.chmod(0o755)
+
+    previous_umask = os.umask(0o022)
+    try:
+        agent_logger = AgentLogger()
+        agent_logger.start_new_run()
+        agent_logger.log_response("synthetic private reply")
+    finally:
+        os.umask(previous_umask)
+
+    path = agent_logger.get_log_file_path()
+    assert path is not None and "synthetic private reply" in path.read_text(encoding="utf-8")
+    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX file links")
+@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+def test_agent_run_does_not_log_private_text_through_a_replaced_path(tmp_path, monkeypatch, link):
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "profile"))
+    agent_logger = AgentLogger()
+    agent_logger.start_new_run()
+    path = agent_logger.get_log_file_path()
+    assert path is not None
+
+    other = tmp_path / "untouched.txt"
+    other.write_text("untouched", encoding="utf-8")
+    path.unlink()
+    if link == "symlink":
+        path.symlink_to(other)
+    else:
+        os.link(other, path)
+    agent_logger.log_response("synthetic private reply")
+
+    assert other.read_text(encoding="utf-8") == "untouched"
+    assert agent_logger.get_log_file_path() is None
 
 
 def test_agent_logger_summarizes_large_records_by_default(tmp_path, monkeypatch) -> None:

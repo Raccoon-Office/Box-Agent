@@ -71,6 +71,11 @@ from box_agent.agent_session import AgentSession
 from box_agent.cloud_handoff import cloud_handoff_instruction, validate_cloud_handoff
 from box_agent.acp.message_display import MessageDisplay
 from box_agent.injections import InjectionKind, InjectionManager, MessageInjection
+from box_agent.payload_privacy import (
+    diagnostic_continuation_quote,
+    private_payload_scope,
+    redact_diagnostic_text,
+)
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
 from box_agent.session_assembly import create_application_runtime
@@ -2860,6 +2865,7 @@ class BoxACPAgent:
         state._prompt_in_progress = True
         finished = asyncio.get_running_loop().create_future()
         state._prompt_finished = finished
+        trace_token = None
         try:
             log_store = state.agent.session_log
             turn_id = _meta_string(meta, "turn_id", "turnId")
@@ -2879,15 +2885,14 @@ class BoxACPAgent:
                     log_store.flush()
             if log_store is not None and context:
                 log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
+            # Routing, memory refresh and final QA handoff run outside the
+            # main model iterator. Their tasks inherit this prompt's writer.
+            turn_id = turn_id or f"{session_id}-turn-{state.turn_counter + 1}"
+            if state.trace_writer is not None:
+                trace_token = set_session_trace_writer(state.trace_writer, turn_id=turn_id)
             config = state.config or self._config
-            if config.agent.memory_backend_type == "desktop":
-                from ..payload_privacy import private_payload_scope
-
-                # Include prompt preparation/finalization and their failures,
-                # not only the inner model iterator's private scope.
-                with private_payload_scope():
-                    return await self._prompt_for_session(params, session_id, state, context, prepared_input)
-            return await self._prompt_for_session(params, session_id, state, context, prepared_input)
+            with private_payload_scope(config.agent.memory_backend_type == "desktop"):
+                return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
         except Exception as exc:
             if edit is not None:
                 history = state.agent.session_log
@@ -2897,6 +2902,8 @@ class BoxACPAgent:
                 }) from exc
             raise
         finally:
+            if trace_token is not None:
+                reset_session_trace_writer(trace_token)
             state._prompt_in_progress = False
             if not finished.done():
                 finished.set_result(None)
@@ -2971,7 +2978,7 @@ class BoxACPAgent:
             state._history_edit_in_progress = False
 
     async def _prompt_for_session(
-        self, params: PromptRequest, session_id: str, state: SessionState, context: dict[str, Any],
+        self, params: PromptRequest, session_id: str, state: SessionState, turn_id: str, context: dict[str, Any],
         prepared_input: dict[str, Any] | None = None,
     ) -> PromptResponse:
         self._config_for_session(state)
@@ -3200,7 +3207,6 @@ class BoxACPAgent:
             state.continuation_applied = True
         state.turn_counter += 1
         provided_turn_id = _meta_string(prompt_meta, "turn_id", "turnId")
-        turn_id = provided_turn_id or f"{session_id}-turn-{state.turn_counter}"
         provided_task_id = normalize_task_id(
             prompt_meta.get("task_id") or prompt_meta.get("taskId")
         )
@@ -3360,7 +3366,7 @@ class BoxACPAgent:
             turn_id=turn_id,
             turn_id_source="host" if provided_turn_id else "fallback",
             title=state.upstream_title,
-            plan_detection_text=plan_detection_text[:500],
+            plan_detection_text=redact_diagnostic_text(plan_detection_text)[:500],
             host_plan_hint=host_plan_hint,
             force_plan_start=force_plan_start,
             require_plan_approval=require_plan_approval,
@@ -3541,7 +3547,8 @@ class BoxACPAgent:
 
         # Drain any stale injections from a previous turn
         for stale in state.inject_queue.begin_run(discard_pending=True):
-            log.warn("session/inject_stale", session_id=session_id, text=_inject_item_text(stale)[:80])
+            log.warn("session/inject_stale", session_id=session_id,
+                     text=redact_diagnostic_text(_inject_item_text(stale))[:80])
         skillhub_search_tool = state.agent.tools.get("search_skillhub")
         if isinstance(skillhub_search_tool, SkillHubSearchTool):
             skillhub_search_tool.reset_turn()
@@ -4438,14 +4445,8 @@ class BoxACPAgent:
         return injected
 
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._config.agent.memory_backend_type == "desktop":
-            from ..payload_privacy import private_payload_scope
-
-            # Titles/summaries can contain the same private QA as the main
-            # conversation, even though this endpoint creates no memory turn.
-            with private_payload_scope():
-                return await self._run_llm_prompt(params)
-        return await self._run_llm_prompt(params)
+        with private_payload_scope(self._config.agent.memory_backend_type == "desktop"):
+            return await self._run_llm_prompt(params)
 
     async def _run_llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single tool-free completion (titles/summaries/rewrites).
@@ -5455,12 +5456,9 @@ class BoxACPAgent:
                         case ContentEvent() if event._streaming:
                             # Stream content deltas in real-time
                             if not event._header and event.content:
-                                log.debug(
-                                    "content/stream",
-                                    session_id=session_id,
-                                    chars=len(event.content),
-                                    content=event.content,
-                                )
+                                # Credential labels and values can arrive in different deltas.
+                                # llm/output and the session trace log the assembled text.
+                                log.debug("content/stream", session_id=session_id, chars=len(event.content))
                                 update = update_agent_message(text_block(event.content))
                                 update.field_meta = {"messageDisplay": display_meta}
                                 await self._send(session_id, update)
@@ -5760,12 +5758,15 @@ class BoxACPAgent:
                                 update.field_meta = {"inputStatus": {"injectionId": injection_id, "status": status}}
                                 await self._send(session_id, update)
                                 continue
+                            diagnostic_text = None
+                            if event.kind == InjectionKind.TEXT_CONTINUATION.value:
+                                diagnostic_text = diagnostic_continuation_quote(text, message_display.last_text)
                             log.info(
                                 "session/injected",
                                 session_id=session_id,
                                 injection_id=injection_id,
                                 user_visible=user_visible,
-                                text=text[:80],
+                                text=(diagnostic_text or redact_diagnostic_text(text))[:80],
                             )
                             if not user_visible:
                                 continue
@@ -6475,7 +6476,9 @@ async def run_acp_server(config: Config | None = None) -> None:
     # Clear any pre-existing handlers first to prevent stdout leaks
     logging.root.handlers.clear()
     stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    from box_agent.payload_privacy import DiagnosticFormatter
+
+    stderr_handler.setFormatter(DiagnosticFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.root.addHandler(stderr_handler)
     logging.root.setLevel(logging.INFO)
 

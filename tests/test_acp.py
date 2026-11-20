@@ -9620,13 +9620,12 @@ async def test_user_oauth_does_not_change_prompt_readiness_with_pending_mcp(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('tool_success', [True, False])
-async def test_desktop_memory_acp_keeps_tool_bodies_in_protocol_and_model_but_out_of_stderr(
+async def test_desktop_acp_keeps_tool_bodies_in_diagnostics_and_original_protocol(
     tmp_path, monkeypatch, capsys, tool_success,
 ):
     from box_agent.acp.debug_logger import ACPDebugLogger
-    from box_agent.payload_privacy import private_payloads
 
-    canary = 'MV2-ACP-PRIVATE-short-memory-body'
+    canary = 'ordinary ACP memory body api_key=fixture-acp-secret.'
     monkeypatch.setenv('BOX_AGENT_LOG_LEVEL', 'debug')
     monkeypatch.setenv('BOX_AGENT_LOG_FORMAT', 'json')
     monkeypatch.setenv('BOX_AGENT_LOG_FULL_PAYLOAD', '1')
@@ -9641,7 +9640,6 @@ async def test_desktop_memory_acp_keeps_tool_bodies_in_protocol_and_model_but_ou
 
         async def execute(self, **arguments):
             assert arguments['content'] == canary
-            assert private_payloads()
             return ToolResult(success=tool_success, content=canary if tool_success else '',
                               error=None if tool_success else canary)
 
@@ -9650,7 +9648,6 @@ async def test_desktop_memory_acp_keeps_tool_bodies_in_protocol_and_model_but_ou
         saw_result = False
 
         async def generate_stream(self, messages, tools=None, **_):
-            assert private_payloads()
             self.calls += 1
             if self.calls == 1:
                 yield StreamEvent(type='finish', finish_reason='tool', tool_calls=[ToolCall(
@@ -9675,7 +9672,12 @@ async def test_desktop_memory_acp_keeps_tool_bodies_in_protocol_and_model_but_ou
         assert result.stopReason == 'end_turn'
         assert llm.saw_result
         assert any(canary in str(update.model_dump()) for update in conn.updates)
-        assert canary not in capsys.readouterr().err + (tmp_path / 'runtime.log').read_text()
-        assert not private_payloads()
+        stderr = capsys.readouterr().err
+        detail = (tmp_path / 'runtime.log').read_text()
+        assert 'ordinary ACP memory body' not in stderr
+        assert 'payload_redacted' in stderr
+        assert 'ordinary ACP memory body' in detail
+        assert 'fixture-acp-secret' not in stderr + detail
+        assert 'payload_redacted' not in detail
     finally:
         logger.close()

@@ -10,6 +10,7 @@ from typing import Any
 
 from ..connector_context import matches_connector_snapshot
 from ..llm.debug_logging import sanitize_for_logging
+from ..payload_privacy import CREDENTIAL_FIELD, KNOWN_TOKEN_PATTERN
 from ..session_log import SessionLog
 from ..turn_hints import with_turn_hints
 
@@ -19,21 +20,11 @@ MAX_BYTES = 64 * 1024
 MAX_EVENTS = 2048
 MAX_VIEWS = 12
 EXCERPT_BYTES = 4096
-_SENSITIVE_FIELD = re.compile(
-    r"(?i)(?!(?:[\w.-]+[_.-])?(?:total|input|output|prompt|completion)[_.-]token$)"
-    r"(?:[\w.-]+[_.-])?(?:authorization|(?:set[_.-]?)?cookie|password\d*|pgpassword|passwd|pwd|pass|passphrase|credentials|"
-    r"(?:api|access|private|secret|db|encryption|signing|ssh)[_.-]?key(?:[_.-]?id)?|"
-    r"(?:(?:access|refresh|session|auth|bearer|api)[_.-]?)?token|"
-    r"(?:client[_.-]?)?secret|secret[_.-]?access[_.-]?key|密码|密钥|令牌)"
-)
 _ASSIGNMENT = re.compile(r"(?<![\w.-])([\w.-]+)[\\\"']*\s*[:=：]")
 _SECRET_TEXT = re.compile(
     r"(?i)\bbearer\s+(?!token\b)\S+|\b(?:api|access|private|secret)\s+key\s*[:=：]|"
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----|"
-    r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
-    r"glpat-[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]{12,}|"
-    r"sk_live_[A-Za-z0-9_]+|hf_[A-Za-z0-9_]+|npm_[A-Za-z0-9_]+|"
-    r"(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b|"
+    rf"{KNOWN_TOKEN_PATTERN}|"
     r"(?<![\w-])(?:--(?:password|passwd|passphrase|token|api-key|credentials)(?=[\s=\\\"'])|-p(?=\S))"
 )
 _CURL = re.compile(r"(?i)\bcurl\b")
@@ -55,7 +46,7 @@ def _hash(text: str) -> str:
 def _redact(value: Any) -> Any:
     value = sanitize_for_logging(value)
     if isinstance(value, dict):
-        return {key: "[REDACTED]" if _SENSITIVE_FIELD.fullmatch(str(key)) else _redact(item)
+        return {key: "[REDACTED]" if CREDENTIAL_FIELD.fullmatch(str(key)) else _redact(item)
                 for key, item in value.items()}
     if isinstance(value, list):
         return [_redact(item) for item in value]
@@ -65,7 +56,7 @@ def _redact(value: Any) -> Any:
         if (_SECRET_TEXT.search(value)
                 or _CURL.search(value) and _USER_ARGUMENT.search(value)
                 or any(":" in match[1] for match in _URL_USERINFO.finditer(value))
-                or any(_SENSITIVE_FIELD.fullmatch(match[1]) for match in _ASSIGNMENT.finditer(value))):
+                or any(CREDENTIAL_FIELD.fullmatch(match[1]) for match in _ASSIGNMENT.finditer(value))):
             return "[REDACTED]"
         return _ATTACHMENT.sub("[OMITTED_ATTACHMENT]", value)
     return value

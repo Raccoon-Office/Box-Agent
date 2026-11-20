@@ -344,14 +344,13 @@ async def test_extmethod_llm_prompt_does_not_create_session():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failed', [False, True])
-async def test_desktop_title_request_omits_private_qa_from_all_diagnostics_without_changing_model_input(
+async def test_desktop_title_diagnostics_keep_qa_and_scrub_credentials_without_changing_model_input(
     tmp_path, monkeypatch, capsys, failed,
 ):
     from box_agent.acp.debug_logger import ACPDebugLogger
     from box_agent.llm.debug_logging import log_llm_request
-    from box_agent.payload_privacy import private_payloads
     import box_agent.acp as acp_module
-    canary = 'MV2-TITLE-PRIVATE-QA'
+    canary = 'ordinary title QA api_key=fixture-title-secret'
     monkeypatch.setenv('BOX_AGENT_LOG_LEVEL', 'debug')
     monkeypatch.setenv('BOX_AGENT_LOG_FULL_PAYLOAD', '1')
     monkeypatch.setenv('BOX_AGENT_LLM_DEBUG', '1')
@@ -359,15 +358,14 @@ async def test_desktop_title_request_omits_private_qa_from_all_diagnostics_witho
     logger = ACPDebugLogger()
     monkeypatch.setattr(acp_module, 'log', logger)
 
-    class PrivateLLM(_FakeLLM):
+    class DiagnosticLLM(_FakeLLM):
         async def generate(self, messages, tools=None, **kwargs):
-            assert private_payloads()
             assert any(canary in str(m.content) for m in messages)
             log_llm_request(provider='openai', mode='utility', api_base='https://model.invalid',
                             params={'messages': [m.model_dump() for m in messages]})
             return await super().generate(messages, tools, **kwargs)
 
-    llm = PrivateLLM(content=canary, raises=RuntimeError(canary) if failed else None)
+    llm = DiagnosticLLM(content=canary, raises=RuntimeError(canary) if failed else None)
     agent = _StubAgent(llm)
     agent._config.agent.memory_backend_type = 'desktop'
     try:
@@ -376,7 +374,11 @@ async def test_desktop_title_request_omits_private_qa_from_all_diagnostics_witho
             assert 'error' in result
         else:
             assert result['text'] == canary
-        assert canary not in capsys.readouterr().err + (tmp_path / 'title.log').read_text()
-        assert not private_payloads()
+        stderr = capsys.readouterr().err
+        log = (tmp_path / 'title.log').read_text()
+        assert 'ordinary title QA' not in stderr
+        assert 'ordinary title QA' in log
+        assert 'fixture-title-secret' not in stderr + log
+        assert 'payload_redacted' not in log
     finally:
         logger.close()

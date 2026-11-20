@@ -1,6 +1,7 @@
 """Agent run logger"""
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -9,9 +10,17 @@ from .llm.debug_logging import (
     full_payload_logging_enabled,
     summarize_request_payload_for_logging,
 )
+from .log_files import make_private_log_dir, open_private_log
 from .schema import Message, ToolCall
+from .payload_privacy import (
+    diagnostic_event_fields,
+    redact_diagnostic_value,
+)
 
 from box_agent.user_paths import state_path
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentLogger:
@@ -29,30 +38,33 @@ class AgentLogger:
         """
         # Use ~/.box-agent/log/ directory for logs
         self.log_dir = state_path('log')
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.log_file = None
+        self.log_file: Path | None = None
         self.log_index = 0
 
     def start_new_run(self):
         """Start new run, create new log file"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        suffix = 0
-        while True:
-            discriminator = f"_{suffix}" if suffix else ""
-            candidate = self.log_dir / f"agent_run_{timestamp}{discriminator}.log"
-            try:
-                handle = candidate.open("x", encoding="utf-8")
-                break
-            except FileExistsError:
-                suffix += 1
-        self.log_file = candidate
+        self.log_file = None
         self.log_index = 0
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        try:
+            make_private_log_dir(self.log_dir)
+            suffix = 0
+            while True:
+                discriminator = f"_{suffix}" if suffix else ""
+                candidate = self.log_dir / f"agent_run_{timestamp}{discriminator}.log"
+                try:
+                    handle = open_private_log(candidate, "x")
+                    break
+                except FileExistsError:
+                    suffix += 1
 
-        # Write log header
-        with handle as f:
-            f.write("=" * 80 + "\n")
-            f.write(f"Agent Run Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 80 + "\n\n")
+            with handle as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"Agent Run Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 80 + "\n\n")
+            self.log_file = candidate
+        except OSError:
+            logger.warning("Agent run log unavailable", exc_info=True)
 
     def log_request(
         self,
@@ -99,6 +111,7 @@ class AgentLogger:
         if cache_fingerprint is not None:
             request_data["cache_fingerprint"] = dict(cache_fingerprint)
 
+        request_data = redact_diagnostic_value(request_data)
         if not full_payload_logging_enabled():
             request_data = summarize_request_payload_for_logging(request_data)
 
@@ -151,6 +164,7 @@ class AgentLogger:
         if provider_request_id:
             response_data["provider_request_id"] = provider_request_id
 
+        response_data = redact_diagnostic_value(response_data)
         if not full_payload_logging_enabled():
             response_data = summarize_request_payload_for_logging(response_data)
 
@@ -169,6 +183,7 @@ class AgentLogger:
         """
         self.log_index += 1
 
+        record = redact_diagnostic_value(record)
         event = record.get("event", "llm/debug")
         request_id = record.get("request_id") or ""
         summary = f"LLM Debug Record: {event}"
@@ -223,6 +238,7 @@ class AgentLogger:
         if raw_output is not None:
             tool_result_data["raw_output"] = raw_output
 
+        tool_result_data = diagnostic_event_fields("tool.response", tool_result_data)
         if not full_payload_logging_enabled():
             tool_result_data = summarize_request_payload_for_logging(tool_result_data)
 
@@ -242,18 +258,20 @@ class AgentLogger:
         if self.log_file is None:
             return
 
-        from .payload_privacy import private_payloads
+        try:
+            handle = open_private_log(self.log_file, "a")
+        except PermissionError:
+            self.log_file = None
+            logger.warning("Agent run log unavailable", exc_info=True)
+            return
 
-        if private_payloads():
-            content = "<private diagnostic payload omitted>"
-
-        with open(self.log_file, "a", encoding="utf-8") as f:
+        with handle as f:
             f.write("\n" + "-" * 80 + "\n")
             f.write(f"[{self.log_index}] {log_type}\n")
             f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
             f.write("-" * 80 + "\n")
             f.write(content + "\n")
 
-    def get_log_file_path(self) -> Path:
+    def get_log_file_path(self) -> Path | None:
         """Get current log file path"""
         return self.log_file

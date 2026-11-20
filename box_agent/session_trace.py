@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any, TypeVar
 from uuid import uuid4
 
-from .llm.debug_logging import sanitize_for_logging
+from .log_files import open_private_log
+from .payload_privacy import diagnostic_event_fields
 
 from box_agent.user_paths import state_path
 
@@ -254,29 +255,6 @@ def safe_session_trace_name(session_id: str) -> str:
     return f"{safe}.jsonl"
 
 
-def _trace_value(value: Any) -> Any:
-    """Return a full JSON-safe value while redacting credential-like keys."""
-
-    if isinstance(value, Mapping):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            result.update(sanitize_for_logging({str(key): _trace_value(item)}))
-        return result
-    if isinstance(value, list | tuple):
-        return [_trace_value(item) for item in value]
-    if hasattr(value, "model_dump"):
-        try:
-            return sanitize_for_logging(value.model_dump(exclude_none=True))
-        except Exception:
-            pass
-    if hasattr(value, "to_schema"):
-        try:
-            return sanitize_for_logging(value.to_schema())
-        except Exception:
-            pass
-    return sanitize_for_logging(value)
-
-
 class SessionTraceWriter:
     """Append standalone JSON records to one file for one product session."""
 
@@ -320,13 +298,6 @@ class SessionTraceWriter:
         if not self.enabled or self.trace_dir is None or self.file_path is None:
             return
         try:
-            from .payload_privacy import private_payloads, private_tool_diagnostics
-
-            if private_payloads():
-                data = (
-                    private_tool_diagnostics(event, data or {})
-                    if event.startswith("tool.") else {"payload_redacted": True}
-                )
             record: dict[str, Any] = {
                 "schema_version": _TRACE_SCHEMA_VERSION,
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
@@ -344,17 +315,13 @@ class SessionTraceWriter:
             if tool_call_id:
                 record["tool_call_id"] = tool_call_id
             if data is not None:
-                record["data"] = _trace_value(dict(data))
+                record["data"] = diagnostic_event_fields(event, data)
 
             line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str)
             with _WRITE_LOCK:
                 self.trace_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                descriptor = os.open(
-                    self.file_path,
-                    os.O_APPEND | os.O_CREAT | os.O_WRONLY,
-                    0o600,
-                )
-                with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                # Surrogate-escaped file names remain readable as JSON escapes.
+                with open_private_log(self.file_path, "a", errors="backslashreplace") as handle:
                     handle.write(line + "\n")
                     handle.flush()
             _maybe_cleanup_session_traces(

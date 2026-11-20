@@ -120,11 +120,15 @@ async def run_task(workspace, **kwargs):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interactive", [False, True])
-async def test_desktop_cli_omits_turn_input_and_output_from_trace(cli_trace_setup, monkeypatch, interactive):
+@pytest.mark.parametrize("backend", ["desktop", "local"])
+async def test_cli_retains_turn_llm_and_tool_payloads_for_every_backend(
+    cli_trace_setup, monkeypatch, interactive, backend,
+):
     workspace, trace_dir = cli_trace_setup
     config = cli.Config.from_yaml(None)
-    config.agent.memory_backend_type = "desktop"
-    inputs = iter(["synthetic private question", "/exit"])
+    config.agent.memory_backend_type = backend
+    question = "ordinary user question api_key=fixture-cli-secret"
+    inputs = iter([question, "/exit"])
 
     class Prompts:
         def __init__(self, *args, **kwargs):
@@ -135,28 +139,56 @@ async def test_desktop_cli_omits_turn_input_and_output_from_trace(cli_trace_setu
 
     monkeypatch.setattr(cli, "PromptSession", Prompts)
     assert await cli.run_agent(
-        workspace, task=None if interactive else "synthetic private question",
+        workspace, task=None if interactive else question,
         sandbox_mode=False, verify_api=False, goal_autopilot_enabled=False,
     ) == 0
     records = read_records(next(trace_dir.glob("*.jsonl")))
-    turns = [record for record in records if record["event"] in {"turn.input", "turn.output", "turn.end"}]
-    assert len(turns) == 3
-    assert all(record["data"] == {"payload_redacted": True} for record in turns)
-    assert "synthetic private question" not in json.dumps(records)
-    assert "native trace answer" not in json.dumps(records)
+    by_event = {record["event"]: record["data"] for record in records}
+    assert {"turn.input", "turn.output", "turn.end", "llm.request", "llm.response", "tool.request", "tool.response"} <= by_event.keys()
+    assert "ordinary user question" in by_event["turn.input"]["content"]
+    assert by_event["turn.output"]["content"] == "native trace answer"
+    assert by_event["turn.end"]["stop_reason"] == "end_turn"
+    assert "ping" in json.dumps(by_event["tool.request"])
+    assert "ping" in json.dumps(by_event["tool.response"])
+    assert "ordinary user question" in json.dumps(by_event["llm.request"])
+    assert any("native trace answer" in json.dumps(record["data"])
+               for record in records if record["event"] == "llm.response")
+    assert "fixture-cli-secret" not in json.dumps(records)
+    assert "payload_redacted" not in json.dumps(records)
 
 
-def test_desktop_cli_trace_omits_exception_and_restores_scope(tmp_path):
-    from box_agent.payload_privacy import private_payloads
-
-    writer = SessionTraceWriter(session_id="private", acp_session_id="", trace_dir=tmp_path, enabled=True)
-    with pytest.raises(ValueError):
-        with cli._cli_traced_turn(writer, content="private question", desktop=True):
-            raise ValueError("private exception")
-    assert not private_payloads()
+def test_cli_trace_keeps_exception_details_and_scrubs_credentials(tmp_path):
+    writer = SessionTraceWriter(session_id="diagnostic", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    with pytest.raises(ValueError, match="ordinary failure"):
+        with cli.traced_session_turn(writer, content="ordinary question"):
+            raise ValueError("ordinary failure api_key=fixture-cli-error-secret")
     records = read_records(writer.file_path)
     assert [record["event"] for record in records] == ["turn.input", "turn.error", "turn.output", "turn.end"]
-    assert all(record["data"] == {"payload_redacted": True} for record in records)
+    assert "ordinary question" in json.dumps(records)
+    assert "ordinary failure" in json.dumps(records)
+    assert "fixture-cli-error-secret" not in json.dumps(records)
+    assert "payload_redacted" not in json.dumps(records)
+
+
+def test_cli_memory_file_diagnostics_keep_errors_and_redact_credentials(tmp_path, monkeypatch, capsys):
+    import logging
+
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "agent"))
+    memory_logger = logging.getLogger("box_agent.memory")
+    previous = memory_logger.handlers, memory_logger.level, memory_logger.propagate
+    with cli._memory_file_logging():
+        memory_logger.info("ordinary memory operation api_key=%s", "fixture-memory-secret")
+        try:
+            raise RuntimeError("ordinary memory exception password=fixture-memory-error-secret")
+        except RuntimeError:
+            memory_logger.exception("memory operation failed")
+    assert (memory_logger.handlers, memory_logger.level, memory_logger.propagate) == previous
+    output = (tmp_path / "agent" / "log" / f"memory_{os.getpid()}.log").read_text()
+    assert "ordinary memory operation" in output and "ordinary memory exception" in output
+    assert "Traceback" in output
+    assert "fixture-memory-secret" not in output and "fixture-memory-error-secret" not in output
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
 
 
 @pytest.mark.asyncio
@@ -288,6 +320,82 @@ async def test_cli_configured_hooks_reach_loop_through_session(cli_trace_setup, 
 
     assert await run_task(workspace) == 0
     assert RecordingSessionHook.starts == [config.agent.max_steps]
+
+
+def test_cli_hook_warning_keeps_error_and_masks_credential_on_default_stderr(
+    cli_trace_setup, monkeypatch, capsys,
+):
+    import logging
+    import sys
+
+    workspace, _ = cli_trace_setup
+    config = cli.Config.from_yaml(None)
+    config.hooks.hooks = ["tests.test_cli_session_trace.RecordingSessionHook"]
+
+    async def fail_hook(self, **kwargs):
+        raise RuntimeError("ordinary stop api_key=fixture-hook-secret after hook")
+
+    monkeypatch.setattr(RecordingSessionHook, "on_done", fail_hook)
+    monkeypatch.setattr(cli.Config, "_ensure_user_config", cli.Config.get_default_config_path)
+    monkeypatch.setattr(sys, "argv", [
+        "box-agent", "--workspace", str(workspace), "--task", "echo ping", "--no-sandbox",
+        "--no-verify-api", "--no-goal-autopilot",
+    ])
+    # Reproduce a CLI process without pytest's log capture handlers.
+    monkeypatch.setattr(logging.root, "handlers", [])
+    fallback = logging.lastResort
+    assert fallback is not None and fallback.formatter is None
+    assert cli.main() == 0
+    warning = capsys.readouterr().err
+    assert "on_done failed: ordinary stop api_key=<redacted> after hook" in warning
+    assert "fixture-hook-secret" not in warning
+    assert logging.lastResort is fallback and fallback.formatter is None
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_cli_filters_sdk_debug_stderr_and_restores_its_formatter(
+    cli_trace_setup, monkeypatch, caplog, capsys, provider,
+):
+    import importlib
+    import logging
+    import sys
+
+    workspace, _ = cli_trace_setup
+    monkeypatch.setattr(cli.Config, "_ensure_user_config", cli.Config.get_default_config_path)
+    monkeypatch.setattr(sys, "argv", ["box-agent", "--workspace", str(workspace), "--task", "test"])
+    monkeypatch.setattr(logging.root, "handlers", [])
+    # Let the installed SDK build the same stderr handler as at CLI startup.
+    monkeypatch.setenv(provider.upper() + "_LOG", "debug")
+    with caplog.at_level(logging.DEBUG, logger=provider), caplog.at_level(logging.DEBUG, logger="httpx"):
+        importlib.import_module(f"{provider}._utils._logs").setup_logging()
+        handler, = logging.root.handlers
+        original = handler.formatter
+        messages = [{"role": "user", "content": "diagnostic password=fixture-sdk-secret"}]
+
+        def reply(request):
+            assert json.loads(request.content)["messages"] == messages
+            return httpx.Response(200, json={"id": "fixture"})
+
+        async def request(*_, **__):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+                if provider == "openai":
+                    from openai import AsyncOpenAI
+
+                    sdk = AsyncOpenAI(api_key="fixture", http_client=client)
+                    await sdk.chat.completions.create(model="fixture", messages=messages)
+                else:
+                    from anthropic import AsyncAnthropic
+
+                    sdk = AsyncAnthropic(api_key="fixture", http_client=client)
+                    await sdk.messages.create(model="fixture", messages=messages, max_tokens=1)
+            return 0
+
+        monkeypatch.setattr(cli, "run_agent", request)
+        assert cli.main() == 0
+    output = capsys.readouterr().err
+    assert handler.formatter is original
+    assert provider + "._base_client:" in output and "Request options:" in output
+    assert "diagnostic password=<redacted>" in output and "fixture-sdk-secret" not in output
 
 
 @pytest.mark.asyncio

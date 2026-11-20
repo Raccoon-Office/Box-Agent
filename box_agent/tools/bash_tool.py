@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field, model_validator
 
 from ..config import ToolsConfig
+from ..payload_privacy import redact_diagnostic_text
 from .chat_references import bash_chat_mutation_error
 from .base import Tool, ToolResult
 from .argument_limits import MAX_BASH_COMMAND_CHARS
@@ -1213,8 +1214,8 @@ class BashTool(Tool):
                     spawn_env["PATH"] = os.pathsep.join(path_parts)
                 log.info(
                     "bash/spawn shell=bundled_bash cmd=%r cwd=%s merge_stderr=%s path_head=%s",
-                    command[:500], self.workspace_dir, merge_stderr,
-                    spawn_env.get("PATH", "")[:200],
+                    redact_diagnostic_text(command)[:500], self.workspace_dir, merge_stderr,
+                    redact_diagnostic_text(spawn_env.get("PATH", ""))[:200],
                 )
                 guarded_command = f"set -o pipefail\n{command}"
                 return await asyncio.create_subprocess_exec(
@@ -1227,7 +1228,7 @@ class BashTool(Tool):
                 )
             log.info(
                 "bash/spawn shell=powershell cmd=%r cwd=%s merge_stderr=%s",
-                command[:500], self.workspace_dir, merge_stderr,
+                redact_diagnostic_text(command)[:500], self.workspace_dir, merge_stderr,
             )
             return await asyncio.create_subprocess_exec(
                 self._powershell_executable, "-NoProfile", "-Command", command,
@@ -1829,7 +1830,7 @@ Examples:
                 abs_paths = extract_absolute_paths(permission_command)
                 log.debug(
                     "bash/perm/extracted paths=%s reason=%s cmd=%r",
-                    abs_paths, escape_reason, command[:200],
+                    abs_paths, escape_reason, redact_diagnostic_text(command)[:200],
                 )
 
                 # CONSERVATIVE: if an escape pattern has no extractable path,
@@ -1865,7 +1866,7 @@ Examples:
                     if not decision.allowed:
                         log.warning(
                             "bash/perm/denied path=%s cap=%s extracted=%s cmd=%r",
-                            p, cap, abs_paths, command[:200],
+                            p, cap, abs_paths, redact_diagnostic_text(command)[:200],
                         )
                         extracted_summary = (
                             f" Extracted paths from command: {abs_paths}."
@@ -2045,7 +2046,7 @@ Examples:
                         }
                         log.warning(
                             "bash/output_truncated command=%r dropped=%d stdout_chars=%d stderr_chars=%d",
-                            command[:120], dropped, original_stdout_chars, original_stderr_chars,
+                            redact_diagnostic_text(command)[:120], dropped, original_stdout_chars, original_stderr_chars,
                         )
 
                     # Create result (content auto-formatted by model_validator)

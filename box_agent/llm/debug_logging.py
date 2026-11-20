@@ -83,7 +83,9 @@ def log_llm_request(
     if not llm_debug_enabled():
         return
 
-    sanitized_payload = sanitize_for_logging(params)
+    from ..payload_privacy import redact_diagnostic_value
+
+    sanitized_payload = redact_diagnostic_value(params)
     if not full_payload_logging_enabled():
         sanitized_payload = summarize_request_payload_for_logging(sanitized_payload)
 
@@ -452,10 +454,10 @@ def _summarize_request_value(value: Any, *, preview_chars: int = _REQUEST_TEXT_P
 
 
 def _emit(record: dict[str, Any]) -> None:
-    from ..payload_privacy import private_payloads
+    from ..log_files import open_private_log
+    from ..payload_privacy import diagnostic_stream_fields, redact_diagnostic_value
 
-    if private_payloads():
-        record = {"event": record.get("event"), "payload_redacted": True}
+    record = redact_diagnostic_value(record)
     full_record = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "level": "DEBUG",
@@ -471,21 +473,21 @@ def _emit(record: dict[str, Any]) -> None:
         except Exception:
             logger.debug("LLM debug sink failed", exc_info=True)
 
-    line = json.dumps(full_record, ensure_ascii=False, default=str)
-    logger.debug(line)
+    stream_line = json.dumps(diagnostic_stream_fields(full_record), ensure_ascii=False, default=str)
+    logger.debug(stream_line)
 
     file_path = os.environ.get("BOX_AGENT_LOG_FILE", "").strip()
     if file_path:
         try:
-            with open(file_path, "a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            with open_private_log(file_path, "a") as handle:
+                handle.write(json.dumps(full_record, ensure_ascii=False, default=str) + "\n")
         except Exception:
             logger.debug("Failed to write BOX_AGENT_LOG_FILE=%s", file_path, exc_info=True)
         return
 
     if not sink_handled:
         try:
-            sys.stderr.write(line + "\n")
+            sys.stderr.write(stream_line + "\n")
             sys.stderr.flush()
         except Exception:
             pass

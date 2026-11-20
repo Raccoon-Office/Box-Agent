@@ -7,6 +7,7 @@ from tests.acp_helpers import acp_params
 import asyncio
 import json
 import os
+import stat
 import time
 from types import SimpleNamespace
 
@@ -58,6 +59,33 @@ class EchoTool(Tool):
         return ToolResult(success=True, content=f"echo:{text}")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
+def test_trace_keeps_error_details_in_private_files_only(tmp_path):
+    trace_dir = tmp_path / "logs"
+    trace_dir.mkdir()
+    trace_dir.chmod(0o755)
+    private = SessionTraceWriter(session_id="private", acp_session_id="", trace_dir=trace_dir, enabled=True)
+    legacy = SessionTraceWriter(session_id="legacy", acp_session_id="", trace_dir=trace_dir, enabled=True)
+    old_body = '{"event":"session.start"}\n'
+    legacy.file_path.write_text(old_body, encoding="utf-8")
+    legacy.file_path.chmod(0o644)
+
+    with legacy.file_path.open(encoding="utf-8") as older_reader:
+        for writer in (private, legacy):
+            writer.write("llm.error", data={"error": "synthetic model failure"})
+            writer.write("tool.response", data={
+                "tool_name": "mcp__seko", "success": False, "error": "synthetic video failure",
+            })
+        assert older_reader.read() == old_body
+
+    assert stat.S_IMODE(trace_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(private.file_path.stat().st_mode) == 0o600
+    assert [row["data"]["error"] for row in _records(private)] == [
+        "synthetic model failure",
+        "synthetic video failure",
+    ]
+
+
 def test_writer_appends_jsonl_and_preserves_ids_with_redaction(tmp_path):
     writer = SessionTraceWriter(
         session_id="office/session 1",
@@ -95,6 +123,14 @@ def test_writer_appends_jsonl_and_preserves_ids_with_redaction(tmp_path):
     assert all(record["turn_id"] == "turn-1" for record in records[:2])
     assert records[0]["data"]["authorization"] == "<redacted>"
     assert records[0]["data"]["total_tokens"] == 12
+
+
+def test_trace_preserves_surrogate_escaped_file_name_and_surrounding_content(tmp_path):
+    writer = SessionTraceWriter(session_id="files", acp_session_id="acp", trace_dir=tmp_path, enabled=True)
+    filename = "报告-\udcff.txt"
+    writer.write("tool.response", data={"filename": filename, "error": "无法打开文件"})
+    record, = _records(writer)
+    assert record["data"] == {"filename": filename, "error": "无法打开文件"}
 
 
 def test_writer_failure_never_escapes_into_agent_flow(tmp_path):
@@ -360,6 +396,37 @@ async def test_scoped_trace_can_be_closed_from_another_task_context(tmp_path):
         "source.next",
         "source.close",
     ]
+
+
+@pytest.mark.parametrize("connection_error", [False, True])
+async def test_incomplete_stream_keeps_filtered_partial_output_at_default_log_level(tmp_path, monkeypatch, connection_error):
+    monkeypatch.delenv("BOX_AGENT_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("BOX_AGENT_SESSION_TRACE_ENABLED", raising=False)
+
+    class PartialProvider:
+        async def generate_stream(self, *args, **kwargs):
+            for part in ("ordinary partial reply: pass", "word=", "fixture-partial", " follow-up"):
+                yield StreamEvent(type="text", delta=part)
+            if connection_error:
+                raise ConnectionError("fixture disconnected")
+
+    client = LLMClient(api_key="test", provider=LLMProvider.OPENAI, model="test-model")
+    client._client = PartialProvider()
+    writer = SessionTraceWriter(session_id="partial", acp_session_id="acp-partial", trace_dir=tmp_path)
+    token = set_session_trace_writer(writer, turn_id="partial-turn")
+    try:
+        stream = client.generate_stream([Message(role="user", content="request")])
+        if connection_error:
+            with pytest.raises(ConnectionError, match="fixture disconnected"):
+                _ = [event async for event in stream]
+        else:
+            _ = [event async for event in stream]
+    finally:
+        reset_session_trace_writer(token)
+    request, error = _records(writer)
+    assert error["event"] == "llm.error" and error["llm_call_id"] == request["llm_call_id"]
+    assert error["data"]["partial_content"] == "ordinary partial reply: password=<redacted> follow-up"
+    assert error["data"]["error_type"] == ("ConnectionError" if connection_error else "IncompleteStream")
 
 
 @pytest.mark.asyncio

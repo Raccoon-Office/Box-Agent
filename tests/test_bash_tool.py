@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import math
 import os
 import shlex
@@ -264,6 +265,44 @@ async def test_rejects_oversized_command_before_execution():
     assert result.error.startswith("BASH_ARGUMENT_TOO_LARGE")
     assert bash_tool.parameters["properties"]["command"]["maxLength"] == MAX_BASH_COMMAND_CHARS
     assert bash_tool.parameters["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_bash_permission_check_filters_the_logged_command_preview(tmp_path, caplog):
+    from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
+
+    policy = CapabilityPolicy(filesystem_scope="session_workspace", session_workspace_root=str(tmp_path))
+    permissions = PermissionEngine(policy, tmp_path, grant_store=GrantStore())
+    tool = BashTool(workspace_dir=str(tmp_path), permission_engine=permissions, non_interactive=True)
+    userinfo = "https://user:fixture-boundary"
+    command = "echo /fixture-outside".ljust(200 - len(userinfo)) + userinfo + "@host.invalid"
+    with caplog.at_level(logging.DEBUG, logger=bash_tool_module.__name__):
+        result = await tool.execute(command=command)
+    assert not result.success
+    assert "bash/perm/extracted" in caplog.text and "bash/perm/denied" in caplog.text
+    assert "https://<redacted>@" in caplog.text and "fixture-boundary" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundled", [False, True])
+async def test_windows_spawn_logs_filter_command_before_the_preview_cut(tmp_path, monkeypatch, caplog, bundled):
+    tool = BashTool(workspace_dir=str(tmp_path))
+    tool.is_windows = True
+    tool._bundled_win_bash = "bash.exe" if bundled else None
+    tool._bundled_win_path_dirs = []
+    tool._powershell_executable = "powershell.exe"
+    userinfo = "https://user:fixture-boundary"
+    command = "echo".ljust(500 - len(userinfo)) + userinfo + "@host.invalid"
+    path_entry = "https://user:fixture-path-boundary"
+    path = "bin;".ljust(200 - len(path_entry)) + path_entry + "@host.invalid"
+    spawn = unittest.mock.AsyncMock()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with caplog.at_level(logging.INFO, logger=bash_tool_module.__name__):
+        await tool._spawn_subprocess(command, environment={"PATH": path})
+    assert command in spawn.call_args.args[-1]
+    assert spawn.call_args.kwargs["env"]["PATH"] == path
+    assert "https://<redacted>@" in caplog.text and "fixture-boundary" not in caplog.text
+    assert "fixture-path-boundary" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2053,7 +2092,7 @@ def test_truncate_bash_streams_preserves_small_streams():
 
 
 @pytest.mark.asyncio
-async def test_foreground_output_truncated_when_oversize():
+async def test_foreground_output_truncated_when_oversize(caplog):
     """Foreground `rg`-style large output must be truncated at the tool
     boundary — this is the direct regression guard for the 3.7M-char
     context-overflow incident."""
@@ -2066,10 +2105,14 @@ async def test_foreground_output_truncated_when_oversize():
     else:
         command = "python3 -c \"print('x' * 60000)\""
 
+    # Keep the synthetic credential at the boundary of the logged command preview.
+    userinfo = "https://user:fixture-boundary"
+    command = (command + " # ").ljust(120 - len(userinfo)) + userinfo + "@host.invalid"
     bash_tool = BashTool()
     result = await bash_tool.execute(command=command)
 
     assert result.success, f"command failed: {result.error}"
+    assert "bash/output_truncated" in caplog.text and "fixture-boundary" not in caplog.text
     assert len(result.stdout) <= MAX_BASH_OUTPUT_CHARS + 500, (
         f"expected truncated output, got {len(result.stdout)} chars"
     )

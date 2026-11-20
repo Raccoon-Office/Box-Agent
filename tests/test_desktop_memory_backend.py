@@ -902,7 +902,7 @@ async def test_full_handoff_queue_still_closes_skipped_turn_without_blocking(hos
 @pytest.mark.parametrize("sample", CREDENTIAL_SAMPLES)
 @pytest.mark.parametrize("finish_sentence", [True, False])
 @pytest.mark.parametrize("qa_secret", ["user", "assistant", None])
-async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_path, host, sample, finish_sentence, qa_secret, caplog, monkeypatch):
+async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_path, host, sample, finish_sentence, qa_secret, monkeypatch):
     from box_agent.agent_service import AgentService
     from box_agent.api import RunRequest
     from box_agent.session_log import SessionLog
@@ -960,14 +960,13 @@ async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_
                 assert view["source_ref"]["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
         assert any(event["type"] == "tool/result" and event["data"]["result"]["content"] == sample for event in log.events)
         assert any(event["type"] == "user/message" and event["data"]["content"] == user for event in log.events)
-        assert "SYNTHETIC" not in caplog.text and "AKIAABCDEFGHIJKLMNOP" not in caplog.text
     finally:
         await session.aclose()
         await manager.aclose()
         log.close()
 
 
-async def test_desktop_hook_errors_never_log_model_or_tool_payloads(tmp_path, host, caplog, monkeypatch):
+async def test_desktop_hook_errors_preserve_existing_model_and_tool_diagnostics(tmp_path, host, caplog, monkeypatch):
     from box_agent.agent_service import AgentService
     from box_agent.api import RunRequest
     from box_agent.hooks import HookManager
@@ -1029,10 +1028,10 @@ async def test_desktop_hook_errors_never_log_model_or_tool_payloads(tmp_path, ho
         assert ("model", "PRIVATE_MODEL_RESPONSE") in seen
         assert ("tool", "PRIVATE_TOOL_RESULT") in seen
         assert ("done", "PRIVATE_FINAL_ANSWER") in seen
-        assert all(value not in caplog.text for value in (
+        assert all(value in caplog.text for value in (
             "PRIVATE_MODEL_RESPONSE", "PRIVATE_TOOL_RESULT", "PRIVATE_FINAL_ANSWER"))
 
-        # The same hook still reports its error outside the private desktop scope.
+        # Ordinary Hook diagnostics keep the same behavior as desktop runs.
         await HookManager([FailingHook()]).fire_done(stop_reason="completed", final_content="ORDINARY_HOOK_ERROR")
         assert "ORDINARY_HOOK_ERROR" in caplog.text
     finally:
@@ -1231,7 +1230,7 @@ async def test_real_acp_connector_transitions_keep_current_turn_evidence(
 
 
 @pytest.mark.parametrize("failed", [False, True])
-async def test_desktop_acp_trace_does_not_persist_private_qa(tmp_path, monkeypatch, host, failed):
+async def test_desktop_acp_trace_preserves_input_output_and_errors(tmp_path, monkeypatch, host, failed):
     from box_agent.acp import BoxACPAgent
     from tests.test_acp import DummyConn, DoneLLM
 
@@ -1260,10 +1259,178 @@ async def test_desktop_acp_trace_does_not_persist_private_qa(tmp_path, monkeypat
             await adapter.prompt(**acp_params(request))
             assert canary in state.agent.session_log.path.read_text()
         records = [json.loads(line) for line in state.trace_writer.file_path.read_text().splitlines()]
-        assert any(row['event'] == 'turn.input' for row in records)
-        assert canary not in state.trace_writer.file_path.read_text()
+        input_record = next(row for row in records if row['event'] == 'turn.input')
+        assert input_record['data']['content'] == canary
+        assert input_record['turn_id'] == 'trace-turn'
+        assert input_record['data']['prompt'] == [{'type': 'text', 'text': canary}]
         if failed:
-            assert any(row['event'] == 'turn.error' for row in records)
+            error_record = next(row for row in records if row['event'] == 'turn.error')
+            assert error_record['turn_id'] == 'trace-turn'
+            assert error_record['data']['message'] == canary
+        else:
+            output_record = next(row for row in records if row['event'] == 'turn.output')
+            assert output_record['turn_id'] == 'trace-turn'
+            assert output_record['data']['content'] == 'done'
+    finally:
+        await adapter.aclose()
+        await process.aclose()
+
+
+@pytest.mark.parametrize("job_available", ["refresh", "handoff"])
+async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp_path, monkeypatch, host, job_available):
+    from copy import deepcopy
+
+    from box_agent.acp import BoxACPAgent
+    from box_agent.llm.llm_wrapper import LLMClient
+    from box_agent.schema import LLMProvider, LLMResponse
+    from box_agent.session_trace import (
+        SessionTraceWriter, emit_session_trace, reset_session_trace_writer, set_session_trace_writer,
+    )
+    from box_agent.tools.base import Tool, ToolResult
+    from tests.test_acp import DummyConn
+    from tests.test_desktop_memory_experience import Transport
+
+    job = Transport()
+    release_model = asyncio.Event()
+    proposed = asyncio.Event()
+
+    async def experience_job(operation, payload):
+        if operation != "experience/job":
+            return None
+        if job_available == "handoff" and not any(op == "qa/evidence" for op, _ in host.calls):
+            return None  # The initial refresh finds no pending job.
+        data = await job.request(operation, payload)
+        if payload["action"] == "propose":
+            proposed.set()
+        return httpx.Response(200, json={
+            "protocol": 2, "identity_epoch": host.bootstrap["identity_epoch"], "ok": True, "data": data,
+        })
+
+    host.before = experience_job
+
+    class TraceTool(Tool):
+        name = "trace_fixture"
+        description = "Return the synthetic trace fixture."
+        parameters: ClassVar[dict] = {
+            "type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"],
+        }
+
+        async def execute(self, text):
+            assert text == "trace-tool-argument"
+            return ToolResult(success=True, content="trace-tool-result")
+
+    class Provider:
+        retry_callback = None
+
+        def __init__(self):
+            self.requests = []
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.requests.append(deepcopy(messages))
+            if len(self.requests) == 1:
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                    id="trace-call", type="function", function=FunctionCall(
+                        name="trace_fixture", arguments={"text": "trace-tool-argument"}))])
+            else:
+                yield StreamEvent(type="text", delta="Trace flow complete.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+        async def generate(self, messages, tools=None, **kwargs):
+            if kwargs["call_kind"] == "memory_experience":
+                assert messages[1].content == job.prompt
+                await release_model.wait()
+                return LLMResponse(content='{"facts":[],"observations":[]}', finish_reason="stop")
+            assert kwargs["call_kind"] == "turn_continuation_judge"
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
+
+    monkeypatch.setenv("BOX_AGENT_SESSION_TRACE_ENABLED", "1")
+    monkeypatch.setenv("BOX_AGENT_SESSION_TRACE_DIR", str(tmp_path / "diagnostics"))
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    config.agent.memory_desktop = DesktopMemoryConfig(
+        bootstrap_file=str(host.path), identity_epoch=host.bootstrap["identity_epoch"])
+    config.agent.tool_interface_version = 1
+    config.agent.retry_on_suspected_truncation = False
+    provider = Provider()
+    model = LLMClient(api_key="test-only", provider=LLMProvider.OPENAI, model="fixture-model")
+    model._client = provider
+    process = backend(host)
+    adapter = BoxACPAgent(DummyConn(), config, model, [TraceTool()], "BASE", memory_manager=process)
+    try:
+        opened = await adapter.new_session(**acp_params(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={"session_id": "trace-session"})))
+        state = adapter._sessions[opened.sessionId]
+        await state.agent.tools["tool_search"].execute(tool_names=["trace_fixture"])
+        other = SessionTraceWriter(session_id="other-session", acp_session_id="other-acp",
+                                   trace_dir=tmp_path / "diagnostics", enabled=True)
+        # Cover both an unbound caller and one already tracing another session.
+        token = set_session_trace_writer(other, turn_id="other-turn") if job_available == "handoff" else None
+        try:
+            await adapter.prompt(**acp_params(SimpleNamespace(
+                sessionId=opened.sessionId, prompt=[{"type": "text", "text": "Run the trace fixture."}],
+                field_meta={"turn_id": "trace-turn"})))
+            emit_session_trace("caller.after_prompt")
+        finally:
+            if token is not None:
+                reset_session_trace_writer(token)
+        # Complete the background model after the foreground prompt has returned.
+        release_model.set()
+        await asyncio.wait_for(proposed.wait(), timeout=5)
+        await asyncio.gather(*tuple(state.memory_runtime.tasks))
+        assert job.proposal == {"facts": [], "observations": []}
+        if token is not None:
+            other_rows = other.file_path.read_text(encoding="utf-8").splitlines()
+            assert [json.loads(line)["event"] for line in other_rows] == ["caller.after_prompt"]
+
+        records = [json.loads(line) for line in state.trace_writer.file_path.read_text(encoding="utf-8").splitlines()]
+        requests = [row for row in records if row["event"] == "llm.request" and row["data"]["streaming"]]
+        by_call = {row["llm_call_id"]: row for row in records if row["event"] == "llm.response"}
+        responses = [by_call[row["llm_call_id"]] for row in requests]
+        assert len(requests) == len(responses) == len(provider.requests) == 2
+        judge = next(row for row in records if row["event"] == "llm.request"
+                     and row["data"]["call_kind"] == "turn_continuation_judge")
+        assert by_call[judge["llm_call_id"]]["data"]["content"] == '{"continue":false}'
+        experience, = [row for row in records if row["event"] == "llm.request"
+                       and row["data"]["call_kind"] == "memory_experience"]
+        experience_reply = by_call[experience["llm_call_id"]]
+        assert experience["session_id"] == experience_reply["session_id"] == "trace-session"
+        assert experience["turn_id"] == experience_reply["turn_id"] == "event"
+        assert experience["data"]["messages"][1]["content"] == job.prompt
+        assert json.loads(experience_reply["data"]["content"]) == job.proposal
+        assert all(row["event"] != "caller.after_prompt" for row in records)
+        assert next(row for row in records if row["event"] == "turn.input")["data"]["content"] == "Run the trace fixture."
+        for request, response, actual in zip(requests, responses, provider.requests):
+            assert request["session_id"] == response["session_id"] == "trace-session"
+            assert request["turn_id"] == response["turn_id"] == "trace-turn"
+            assert request["llm_call_id"] == response["llm_call_id"]
+            expected = []
+            for message in actual:
+                recorded = message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+                if message.role == "user":
+                    recorded["source"] = message.source
+                expected.append(recorded)
+            assert request["data"]["messages"] == expected
+            assert "user_items-unique-data" in request["data"]["messages"][0]["content"]
+        assert requests[0]["llm_call_id"] != requests[1]["llm_call_id"]
+        tool_request = next(row for row in records if row["event"] == "tool.request" and row["tool_call_id"] == "trace-call")
+        tool_response = next(row for row in records if row["event"] == "tool.response" and row["tool_call_id"] == "trace-call")
+        assert tool_request["data"]["arguments"] == {"text": "trace-tool-argument"}
+        assert tool_request["turn_id"] == tool_response["turn_id"] == "trace-turn"
+        assert tool_response["data"]["content"] == tool_response["data"]["model_content"] == "trace-tool-result"
+        assert tool_response["data"]["success"] is True
+        assert next(message for message in requests[1]["data"]["messages"]
+                    if message["role"] == "tool" and message["tool_call_id"] == "trace-call")["content"] == "trace-tool-result"
+        assert responses[0]["data"]["tool_calls"][0]["id"] == "trace-call"
+        assert responses[1]["data"]["content"] == "Trace flow complete."
+        assert next(row for row in records if row["event"] == "turn.output")["data"]["content"] == "Trace flow complete."
+        assert not any(row.get("data", {}).get("payload_redacted") for row in records)
+
+        qa = next(payload for operation, payload in host.calls if operation == "qa/evidence")
+        assert qa["user"] == "Run the trace fixture." and qa["assistant"] == "Trace flow complete."
+        assert qa["evidence"]["status"] == "captured"
+        assert {view["source_ref"]["event_type"] for view in qa["evidence"]["views"]} >= {"user/message", "tool/call", "tool/result"}
+        assert "user_items-unique-data" not in json.dumps(qa)
+        assert any(operation == "turn/close" for operation, _ in host.calls)
     finally:
         await adapter.aclose()
         await process.aclose()
