@@ -19,6 +19,44 @@ from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.engine import artifact_results
 
 
+_AUTO_SNAPSHOT = "- [Snapshot](.playwright-mcp/page-2026-11-19T18-06-05-997Z.yml)"
+_CONSOLE_EVENT = "- New console entries: .playwright-mcp/console-2026-11-19T18-06-05-970Z.log#L1"
+
+
+@pytest.mark.parametrize("server_name, explicit_filename", [
+    ("playwright", False), ("playwright", True), ("test-mcp", False),
+])
+def test_browser_tool_receipt_uses_inline_snapshot_instead_of_private_cache(tmp_path, server_name, explicit_filename):
+    content = f"### Snapshot\n{_AUTO_SNAPSHOT}\n### Events\n{_CONSOLE_EVENT}\n- Downloaded file notes.txt"
+    old = Message(role="tool", tool_call_id="older-call", name="managed_browser_navigate", content=content)
+    result = process_tool_result(ToolResultPipelineInput(
+        messages=[old], tool_call_id="new-call", tool_name="managed_browser_navigate",
+        arguments={"filename": "workspace-snapshot.yml"} if explicit_filename else {},
+        result=ToolResult(success=True, content=content), visible_content=content,
+        visible_error=None, result_storage=ToolResultStorage(tmp_path), server_name=server_name,
+    ))
+
+    assert old.content == content
+    assert result.visible_content == content
+    assert "- Downloaded file notes.txt" in result.model_content
+    assert (_CONSOLE_EVENT in result.model_content) is (server_name != "playwright")
+    assert (_AUTO_SNAPSHOT in result.model_content) is (server_name != "playwright" or explicit_filename)
+    if server_name == "playwright" and not explicit_filename:
+        assert "Use managed_browser_snapshot" in result.model_content
+
+
+def test_browser_tool_receipt_preserves_inline_page_text(tmp_path):
+    snapshot = f"### Snapshot\n```yaml\n### Events\n{_CONSOLE_EVENT}\n```\n"
+    content = snapshot + f"### Events\n{_CONSOLE_EVENT}"
+    result = process_tool_result(ToolResultPipelineInput(
+        messages=[], tool_call_id="snapshot", tool_name="managed_browser_snapshot",
+        arguments={}, result=ToolResult(success=True, content=content), visible_content=content,
+        visible_error=None, result_storage=ToolResultStorage(tmp_path), server_name="playwright",
+    ))
+    assert result.model_content == snapshot
+    assert result.visible_content == content
+
+
 @pytest.mark.parametrize("code", ["CHAT_REFERENCE_PROTECTED", "CHAT_REFERENCE_DELETE_DENIED", "BROAD_HOME_SEARCH_BLOCKED"])
 def test_repeated_policy_blocks_across_tools_keep_first_guidance_and_stop_retry_hint(tmp_path, code):
     messages = []

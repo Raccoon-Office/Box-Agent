@@ -25,7 +25,7 @@ from ...tool_result_storage import (
     _json_fits,
 )
 from ..base import Tool, ToolResult
-from ..browser_result_adapter import _trace_safe_tool_raw_output
+from ..browser_result_adapter import _playwright_model_content, _trace_safe_tool_raw_output
 from ..file_result_adapter import (
     _context_resource_history_decision,
     _record_context_resource_history,
@@ -147,6 +147,10 @@ def process_tool_result(
     if pipeline_input.hook_text_modified:
         # 已处理的可见文本进入历史，避免原 model_context 或资源回执覆盖修改。
         model_content = visible_content if result.success else f"Error: {visible_error or visible_content}"
+    elif result.success and pipeline_input.server_name == "playwright":
+        model_content = _playwright_model_content(
+            model_content, explicit_filename=bool(pipeline_input.arguments.get("filename")),
+        )
     repeated = _repeatable_framework_error(
         tool_name=pipeline_input.tool_name,
         result=result,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -13,11 +14,41 @@ from ..artifacts import artifact_scan_root as _artifact_scan_root
 from .base import ToolResult
 
 
+_PLAYWRIGHT_AUTO_SNAPSHOT = re.compile(
+    r"- \[Snapshot\]\(\.playwright-mcp/page-[0-9TZ.-]+\.yml\)"
+)
+_PLAYWRIGHT_CONSOLE_EVENT = re.compile(
+    r"- New console entries: \.playwright-mcp/console-[0-9TZ.-]+\.log(?:#L\d+(?:-L?\d+)?)?"
+)
 _BROWSER_SNAPSHOT_OUTPUT_PATH_ERROR = (
     "BROWSER_SNAPSHOT_OUTPUT_PATH_INVALID: relative snapshot filenames must stay "
     "inside the session cwd. Use a path such as "
     "research/page-snapshot.md, or omit filename when no persisted snapshot is needed."
 )
+
+
+def _playwright_model_content(content: str, *, explicit_filename: bool = False) -> str:
+    """Keep Playwright's private cache links out of the model's new tool receipt."""
+    if ".playwright-mcp/" not in content:
+        return content
+
+    lines = content.splitlines(keepends=True)
+    projected = []
+    in_code_block = False
+    for index, line in enumerate(lines):
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+        if not in_code_block and index:
+            previous = lines[index - 1].rstrip("\r\n")
+            text = line.rstrip("\r\n")
+            if previous == "### Snapshot" and not explicit_filename and _PLAYWRIGHT_AUTO_SNAPSHOT.fullmatch(text):
+                line = "- Use managed_browser_snapshot to get the current page snapshot inline." + line[len(text):]
+            elif previous == "### Events" and _PLAYWRIGHT_CONSOLE_EVENT.fullmatch(text):
+                if index + 1 == len(lines) or not lines[index + 1].startswith("- "):
+                    projected.pop()  # This Events section only held a cache link.
+                continue
+        projected.append(line)
+    return "".join(projected)
 
 
 def _prepare_browser_snapshot_output(

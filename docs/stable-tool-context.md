@@ -98,6 +98,9 @@ snapshot companion, including on an exact lookup. A navigation or snapshot hit
 also includes the click schema when the current user turn explicitly asks to
 click. The same visibility, authorization and discovery budget apply to the
 companions. The MCP connection follows the normal background discovery path.
+Model-facing Playwright receipts point automatic snapshot references to the
+inline snapshot tool and omit private console cache links. The original
+diagnostic result and explicitly requested file outputs remain available.
 
 Compaction does not promote discoveries into the system prompt or top-level tool definitions. It restores complete, acknowledged tool descriptions (including schemas and existing refs) at the message tail when missing. Current definition, visibility, permission and connection-generation checks still apply; stale or unacknowledged discoveries are not restored. Required/always-load descriptions also retain their existing recovery path. Compaction alone does not disconnect MCP or issue new references.
 
