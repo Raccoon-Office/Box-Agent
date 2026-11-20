@@ -10,10 +10,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from box_agent.device_artifacts import artifact_refs, delivered_update, project_artifacts
 from box_agent.injections import InjectionKind, MessageInjection
 from box_agent.schema import Message
 from box_agent.session_history import effective_events
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.request_user_decision_tool import decision_response_fields
 
 if TYPE_CHECKING:
     from box_agent.session_log import SessionLog
@@ -29,7 +31,7 @@ CANCEL_RETRY_MAX_SECONDS = 8
 CANCEL_RETRY_CONCURRENCY = 4
 IDENTITY_FIELDS = ("deviceId", "sessionId", "turnId")
 SNAPSHOT_FIELDS = (*IDENTITY_FIELDS, "status", "seq", "deviceOnline", "source",
-                   "observedAt", "stale", "currentStatus", "approval", "inputRequest")
+                   "observedAt", "stale", "currentStatus", "deliveryStatus", "approval", "inputRequest")
 RESULT_FIELDS = (*SNAPSHOT_FIELDS, "complete", "result", "error", "summary", "permissionIssue")
 SNAPSHOT_STATUSES = READY | {"accepted", "running", "unknown", "requesting", "unknown_delivery", "rejected"}
 
@@ -67,11 +69,13 @@ def input_request_snapshot(value: Any) -> dict[str, str]:
     return {"question": question}
 
 
-def current_snapshot(value: dict[str, Any], *, include_result: bool = False) -> dict[str, Any]:
+def current_snapshot(
+    value: dict[str, Any], *, include_result: bool = False, include_ready_result: bool = False,
+) -> dict[str, Any]:
     status = canonical_status(value.get("status"))
     if not isinstance(status, str) or status not in SNAPSHOT_STATUSES:
         raise ValueError("invalid device status snapshot")
-    fields = RESULT_FIELDS if include_result else SNAPSHOT_FIELDS
+    fields = RESULT_FIELDS if include_result or (include_ready_result and status in READY) else SNAPSHOT_FIELDS
     snapshot = {key: value[key] for key in fields if key in value}
     snapshot["status"] = status
     if "seq" in snapshot and (type(snapshot["seq"]) is not int or snapshot["seq"] < 0):
@@ -184,7 +188,8 @@ def delegated_approval_turn(
 
     after_input = active[latest_input[0] + 1:]
     end = next((event["data"] for event in reversed(after_input) if event["type"] == "turn/end"), {})
-    call_id = response.get("tool_call_id") if isinstance(response, dict) else None
+    response = decision_response_fields(response, strict=True)
+    call_id = response.get("tool_call_id")
     if end.get("reason", {}).get("kind") != "waiting_for_user" or not isinstance(call_id, str) or not call_id:
         raise RequestError(-32602, "DEVICE_DELEGATION_CONTINUATION_NOT_WAITING")
     for event in after_input:
@@ -258,13 +263,15 @@ class DeviceDelegations:
     def __init__(
         self, session_id: str,
         request: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
-        turn_id: Callable[[], str], session_log: SessionLog | None = None,
+        turn_id: Callable[[], str], session_log: SessionLog | None = None, *, artifact_upload: bool = False,
     ) -> None:
         self.session_id = session_id
+        self.artifact_upload = artifact_upload
         self.request = request
         self.turn_id = turn_id
         self.log = session_log
         self.operations: dict[str, dict[str, Any]] = {}
+        self._turn_operations: dict[tuple[str, ...], str] = {}
         self.stopped_turns: set[str] = set()
         self.pending: set[asyncio.Task] = set()
         self.closed = False
@@ -286,7 +293,7 @@ class DeviceDelegations:
                     data = item["data"]
                     record = deepcopy(data)
                     record["status"] = canonical_status(record["status"])
-                    self.operations[record["operationId"]] = record
+                    self._index_record(record)
                 elif item["type"] == "device/offered":
                     self.offered[item["data"]["digest"]] = item["data"]["targets"]
                 elif item["type"] == "device/ended":
@@ -391,9 +398,9 @@ class DeviceDelegations:
                 self.wakes[recovery] = batch
                 self.superseded_wakes.add(turn)
                 return recovery
-        batch = sorted((op, record["seq"]) for op, record in self.operations.items()
-                       if (op, record["seq"]) not in claimed
-                       and self._wakeable(op, record["seq"]))
+        batch = sorted((op, seq) for op, record in self.operations.items()
+                       for seq in [record.get("readySeq", record["seq"])]
+                       if (op, seq) not in claimed and self._wakeable(op, seq))
         if not batch or self.log is None:
             return None
         digest = sha256(json.dumps(batch).encode()).hexdigest()
@@ -407,8 +414,9 @@ class DeviceDelegations:
 
     def _operation_for(self, target: dict[str, Any]) -> str | None:
         identity = turn_identity(target)
-        return next((op for op, record in self.operations.items()
-                     if turn_identity(record) == identity), None)
+        if all(isinstance(value, str) and value for value in identity):
+            return self._turn_operations.get(identity)
+        return None
 
     def _cursor_key(self, target: dict[str, Any]) -> str:
         identity = turn_identity(target)
@@ -418,7 +426,7 @@ class DeviceDelegations:
 
     def _consumed_seq(self, target: dict[str, Any]) -> int:
         # Old Session Logs stored cursors by command ID.
-        operation = self._operation_for(target) if all(turn_identity(target)) else None
+        operation = target.get("operationId") or self._operation_for(target)
         return max(self.consumed.get(self._cursor_key(target), 0),
                    self.consumed.get(operation or target.get("operationId", ""), 0))
 
@@ -432,7 +440,7 @@ class DeviceDelegations:
         record = self.operations.get(op)
         return bool(record and self._eligible(record)
                     and record["parentTurnId"] in self.ended_turns
-                    and record["status"] in READY and seq == record["seq"]
+                    and record["status"] in READY and seq == record.get("readySeq", record["seq"])
                     and seq > self._consumed_seq(record))
 
     def request_injections(self, history: list[Message]) -> tuple[MessageInjection, ...]:
@@ -446,13 +454,13 @@ class DeviceDelegations:
             status = record["status"]
             if not self._eligible(record) or status == "rejected":
                 continue
-            if status in READY and record["seq"] <= max(
+            if status in READY and record.get("readySeq", record["seq"]) <= max(
                 self._consumed_seq(record), in_tool_results.get(self._cursor_key(record), 0),
             ):
                 continue
             fields = (*IDENTITY_FIELDS, "seq",
                       "status", "summary", "result", "error", "observedAt", "complete", "approval",
-                      "permissionIssue", "inputRequest")
+                      "permissionIssue", "inputRequest", "deliveryStatus")
             updates.append({key: record[key] for key in fields if key in record})
         if not updates:
             return ()
@@ -471,14 +479,26 @@ class DeviceDelegations:
 
     def save(self, record: dict[str, Any]) -> None:
         self._record("device/state", record)
-        self.operations[record["operationId"]] = record
+        self._index_record(record)
+
+    def _index_record(self, record: dict[str, Any]) -> None:
+        op = record["operationId"]
+        old = self.operations.get(op)
+        identity = turn_identity(record)
+        if old and (previous := turn_identity(old)) != identity and self._turn_operations.get(previous) == op:
+            del self._turn_operations[previous]
+        self.operations[op] = record
+        if all(isinstance(value, str) and value for value in identity):
+            self._turn_operations.setdefault(identity, op)
 
     async def start(self, device_id: str, instruction: str, *,
-                    session_id: str | None = None) -> dict[str, Any]:
+                    session_id: str | None = None, artifact_delivery: str | None = None) -> dict[str, Any]:
+        if artifact_delivery is not None and (not self.artifact_upload or artifact_delivery != "cloud"):
+            raise ValueError("unsupported artifact delivery")
         if self.closed:
             raise RuntimeError("device delegations are closed")
         # A cancelled parent must still consume a late acceptance and target it.
-        task = asyncio.create_task(self._start(device_id, instruction, self.turn_id(), session_id))
+        task = asyncio.create_task(self._start(device_id, instruction, self.turn_id(), session_id, artifact_delivery))
         self._track(task)
         return await asyncio.shield(task)
 
@@ -546,15 +566,17 @@ class DeviceDelegations:
             self.retry_stopped_cancellation(op)
 
     async def _start(self, device_id: str, instruction: str, turn: str,
-                     session_id: str | None = None) -> dict[str, Any]:
+                     session_id: str | None = None, artifact_delivery: str | None = None) -> dict[str, Any]:
         if self.closed or not turn or turn in self.stopped_turns:
             raise ValueError("parent turn is not active")
         args = {"instruction": instruction}
+        if artifact_delivery:
+            args["artifactDelivery"] = artifact_delivery
         if session_id is not None:
             args["sessionId"] = session_id
         matching = [item for item in self.operations.values()
                     if item["parentTurnId"] == turn and item["deviceId"] == device_id
-                    and item.get("instruction") == instruction
+                    and item.get("instruction") == instruction and item.get("artifactDelivery") == artifact_delivery
                     and item.get("requestedSessionId") == session_id]
         if any(item["status"] == "requesting" for item in matching):
             raise ValueError("identical device request already in flight for this parent turn")
@@ -564,6 +586,8 @@ class DeviceDelegations:
             record = {"operationId": uuid4().hex, "deviceId": device_id,
                       "parentTurnId": turn, "instruction": instruction,
                       "requestedSessionId": session_id, "seq": 0}
+        if artifact_delivery:
+            record["artifactDelivery"] = artifact_delivery
         op = record["operationId"]
         record["status"] = "requesting"
         self.save(record)
@@ -646,6 +670,12 @@ class DeviceDelegations:
         if device_id is not None:
             payload["deviceId"] = device_id
         wait_seconds = args.get("timeoutMs", 30000) / 1000 if operation == "subagent.wait" else 0
+        if operation == "artifact.upload":
+            op = self._operation_for(arguments)
+            record = self.operations.get(op, {})
+            if not record:
+                raise ValueError("child turn is not owned by this parent session")
+            wait_seconds = 120
         result = await self._request(payload, wait_seconds=wait_seconds)
         if not isinstance(result, dict):
             raise ValueError("invalid device response")
@@ -660,6 +690,15 @@ class DeviceDelegations:
                 if not snapshot["timedOut"]:
                     return snapshot
             return {"error": result["error"]} if operation in {"subagent.get", "subagent.wait"} else result
+        if operation == "artifact.upload":
+            refs = artifact_refs({"artifactRefs": [result]}, device_id)
+            ref = refs[0]
+            original = next((item for item in artifact_refs(record.get("result"), device_id)
+                             if item["artifactId"] == args["artifactId"]), None)
+            if (turn_identity(result) != turn_identity(arguments) or ref["artifactId"] != args["artifactId"]
+                    or "cloudFileRef" not in ref or (original and original["name"] != ref["name"])):
+                raise ValueError("invalid artifact upload receipt")
+            return {**arguments, **ref}
         collection = {"list": "devices", "session.list": "sessions",
                       "session.read": "messages", "subagent.wait": "results"}.get(operation)
         if collection and not isinstance(result.get(collection), list):
@@ -671,11 +710,15 @@ class DeviceDelegations:
         if operation == "subagent.wait":
             return self._wait_result(result, args["targets"])
         if operation == "subagent.get":
-            return current_snapshot(result, include_result=True)
+            return self._snapshot(result, include_result=True)
         return result
 
-    @staticmethod
-    def _wait_result(result: dict[str, Any], targets: list[dict[str, Any]]) -> dict[str, Any]:
+    def _snapshot(self, item: dict, *, include_result: bool, include_ready_result: bool = False) -> dict:
+        record = self.operations.get(self._operation_for(item), {})
+        item = project_artifacts(item, record.get("artifactDelivery") == "cloud")
+        return current_snapshot(item, include_result=include_result, include_ready_result=include_ready_result)
+
+    def _wait_result(self, result: dict[str, Any], targets: list[dict[str, Any]]) -> dict[str, Any]:
         timed_out = result.get("timedOut")
         if type(timed_out) is not bool or bool(result["results"]) == timed_out:
             raise ValueError("invalid device wait result")
@@ -691,7 +734,7 @@ class DeviceDelegations:
                 if (not all(isinstance(value, str) for value in identity)
                         or identity not in expected or identity in seen):
                     raise ValueError("unexpected device wait target")
-                snapshot = current_snapshot(item, include_result=ready)
+                snapshot = self._snapshot(item, include_result=ready, include_ready_result=timed_out)
                 if ready and snapshot["status"] not in READY:
                     raise ValueError("device wait returned a non-ready result")
                 snapshots.append(snapshot)
@@ -706,9 +749,9 @@ class DeviceDelegations:
         if timed_out:
             # A target may become ready between the wait deadline and the final
             # snapshot. Return that state immediately instead of reporting a timeout.
-            ready = [item for item in result["states"] if canonical_status(item.get("status")) in READY]
+            ready = [item for item in response["states"] if item["status"] in READY]
             if ready:
-                response = {"timedOut": False, "results": checked(ready, ready=True)}
+                response = {"timedOut": False, "results": ready}
         return response
 
     def offer(self, content: str, result: dict[str, Any]) -> None:
@@ -736,6 +779,8 @@ class DeviceDelegations:
     def _offered_sequences(
         self, messages: list[Message], *, include_runtime: bool,
     ) -> dict[str, int]:
+        if not self.offered:
+            return {}
         cursors: dict[str, int] = {}
         for message in messages:
             if message.role != "tool" and not (include_runtime and message.source == "runtime"):
@@ -797,7 +842,13 @@ class DeviceDelegations:
         status = canonical_status(event.get("status"))
         if type(seq) is not int or seq < 1 or not isinstance(status, str) or status not in READY | {"running"}:
             raise ValueError("invalid device event sequence or status")
-        if seq <= record["seq"] or record["status"] in TERMINAL:
+        if record["status"] in TERMINAL and seq > record["seq"]:
+            # Each supplement is a cumulative manifest. A later copy can arrive
+            # before its predecessor without postponing the original completion.
+            if enriched := delivered_update(record, event):
+                self.save(enriched)
+            return {"recorded": True}
+        if seq <= record["seq"]:
             self.retry_stopped_cancellation(record["operationId"])
             return {"recorded": True}
         if seq > record["seq"] + 1024:
@@ -814,6 +865,8 @@ class DeviceDelegations:
             if key in event
         }
         update["status"] = status
+        if event.get("deliveryStatus") in ("pending", "failed"):
+            update["deliveryStatus"] = event["deliveryStatus"]
         if "permissionIssue" in event:
             update["permissionIssue"] = permission_issue_snapshot(event["permissionIssue"])
         if approval is not None:
@@ -829,13 +882,21 @@ class DeviceDelegations:
         through = record["seq"]
         while str(through + 1) in buffered:
             current = buffered.pop(str(through + 1))
+            if record["status"] in TERMINAL:
+                enriched = delivered_update(record, current)
+                if enriched is not None:
+                    record = enriched
+                through += 1
+                continue
+            current = project_artifacts({**current, "deviceId": record["deviceId"]},
+                                        record.get("artifactDelivery") == "cloud")
             # Payload fields belong to the current state, not to prior approval.
             record = {key: value for key, value in record.items()
                       if key not in {"result", "error", "summary", "observedAt", "complete", "approval",
-                                     "permissionIssue", "inputRequest"}}
+                                     "permissionIssue", "inputRequest", "deliveryStatus"}}
             record.update(current)
             through += 1
-            if record["status"] in TERMINAL:
+            if record["status"] in TERMINAL and not artifact_refs(record.get("result"), record["deviceId"]):
                 buffered.clear()
                 break
         self.save({**record, "buffered": buffered})
@@ -852,7 +913,7 @@ class DeviceTool(Tool):
     def __init__(self, delegations: DeviceDelegations, action: str) -> None:
         self.delegations = delegations
         self.operation = action if "." in action or action == "list" else "subagent." + action
-        if self.operation not in OPERATIONS:
+        if self.operation not in OPERATIONS and not (delegations.artifact_upload and self.operation == "artifact.upload"):
             raise ValueError("unsupported device operation")
 
     @property
@@ -898,6 +959,7 @@ class DeviceTool(Tool):
                 "contains the latest snapshots. Waiting does not cancel tasks or decide user approval. "
                 + approval_guidance
             ),
+            "artifact.upload": "Upload one published child artifact when the cloud needs its bytes. Use its exact turn and artifactId. Returns the cloud file URI.",
             "subagent.cancel": "Request cancellation by deviceId, sessionId and turnId. Acceptance does not confirm cancellation.",
         }[self.operation]
 
@@ -924,6 +986,7 @@ class DeviceTool(Tool):
                 )},
                 "instruction": {**text, "description": "New work to append to this existing session."},
             },
+            "artifact.upload": {**identity, "artifactId": text},
             "subagent.get": identity,
             "subagent.cancel": identity,
             "subagent.wait": {
@@ -933,7 +996,12 @@ class DeviceTool(Tool):
                 "timeoutMs": {"type": "integer", "minimum": 0, "maximum": 60000,
                               "description": "Maximum wait in milliseconds. Use 0 to check immediately."}},
         }[self.operation]
+        if self.delegations.artifact_upload and self.operation in {"subagent.start", "subagent.send"}:
+            fields["artifactDelivery"] = {"type": "string", "enum": ["cloud"], "description": (
+                "Require cloud copies of the produced files before reporting success. "
+                "Use only on devices advertising artifact.upload. Omit when a summary or local output suffices.")}
         required = {
+            "artifact.upload": [*IDENTITY_FIELDS, "artifactId"],
             "list": [], "session.list": ["deviceId"],
             "session.read": ["deviceId", "sessionId"],
             "subagent.start": ["deviceId", "instruction"],
@@ -948,7 +1016,7 @@ class DeviceTool(Tool):
             if self.operation in {"subagent.start", "subagent.send"}:
                 result = await self.delegations.start(
                     arguments["deviceId"], arguments["instruction"],
-                    session_id=arguments.get("sessionId"))
+                    session_id=arguments.get("sessionId"), artifact_delivery=arguments.get("artifactDelivery"))
             elif self.operation == "subagent.cancel":
                 result = await self.delegations.cancel_target(arguments)
             else:

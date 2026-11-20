@@ -609,21 +609,14 @@ def _user_decision_response_from_meta(meta: Any) -> dict[str, str] | None:
     """Normalize the host response to a public ``request_user_decision`` call."""
     if not isinstance(meta, dict):
         return None
-    raw = meta.get("userDecision") or meta.get("user_decision")
-    if not isinstance(raw, dict):
-        return None
+    from box_agent.tools.request_user_decision_tool import decision_response_fields
 
-    request_id = str(raw.get("request_id") or raw.get("requestId") or "").strip()
-    decision_kind = str(
-        raw.get("decision_kind") or raw.get("decisionKind") or ""
-    ).strip()
-    option_id = str(
-        raw.get("selected_option_id") or raw.get("selectedOptionId") or ""
-    ).strip()
-    option_label = str(
-        raw.get("selected_option_label") or raw.get("selectedOptionLabel") or ""
-    ).strip()
-    custom_text = str(raw.get("custom_text") or raw.get("customText") or "").strip()
+    raw = decision_response_fields(meta.get("userDecision") or meta.get("user_decision"))
+    request_id = str(raw.get("request_id") or "").strip()
+    decision_kind = str(raw.get("decision_kind") or "").strip()
+    option_id = str(raw.get("selected_option_id") or "").strip()
+    option_label = str(raw.get("selected_option_label") or "").strip()
+    custom_text = str(raw.get("custom_text") or "").strip()
     trigger = str(raw.get("trigger") or "user").strip().lower()
     if not request_id or not decision_kind or not (option_id or custom_text):
         return None
@@ -2561,7 +2554,7 @@ class BoxACPAgent:
                 state.device_delegations = DeviceDelegations(
                     session_id, self._conn.ext_method,
                     lambda: state.current_turn_id if state.turn_active and not state.cancelled else "",
-                    agent.session_log,
+                    agent.session_log, artifact_upload=device_meta.get("artifactUpload") is True,
                 )
                 if agent.session_log is not None:
                     for event in reversed(agent.session_log._active_events()):
@@ -2575,7 +2568,8 @@ class BoxACPAgent:
                 state.inject_queue.request_injections = state.device_delegations.request_injections
                 state.inject_queue.model_response_receipts = state.device_delegations.response_receipts
                 state.inject_queue.on_model_commit = state.device_delegations.confirm_receipts
-                for action in OPERATIONS:
+                actions = (*OPERATIONS, "artifact.upload") if state.device_delegations.artifact_upload else OPERATIONS
+                for action in actions:
                     tool = DeviceTool(state.device_delegations, action)
                     agent.tools[tool.name] = tool
             tools = list(agent.tools.values())
