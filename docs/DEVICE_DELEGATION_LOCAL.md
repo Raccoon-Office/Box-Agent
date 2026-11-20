@@ -10,18 +10,19 @@ uv run python -m examples.device_parent_demo
 
 The endpoint uses standard NDJSON ACP stdio. Initialize with protocolVersion 1. Create a parent with `session/new`, `cwd` pointing to its task workspace, `mcpServers: []`, and `_meta: {"device":{"version":1}}`. Other sessions do not expose device tools.
 
-All eight tools use id-bearing `_device/request` with `version: 1`, the parent ACP `sessionId`, a fresh request `operationId`, an `operation`, optional `deviceId`, and `args`.
+The eight base tools and the optional artifact tool use id-bearing `_device/request` with `version: 1`, the parent ACP `sessionId`, a fresh request `operationId`, an `operation`, optional `deviceId`, and `args`.
 
 | Model tool | Wire operation | Required model arguments | Optional arguments |
 | --- | --- | --- | --- |
 | `device_list` | `list` | none | `cursor`, `limit` |
 | `device_session_list` | `session.list` | `deviceId` | `cursor`, `limit` |
 | `device_session_read` | `session.read` | `deviceId`, `sessionId` | `cursor`, `limit` |
-| `device_subagent_start` | `subagent.start` | `deviceId`, `instruction` | none |
-| `device_subagent_send` | `subagent.send` | `deviceId`, `sessionId`, `instruction` | none |
+| `device_subagent_start` | `subagent.start` | `deviceId`, `instruction` | `artifactDelivery` when negotiated |
+| `device_subagent_send` | `subagent.send` | `deviceId`, `sessionId`, `instruction` | `artifactDelivery` when negotiated |
 | `device_subagent_get` | `subagent.get` | `deviceId`, `sessionId`, `turnId` | none |
 | `device_subagent_wait` | `subagent.wait` | `targets: [{deviceId, sessionId, turnId}]` | `timeoutMs` |
 | `device_subagent_cancel` | `subagent.cancel` | `deviceId`, `sessionId`, `turnId` | none |
+| `device_artifact_upload` | `artifact.upload` | `deviceId`, `sessionId`, `turnId`, `artifactId` | enabled by `_meta.device.artifactUpload: true` |
 
 Pagination limits are 1–100. Wait accepts 1–32 targets and timeoutMs 0–60000 (default 30000). Unknown properties and invalid argument types fail before RPC.
 
@@ -104,7 +105,7 @@ A definite start/send rejection such as SESSION_BUSY is retained for diagnostics
 
 A `waiting_approval` event includes an `approval` object with `approvalRequestId`, `title`, timezone-qualified ISO 8601 `expiresAt` and `decisions: ["allow_once","deny"]`. The approval descriptor is visible in get, wait and runtime device context. A subsequent state clears the previous descriptor.
 
-The trusted user interface sends `_device/permission_decision` to the authenticated device route with `deviceId`, `cloudSessionId`, `sessionId`, `turnId`, `approvalRequestId` and `decision`. The device validates the target, expiry and decision before returning `{"applied":true}`. The eight model tools expose task state. Approval decisions use the trusted user channel.
+The trusted user interface sends `_device/permission_decision` to the authenticated device route with `deviceId`, `cloudSessionId`, `sessionId`, `turnId`, `approvalRequestId` and `decision`. The device validates the target, expiry and decision before returning `{"applied":true}`. The device task tools expose task state. Approval decisions use the trusted user channel.
 
 For a trusted delegated input, Box requests a remote decision only for eligible `read_file` and `write_file` escalation on a concrete file inside the user's home. Raw ACP permission input carries the canonical `path` and `operation` and an `exactFilesystem` descriptor. Box sets `deviceApprovalTurnId` from the trusted bound prompt. The approval is scoped to the authorized retry. Full commands, directory escalation and other capabilities use their local policy without a cross-device approval. Manual ACP prompts keep their local permission behavior.
 
