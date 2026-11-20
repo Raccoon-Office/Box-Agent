@@ -1,5 +1,16 @@
 # Managed browser window modes
 
+Models operate pages through `browser_repl_js`. Its `mode` selects `managed`
+(Playwright MCP) or `user` (the connected user browser). Both backends are
+internal. Discovery and execution enforce this boundary, including calls with
+previously issued tool references.
+
+Browser REPL requires macOS, full session access, and
+`plugins.repl.trusted_local_code: true`. Standard sessions can chat without
+browser actions. New configurations can omit the retired `plugins.repl.enabled`
+key. When migrating a profile that explicitly set it to false, set
+`trusted_local_code: false` to preserve its opt-out before removing the key.
+
 `mcp_config(action="inspect_browser")` reports the connected runtime's current
 session mode before consulting the user MCP config file. A runtime response uses
 `source=runtime`, `scope=session`, `mode=headed|headless`, `switch_supported`, and
@@ -16,8 +27,7 @@ mode. Other sessions and the default MCP configuration remain unchanged.
 The pool continues sharing the default browser process. A session selecting the
 alternate mode owns an additional managed MCP process; the existing pool limit,
 idle reaper, session close and runtime shutdown clean it up. No duplicate server
-entries or host-wide reconnects are used. Public `managed_browser_*` names stay
-unchanged.
+entries or host-wide reconnects are used.
 
 Changing mode resets tabs, cookies, login, form state and element refs. The result
 reports `changed` and `state_reset`; callers must navigate again and obtain a new

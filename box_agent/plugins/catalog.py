@@ -9,5 +9,6 @@ from .descriptors import PluginDescriptor
 
 def bundled_plugin_descriptors() -> tuple[PluginDescriptor, ...]:
     from .cua import plugin_descriptors
+    from .repl import plugin_descriptors as repl_descriptors
 
-    return plugin_descriptors()
+    return plugin_descriptors() + repl_descriptors()

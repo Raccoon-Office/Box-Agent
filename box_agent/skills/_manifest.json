@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "box_agent_version": "1.0.0",
-  "generated_at": "2026-11-09T14:21:41Z",
+  "generated_at": "2026-11-20T10:09:55Z",
   "skills": [
     {
       "name": "browser-use",
@@ -34,10 +34,6 @@
     {
       "name": "html-templates",
       "path": "html-templates/SKILL.md"
-    },
-    {
-      "name": "mac-cua",
-      "path": "mac-cua/SKILL.md"
     },
     {
       "name": "mcp-config",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tarfile
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -108,6 +109,18 @@ def test_pyinstaller_target_arch_args_omits_non_macos() -> None:
     assert build_runtime.pyinstaller_target_arch_args(plat="linux", arch="x64") == []
 
 
+def test_macos_runtime_includes_repl_modules_loaded_by_path() -> None:
+    root = build_runtime.PROJECT_ROOT
+    args = build_runtime.pyinstaller_vendor_args(root, plat="darwin")
+    files = set(zip(args[::2], args[1::2]))
+    for relative in (
+        Path("box_agent/_vendor/mac_cua/cua_images.py"),
+        Path("box_agent/_vendor/mac_cua/cua_adapter/cua_evidence.py"),
+    ):
+        assert (root / relative).is_file()
+        assert ("--add-data", f"{root / relative}{os.pathsep}{relative.parent}") in files
+
+
 def test_bundled_stable_runtime_components_default_platforms() -> None:
     assert build_runtime.bundled_stable_runtime_components(
         plat="darwin",
@@ -187,8 +200,9 @@ def test_pyinstaller_args_keep_bundled_sandbox_by_default() -> None:
     assert "pandas" in hidden
     assert "pip._internal.cli.main" in hidden
     assert "box_agent.mcp_servers.web_extract_server" in hidden
-    assert "box_agent.mcp_servers.cua_server" in hidden
-    assert "box_agent.mcp_servers.cua_adapter" in hidden
+    assert "box_agent._vendor.mac_cua.cua_adapter.cua_adapter" in hidden
+    assert "box_agent.mcp_servers.cua_server" not in hidden
+    assert "box_agent.mcp_servers.cua_adapter" not in hidden
     assert "box_agent.mcp_servers.cua_panel_keyboard" not in hidden
     assert ("--collect-all", "ipykernel") in collect_pairs
     assert ("--collect-submodules", "pandas") in collect_pairs
@@ -209,8 +223,9 @@ def test_pyinstaller_args_drop_sandbox_stack_for_external_python_mode() -> None:
     assert "dateutil" in hidden
     assert "dateutil.parser" in hidden
     assert "box_agent.mcp_servers.web_extract_server" in hidden
-    assert "box_agent.mcp_servers.cua_server" in hidden
-    assert "box_agent.mcp_servers.cua_adapter" in hidden
+    assert "box_agent._vendor.mac_cua.cua_adapter.cua_adapter" in hidden
+    assert "box_agent.mcp_servers.cua_server" not in hidden
+    assert "box_agent.mcp_servers.cua_adapter" not in hidden
     assert "box_agent.mcp_servers.cua_panel_keyboard" not in hidden
     assert "ipykernel" not in hidden
     assert "pandas" not in hidden

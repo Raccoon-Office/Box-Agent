@@ -480,3 +480,32 @@ async def test_replayed_search_history_does_not_reauthorize_cold_session_ref():
         role="tool", name="tool_search", tool_call_id="search", content=result.content)])
     error = restored.prepare_tools().resolve_call(call(ref, '{"value":"ok"}'))[2]
     assert error and "search again" in error.lower()
+
+@pytest.mark.asyncio
+async def test_discovery_only_offers_examples_owned_by_tools_and_valid_for_their_schema():
+    from box_agent.plugins.repl.tools import create_tools
+    from box_agent.tools.schema_validation import validate_tool_arguments
+
+    engine, search, target, tools = setup()
+    repl = create_tools(None)
+    tools.update((tool.name, tool) for tool in repl)
+    engine.prepare_tools()
+    result = await search.execute(tool_names=[target.name, *(tool.name for tool in repl)])
+    items = {item["name"]: item for item in json.loads(result.content)["activated"]}
+    assert "call_example" not in items[target.name]
+    for tool in repl:
+        item = items[tool.name]
+        example = item["call_example"]
+        assert example["tool_ref"] == item["tool_ref"]
+        assert not validate_tool_arguments(item["input_schema"], json.loads(example["arguments_json"]))
+    assert "getBrowser" not in items["cua_repl_js"]["description"]
+    assert "getApp" not in items["cua_repl_reset"]["description"]
+    native_example = items["cua_repl_js"]["call_example"]
+    acknowledge(engine, result)
+    resolved, routed, error = engine.prepare_tools().resolve_call(
+        call(native_example["tool_ref"], native_example["arguments_json"])
+    )
+    assert routed and error is None
+    assert resolved.function.name == "cua_repl_js"
+    assert resolved.function.arguments == json.loads(native_example["arguments_json"])
+    assert resolved.function.arguments["title"]

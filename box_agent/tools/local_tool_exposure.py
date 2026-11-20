@@ -11,6 +11,7 @@ from .base import Tool, build_tool_name_index
 DISCOVERABLE_LOCAL_NAMES = frozenset({
     "append_file", "query_jsonl", "bash_output", "bash_kill", "sandbox_status",
     "mcp_config", "report_execution_result",
+    "cua_repl_js", "cua_repl_reset", "browser_repl_js", "browser_repl_reset",
     "plan_read", "plan_write", "todo_read", "todo_write", "goal_read", "goal_write",
     "memory_read", "memory_search", "memory_write", "memory_edit",
     "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction",
@@ -21,7 +22,8 @@ DISCOVERABLE_LOCAL_NAMES = frozenset({
 # These audited method hints change schema visibility only. They never register
 # tools, enable configurations, or grant permission to resources or side effects.
 SKILL_TOOL_HINTS: Mapping[str, frozenset[str]] = {
-    "browser-use": frozenset({"mcp_config"}),
+    "browser-use": frozenset({"mcp_config", "browser_repl_js", "browser_repl_reset"}),
+    "computer-use": frozenset({"cua_repl_js", "cua_repl_reset"}),
     "mcp-config": frozenset({"mcp_config"}),
     "memory-guide": frozenset({"memory_read", "memory_search", "memory_write", "memory_edit", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction"}),
     "ppt-fast": frozenset({"append_file", "query_jsonl", "report_execution_result"}),

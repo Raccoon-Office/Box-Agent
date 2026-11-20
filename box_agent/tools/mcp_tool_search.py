@@ -91,9 +91,9 @@ def _visible_server_instruction_keys(messages: Iterable[Message]) -> set[tuple[s
     return visible
 
 
-def _tool_call_description(tool_ref: str, parameters: dict) -> dict:
+def _tool_call_description(tool_ref: str, parameters: dict, *, tool: Tool) -> dict:
     """Pair a capability schema with its actual provider-facing entry point."""
-    return {
+    descriptor = {
         "tool_ref": tool_ref,
         "input_schema": parameters,
         "callable_function": "call_tool",
@@ -102,6 +102,13 @@ def _tool_call_description(tool_ref: str, parameters: dict) -> dict:
             "arguments_json matching input_schema. Do not call the display name directly."
         ),
     }
+    example = getattr(tool, "call_example_arguments", None)
+    if example is not None:
+        descriptor["call_example"] = {
+            "tool_ref": tool_ref,
+            "arguments_json": json.dumps(example, ensure_ascii=False),
+        }
+    return descriptor
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +144,7 @@ class ToolSearchTool(Tool):
         connector_discovery=None,
     ) -> None:
         self._stable_manager = None
+        self.model_tool_filter: Callable[[Tool], bool] | None = None
         self._catalog = catalog
         self._activated = activated
         self._protected_names_provider = protected_names_provider
@@ -154,6 +162,8 @@ class ToolSearchTool(Tool):
 
     def _entry_is_allowed(self, entry) -> bool:
         if not mcp_tool_allows(entry.tool, "model"):
+            return False
+        if self.model_tool_filter is not None and not self.model_tool_filter(entry.tool):
             return False
         if entry.connector_id is None:
             return True
@@ -437,6 +447,7 @@ class ToolSearchTool(Tool):
                 self._local_tools_provider() if self._local_tools_provider is not None else ()
             )
             if getattr(tool, "mcp_tool_id", None) is None and tool.name != TOOL_SEARCH_NAME
+            and (self.model_tool_filter is None or self.model_tool_filter(tool))
             and (self._stable_manager is None or self._stable_manager.is_discoverable(tool))
         }
         local_index = {
@@ -590,7 +601,7 @@ class ToolSearchTool(Tool):
                         "already_active": already_active}
             if self._stable_manager is not None:
                 placeholder = "tool:v1:" + "x" * 32
-                preview = {**item, **_tool_call_description(placeholder, entry.tool.parameters)}
+                preview = {**item, **_tool_call_description(placeholder, entry.tool.parameters, tool=entry.tool)}
                 size = len(json.dumps(preview, ensure_ascii=False)) + 2
                 if size > _DISCOVERY_ENTRY_BUDGET_CHARS:
                     oversized_count += 1
@@ -759,6 +770,13 @@ class MCPToolExposureManager:
         self._scope_upstreams: dict[str, Tool] = {}
         self._scope_local_tools: dict[str, Tool] = {}
         self._direct_generations: dict[str, int] = {}
+        self.model_tool_filter: Callable[[Tool], bool] | None = None
+
+    def is_model_tool_allowed(self, tool: Tool) -> bool:
+        """Model-facing policy, separate from internal backend/connector authority."""
+        return mcp_tool_allows(tool, "model") and (
+            self.model_tool_filter is None or self.model_tool_filter(tool)
+        )
 
     def for_inherited_tools(
         self, child_tools: dict[str, Tool], *, child_local_tools: tuple[Tool, ...] = (),
@@ -804,8 +822,8 @@ class MCPToolExposureManager:
         search_tool._local_tools_provider = lambda: tuple(self._stable_candidates.values())
 
     def is_discoverable(self, tool: Tool) -> bool:
-        return (mcp_tool_allows(tool, "model")
-                and tool.name not in {"tool_search", "call_tool"}
+        return (tool.name not in {"tool_search", "call_tool"}
+                and self.is_model_tool_allowed(tool)
                 and tool.name not in (self._stable_direct or {})
                 and (self._stable_visibility is None or self._stable_visibility(tool.name)))
 
@@ -819,7 +837,7 @@ class MCPToolExposureManager:
         else:
             ref = "tool:v1:" + secrets.token_urlsafe(24)
             self._stable_refs[ref] = (tool, definition, generation)
-        return _tool_call_description(ref, definition.parameters)
+        return _tool_call_description(ref, definition.parameters, tool=tool)
 
     @staticmethod
     def _canonical_descriptor(item: dict) -> str:
@@ -906,6 +924,22 @@ class MCPToolExposureManager:
                 if receipt not in visible_catalogs:
                     del delivered[group_key]
 
+    def resolve_internal_mcp(self, name: str, server: str) -> tuple[Tool, int] | None:
+        """Resolve a backend within this session, independently of model discovery."""
+        if self._scope_parent is not None:
+            return None
+        if self._deferred_mcp:
+            entry = self._catalog.get_by_model_name(name)
+            if entry and entry.server_name == server and not entry.name_conflict and self._entry_is_allowed(entry):
+                return entry.tool, entry.generation
+        else:
+            tool = self._live_candidates().get(name)
+            if (getattr(tool, "mcp_tool_id", None) and tool.server_name == server
+                    and mcp_tool_allows(tool, "model")
+                    and self._connector_is_allowed(getattr(tool, "mcp_connector_id", None))):
+                return tool, tool.mcp_generation
+        return None
+
     def is_current_target(self, name: str, tool: Tool) -> bool:
         if self._scope_parent is not None:
             if name in self._scope_local_tools:
@@ -970,7 +1004,7 @@ class MCPToolExposureManager:
         def queue_tool(name: str, description: str, tool: Tool, generation: int | None) -> bool:
             placeholder = "tool:v1:" + "x" * 32
             preview = {"name": name, "description": description,
-                       **_tool_call_description(placeholder, tool.parameters)}
+                       **_tool_call_description(placeholder, tool.parameters, tool=tool)}
             if len(json.dumps(preview, ensure_ascii=False)) > _DISCOVERY_ENTRY_BUDGET_CHARS:
                 queue(json.dumps({
                     "name": name[:256],
@@ -1138,8 +1172,9 @@ class MCPToolExposureManager:
                 continue
             visible[entry.model_name] = entry.tool
             generations[entry.model_name] = entry.generation
-        tools = list(visible.values())
-        return ToolExposure(tools, frozenset(visible), generations)
+        tools = [tool for tool in visible.values() if self.is_model_tool_allowed(tool)]
+        names = frozenset(tool.name for tool in tools)
+        return ToolExposure(tools, names, {name: value for name, value in generations.items() if name in names})
 
     def inherited_tools(self, tool_map: dict[str, Tool]) -> dict[str, Tool]:
         """Retain allowed local capabilities and only activated/eager remote tools."""
@@ -1161,6 +1196,12 @@ class MCPToolExposureManager:
         offered_generation: int | None,
         target_tool: Tool | None = None,
     ) -> str | None:
+        target = target_tool
+        if target is None:
+            entry = self._catalog.get_by_model_name(name)
+            target = entry.tool if entry is not None else self._live_candidates().get(name)
+        if target is not None and not self.is_model_tool_allowed(target):
+            return f"Tool '{name}' is not available to the model in this session."
         if self._scope_parent is not None:
             if name in self._scope_local_tools:
                 if target_tool is not None and self.is_current_target(name, target_tool):
