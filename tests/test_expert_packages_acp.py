@@ -415,3 +415,59 @@ async def test_cold_legacy_restore_cannot_enable_cli_discovery_from_new_metadata
         assert not list(retained.events_of_type("connectors/discovery-contract"))
     finally:
         retained.close()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("team_key", ["expert_team", "expertTeam"])
+async def test_missing_required_team_member_is_rejected_without_replacing_live_session(
+    host, tmp_path, entry, team_key,
+):
+    team = {
+        "id": "custom-review-team", "name": "Custom review team", "executionMode": "orchestrated",
+        "leader": {"id": "lead", "name": "Lead"},
+        "members": [{"id": "writer", "name": "Writer"}, {"id": "reviewer", "name": "Reviewer"}],
+        "orchestration": {"workstreams": [
+            {"memberId": "lead", "title": "Framing", "required": True},
+            {"memberId": "writer", "title": "Writing", "required": True},
+            {"memberId": "reviewer", "title": "Review", "required": True},
+        ]},
+    }
+    cwd = str(tmp_path / "workspace")
+    first = await host.new_session(cwd=cwd, session_id="stable-team", **{team_key: team})
+    original = host._sessions[first.sessionId]
+    incomplete = copy.deepcopy(team)
+    incomplete["members"].pop()
+    call = getattr(host, entry)
+    params = {"cwd": cwd, "session_id": "stable-team" if entry == "new_session" else first.sessionId}
+    with pytest.raises(RequestError) as error:
+        await call(**params, **{team_key: incomplete})
+    assert error.value.code == -32602
+    assert error.value.data["code"] == "EXPERT_TEAM_INVALID_MEMBER_REFERENCE"
+    assert error.value.data["teamId"] == "custom-review-team"
+    assert error.value.data["missingMemberIds"] == ["reviewer"]
+    assert host._sessions[first.sessionId] is original
+    assert len(host._sessions) == 1
+    continued = await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "continue"}])
+    assert continued.stopReason == "end_turn"
+
+    await call(**params, **{team_key: team})
+    current = host._sessions[first.sessionId]
+    assert current is not original
+    assert [member.id for member in current.expert_context.team.members] == ["writer", "reviewer"]
+
+@pytest.mark.asyncio
+async def test_incomplete_team_cannot_create_a_new_session(host, tmp_path):
+    team = {
+        "id": "incomplete-team", "name": "Incomplete team",
+        "members": [{"id": "writer", "name": "Writer"}],
+        "orchestration": {"workstreams": [
+            {"memberId": "reviewer", "title": "Required review", "required": True},
+        ]},
+    }
+    with pytest.raises(RequestError) as error:
+        await host.new_session(cwd=str(tmp_path / "workspace"), expert_team=team)
+    assert error.value.code == -32602
+    assert error.value.data["code"] == "EXPERT_TEAM_INVALID_MEMBER_REFERENCE"
+    assert error.value.data["missingMemberIds"] == ["reviewer"]
+    assert host._sessions == {}
+    assert not list((tmp_path / "profile" / "sessions").rglob("session.jsonl"))
