@@ -1,0 +1,118 @@
+--- a/cua_adapter/cua_observation.py
++++ b/cua_adapter/cua_observation.py
+@@ -99,7 +99,7 @@
+ 
+ def clear_image(state):
+     for name in ('image_frame', 'image_window', 'image_size', 'image_bounds',
+-                 'image_background_input', 'image_attachment_chain',
++                 'image_background_input', 'image_capture_id', 'image_attachment_chain',
+                  'image_attachment_root_window_id', 'coordinate_frame'):
+         state.pop(name, None)
+ 
+@@ -398,7 +398,7 @@
+             if image:
+                 image_geometry = {name: child[name] for name in (
+                     'image_frame', 'image_window', 'image_size', 'image_bounds',
+-                    'image_background_input', 'image_attachment_chain',
++                    'image_background_input', 'image_capture_id', 'image_attachment_chain',
+                     'image_attachment_root_window_id')
+                     if name in child}
+                 image_geometry['image_frame'] = self.windows.frame(current)
+@@ -430,7 +430,7 @@
+                 if image:
+                     image_geometry = {name: capture_state[name] for name in (
+                         'image_frame', 'image_window', 'image_size', 'image_bounds',
+-                        'image_background_input', 'image_attachment_chain',
++                        'image_background_input', 'image_capture_id', 'image_attachment_chain',
+                         'image_attachment_root_window_id') if name in capture_state}
+                     image_geometry['image_frame'] = self.windows.frame(current)
+         if current is None and 'get_application_menu_state' in self.driver.tools:
+@@ -672,6 +672,7 @@
+             # image_frame can bind freshness to an attached child; retain the actual
+             # capture source separately for screenshot geometry and diagnostics.
+             state['image_window'] = self.windows.frame(window)
++            state['image_capture_id'] = raw.get('capture_id')
+             state['image_size'] = (raw.get('screenshot_width'), raw.get('screenshot_height'))
+             bounds = rectangle(raw.get('screenshot_bounds') or raw.get('window_bounds'))
+             if raw.get('screenshot_frame_valid') is True and bounds:
+--- a/cua_adapter/cua_actions.py
++++ b/cua_adapter/cua_actions.py
+@@ -421,6 +421,57 @@
+                  'delivery_mode': 'foreground'})
+ 
+ 
++    def dispatch_menu_input(self, state, menu, tool, params, *, screenshot_coordinates=False):
++        """Keep the observed menu as the pixel surface and its live AX owner as key target."""
++        wid = menu['window_id']
++        self.windows.clear_action_app_inventory()
++        rows = self.windows.verify_frame(state, menu)
++        chain = self.windows.attachment_chain(state, wid, rows)
++        if tool == 'click':
++            bounds = self.rectangle(menu.get('bounds'))
++            capture = state.get('image_capture_id')
++            exact = (state.get('image_background_input') or {}).get('exact_window') or {}
++            if (not bounds or state.get('coordinate_frame') != self.windows.frame(menu)
++                    or state.get('image_frame') != self.windows.frame(menu)
++                    or state.get('image_window') != self.windows.frame(menu)
++                    or state.get('image_bounds') != bounds or state.get('image_attachment_chain') != chain
++                    or not isinstance(capture, str) or not capture or exact.get('pid') != state['pid']
++                    or exact.get('window_id') != wid or exact.get('status') not in {'matched', 'ax_unresolved'}):
++                raise ValueError('WindowChanged: take a fresh screenshot of the attached menu before clicking')
++            width, height = state['image_size']
++            if any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
++                   for v in (width, height, *bounds[2:])):
++                raise ValueError('AttachmentUnverified: invalid menu screenshot geometry')
++            x, y = params['x'], params['y']
++            if not screenshot_coordinates:
++                x, y = x * width / bounds[2], y * height / bounds[3]
++            if not (0 <= x < width and 0 <= y < height):
++                raise ValueError('AttachmentUnverified: click is outside the menu screenshot')
++            params = {**params, 'x': x, 'y': y, 'capture_id': capture, 'delivery_mode': 'foreground'}
++        else:
++            self.windows.refresh_keyboard_focus(state, menu)
++
++        self.windows.clear_action_app_inventory()
++        rows = self.windows.verify_frame(state, menu)
++        owner = self.windows.focused_window_id(state)
++        context = state.get('native_window_context') or {}
++        if (self.windows.attachment_role(state, wid) != 'AXMenu' or len(chain) < 2
++                or self.windows.attachment_chain(state, wid, rows) != chain
++                or state.get('app_active') is not True or state.get('frontmost_window_id') != wid
++                or any(row.get('pid') != state['pid'] for row in rows if row['window_id'] in chain)
++                or context.get('trusted') is not True or context.get('pid') != state['pid']
++                or owner not in chain or state.get('driver_active_window_id') != owner):
++            raise ValueError('WindowChanged: attached menu or its keyboard focus owner changed; observe again')
++        arguments = {'pid': state['pid'], 'window_id': owner, **params}
++        if tool == 'click':
++            arguments.update(window_id=wid, activation_window_id=owner)
++        self.driver.validate(tool, arguments)
++        self.invalidate()
++        self.clear_image(state)
++        result = self.call(tool, arguments)
++        effect = self.result_data(result).get('effect')
++        return {'effect': effect} if effect and effect != 'confirmed' else {}
++
+     def activate_keyboard_target(self, state, window):
+         """Reconcile a z-order-only activation refusal with fresh semantic focus."""
+         wid = window['window_id']
+@@ -488,6 +539,10 @@
+                     'window_id': target_window['window_id']}
+         plan = compile_action(method, args, self.driver.tools)
+         name, params = plan.tool, dict(plan.params)
++        menu_surface = self.windows.attachment_role(state, active_window['window_id']) == 'AXMenu'
++        if (menu_surface and method == 'pressKey' and not params.get('modifiers')
++                and params.get('key') in {'up', 'down', 'left', 'right', 'home', 'end', 'return', 'escape'}):
++            return self.dispatch_menu_input(state, active_window, name, params)
+         pixel_fallback = False
+         if method == 'click':
+             button, count = params.pop('button'), params.pop('count')
+@@ -538,6 +593,9 @@
+                 if 'x' in params:
+                     params['count'] = count
+             if 'x' in params:
++                if menu_surface:
++                    return self.dispatch_menu_input(state, active_window, name, params,
++                                                    screenshot_coordinates=pixel_fallback)
+                 if (popup_relation and popup_relation.get('status') == 'active'
+                         and self.windows.frame(target_window) == popup_relation.get('surface')):
+                     popup_screen_point = self.screenshot_screen_point(state, target_window, params)

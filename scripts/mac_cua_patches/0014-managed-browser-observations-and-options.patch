@@ -1,0 +1,74 @@
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -198,6 +198,13 @@
+             `DOM: ${dom.mode}, observation=${dom.observationId}, base=${dom.baseId}, scope=${dom.scope}, complete=${dom.complete}` +
+             (dom.reason ? '\n' + dom.reason : '') + (dom.text ? '\n' + dom.text : ''));
+     }
++    function methodOptions(value, keys, method) {
++        if (!value || typeof value !== 'object' || Array.isArray(value) ||
++            Object.keys(value).some(key => !keys.includes(key))) {
++            throw TypeError('InvalidArguments: ' + method + ' options: ' + keys.join(', '));
++        }
++        return value;
++    }
+     class Tab {
+         #handle;
+         constructor(handle) { this.#handle = handle; }
+@@ -241,9 +248,19 @@
+             const parsed = parsePressKey(arguments, 'Tab');
+             await this.#action('pressKey', {key: parsed.key, modifiers: parsed.modifiers});
+         }
+-        async scroll({x, y, deltaX = 0, deltaY = 0}) { await this.#action('scroll', {x, y, deltaX, deltaY}); }
++        async scroll(opts) {
++            const {x, y, deltaX = 0, deltaY = 0} = methodOptions(opts, ['x', 'y', 'deltaX', 'deltaY'], 'scroll');
++            if (![deltaX, deltaY].every(Number.isFinite) || !(deltaX || deltaY) ||
++                ((x !== undefined || y !== undefined) && ![x, y].every(Number.isFinite))) {
++                throw TypeError('InvalidScroll: supply a nonzero finite deltaX or deltaY and optionally both finite x and y');
++            }
++            await this.#action('scroll', {x, y, deltaX, deltaY});
++        }
+         async selectOption(target, values) { await this.#action('selectOption', {target, values}); }
+-        async waitForText(text, {state = 'visible'} = {}) { await this.#action('waitForText', {text, state}); }
++        async waitForText(text, opts = {}) {
++            const {state = 'visible'} = methodOptions(opts, ['state'], 'waitForText');
++            await this.#action('waitForText', {text, state});
++        }
+         async waitForLoad({timeoutMs = 15000} = {}) { await call('browser.waitForLoad', this.#handle, {timeoutMs}); }
+         async waitForElement(selector, {timeoutMs = 10000, visible = false} = {}) {
+             await call('browser.waitForElement', this.#handle, {selector, timeoutMs, visible});
+@@ -254,7 +271,10 @@
+             return value;
+         }
+         async uploadFile(selector, path) { await call('browser.uploadFile', this.#handle, {selector, path}); }
+-        async handleDialog({accept, promptText}) { await this.#action('handleDialog', {accept, promptText}); }
++        async handleDialog(opts) {
++            const {accept, promptText} = methodOptions(opts, ['accept', 'promptText'], 'handleDialog');
++            await this.#action('handleDialog', {accept, promptText});
++        }
+         async close() { await call('browser.close', this.#handle); }
+     }
+     function exposeBrowserMethods(implementation, methods) {
+@@ -278,15 +298,19 @@
+             if (opts.emit !== false) write(tabs);
+             return tabs;
+         }
++        #bindTab(result) {
++            if (result.notice) write(result.notice);
++            else if (result.state.mode === 'managed') writeBrowserState(result.state);
++            else write(result.state);
++            return exposeBrowserMethods(new Tab(result.handle), this.#tabMethods);
++        }
+         async getTab(targetId) {
+             const result = await call('browser.getTab', null, {targetId});
+-            write(result.state);
+-            return exposeBrowserMethods(new Tab(result.handle), this.#tabMethods);
++            return this.#bindTab(result);
+         }
+         async newTab(url = 'about:blank') {
+             const result = await call('browser.newTab', null, {url});
+-            write(result.state);
+-            return exposeBrowserMethods(new Tab(result.handle), this.#tabMethods);
++            return this.#bindTab(result);
+         }
+     }
+     const axElementId = (state, description) => {

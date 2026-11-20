@@ -1,0 +1,13 @@
+diff --git a/cua_adapter/cua_repl.mjs b/cua_adapter/cua_repl.mjs
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -386,7 +386,8 @@
+             const cell = {id: message.cell, closed: false};
+             active = cell;
+             scope.run(cell, () => {
+-                try { r.eval(message.code, r.context, 'cua-cell', error => finish(error)); }
++                // End trailing // comments before Node wraps top-level await.
++                try { r.eval(message.code + '\n', r.context, 'cua-cell', error => finish(error)); }
+                 catch (error) { finish(error); }
+             });
+         }

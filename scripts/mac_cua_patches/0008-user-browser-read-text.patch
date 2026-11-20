@@ -1,0 +1,16 @@
+diff --git a/cua_adapter/cua_repl.mjs b/cua_adapter/cua_repl.mjs
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -215,6 +215,12 @@
+         }
+         getState(opts) { return this.#observe('getState', opts); }
+         getScreenshot(opts) { return this.#observe('getScreenshot', opts); }
+         getStateAndScreenshot(opts) { return this.#observe('getStateAndScreenshot', opts); }
++        async readText() {
++            if (arguments.length !== 0) throw Error('InvalidArguments: readText takes no arguments');
++            const value = await call('browser.readText', this.#handle);
++            write(value);
++            return value;
++        }
+         async #action(method, args) {
+             const result = await call('browser.' + method, this.#handle, args);

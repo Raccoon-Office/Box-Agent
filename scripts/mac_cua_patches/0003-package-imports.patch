@@ -1,0 +1,62 @@
+--- a/cua_adapter/cua_adapter.py
++++ b/cua_adapter/cua_adapter.py
+@@ -17,29 +17,15 @@
+ _evidence_spec.loader.exec_module(evidence_contract)
+ 
+ 
+-def _load_sibling(name):
+-    if name in sys.modules:
+-        return sys.modules[name]
+-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + '.py'))
+-    module = importlib.util.module_from_spec(spec)
+-    sys.modules[name] = module
+-    spec.loader.exec_module(module)
+-    return module
+-
+-
+-for _module_name in ('cua_actions', 'cua_driver', 'cua_mcp', 'cua_observation',
+-                     'cua_windows', 'cua_service'):
+-    _load_sibling(_module_name)
+-
+-from cua_actions import ActionExecutor
+-from cua_driver import ActionError, DriverSession, data
+-from cua_mcp import DRIVER_TIMEOUT_SECONDS, PROTOCOL, McpClient
+-from cua_observation import (ObservationEngine, active_menu_elements, app_elements,
++from .cua_actions import ActionExecutor
++from .cua_driver import ActionError, DriverSession, data
++from .cua_mcp import DRIVER_TIMEOUT_SECONDS, PROTOCOL, McpClient
++from .cua_observation import (ObservationEngine, active_menu_elements, app_elements,
+     application_menu_elements, application_menu_tree, attached_sheet_elements, ax_line,
+     clear_image, compact_rows, menu_entries, rectangle, top_window, window_stack_sort_key,
+     with_text_labels)
+-from cua_service import ReplService as _ReplService, serve as _serve
+-from cua_windows import WindowContext, native_window_inventory
++from .cua_service import ReplService as _ReplService, serve as _serve
++from .cua_windows import WindowContext, native_window_inventory
+ 
+ APP_LAUNCH_TIMEOUT_SECONDS = 60
+ APP_LAUNCH_WINDOW_TIMEOUT_SECONDS = 30
+--- a/cua_adapter/cua_observation.py
++++ b/cua_adapter/cua_observation.py
+@@ -6,7 +6,7 @@
+ import math
+ import re
+ 
+-from cua_driver import ActionError, data
++from .cua_driver import ActionError, data
+ 
+ ATTACHED_WINDOW_ROLES = {'AXSheet', 'AXPopover', 'AXMenu', 'AXWindow'}
+ 
+--- a/cua_adapter/cua_windows.py
++++ b/cua_adapter/cua_windows.py
+@@ -6,8 +6,8 @@
+ import math
+ import sys
+ 
+-from cua_driver import ActionError, data
+-from cua_observation import (ATTACHED_WINDOW_ROLES, active_menu_elements,
++from .cua_driver import ActionError, data
++from .cua_observation import (ATTACHED_WINDOW_ROLES, active_menu_elements,
+     attached_sheet_elements, clear_image, rectangle, top_window, window_stack_key,
+     window_stack_sort_key)
+ 
