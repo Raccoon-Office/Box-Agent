@@ -1,0 +1,45 @@
+name: Connector runtime
+
+on:
+  pull_request:
+    paths:
+      - 'box_agent/acp/**'
+      - 'box_agent/skill*.py'
+      - 'box_agent/session_assembly.py'
+      - 'box_agent/tools/skill*.py'
+      - 'box_agent/tools/mcp*.py'
+      - 'box_agent/tools/setup.py'
+      - 'tests/test_connector*.py'
+      - 'tests/test_acp*.py'
+      - 'tests/test_skill_catalog_tool.py'
+      - 'tests/test_mcp_connection_lifecycle.py'
+      - '.github/workflows/connector-platform.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  connectors:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Install project and test dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+      - name: Test connector discovery, MCP, and ordinary chat
+        run: >-
+          uv run --no-sync pytest -q --tb=short
+          tests/test_acp_connector_discovery.py
+          tests/test_acp.py::test_initialize_replies_while_background_skills_and_mcp_remain_pending
+          tests/test_acp.py::test_user_oauth_does_not_change_prompt_readiness_with_pending_mcp
+          tests/test_mcp_connection_lifecycle.py
+          tests/test_connector_skill_versions.py
+          tests/test_connector_skill_source.py
+          tests/test_skill_catalog_tool.py::test_same_named_connector_files_are_individually_readable_and_scoped

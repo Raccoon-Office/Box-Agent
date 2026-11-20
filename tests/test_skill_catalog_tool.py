@@ -37,7 +37,7 @@ def make_tool(loader, **kwargs):
 async def test_same_named_connector_files_are_individually_readable_and_scoped(tmp_path):
     from box_agent.tools.skill_tool import GetSkillTool
 
-    root = tmp_path / "connectors"
+    root = tmp_path / "项目 Skills" / "connectors"
     files = {owner: write_skill(root / f"connector-{owner}", "guide", body=f"BODY_{owner}")
              for owner in ("alpha", "beta")}
     loader = SkillLoader(sources=[(root, "connector")], skill_settings_path=tmp_path / "settings.json")
