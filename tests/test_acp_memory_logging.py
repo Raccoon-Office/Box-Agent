@@ -41,12 +41,13 @@ def test_acp_and_provider_log_only_to_owner_accessible_files(tmp_path, monkeypat
     finally:
         os.umask(previous_umask)
 
-    assert "synthetic MCP failure" in acp_file.read_text(encoding="utf-8")
-    assert "synthetic private message" in provider_file.read_text(encoding="utf-8")
-    for path in (acp_file, provider_file):
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        if existing_file:
-            assert path.read_text(encoding="utf-8").startswith("older record\n")
+    if existing_file:
+        for path in (acp_file, provider_file):
+            assert path.read_text(encoding="utf-8") == "older record\n"
+    else:
+        assert "synthetic MCP failure" in acp_file.read_text(encoding="utf-8")
+        assert "synthetic private message" in provider_file.read_text(encoding="utf-8")
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (acp_file, provider_file))
 
 
 @pytest.mark.parametrize("level,log_format", [(None, "json"), ("debug", "json"), ("debug", "text")])

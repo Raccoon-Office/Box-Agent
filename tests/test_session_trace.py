@@ -60,21 +60,27 @@ class EchoTool(Tool):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
-def test_trace_tightens_existing_file_before_appending_errors(tmp_path):
+def test_trace_keeps_error_details_in_private_files_only(tmp_path):
     trace_dir = tmp_path / "logs"
     trace_dir.mkdir()
     trace_dir.chmod(0o755)
-    writer = SessionTraceWriter(session_id="private", acp_session_id="", trace_dir=trace_dir, enabled=True)
-    writer.file_path.write_text('{"event":"session.start"}\n', encoding="utf-8")
-    writer.file_path.chmod(0o644)
+    private = SessionTraceWriter(session_id="private", acp_session_id="", trace_dir=trace_dir, enabled=True)
+    legacy = SessionTraceWriter(session_id="legacy", acp_session_id="", trace_dir=trace_dir, enabled=True)
+    old_body = '{"event":"session.start"}\n'
+    legacy.file_path.write_text(old_body, encoding="utf-8")
+    legacy.file_path.chmod(0o644)
 
-    writer.write("llm.error", data={"error": "synthetic model failure"})
-    writer.write("tool.response", data={"tool_name": "mcp__seko", "success": False, "error": "synthetic video failure"})
+    with legacy.file_path.open(encoding="utf-8") as older_reader:
+        for writer in (private, legacy):
+            writer.write("llm.error", data={"error": "synthetic model failure"})
+            writer.write("tool.response", data={
+                "tool_name": "mcp__seko", "success": False, "error": "synthetic video failure",
+            })
+        assert older_reader.read() == old_body
 
     assert stat.S_IMODE(trace_dir.stat().st_mode) == 0o755
-    assert stat.S_IMODE(writer.file_path.stat().st_mode) == 0o600
-    assert [row["event"] for row in _records(writer)] == ["session.start", "llm.error", "tool.response"]
-    assert [row["data"]["error"] for row in _records(writer)[1:]] == [
+    assert stat.S_IMODE(private.file_path.stat().st_mode) == 0o600
+    assert [row["data"]["error"] for row in _records(private)] == [
         "synthetic model failure",
         "synthetic video failure",
     ]

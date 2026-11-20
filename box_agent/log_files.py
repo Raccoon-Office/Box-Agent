@@ -36,7 +36,8 @@ def _private_log_descriptor(path: str, flags: int) -> int:
             if info.st_uid != os.geteuid():
                 raise PermissionError("Diagnostic file is owned by another user")
             if stat.S_IMODE(info.st_mode) & 0o077:
-                os.fchmod(descriptor, stat.S_IMODE(info.st_mode) & 0o600)
+                # Older readers can keep using an open descriptor after chmod.
+                raise PermissionError("Diagnostic file has group or other permissions")
         elif os.name == "nt":
             # The CRT ignores POSIX mode bits on Windows. Check the inherited
             # ACL on the actual open file before passing it to a writer.
