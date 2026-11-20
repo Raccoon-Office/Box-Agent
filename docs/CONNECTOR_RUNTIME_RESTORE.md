@@ -37,6 +37,30 @@ Reapplying unchanged configuration retries servers whose last connection failed,
 without restarting healthy or still-loading servers. The returned success value
 reflects that new attempt, including another failure.
 
+Repeated `_mcp/credential/set` with the same headers and binding is a no-op:
+it does not advance the credential version or invalidate a pending handshake.
+Changed credentials or an explicitly changed user binding still advance it.
+The connection fingerprint includes source ownership/identity, transport,
+URL/command/arguments/environment/cwd, headers/credential reference, and connection
+timeouts. Catalog names, descriptions, logos, package version, source-file location,
+`alwaysLoad`, and tool execution timeout do not restart a healthy transport.
+Tool policy and display metadata are refreshed on that existing connection.
+Disabling/removing remains explicit; re-enabling still establishes a connection.
+
+Desktop cloud-package auto-updates download and validate outside user-operation
+queues, then use the existing Skill publication idle boundary. A running chat or
+scheduled turn finishes before the package, MCP/CLI configuration, and Skills
+switch. Waiting for idle is outside the connector mutation queue; disconnect,
+disable, unbind, or uninstall invalidates that publication before it can run.
+Publication rechecks idle and briefly owns the existing runtime configuration
+gate: a newly arriving turn waits for publication, including any required MCP
+reconnection, to complete. This is an asynchronous admission wait, not synchronous
+Electron work. Download/idle waits are not added to ACP initialize; the initializer
+and MCP cold-start readiness contract above are unchanged. No additional ACP
+restart is requested for MCP package updates. Standalone source-replace calls
+still follow the existing reconnect contract; the host owns the auto-update
+publication boundary.
+
 Reconnect retires an already-ended connection even if its cleanup logged an
 error, so a historical failure cannot prevent a fresh connection attempt. Cleanup
 still runs in the task that opened the SDK contexts. If that task is still closing,
@@ -47,6 +71,20 @@ reported once, without permanently blocking subsequent attempts.
 Conversation connector authorization applies to eager and deferred tools,
 including child inheritance and calls after a selection is revoked. Catalog
 refreshes never add tools to utility sessions, including background discovery.
+
+Package Skills have a separate lifecycle from MCP tools. Both MCP and CLI
+packages install their Skills under
+`<BOX_AGENT_HOME>/connectors/skills/connector-<id>/<skill-id>/SKILL.md`, with
+`source=connector`. The desktop host writes `disable: true` when the connector
+is disabled and removes its owned installation on uninstall. SkillLoader's
+existing refresh and disable handling controls discovery and reads, including
+child delegation; there is no additional MCP-connectivity, connector-selection,
+or conversation-grant requirement for these Skills. A temporary MCP outage does
+not disable guidance. Reading guidance does not grant access to MCP tools.
+Previously delivered guidance remains in conversation history.
+
+This package lifecycle does not change built-in Lark, WeCom, or DingTalk
+integrations, their credentials, or ordinary user/SkillHub Skill settings.
 
 Changing this contract requires rebuilding the packaged ACP runtime and testing
 host startup, mixed OAuth/token restoration and process restart. Source tests

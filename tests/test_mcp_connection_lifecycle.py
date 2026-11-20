@@ -134,6 +134,64 @@ async def test_installed_config_loads_namespaced_tools_without_rewriting_config_
     assert state.transports == 0
 
 
+async def test_same_token_and_metadata_refresh_do_not_close_an_inflight_sdk_call(
+    sdk_connection, monkeypatch, tmp_path,
+):
+    _, state = sdk_connection
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    @state.server.call_tool()
+    async def slow_tool(name, arguments):
+        started.set()
+        await finish.wait()
+        return [types.TextContent(type="text", text="completed before update")]
+
+    user = tmp_path / "mcp.json"
+    user.write_text('{"mcpServers": {}}')
+    connector = tmp_path / "connectors.json"
+    config = {"command": "fixture", "_connectorId": "example", "credentialRef": "example-key"}
+    connector.write_text(json.dumps({"mcpServers": {"example": config}}))
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CONFIG_PATH", str(user))
+    monkeypatch.setenv("BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", str(connector))
+    monkeypatch.delenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("BOX_AGENT_RESERVED_MCP_SERVER_NAMES", raising=False)
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    for name, value in {
+        "_mcp_connections": [], "_mcp_status": {}, "_mcp_config_path": None,
+        "_mcp_reconnect_locks": {}, "_mcp_source_reconcile_lock": asyncio.Lock(),
+        "_cua_service": None, "_mcp_loading": False,
+        "_mcp_auth_file": "", "_mcp_auth_token": "", "_mcp_auth_fingerprint": "",
+        "_mcp_server_definitions": {}, "_mcp_sources": (), "_mcp_source_overrides": {},
+        "_mcp_runtime_credentials": {}, "_mcp_runtime_credential_versions": {},
+        "_mcp_connection_epochs": {},
+    }.items():
+        monkeypatch.setattr(mcp_loader, name, value)
+    headers = {"Authorization": "Bearer fixture"}
+    mcp_loader.set_mcp_runtime_credential("example-key", headers)
+    call = None
+    try:
+        tools = await mcp_loader.load_mcp_tools_async(str(user))
+        call = asyncio.create_task(tools[0].invoke({}))
+        await asyncio.wait_for(started.wait(), 1)
+        original = mcp_loader._mcp_connections[0]
+        assert mcp_loader.set_mcp_runtime_credential("example-key", headers) == []
+        config.update(_connectorName="Updated label", alwaysLoad=True)
+        connector.write_text(json.dumps({"mcpServers": {"example": config}}))
+        result = await asyncio.wait_for(mcp_loader.reconcile_mcp_sources("connector"), 1)
+        assert result["success"] and not result["results"]
+        assert mcp_loader._mcp_connections[0] is original
+        assert state.transports == 1 and not state.exits
+        assert not call.done()
+        finish.set()
+        assert (await asyncio.wait_for(call, 1)).success
+    finally:
+        finish.set()
+        if call is not None:
+            await asyncio.gather(call, return_exceptions=True)
+        await mcp_loader.cleanup_mcp_connections()
+
+
 async def test_stdio_handshake_replaces_and_bounds_server_instructions(sdk_connection):
     conn, state = sdk_connection
     state.server.instructions = "  " + "用" * 3_000 + " "

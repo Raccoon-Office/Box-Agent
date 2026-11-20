@@ -22,6 +22,101 @@ def _write(path: Path, servers: dict) -> None:
     path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
 
 
+@pytest.mark.parametrize("owner", ["connector", "user"])
+def test_repeated_runtime_credential_preserves_connection_version_and_epoch(
+    owner, isolated_connector_runtime,
+):
+    source = McpConfigSource(owner, Path("<runtime>"))
+    config = {"url": "https://service.test/mcp"}
+    reference = "user-mcp:service" if owner == "user" else "service-token"
+    if owner == "connector":
+        config.update(_connectorId="service", credentialRef=reference)
+    definition = resolve_mcp_sources((source,), source_server_overrides={owner: {"service": config}}).servers["service"]
+    mcp_loader._mcp_server_definitions["service"] = definition
+    target = {"owner": "user", "name": "service", "config": config} if owner == "user" else None
+    headers = {"Authorization": "Bearer fixture"}
+    assert mcp_loader.set_mcp_runtime_credential(reference, headers, target=target) == ["service"]
+    versions = dict(mcp_loader._mcp_runtime_credential_versions)
+    epoch = mcp_loader._mcp_connection_epochs["service"]
+    assert mcp_loader.set_mcp_runtime_credential(reference, dict(headers), target=target) == []
+    assert mcp_loader._mcp_runtime_credential_versions == versions
+    assert mcp_loader._mcp_connection_epochs["service"] is epoch
+    assert mcp_loader.set_mcp_runtime_credential(reference, {"Authorization": "Bearer changed"}, target=target) == ["service"]
+    assert mcp_loader._mcp_runtime_credential_versions != versions
+
+
+@pytest.mark.parametrize("field,value", [
+    ("_connectorName", "New name"), ("description", "New description"),
+    ("logo", "new.svg"), ("version", "2.0.0"), ("alwaysLoad", True),
+    ("execute_timeout", 60),
+])
+def test_display_and_tool_policy_updates_preserve_transport_fingerprint(field, value):
+    source = McpConfigSource("connector", Path("<runtime>"))
+    config = {"url": "https://service.test/mcp", "_connectorId": "service"}
+    def resolve(config):
+        return resolve_mcp_sources((source,), source_server_overrides={"connector": {"service": config}}).servers["service"]
+    assert resolve(config).fingerprint == resolve({**config, field: value}).fingerprint
+
+
+@pytest.mark.parametrize("field,value", [
+    ("url", "https://other.test/mcp"), ("type", "sse"),
+    ("headers", {"Authorization": "fixture"}), ("credentialRef", "new-ref"),
+    ("command", "node"), ("args", ["new/server.js"]), ("env", {"KEY": "fixture"}),
+    ("cwd", "/new"), ("connect_timeout", 60), ("sse_read_timeout", 120),
+])
+def test_transport_and_authentication_changes_require_a_new_connection(field, value):
+    source = McpConfigSource("connector", Path("<runtime>"))
+    config = {"url": "https://service.test/mcp", "_connectorId": "service"}
+    def resolve(config):
+        return resolve_mcp_sources((source,), source_server_overrides={"connector": {"service": config}}).servers["service"]
+    assert resolve(config).fingerprint != resolve({**config, field: value}).fingerprint
+
+
+@pytest.mark.asyncio
+async def test_metadata_and_repeated_token_refresh_keep_the_live_transport(
+    monkeypatch, isolated_connector_runtime,
+):
+    from unittest.mock import AsyncMock
+
+    connect = AsyncMock(return_value=True)
+    disconnect = AsyncMock()
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "disconnect", disconnect)
+    mcp_loader.set_mcp_runtime_credential("law-token", {"Authorization": "Bearer fixture"})
+    await mcp_loader.replace_mcp_source("connector", isolated_connector_runtime, ["pkulaw"])
+    connection = mcp_loader._mcp_connections[0]
+    mcp_loader.set_mcp_runtime_credential("law-token", {"Authorization": "Bearer fixture"})
+    config = isolated_connector_runtime["mcpServers"]["law"]
+    config.update(_connectorName="Updated name", alwaysLoad=True, execute_timeout=45)
+    result = await mcp_loader.replace_mcp_source("connector", isolated_connector_runtime, ["pkulaw"])
+    assert result["success"] is True
+    assert mcp_loader._mcp_connections[0] is connection
+    assert connection.connector_name == "Updated name"
+    assert connection.always_load is True
+    assert connection.execute_timeout == 45
+    assert mcp_loader._mcp_server_definitions["law"].config == config
+    connect.assert_awaited_once()
+    disconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enabling_a_disabled_server_reconnects_with_the_same_transport(
+    monkeypatch, isolated_connector_runtime,
+):
+    from unittest.mock import AsyncMock
+
+    connect = AsyncMock(return_value=True)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    config = isolated_connector_runtime["mcpServers"]["oauth"]
+    config["disabled"] = True
+    await mcp_loader.replace_mcp_source("connector", isolated_connector_runtime, ["qixin"])
+    assert not connect.called
+    config["disabled"] = False
+    result = await mcp_loader.replace_mcp_source("connector", isolated_connector_runtime, ["qixin"])
+    assert result["success"] is True
+    connect.assert_awaited_once()
+
+
 def test_configured_sources_keep_standalone_single_file(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("BOX_AGENT_USER_MCP_CONFIG_PATH", raising=False)
     monkeypatch.delenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", raising=False)

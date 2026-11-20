@@ -1114,6 +1114,12 @@ class SkillLoader:
         bundles on every discovery. User skills keep recursive discovery so
         officev3-authored skills are picked up without regenerating a manifest.
         """
+        if entry.source == "connector":
+            try:
+                return self._connector_skill_files(entry.directory)
+            except (OSError, RuntimeError):
+                # A temporarily unreadable connector source cannot break discovery of other Skills.
+                return []
         if (
             entry.source == "builtin"
             and entry.manifest_names is not None
@@ -1127,6 +1133,55 @@ class SkillLoader:
                 # 根目录本身被替换时不递归扫描外部目录，保留入口用于不可用诊断。
                 return [entry.directory / "SKILL.md"]
         return list(entry.directory.rglob("SKILL.md"))
+
+    @staticmethod
+    def _connector_skill_files(root: Path) -> List[Path]:
+        """Resolve the desktop's active receipts without walking inactive version trees."""
+        files: List[Path] = []
+        managed: set[Path] = set()
+        base = root.resolve(strict=True)
+        receipts = root / ".installations"
+        if receipts.resolve() != base / ".installations":
+            return []
+        for receipt in receipts.glob("*.json"):
+            connector_id = receipt.stem
+            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", connector_id):
+                continue
+            directory = f"connector-{connector_id}"
+            managed.add(root / directory)
+            try:
+                if receipt.is_symlink():
+                    continue
+                record = json.loads(receipt.read_bytes())
+                if not isinstance(record, dict) or record.get("connectorId") != connector_id:
+                    continue
+                entries = [item for item in record.get("entries", [])
+                           if isinstance(item, dict) and item.get("scope") == "connector"]
+                if len(entries) != 1 or entries[0].get("directory") != directory:
+                    continue
+                revision = entries[0].get("revision")
+                if revision is None:
+                    selected = base / directory
+                elif isinstance(revision, str) and re.fullmatch(
+                    r"v-[a-zA-Z0-9._-]{1,32}-[a-f0-9]{32}(?:-[a-f0-9-]{36})?", revision
+                ):
+                    selected = base.parent / "skill-versions" / directory / revision
+                else:
+                    continue
+                if selected.resolve(strict=True) == selected:
+                    files.extend(p for p in selected.rglob("SKILL.md") if p.resolve() == p)
+            except (OSError, ValueError, TypeError, RuntimeError):
+                # A damaged or concurrently removed receipt must not reactivate a retired copy.
+                continue
+        # Pre-receipt connector installations and manually provided connector sources.
+        for child in root.iterdir():
+            if child.name.startswith(".") or child in managed or child.resolve() != base / child.name:
+                continue
+            if child.is_dir():
+                files.extend(child.rglob("SKILL.md"))
+            elif child.name == "SKILL.md":
+                files.append(child)
+        return files
 
     @staticmethod
     def _expert_path_state(path: Path, root: Path) -> Tuple[str, Optional[str]]:

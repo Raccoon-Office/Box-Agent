@@ -1046,7 +1046,6 @@ class SessionState(AgentSession):
     pending_llm_binding: dict[str, Any] | None = None
     inject_queue: InjectionManager = field(default_factory=InjectionManager)
     wrap_up_requested: bool = False
-    connector_skill_grants: set[str] = field(default_factory=set)
     selected_connector_ids: set[str] = field(default_factory=set)
     connector_statuses: tuple[tuple[str, str, str], ...] | None = None
     connector_status_unavailable: bool = False
@@ -1190,32 +1189,6 @@ def _connected_connector_ids(selected_connector_ids: set[str]) -> frozenset[str]
         and expected == {server_name for server_name, _, _ in statuses}
         and all(state == "connected" for _, _, state in statuses)
     )
-
-
-def _connector_skill_is_available(skill: Any, selected_connector_ids: set[str], discovery=None) -> bool:
-    """Gate new connector-Skill recognition without removing already loaded guidance."""
-    if getattr(skill, "source", None) != "connector":
-        return True
-    if discovery is not None:
-        owner_id = getattr(skill, "owner_id", None)
-        if not discovery.permitted(owner_id):
-            return False
-        entry = discovery.entries[owner_id]
-        if entry["kind"] == "cli":
-            return skill.name in entry["skills"] and not getattr(skill, "disabled", False)
-    return getattr(skill, "owner_id", None) in _connected_connector_ids(
-        selected_connector_ids
-    )
-
-
-def _connector_skill_is_granted(skill: Any, connector_skill_grants: set[str], discovery=None) -> bool:
-    """Keep selector grants; a selected ready CLI also permits its verified methods."""
-    if getattr(skill, "source", None) != "connector" or getattr(skill, "name", None) in connector_skill_grants:
-        return True
-    if discovery is not None:
-        entry = discovery.entries.get(getattr(skill, "owner_id", None), {})
-        return entry.get("kind") == "cli" and _connector_skill_is_available(skill, set(), discovery)
-    return False
 
 
 _UNAVAILABLE_CONNECTOR_STATUS = (
@@ -2222,7 +2195,6 @@ class BoxACPAgent:
                 skill_bindings_by_directory=expert_context.skill_bindings_by_directory,
                 skill_bindings_by_path=expert_context.skill_bindings_by_path,
             )
-        connector_skill_grants: set[str] = set()
         skillhub_search_tool: SkillHubSearchTool | None = None
         if skillhub_search_enabled and not utility:
 
@@ -2376,14 +2348,6 @@ class BoxACPAgent:
                     skill_task=self._skill_task, session_log=session_log,
                     workspace_tools_factory=add_workspace_tools,
                     capability_state_provider=self._sub_agent_capability_state,
-                    skill_access_filter=lambda skill: _connector_skill_is_granted(
-                        skill, connector_skill_grants, connector_discovery
-                    ) and (connector_discovery is None or _connector_skill_is_available(
-                        skill, selected_connector_ids, connector_discovery
-                    )),
-                    skill_catalog_filter=lambda skill: _connector_skill_is_available(
-                        skill, selected_connector_ids, connector_discovery
-                    ),
                     extra_tools=tools,
                     prompt_suffix="\n\n".join(part for part in (
                         HARD_CAPABILITY_GAP_PROMPT if skillhub_search_tool else None,
@@ -2399,7 +2363,6 @@ class BoxACPAgent:
                     if connector_discovery is None or connector_discovery.permitted(connector_id)
                 ),
                 connector_discovery=connector_discovery,
-                connector_skill_grants=connector_skill_grants,
                 selected_connector_ids=selected_connector_ids,
                 connector_statuses=connector_statuses,
                 connector_status_unavailable=connector_status_unavailable,
@@ -2956,7 +2919,6 @@ class BoxACPAgent:
             state.preloaded_skill_names.clear()
             state.preloaded_skill_hashes.clear()
             state.preloaded_skill_attributions.clear()
-            state.connector_skill_grants.clear()
             state.inject_queue.begin_run(discard_pending=True)
             state.inject_queue.end_run()
             state.continuation_applied = True
@@ -3407,11 +3369,6 @@ class BoxACPAgent:
             state.skill_loader,
             plan_detection_text,
         )
-        if (
-            explicit_skill is not None
-            and getattr(explicit_skill, "source", None) == "connector"
-        ):
-            explicit_skill = None
         requested_host_skills = (
             _meta_string_list(prompt_meta, "selected_skill_names", limit=8)
             or _meta_string_list(prompt_meta, "selectedSkillNames", limit=8)
@@ -3420,8 +3377,7 @@ class BoxACPAgent:
             name
             for name in requested_host_skills
             if state.skill_loader is not None
-            and (skill := state.skill_loader.get_skill(name)) is not None
-            and getattr(skill, "source", None) != "connector"
+            and state.skill_loader.get_skill(name) is not None
         )
         explicitly_selected_skill_names = tuple(
             dict.fromkeys(
@@ -3473,19 +3429,6 @@ class BoxACPAgent:
                 self._sync_cache_fingerprint_context(state)
             except Exception as exc:
                 log.warn("skills/filter_error", session_id=session_id, message=str(exc))
-
-        matched_skill_names = (
-            state.skill_selector.matched_skill_names
-            if state.skill_selector is not None
-            else ()
-        )
-        if state.skill_loader is not None:
-            for skill_name in matched_skill_names:
-                skill = state.skill_loader.get_skill(skill_name)
-                if skill is not None and _connector_skill_is_available(
-                    skill, state.selected_connector_ids, getattr(state.agent, "connector_discovery", None)
-                ):
-                    state.connector_skill_grants.add(skill.name)
 
         if state.agent.skill_runtime is not None:
             state.agent.skill_runtime.select(explicitly_selected_skill_names)

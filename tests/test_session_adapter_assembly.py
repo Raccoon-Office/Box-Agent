@@ -245,17 +245,17 @@ async def test_acp_sessions_share_runtime_and_rebind_closes_only_old_session(tmp
 
 
 @pytest.mark.asyncio
-async def test_managed_session_keeps_connector_skill_grants_for_parent_and_child(tmp_path, monkeypatch):
+async def test_managed_session_uses_enabled_connector_skills_for_parent_and_child(tmp_path, monkeypatch):
     from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
     from box_agent.tools.skill_catalog_tool import ListSkillsTool
     from box_agent.tools.skill_tool import GetSkillTool
     from tests.test_connector_skill_source import _write_connector_skill
 
     connector_root = tmp_path / "connector-skills"
-    _write_connector_skill(connector_root)
+    skill_path = _write_connector_skill(connector_root)
     loader = SkillLoader(sources=[(connector_root, "connector")])
     loader.discover_skills()
-    monkeypatch.setattr(acp, "_connected_connector_ids", lambda selected: frozenset(selected))
+    monkeypatch.setattr(acp, "_connected_connector_ids", lambda selected: frozenset())
     config = Config(
         llm=LLMConfig(api_key="test"),
         agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False),
@@ -272,26 +272,23 @@ async def test_managed_session_keeps_connector_skill_grants_for_parent_and_child
         skill_tool = state.agent.tools["get_skill"]
         catalog_tool = state.agent.tools["list_skills"]
         child_tool = state.agent.tools["sub_agent"]
-        assert (await catalog_tool.execute(query="pkulaw")).raw_output["skills"] == []
-        denied = await skill_tool.execute(skill_name="pkulaw")
-        assert not denied.success and "not enabled" in denied.error
-        denied_child = await child_tool.execute(task="Search the law", skills=["pkulaw"], required_tools=[])
-        assert not denied_child.success
-        catalog_update = state.skill_selector.update("pkulaw")
-        assert "pkulaw" not in (catalog_update or "")
-        assert "pkulaw" not in state.skill_selector.matched_skill_names
-
         await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=response.sessionId, prompt=[{"text": "pkulaw legal search"}],
-            field_meta={"selected_connector_ids": ["pkulaw"]},
+            field_meta={"selected_connector_ids": []},
         )))
-        assert state.connector_skill_grants == {"pkulaw"}
         visible = (await catalog_tool.execute(query="pkulaw")).raw_output["skills"]
         assert [row["name"] for row in visible] == ["pkulaw"]
         assert visible[0]["available"] is True
         assert (await skill_tool.execute(skill_name="pkulaw")).success
         allowed_child = await child_tool.execute(task="Search the law", skills=["pkulaw"], required_tools=[])
         assert allowed_child.success
+        content = skill_path.read_text(encoding="utf-8")
+        skill_path.write_text(content.replace("---\n", "---\ndisable: true\n", 1), encoding="utf-8")
+        unavailable = (await catalog_tool.execute(query="pkulaw")).raw_output["skills"]
+        assert unavailable[0]["available"] is False
+        assert not (await skill_tool.execute(skill_name="pkulaw")).success
+        denied_child = await child_tool.execute(task="Search the law", skills=["pkulaw"], required_tools=[])
+        assert not denied_child.success
     finally:
         await adapter.aclose()
 

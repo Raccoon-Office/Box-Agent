@@ -295,13 +295,14 @@ async def test_acp_decline_continues_original_task_with_ready_capabilities(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_acp_ready_cli_method_is_loadable_without_semantic_match_and_revoked_on_next_turn(tmp_path):
+async def test_acp_cli_skill_enablement_is_independent_of_discovery_selection_and_readiness(tmp_path):
     from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
     from box_agent.tools.skill_tool import GetSkillTool
 
     folder = tmp_path / "skills" / "connector-tmeet" / "method"
     folder.mkdir(parents=True)
-    folder.joinpath("SKILL.md").write_text(
+    skill_path = folder.joinpath("SKILL.md")
+    skill_path.write_text(
         "---\nname: tmeet-skill\ndescription: unique rare method\n---\nVerified CLI method body.\n",
         encoding="utf-8",
     )
@@ -313,17 +314,19 @@ async def test_acp_ready_cli_method_is_loadable_without_semantic_match_and_revok
     try:
         session = await create(host, tmp_path, catalog=ready)
         state = host._sessions[session.sessionId]
-        assert not state.connector_skill_grants
-        assert not (await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")).success
+        assert (await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")).success
         await prompt(host, session.sessionId, "继续", metadata={
             "connector_discovery": ready, "selected_connector_ids": ["tmeet"],
         })
-        state.connector_skill_grants.clear()  # A discovered method need not match the selector's query.
         result = await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")
         assert result.success and "Verified CLI method body" in result.content
         await prompt(host, session.sessionId, "继续", metadata={
-            "connector_discovery": ready, "selected_connector_ids": [],
+            "connector_discovery": snapshot([entry(configured=True, enabled=True,
+                status="error", execution_ready=False)], revision=2), "selected_connector_ids": [],
         })
+        assert (await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")).success
+        enabled_content = skill_path.read_text(encoding="utf-8")
+        skill_path.write_text(enabled_content.replace("---\n", "---\ndisable: true\n", 1), encoding="utf-8")
         assert not (await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")).success
     finally:
         await host.aclose()

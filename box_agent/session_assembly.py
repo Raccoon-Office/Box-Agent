@@ -468,14 +468,6 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
     agent = session.agent
     session_skill_loader = resources.skill_loader
     expert_context = resources.state.get("expert_context")
-    grants = resources.state.get("connector_skill_grants")
-    if grants is not None and session_skill_loader is not None:
-        # Agent has already validated and restored the session's read records.
-        # Derive the compatibility grant set without restoring a second time.
-        for name in agent.skill_runtime.current_active_names:
-            skill = session_skill_loader.get_skill(name)
-            if skill is not None and getattr(skill, "source", None) == "connector":
-                grants.add(skill.name)
     if session_skill_loader:
         from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillSelector, move_skill_slot_to_end
 

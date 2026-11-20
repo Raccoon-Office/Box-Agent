@@ -487,6 +487,91 @@ async def test_acp_session_metadata_hides_physically_isolated_connector_skills(t
 
 
 @pytest.mark.asyncio
+async def test_initialize_replies_while_background_skills_and_mcp_remain_pending(tmp_path):
+    release = asyncio.Event()
+    skill_task = asyncio.create_task(release.wait())
+    mcp_task = asyncio.create_task(release.wait())
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    host = BoxACPAgent(
+        DummyConn(), config, DummyLLM(), [], "system",
+        skill_task=skill_task, mcp_task=mcp_task,
+    )
+    try:
+        result = await asyncio.wait_for(host.initialize(protocol_version=1), timeout=1)
+        assert result.protocol_version == 1
+        assert not skill_task.done()
+        assert not mcp_task.done()
+    finally:
+        release.set()
+        await asyncio.gather(skill_task, mcp_task)
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mcp_state", [None, "failed", "connected"])
+async def test_acp_connector_skills_follow_installed_enablement_not_mcp_status(
+    tmp_path, monkeypatch, mcp_state,
+):
+    connector_root = tmp_path / "connectors" / "skills"
+    skill_dir = connector_root / "connector-package-fixture" / "package-guide"
+    skill_dir.mkdir(parents=True)
+    skill_path = skill_dir / "SKILL.md"
+    enabled_content = (
+        "---\nname: package-guide\ndescription: Package fixture guide\n"
+        "keywords: [package-fixture]\n---\nPACKAGE GUIDANCE\n"
+    )
+    skill_path.write_text(enabled_content, encoding="utf-8")
+    sources = [(connector_root, "connector")]
+    loader = SkillLoader(sources=sources)
+    loader.discover_skills()
+    monkeypatch.setattr(acp_module, "get_mcp_connector_server_names", lambda: (
+        {"package-fixture": frozenset({"fixture-server"})} if mcp_state else {}
+    ))
+    monkeypatch.setattr(acp_module, "get_mcp_status", lambda: ([{
+        "owner": "connector", "connectorId": "package-fixture",
+        "name": "fixture-server", "state": mcp_state,
+    }] if mcp_state else []))
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(
+        DummyConn(), config, DummyLLM(), create_skill_tools(sources=sources)[0],
+        f"system\n\n{SKILL_SLOT_SENTINEL}", skill_loader=loader,
+    )
+    session = await agent.new_session(**acp_params(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"selected_connector_ids": []},
+    )))
+    state = agent._sessions[session.sessionId]
+    tool = state.agent.tools["get_skill"]
+    state.skill_selector.render_catalog("package-fixture")
+    assert "package-guide" in state.skill_selector.matched_skill_names
+    result = await tool.execute(skill_name="package-guide")
+    assert result.success is True
+    assert "PACKAGE GUIDANCE" in result.content
+    await agent.prompt(**acp_params(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Use the package guide"}],
+        field_meta={"selected_skill_names": ["package-guide"]},
+    )))
+    assert "package-guide" in state.explicitly_allowed_skill_names
+
+    skill_path.write_text(enabled_content.replace("---\n", "---\ndisable: true\n", 1), encoding="utf-8")
+    await state.skill_loader.areload()
+    assert (await tool.execute(skill_name="package-guide")).success is False
+    skill_path.write_text(enabled_content, encoding="utf-8")
+    await state.skill_loader.areload()
+    assert (await tool.execute(skill_name="package-guide")).success is True
+    skill_path.unlink()
+    await state.skill_loader.areload()
+    assert (await tool.execute(skill_name="package-guide")).success is False
+
+
+@pytest.mark.asyncio
 async def test_acp_workspace_config_methods_share_profiles(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))

@@ -2614,6 +2614,7 @@ def set_mcp_runtime_credential(
     }
     if not normalized_headers:
         raise ValueError("credential headers are required")
+    previous_target = _mcp_credential_targets.get(normalized_ref) if target is not None else None
     if target is not None:
         if not isinstance(target, dict) or target.get("owner") != "user":
             raise ValueError("credential target must be user-owned")
@@ -2638,6 +2639,11 @@ def set_mcp_runtime_credential(
             name for name, definition in _mcp_server_definitions.items()
             if definition.owner == "connector" and definition.config.get("credentialRef") == normalized_ref
         ]
+    if (
+        _mcp_runtime_credentials.get(credential_key) == normalized_headers
+        and (target is None or previous_target == _mcp_credential_targets.get(normalized_ref))
+    ):
+        return []
     _mcp_runtime_credentials[credential_key] = normalized_headers
     _mcp_runtime_credential_versions[credential_key] = (
         _mcp_runtime_credential_versions.get(credential_key, 0) + 1
@@ -3312,11 +3318,30 @@ async def _reconcile_mcp_sources_locked(
         if after.config.get("disabled", False):
             operations.append(retire(name, before, after))
             continue
-        if before is not None and before.fingerprint == after.fingerprint:
+        if (
+            before is not None and before.fingerprint == after.fingerprint
+            and not before.config.get("disabled", False)
+        ):
             status = _mcp_status.get(name)
             # An unchanged configuration is not proof of a successful connection.
             # Retry failures, but leave healthy or still-loading servers alone.
             if status is None or status.state != "failed":
+                _mcp_server_definitions[name] = after
+                if status is not None:
+                    status.connector_name = after.connector_name
+                    status.source_path = after.source_path
+                for connection in _mcp_connections:
+                    if connection.name != name:
+                        continue
+                    connection.connector_name = after.connector_name
+                    connection.always_load = bool(after.config.get("alwaysLoad", False))
+                    connection.execute_timeout = after.config.get("execute_timeout")
+                    for tool in connection.tools:
+                        tool._connector_name = after.connector_name
+                        tool._always_load = connection.always_load
+                        tool._execute_timeout = connection._get_execute_timeout()
+                    if before.config != after.config:
+                        get_mcp_tool_catalog().replace_server(name, connection.tools)
                 continue
         operations.append(reconnect(name, "added" if before is None else "modified"))
 
