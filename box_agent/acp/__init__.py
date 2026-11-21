@@ -5898,18 +5898,6 @@ class BoxACPAgent:
                             log.debug("web_search/payload", session_id=session_id, tool_call_id=tid, payload=web_search_payload)
                             await self._send(session_id, update_tool_call(tid, raw_output=web_search_payload))
 
-                        case ErrorEvent(error_code="TURN_COMPLETION_CHECK_SKIPPED"):
-                            notice = {
-                                "zh": "任务进度暂未确认，已有输出已保留。",
-                                "ja": "タスクの進捗は未確認です。生成済みの内容は保持されています。",
-                                "en": "Task progress is unconfirmed. Existing output was kept.",
-                            }.get(ui_language, "Task progress is unconfirmed. Existing output was kept.")
-                            await self._send(session_id, update_tool_call(
-                                "agent-progress-completion-check",
-                                raw_output={"type": "agent_progress", "content": notice,
-                                            "code": "TURN_COMPLETION_CHECK_SKIPPED"},
-                            ))
-
                         case ErrorEvent(
                             message=msg,
                             is_fatal=is_fatal,

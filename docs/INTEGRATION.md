@@ -246,9 +246,6 @@ Agent 将历史整理放到工作线程，并在整理和发送时检查取消�
 保留已收到的内容并等待用户发送新消息。
 原会话恢复时，已发出但缺失结果的工具操作会在历史更新中标注 `_meta.toolOutcomeUnknown`。
 
-辅助续执行检查超时会通过 `agent_progress` 回报 `TURN_COMPLETION_CHECK_SKIPPED`，
-保留已生成的回答并结束该检查。确定性的完成校验仍照常执行。
-
 宿主关闭 stdin 或终止服务时，ACP 先停止接收新的 `session/new` 和
 `session/prompt`，取消并等待在途会话创建/重绑完成回滚，再释放会话资源。
 关闭期间的新请求返回 `code=-32000`、`data.code="AGENT_CLOSING"`；
