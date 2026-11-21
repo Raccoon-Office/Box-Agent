@@ -1,10 +1,12 @@
 """Resume's inclusive turn cursor shares load's effective-history wire format."""
 
 import asyncio
+from threading import Event
 
 import pytest
 
 from box_agent.acp import RequestError
+from box_agent.session_log import SessionLog, SessionLogInUseError
 from tests.test_acp_history_edit import CaptureLLM, adapter
 
 
@@ -152,4 +154,59 @@ async def test_interrupted_cursor_replay_can_be_retried(tmp_path):
         await host.resume_session(str(tmp_path), session_id, replayFromTurnId='t2')
         assert {update['_meta']['turnId'] for update in updates} == {'t2', 't3'}
     finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_load_by_request_id_releases_writer_before_resume(tmp_path, monkeypatch):
+    host, llm, session_id, updates = await seeded(tmp_path)
+    log = host._sessions[session_id].agent.session_log
+    upstream_id = log.header["id"]
+    storage_root = log.path.parent.parent
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = Event()
+    history_messages = SessionLog.history_messages
+
+    def wait_before_first_update(log, *, events=None, checkpoint=None):
+        if log.header["id"] == upstream_id:
+            loop.call_soon_threadsafe(entered.set)
+            while not release.wait(0.01):
+                if checkpoint is not None:
+                    checkpoint()
+        return history_messages(log, events=events, checkpoint=checkpoint)
+
+    monkeypatch.setattr(SessionLog, "history_messages", wait_before_first_update)
+    replay = asyncio.create_task(host.load_session(str(tmp_path), session_id, replayRequestId=42))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert await host.ext_method("cancel_session_replay", {
+            "sessionId": session_id, "requestId": 41,
+        }) == {"settled": True}
+        assert not replay.done()
+        with pytest.raises(SessionLogInUseError):
+            SessionLog.open(storage_root, session_id=upstream_id, cwd=tmp_path)
+        assert not updates
+
+        receipt = await asyncio.wait_for(host.ext_method("cancel_session_replay", {
+            "sessionId": session_id, "requestId": 42,
+        }), 5)
+        assert receipt == {"settled": True}
+        # Acquire the writer immediately after the cancellation receipt.
+        SessionLog.open(storage_root, session_id=upstream_id, cwd=tmp_path).close()
+        with pytest.raises(RequestError) as cancelled:
+            await replay
+        assert cancelled.value.data == {"code": "SESSION_REPLAY_CANCELLED"}
+        assert not updates
+
+        await host.resume_session(str(tmp_path), session_id)
+        result = await host.prompt(session_id, [{"type": "text", "text": "follow-up"}], turn_id="t4")
+        assert result.stop_reason == "end_turn"
+        assert len(llm.requests) == 4
+        assert {"t1", "t2", "t3"} <= {
+            message.input_facts["id"] for message in llm.requests[-1] if message.input_facts
+        }
+    finally:
+        release.set()
+        await asyncio.gather(replay, return_exceptions=True)
         await host.aclose()

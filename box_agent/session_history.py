@@ -20,10 +20,14 @@ def prompt_fingerprint(prompt: Any, context: dict[str, Any] | None = None) -> st
     return sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def effective_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def effective_events(
+    events: list[dict[str, Any]], *, checkpoint: Callable[[], None] | None = None,
+) -> list[dict[str, Any]]:
     """Resolve rewinds without importing events from a discarded future."""
     active: list[dict[str, Any]] = []
     for event in events:
+        if checkpoint is not None:
+            checkpoint()
         if event["type"] == "history/revise":
             if not all(isinstance(event["data"].get(key), str) and event["data"][key]
                        for key in ("revision_id", "previous_revision_id", "turn_id")):

@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -62,6 +63,43 @@ def test_windows_stdout_stays_pinned_and_propagates_broken_pipe(monkeypatch):
     transport.close()
     with pytest.raises(ConnectionError):
         transport.write(b'closed')
+
+
+@pytest.mark.asyncio
+async def test_windows_stdout_backpressure_keeps_reads_available_and_preserves_frame_order(monkeypatch):
+    entered, release = Event(), Event()
+
+    class SlowOutput(io.BytesIO):
+        def write(self, data):
+            if data == b'{"id":1}\n':
+                entered.set()
+                assert release.wait(5)
+            return super().write(data)
+
+    output = SlowOutput()
+    monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    reader = stdio_compat._StdioStreamReader()
+    writer = SimpleNamespace(transport=stdio_compat._StdoutTransport())
+    transport = stdio_compat.StdioTransport(reader, writer)
+    first = asyncio.create_task(transport.send({"id": 1}))
+    second = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        reader.feed_data(b'{"id":3}\n')
+        assert await asyncio.wait_for(transport.receive(), 1) == {"id": 3}
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        second = asyncio.create_task(transport.send({"id": 2}))
+        await asyncio.sleep(0)
+        assert output.getvalue() == b''
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+        if second is not None:
+            await second
+        await transport.close()
+    assert output.getvalue() == b'{"id":1}\n{"id":2}\n'
 
 
 @pytest.mark.asyncio
