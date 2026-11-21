@@ -37,6 +37,30 @@ Reapplying unchanged configuration retries servers whose last connection failed,
 without restarting healthy or still-loading servers. The returned success value
 reflects that new attempt, including another failure.
 
+Repeated `_mcp/credential/set` with the same headers and binding is a no-op:
+it does not advance the credential version or invalidate a pending handshake.
+Changed credentials or an explicitly changed user binding still advance it.
+The connection fingerprint includes source ownership/identity, transport,
+URL/command/arguments/environment/cwd, headers/credential reference, and connection
+timeouts. Catalog names, descriptions, logos, package version, source-file location,
+`alwaysLoad`, and tool execution timeout do not restart a healthy transport.
+Tool policy and display metadata are refreshed on that existing connection.
+Disabling/removing remains explicit; re-enabling still establishes a connection.
+
+Desktop cloud-package auto-updates download and validate outside user-operation
+queues, then use the existing Skill publication idle boundary. A running chat or
+scheduled turn finishes before the package, MCP/CLI configuration, and Skills
+switch. Waiting for idle is outside the connector mutation queue; disconnect,
+disable, unbind, or uninstall invalidates that publication before it can run.
+Publication rechecks idle and briefly owns the existing runtime configuration
+gate: a newly arriving turn waits for publication, including any required MCP
+reconnection, to complete. This is an asynchronous admission wait, not synchronous
+Electron work. Download/idle waits are not added to ACP initialize; the initializer
+and MCP cold-start readiness contract above are unchanged. No additional ACP
+restart is requested for MCP package updates. Standalone source-replace calls
+still follow the existing reconnect contract; the host owns the auto-update
+publication boundary.
+
 Reconnect retires an already-ended connection even if its cleanup logged an
 error, so a historical failure cannot prevent a fresh connection attempt. Cleanup
 still runs in the task that opened the SDK contexts. If that task is still closing,
@@ -47,6 +71,28 @@ reported once, without permanently blocking subsequent attempts.
 Conversation connector authorization applies to eager and deferred tools,
 including child inheritance and calls after a selection is revoked. Catalog
 refreshes never add tools to utility sessions, including background discovery.
+
+Package Skills have a separate lifecycle from MCP tools. For versioned MCP and CLI
+packages, `connectors/skills/.installations/<id>.json` selects the active revision
+under `connectors/skill-versions/connector-<id>/<revision>/`. Existing installations
+under `connectors/skills/connector-<id>/` are also supported. Paths are relative to
+`BOX_AGENT_HOME`. The desktop host disables or removes the owned Skills when it
+disables or uninstalls a connector.
+
+Automatic recommendations, including those for selected connectors, use only
+regular Skill sources. Startup, session creation, and ordinary prompts never scan
+connector receipts. The model can discover an installed package method through
+`list_skills` and read its current enabled version through `get_skill`. These
+lookups use a separate catalog and lock; another session can chat while a lookup
+is pending. When several visible methods share a name with a connector Skill,
+`list_skills` returns a row for each file. Pass the chosen row's `skill_name` to
+`get_skill`. A regular Skill keeps its short name. Each colliding connector row
+identifies its active `SKILL.md` by path. After a package version change, list
+again to obtain its current path. Explicit child Skill delegation can use the same sources. A temporary
+MCP outage does not disable guidance. Reading guidance does not grant MCP tools.
+
+This package lifecycle does not change built-in Lark, WeCom, or DingTalk
+integrations, their credentials, or ordinary user/SkillHub Skill settings.
 
 Changing this contract requires rebuilding the packaged ACP runtime and testing
 host startup, mixed OAuth/token restoration and process restart. Source tests

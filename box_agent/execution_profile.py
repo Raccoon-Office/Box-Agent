@@ -24,6 +24,10 @@ def is_skill_blocked(
     name: str,
     blocked_skill_names: Collection[str],
     explicitly_allowed_skill_names: Collection[str] | None = None,
+    *,
+    declared_name: str | None = None,
 ) -> bool:
     """Apply the same execution-policy gate to discovery and reading."""
-    return name in blocked_skill_names and name not in (explicitly_allowed_skill_names or ())
+    allowed = explicitly_allowed_skill_names or ()
+    return ((name in blocked_skill_names and name not in allowed)
+            or (declared_name is not None and declared_name in blocked_skill_names and declared_name not in allowed))

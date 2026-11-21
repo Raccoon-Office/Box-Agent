@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from box_agent.acp import _connector_skill_is_available
 from box_agent.schema import Message
 from box_agent.session_log import SessionLog
 from box_agent.tools.connector_discovery import (
@@ -221,17 +220,6 @@ async def test_candidate_count_and_serialized_budget_do_not_scale_with_catalog(c
     assert all(len(row.get("purpose", "")) <= 160 for row in payload["connector_candidates"])
     assert len(PROMPT) <= 600
     assert "The setup receipt pauses the task for the user's choice" in PROMPT
-
-
-def test_cli_skill_requires_current_selection_readiness_and_its_named_entry():
-    selected = {"tmeet"}
-    item = entry(configured=True, enabled=True, status="connected", execution_ready=True)
-    discovery, _, _, _ = search_fixture([item], selected=selected)
-    skill = SimpleNamespace(source="connector", owner_id="tmeet", name="tmeet-skill", disabled=False)
-    assert _connector_skill_is_available(skill, selected, discovery)
-    assert not _connector_skill_is_available(SimpleNamespace(**{**vars(skill), "name": "unowned"}), selected, discovery)
-    selected.clear()
-    assert not _connector_skill_is_available(skill, selected, discovery)
 
 
 def test_new_v2_discovery_mode_is_bound_and_legacy_logs_cannot_upgrade(tmp_path):

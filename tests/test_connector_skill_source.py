@@ -5,7 +5,6 @@ import pytest
 from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader, SkillSelector
 from box_agent.tools.skill_tool import GetSkillTool
 from box_agent.tools.sub_agent_capabilities import (
-    CapabilityFailure,
     CapabilityResolver,
     DelegationSpec,
     parse_delegation_spec,
@@ -58,54 +57,47 @@ def test_disabled_connector_skill_stays_out_of_model_catalog(tmp_path: Path) -> 
     assert disabled.disabled is True
 
 
-def test_connector_skill_requires_connection_for_new_matching_but_stays_after_loading(
+def test_enabled_connector_skill_stays_out_of_automatic_recommendations(
     tmp_path: Path,
 ) -> None:
     connector_root = tmp_path / "connectors" / "skills"
     _write_connector_skill(connector_root)
     loader = SkillLoader(sources=[(connector_root, "connector")])
     loader.discover_skills()
-    connected_connectors: set[str] = set()
-    selector = SkillSelector(
-        loader,
-        skill_filter=lambda skill: skill.source != "connector"
-        or skill.owner_id in connected_connectors,
-    )
+    selector = SkillSelector(loader)
     selector.bind(f"prefix\n\n{SKILL_SLOT_SENTINEL}\n\nsuffix")
 
     assert "pkulaw" not in (selector.update("PKULaw legal search") or "")
-
-    connected_connectors.add("pkulaw")
-    assert "pkulaw" in (selector.update("PKULaw legal search") or "")
-
-    connected_connectors.clear()
     selector.update("continue")
-    assert "pkulaw" in selector.matched_skill_names
+    assert selector.matched_skill_names == ()
 
 
 @pytest.mark.asyncio
-async def test_connector_skill_cannot_be_loaded_without_conversation_grant(tmp_path: Path) -> None:
+async def test_connector_skill_loads_without_grant_and_obeys_disable_and_removal(tmp_path: Path) -> None:
     connector_root = tmp_path / "connectors" / "skills"
-    _write_connector_skill(connector_root)
+    skill_path = _write_connector_skill(connector_root)
     loader = SkillLoader(sources=[(connector_root, "connector")])
     loader.discover_skills()
-    grants: set[str] = set()
-    tool = GetSkillTool(
-        loader,
-        skill_access_filter=lambda skill: skill.source != "connector" or skill.name in grants,
-    )
-
-    denied = await tool.execute(skill_name="pkulaw")
-    assert denied.success is False
-    assert "not enabled for this conversation" in denied.error
-
-    grants.add("pkulaw")
+    tool = GetSkillTool(loader)
     allowed = await tool.execute(skill_name="pkulaw")
     assert allowed.success is True
     assert "Always retrieve before answering." in allowed.content
 
+    enabled_content = skill_path.read_text(encoding="utf-8")
+    skill_path.write_text(enabled_content.replace("---\n", "---\ndisable: true\n", 1), encoding="utf-8")
+    await loader.areload()
+    assert (await tool.execute(skill_name="pkulaw")).success is False
+    assert loader.filter_by_query("PKULaw legal search") == []
 
-def test_connector_skill_cannot_be_delegated_without_conversation_grant(tmp_path: Path) -> None:
+    skill_path.write_text(enabled_content, encoding="utf-8")
+    await loader.areload()
+    assert (await tool.execute(skill_name="pkulaw")).success is True
+    skill_path.unlink()
+    await loader.areload()
+    assert (await tool.execute(skill_name="pkulaw")).success is False
+
+
+def test_enabled_connector_skill_can_be_delegated_without_conversation_grant(tmp_path: Path) -> None:
     connector_root = tmp_path / "connectors" / "skills"
     _write_connector_skill(connector_root)
     loader = SkillLoader(sources=[(connector_root, "connector")])
@@ -117,11 +109,9 @@ def test_connector_skill_cannot_be_delegated_without_conversation_grant(tmp_path
         spec,
         parent_tools={},
         skill_loader=loader,
-        skill_access_filter=lambda skill: skill.source != "connector",
     )
 
-    assert isinstance(result, CapabilityFailure)
-    assert result.code == "SKILL_NOT_ENABLED_FOR_CONVERSATION"
+    assert [skill.name for skill in result.skills] == ["pkulaw"]
 
 
 def test_connector_disable_flag_does_not_change_existing_user_skill_behavior(

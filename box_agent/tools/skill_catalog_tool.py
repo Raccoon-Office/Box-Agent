@@ -26,7 +26,7 @@ class ListSkillsTool(Tool):
         skill_access_filter: Callable[[Any], bool] | None = None,
         skill_filter: Callable[[Any], bool] | None = None,
     ) -> None:
-        self.skill_loader = skill_loader
+        self.skill_loader = skill_loader.conversation_catalog
         self.include_disabled = include_disabled
         self.allowed_skill_names = (
             frozenset(allowed_skill_names) if allowed_skill_names is not None else None
@@ -66,21 +66,23 @@ class ListSkillsTool(Tool):
     def _in_scope(self, name: str) -> bool:
         return self.allowed_skill_names is None or name in self.allowed_skill_names
 
-    def _metadata(self, skill: Skill) -> dict[str, object]:
+    def _metadata(self, skill: Skill, loader: SkillLoader) -> dict[str, object]:
+        declared = skill.declared_skill or skill
         reason = None
         # include_disabled controls diagnostic visibility, never availability.
-        if self.skill_loader.get_skill(skill.name) is None:
+        if loader.get_skill(skill.name) is None:
             reason = "Skill is disabled by the current configuration."
         elif skill.broken:
             reason = f"Skill is malformed: {skill.broken_reason or 'invalid SKILL.md'}"
-        elif self.skill_access_filter is not None and not self.skill_access_filter(skill):
+        elif self.skill_access_filter is not None and not self.skill_access_filter(declared):
             reason = "Skill is not enabled for this conversation."
         elif is_skill_blocked(
-            skill.name, self.blocked_skill_names, self.explicitly_allowed_skill_names
+            skill.name, self.blocked_skill_names, self.explicitly_allowed_skill_names, declared_name=declared.name
         ):
             reason = "Skill is blocked by the execution profile unless explicitly selected."
         return {
-            **skill.to_metadata_dict(),
+            **declared.to_metadata_dict(),
+            "skill_name": skill.name,
             "available": reason is None,
             "unavailable_reason": reason,
         }
@@ -93,23 +95,33 @@ class ListSkillsTool(Tool):
         )
         if issues:
             return self._invalid_arguments_result(issues)
-        await self.skill_loader.areload()
+        loader = self.skill_loader.tool_catalog
+        await loader.areload()
         query = query.strip()
         skills = [
-            skill for skill in self.skill_loader.search_skills(include_disabled=True)
-            if self.skill_filter is None or self.skill_filter(skill)
+            skill for skill in loader.search_skills(include_disabled=True)
+            if self._in_scope(skill.name)
+            and (self.skill_filter is None or self.skill_filter(skill.declared_skill or skill))
         ]
-        catalog = {
-            skill.name: self._metadata(skill)
-            for skill in skills if self._in_scope(skill.name)
-        }
-        for diagnostic in self.skill_loader.unavailable_skills_metadata():
+        # Each connector has both its legacy short name (when it wins) and its
+        # discovered path. Show one row per file, using the path for ambiguous names.
+        paths_by_name = {}
+        for skill in skills:
+            paths_by_name.setdefault((skill.declared_skill or skill).name, set()).add(skill.skill_path)
+        visible = {skill.name: skill for skill in skills}
+        for skill in skills:
+            declared = skill.declared_skill
+            if declared is not None and visible.get(declared.name) is declared:
+                redundant = declared.name if len(paths_by_name[declared.name]) > 1 else skill.name
+                visible.pop(redundant)
+        catalog = {name: self._metadata(skill, loader) for name, skill in visible.items()}
+        for diagnostic in loader.unavailable_skills_metadata():
             name = str(diagnostic["name"])
             if self._in_scope(name) and (
                 self.skill_filter is None
                 or self.skill_filter(SimpleNamespace(**diagnostic))
             ):
-                catalog.setdefault(name, diagnostic)
+                catalog.setdefault(name, {**diagnostic, "skill_name": name})
 
         # Scope/policy, source metadata and search terms all affect a page.
         # Skill bodies do not participate in a metadata-only catalog revision.
@@ -117,25 +129,25 @@ class ListSkillsTool(Tool):
             "include_disabled": self.include_disabled,
             "catalog": [catalog[name] for name in sorted(catalog)],
             "keywords": {
-                skill.name: skill.keywords or []
-                for skill in skills if self._in_scope(skill.name)
+                name: skill.keywords or [] for name, skill in visible.items()
             },
         }
         revision = sha256(json.dumps(
             revision_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")).hexdigest()
-        exact = catalog.get(query)
-        if exact is not None and (
-            not exact["available"] or exact.get("user_visible") is False
-        ):
-            matches = [exact]
+        exact = [row for key, row in catalog.items() if key == query or row["name"] == query]
+        if exact and (len(exact) > 1 or any(
+            not row["available"] or row.get("user_visible") is False or row["name"] != query
+            for row in exact
+        )):
+            matches = sorted(exact, key=lambda row: (row["name"] != row["skill_name"], row["skill_name"]))
         else:
             matches = [
                 catalog[skill.name]
-                for skill in self.skill_loader.search_skills(query, include_disabled=True)
+                for skill in loader.search_skills(query, include_disabled=True)
                 if skill.user_visible and skill.name in catalog and (
                     catalog[skill.name]["available"]
-                    or (self.include_disabled and self.skill_loader.get_skill(skill.name) is None)
+                    or (self.include_disabled and loader.get_skill(skill.name) is None)
                 )
             ]
         page = matches[offset:offset + limit]
@@ -149,6 +161,8 @@ class ListSkillsTool(Tool):
             "next_offset": next_offset,
             "skills": page,
         }
+        if any(row["skill_name"] != row["name"] for row in page):
+            payload["read_hint"] = "Pass the chosen row's skill_name to get_skill to read that specific file."
         return ToolResult(
             success=True,
             content=json.dumps(payload, ensure_ascii=False, sort_keys=True),

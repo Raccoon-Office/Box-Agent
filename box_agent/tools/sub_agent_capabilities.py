@@ -711,7 +711,7 @@ class CapabilityResolver:
         try:
             resolved = skill_dependencies.resolve_required_skills(skill_loader, spec.skill_names)
             for skill in resolved:
-                if skill_access_filter is not None and not skill_access_filter(skill):
+                if skill_access_filter is not None and not skill_access_filter(skill.declared_skill or skill):
                     return CapabilityFailure(
                         code="SKILL_NOT_ENABLED_FOR_CONVERSATION",
                         message=f"Required Skill '{skill.name}' is not enabled for this conversation.",

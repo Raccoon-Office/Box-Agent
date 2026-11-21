@@ -147,12 +147,21 @@ def _fingerprint(
     config: dict,
     credential_version: int,
 ) -> str:
+    # Reuse transports across catalog/Skill metadata changes. Ownership and
+    # credential binding remain part of the connection identity.
+    connection = {
+        key: config[key]
+        for key in (
+            "type", "transport", "url", "command", "args", "env", "cwd",
+            "headers", "credentialRef", "connect_timeout", "sse_read_timeout",
+        )
+        if key in config
+    }
     serialized = json.dumps(
         {
             "owner": source.owner,
-            "sourcePath": str(source.path),
             "configId": config_id,
-            "config": config,
+            "config": connection,
         },
         ensure_ascii=False,
         sort_keys=True,

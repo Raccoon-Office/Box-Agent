@@ -13,7 +13,9 @@ from ..execution_profile import is_skill_blocked
 from ..skill_dependencies import SkillDependencyError
 from .base import Tool, ToolResult, ToolInvocationContext
 from .completion_checks import CompletionCheck, CompletionContext
-from .skill_loader import SKILL_USAGE_GUIDANCE, SkillLoader, SkillSource, SkillValidation
+from .skill_loader import (
+    SKILL_USAGE_GUIDANCE, SkillLoader, SkillSource, SkillValidation, validate_tool_skill_references,
+)
 
 
 class GetSkillTool(Tool):
@@ -35,7 +37,7 @@ class GetSkillTool(Tool):
         allow_component_setup: bool = True,
         skip_video_generation: bool = False,
     ):
-        self.skill_loader = skill_loader
+        self.skill_loader = skill_loader.conversation_catalog
         self.include_disabled = include_disabled
         self.allowed_skill_names = allowed_skill_names
         self.preloaded_skill_hashes = preloaded_skill_hashes
@@ -96,13 +98,16 @@ class GetSkillTool(Tool):
         name = skill_name.strip()
         if self.allowed_skill_names is not None and name not in self.allowed_skill_names:
             return ToolResult(success=False, error="Skill is outside this task's assigned scope.")
-        if is_skill_blocked(name, self.blocked_skill_names, self.explicitly_allowed_skill_names):
+        loader = catalog or self.skill_loader
+        selected = loader.get_skill(name, include_disabled=True)
+        declared_name = selected.declared_skill.name if selected and selected.declared_skill else None
+        if is_skill_blocked(name, self.blocked_skill_names, self.explicitly_allowed_skill_names,
+                            declared_name=declared_name):
             return ToolResult(success=False, error=(
                 f"Skill '{name}' is disabled by the active execution profile unless the user explicitly requests it. "
                 "Continue with bounded direct work and do not retry loading this Skill."))
         if refresh:
             self.skill_loader.maybe_reload()
-        loader = catalog or self.skill_loader
         requirement = self.component_requirement(name, catalog=loader)
         if requirement is not None:
             return requirement
@@ -114,7 +119,7 @@ class GetSkillTool(Tool):
             if self.allowed_skill_names is not None and any(skill.name not in self.allowed_skill_names for skill in dependencies):
                 return ToolResult(success=False, error="Required Skill is outside this task's assigned scope.")
             for skill in dependencies:
-                if self.skill_access_filter is not None and not self.skill_access_filter(skill):
+                if self.skill_access_filter is not None and not self.skill_access_filter(skill.declared_skill or skill):
                     return ToolResult(success=False, error=(
                         f"Skill '{skill.name}' is not enabled for this conversation. "
                         "Connector Skills can only be enabled through the conversation connector picker."
@@ -159,7 +164,7 @@ class GetSkillTool(Tool):
                    or (owner if isinstance(owner, SkillRuntime) else None)
                    or SkillRuntime(self.skill_loader))
         callers = runtime._caller_references((name,)) if isinstance(runtime, SkillRuntime) else {}
-        validation = await self.skill_loader.avalidate_references(() if callers else (name,), allow_stale=False)
+        validation = await validate_tool_skill_references(self.skill_loader, () if callers else (name,))
         if callers:
             if validation.timed_out and (self.allowed_skill_names is not None or self.skill_access_filter is not None):
                 return ToolResult(success=False, error="Skill scope validation did not finish; retry later.",
@@ -219,6 +224,7 @@ def create_skill_tools(
     else:
         loader = SkillLoader(skills_dir=skills_dir or "./skills")
 
+    loader = loader.conversation_catalog
     if not defer_discovery:
         skills = loader.discover_skills()
         import sys as _sys

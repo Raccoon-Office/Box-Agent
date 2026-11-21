@@ -1,7 +1,10 @@
 """The real ACP/session/tool path consumes host discovery without prompt catalogs."""
 
+import asyncio
 import json
+import threading
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +18,123 @@ from tests.acp_helpers import acp_params
 from tests.test_acp import DummyConn, DoneLLM
 from tests.test_connector_discovery import entry, snapshot
 from tests.test_mcp_tool_search import FakeMCPTool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regular_source", ["builtin", "user"])
+async def test_connector_receipt_io_is_confined_to_explicit_skill_lookup(tmp_path, monkeypatch, regular_source):
+    from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
+    from box_agent.tools.skill_tool import create_skill_tools
+
+    root = tmp_path / "connectors" / "skills"
+    receipt = root / ".installations" / "tmeet.json"
+    receipt.parent.mkdir(parents=True)
+    revision = "v-2.0.0-" + "a" * 32
+    receipt.write_text(json.dumps({"connectorId": "tmeet", "entries": [
+        {"scope": "connector", "directory": "connector-tmeet", "revision": revision}
+    ]}))
+    method = root.parent / "skill-versions" / "connector-tmeet" / revision / "meeting-guide" / "SKILL.md"
+    method.parent.mkdir(parents=True)
+    method.write_text("---\nname: meeting-guide\ndescription: meeting guide\n---\nPACKAGE_METHOD\n")
+    regular = tmp_path / "user" / "other-guide" / "SKILL.md"
+    regular.parent.mkdir(parents=True)
+    regular.write_text("---\nname: other-guide\ndescription: other guide\n---\nREGULAR_METHOD\n")
+    entered, release = threading.Event(), threading.Event()
+    original = Path.read_bytes
+
+    def read(path):
+        if path == receipt:
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("chat waited for the connector receipt")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    duplicate = method.parent.parent / "other-guide" / "SKILL.md"
+    duplicate.parent.mkdir()
+    duplicate.write_text("---\nname: other-guide\ndescription: duplicate\n---\nPACKAGE_DUPLICATE\n")
+    tools, loader = create_skill_tools(sources=[(root, "connector"), (regular.parent.parent, regular_source)],
+                                       defer_discovery=True)
+    loader.tool_catalog.validation_timeout_seconds = 15
+    startup = asyncio.create_task(asyncio.to_thread(loader.discover_skills))
+    class ReadMeetingGuide(CaptureLLM):
+        read_next = False
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if self.read_next:
+                self.read_next = False
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                    ToolCall(id="read-meeting-guide", type="function", function=FunctionCall(
+                        name="get_skill", arguments={"skill_name": "meeting-guide"})),
+                ])
+                return
+            async for event in super().generate_stream(messages, tools, **kwargs):
+                yield event
+
+    model = ReadMeetingGuide()
+    host = BoxACPAgent(DummyConn(), config(tmp_path), model, tools, f"system\n{SKILL_SLOT_SENTINEL}",
+                       skill_loader=loader, skill_task=startup)
+    lookup = None
+    try:
+        await host.initialize(protocol_version=1)
+        session = await asyncio.wait_for(create(host, tmp_path), 4)
+        state = host._sessions[session.sessionId]
+        for selected in ([], ["tmeet"]):
+            await prompt(host, session.sessionId, "meeting-guide other-guide",
+                         metadata={"selected_connector_ids": selected, "selected_skill_names": ["meeting-guide"]})
+            assert "meeting-guide" not in state.skill_selector.matched_skill_names
+            assert "other-guide" in state.skill_selector.matched_skill_names
+            assert "meeting-guide" not in state.explicitly_allowed_skill_names
+        assert not entered.is_set()
+
+        lookup = asyncio.create_task(state.agent.tools["list_skills"].execute(query="meeting-guide"))
+        assert await asyncio.to_thread(entered.wait, 3)
+        other = await asyncio.wait_for(create(host, tmp_path, "other"), 4)
+        before = len(model.requests)
+        await asyncio.wait_for(prompt(host, other.sessionId, "你好"), 4)
+        assert len(model.requests) > before and not lookup.done()
+        ordinary = await state.agent.tools["get_skill"].execute(skill_name="other-guide")
+        assert ordinary.success and "REGULAR_METHOD" in ordinary.content
+        loader.tool_catalog.validation_timeout_seconds = 0.05
+        unavailable = await state.agent.tools["get_skill"].execute(skill_name="meeting-guide")
+        assert not unavailable.success and unavailable.raw_output["code"] == "SKILL_VALIDATION_TIMEOUT"
+        before = len(model.requests)
+        await asyncio.wait_for(prompt(host, session.sessionId, "你好"), 4)
+        assert len(model.requests) > before and not lookup.done()
+        loader.tool_catalog.validation_timeout_seconds = 15
+        release.set()
+        assert (await lookup).raw_output["skills"][0]["name"] == "meeting-guide"
+        same_name = await state.agent.tools["list_skills"].execute(query="other-guide")
+        rows = same_name.raw_output["skills"]
+        assert [(row["name"], row["source"]) for row in rows] == [
+            ("other-guide", regular_source), ("other-guide", "connector"),
+        ]
+        for row, body in zip(rows, ("REGULAR_METHOD", "PACKAGE_DUPLICATE")):
+            read_result = await state.agent.tools["get_skill"].execute(skill_name=row["skill_name"])
+            assert read_result.success and body in read_result.content
+        model.read_next = True
+        await prompt(host, session.sessionId, "read the meeting guide")
+        assert any(m["role"] == "tool" and "PACKAGE_METHOD" in str(m.get("content"))
+                   for m in model.requests[-1]["messages"])
+        entered.clear()
+        # The prompt's reference validator must recognize a previous tool read
+        # without hitting disk again, even though this name is never recommended.
+        verified = await state.skill_loader.avalidate_references(("meeting-guide",))
+        assert verified.resolve("meeting-guide").source == "connector"
+        qualified = rows[1]["skill_name"]
+        assert (await state.skill_loader.avalidate_references((qualified,))).resolve(qualified).path == str(duplicate)
+        await prompt(host, session.sessionId, "meeting-guide", metadata={"selected_connector_ids": ["tmeet"]})
+        assert "is no longer available" not in json.dumps(model.requests[-1]["messages"])
+        assert "meeting-guide" not in state.skill_selector.matched_skill_names
+        assert not entered.is_set()
+        receipt.write_text("{}")
+        assert not (await state.agent.tools["get_skill"].execute(skill_name="meeting-guide")).success
+        assert not (await state.agent.tools["get_skill"].execute(skill_name=qualified)).success
+    finally:
+        release.set()
+        if lookup is not None:
+            await lookup
+        await host.aclose()
 
 
 class CaptureLLM(DoneLLM):
@@ -295,13 +415,14 @@ async def test_acp_decline_continues_original_task_with_ready_capabilities(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_acp_ready_cli_method_is_loadable_without_semantic_match_and_revoked_on_next_turn(tmp_path):
+async def test_acp_cli_skill_enablement_is_independent_of_discovery_selection_and_readiness(tmp_path):
     from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
     from box_agent.tools.skill_tool import GetSkillTool
 
     folder = tmp_path / "skills" / "connector-tmeet" / "method"
     folder.mkdir(parents=True)
-    folder.joinpath("SKILL.md").write_text(
+    skill_path = folder.joinpath("SKILL.md")
+    skill_path.write_text(
         "---\nname: tmeet-skill\ndescription: unique rare method\n---\nVerified CLI method body.\n",
         encoding="utf-8",
     )
@@ -313,17 +434,19 @@ async def test_acp_ready_cli_method_is_loadable_without_semantic_match_and_revok
     try:
         session = await create(host, tmp_path, catalog=ready)
         state = host._sessions[session.sessionId]
-        assert not state.connector_skill_grants
-        assert not (await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")).success
+        assert (await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")).success
         await prompt(host, session.sessionId, "继续", metadata={
             "connector_discovery": ready, "selected_connector_ids": ["tmeet"],
         })
-        state.connector_skill_grants.clear()  # A discovered method need not match the selector's query.
         result = await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")
         assert result.success and "Verified CLI method body" in result.content
         await prompt(host, session.sessionId, "继续", metadata={
-            "connector_discovery": ready, "selected_connector_ids": [],
+            "connector_discovery": snapshot([entry(configured=True, enabled=True,
+                status="error", execution_ready=False)], revision=2), "selected_connector_ids": [],
         })
+        assert (await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")).success
+        enabled_content = skill_path.read_text(encoding="utf-8")
+        skill_path.write_text(enabled_content.replace("---\n", "---\ndisable: true\n", 1), encoding="utf-8")
         assert not (await state.agent.tools["get_skill"].execute(skill_name="tmeet-skill")).success
     finally:
         await host.aclose()
