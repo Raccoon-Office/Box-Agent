@@ -27,8 +27,8 @@ class _McpStdoutProxy:
 
 
 def _preload_frozen_acp_schema() -> None:
-    """Avoid source inspection for ACP field documentation in Windows binaries."""
-    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+    """Avoid source inspection for ACP field documentation in Windows and macOS binaries."""
+    if sys.platform not in ("win32", "darwin") or not getattr(sys, "frozen", False):
         return
 
     from importlib import import_module
