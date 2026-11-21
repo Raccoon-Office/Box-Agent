@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import os
 import re
 import signal
 import sys
@@ -41,6 +42,7 @@ from contextlib import AsyncExitStack, aclosing, suppress
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
+from threading import Event
 from time import perf_counter
 from typing import Any
 from uuid import uuid4, uuid5
@@ -123,6 +125,7 @@ from box_agent.tools.bash_tool import (
 )
 from box_agent.tools.file_tools import WriteTool
 from box_agent.tools.skill_scratch import (
+    SKILL_SCRATCH_DIR_NAME,
     SkillScratchDirectory,
     cleanup_skill_scratch_dir,
 )
@@ -195,7 +198,11 @@ from box_agent.session_trace import (
     SessionTraceWriter, reset_session_trace_writer, scoped_session_trace,
     set_session_trace_writer,
 )
-from box_agent.session_log import SessionLog, run_session_io
+from box_agent.session_log import (
+    SessionLog, SessionLogCorrupted, SessionLogDurabilityError, SessionLogInUseError,
+    SessionLogReplayError, SessionLogWorkspaceMismatch, TOOL_OUTCOME_UNKNOWN, run_session_io,
+)
+from box_agent.windows_session_lock import ERROR_ACCESS_DENIED
 from box_agent.api.input import UserInput
 from box_agent.input_preparation import prepare_user_input, resource_image_paths
 from box_agent.input_images import MAX_INPUT_IMAGES
@@ -999,6 +1006,63 @@ def _session_busy_error(session_id: str | None, *, rebinding: bool = False) -> R
     return RequestError(-32010, message, data)
 
 
+def _session_storage_error(error: OSError, operation: str) -> RequestError:
+    cause = error.__cause__ if isinstance(error.__cause__, OSError) else error
+    winerror = getattr(cause, "winerror", None)
+    data: dict[str, Any] = {
+        "code": "SESSION_STORAGE_UNAVAILABLE",
+        "operation": operation,
+        "reason": (
+            "access_denied"
+            if winerror == ERROR_ACCESS_DENIED or (os.name != "nt" and isinstance(cause, PermissionError))
+            else "io_error"
+        ),
+    }
+    if cause.errno is not None:
+        data["errno"] = cause.errno
+    if winerror is not None:
+        data["winerror"] = winerror
+    if cause.filename and Path(cause.filename).name == ".writer.lock":
+        data["resource"] = "writer_lock"
+    log.warn("session/storage_unavailable", **data, error_type=type(cause).__name__)
+    return RequestError(-32012, "SESSION_STORAGE_UNAVAILABLE", data)
+
+
+_RECOVERY_SESSION_ID = re.compile(r"desktop-recovery-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+_RECOVERY_PROMPT = (
+    "\n\nThe previous session runtime log could not be fully restored. "
+    "Use supplied conversation history for context, but verify existing "
+    "artifacts and outcomes before repeating earlier actions with side effects."
+)
+
+
+def _session_storage_root(session_id: str) -> Path:
+    root = state_path("sessions")
+    if not _RECOVERY_SESSION_ID.fullmatch(session_id):
+        return root
+    # Older Agents stored these IDs in sessions. Keep their existing writer lock
+    # and history there, including a directory whose first write is still active.
+    try:
+        if SessionLog.has_session_directory(root, session_id):
+            return root
+    except PermissionError:
+        # An independently recovered session can live outside the blocked tree.
+        pass
+    return state_path("recovered-sessions")
+
+
+@dataclass
+class _SessionReplay:
+    request_id: int | None
+    stop: Event
+    task: asyncio.Task[LoadSessionResponse]
+
+    def cancel(self) -> None:
+        if not self.stop.is_set() and not self.task.done():
+            self.stop.set()
+            self.task.cancel()
+
+
 @dataclass(frozen=True)
 class _ImageAttachmentContext:
     text: str
@@ -1318,6 +1382,7 @@ class BoxACPAgent:
         self._process_owner_namespace = uuid4()
         self._session_bindings_in_progress: dict[str, tuple[str, ...]] = {}
         self._session_creation_tasks: set[asyncio.Task[NewSessionResponse]] = set()
+        self._session_replays: dict[str, _SessionReplay] = {}
         self._closing = False
         self._close_lock = asyncio.Lock()
         self._client_info: ClientInfo | None = None
@@ -1360,11 +1425,13 @@ class BoxACPAgent:
         # Settle it before taking a snapshot of sessions to avoid both waiting on
         # an initializer and racing its removal of a retired handle. These are
         # adapter-owned tasks, not SDK request tasks that may still send replies.
+        replays = tuple(self._session_replays.values())
+        for replay in replays:
+            replay.cancel()
         creating = tuple(self._session_creation_tasks)
         for task in creating:
             task.cancel()
-        if creating:
-            await asyncio.gather(*creating, return_exceptions=True)
+        await asyncio.gather(*creating, *(r.task for r in replays), return_exceptions=True)
         errors = []
         if self._memory_bootstrap_task is not None:
             self._memory_bootstrap_task.cancel()
@@ -1771,6 +1838,7 @@ class BoxACPAgent:
         response_meta: dict[str, Any] = {
             "raccoon_thinking": {"protocol_version": 1},
             "connector_discovery": {"versions": [1]},
+            "session_replay": {"protocol_version": 1},
         }
         if skills is not None:
             # Pydantic alias: _meta ↔ field_meta
@@ -1880,7 +1948,10 @@ class BoxACPAgent:
         if not workspace.is_absolute():
             workspace = workspace.resolve()
         if not load_existing:
-            workspace.mkdir(parents=True, exist_ok=True)
+            try:
+                workspace.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                raise _session_storage_error(error, "workspace") from error
 
         # Extract session_mode from _meta (ACP extension point)
         # Pydantic aliases _meta to field_meta
@@ -2253,7 +2324,9 @@ class BoxACPAgent:
                     )
                 )
 
-        recovery_prompt: str | None = None
+        recovery_prompt = (
+            _RECOVERY_PROMPT if upstream_session_id and _RECOVERY_SESSION_ID.fullmatch(upstream_session_id) else None
+        )
         session_log: SessionLog | None = None
         session_projection = None
         session_log_restored = False
@@ -2268,7 +2341,11 @@ class BoxACPAgent:
                 await self._mcp_apps.close_session(existing_handle)
                 await existing_state.aclose()
                 if existing_log is not None:
-                    existing_log.close()
+                    try:
+                        existing_log.close()
+                    except OSError as error:
+                        log.warn("session/log_close_failed", session_id=existing_handle,
+                                 error_type=type(error).__name__)
                 self._sessions.pop(existing_handle, None)
                 # The retired handle owned a managed BrowserContext (if it ever
                 # used the browser); release it so it does not linger until
@@ -2281,12 +2358,12 @@ class BoxACPAgent:
                         session_id=existing_handle,
                         error=str(browser_error),
                     )
-            session_root = state_path('sessions')
 
             def open_log():
                 # Retain ownership even if cancellation arrives before the
                 # worker's result is delivered to this coroutine.
                 nonlocal session_log
+                session_root = _session_storage_root(upstream_session_id)
                 try:
                     session_log, projection = SessionLog.open_with_projection(
                         session_root, session_id=upstream_session_id,
@@ -2302,27 +2379,36 @@ class BoxACPAgent:
                 return projection, True
 
             try:
-                session_projection, resumed = await run_session_io(open_log)
+                try:
+                    session_projection, resumed = await run_session_io(open_log)
+                except FileNotFoundError:
+                    raise
+                except OSError as exc:
+                    raise _session_storage_error(exc, "open") from exc
                 if resumed:
                     # Validate Skill sources before resume repair appends records.
                     restore_loader = (session_skill_loader if session_skill_loader is not None
                                       else AgentService.resolve_skill_loader(self._base_tools))
                     await SkillRuntime(restore_loader, allow_partial_restore=True).arestore_records(session_projection.skills)
                     session_log_restored = session_projection.has_messages
-                    session_projection = await run_session_io(
-                        lambda: session_log.prepare_resume_projection(session_projection)
-                    )
-            except BaseException:
+                    try:
+                        session_projection = await run_session_io(
+                            lambda: session_log.prepare_resume_projection(session_projection)
+                        )
+                    except OSError as exc:
+                        raise _session_storage_error(exc, "restore") from exc
+            except BaseException as error:
                 if session_log is not None:
-                    session_log.close()
+                    try:
+                        session_log.close()
+                    except OSError as cleanup_error:
+                        from box_agent.session_assembly import attach_cleanup_error
+
+                        attach_cleanup_error(error, cleanup_error)
                 raise
             if resumed:
                 if session_log.recovery_source is not None:
-                    recovery_prompt = (
-                        "\n\nThe previous session runtime log could not be fully restored. "
-                        "Use supplied conversation history for context, but verify existing "
-                        "artifacts and outcomes before repeating earlier actions with side effects."
-                    )
+                    recovery_prompt = _RECOVERY_PROMPT
                     log.info(
                         "session/recovered", session_id=session_id,
                         source=str(session_log.recovery_source),
@@ -2573,6 +2659,10 @@ class BoxACPAgent:
                     session_log.close()
                 except BaseException as cleanup_error:
                     attach_cleanup_error(error, cleanup_error)
+            if isinstance(error, OSError) and error.filename:
+                failed_path = Path(error.filename)
+                if failed_path == workspace or failed_path.is_relative_to(workspace / SKILL_SCRATCH_DIR_NAME):
+                    raise _session_storage_error(error, "workspace") from error
             raise
         self._sessions[session_id] = state
         return response
@@ -2599,13 +2689,18 @@ class BoxACPAgent:
         params = NewSessionRequest(cwd=cwd, mcp_servers=mcp_servers or [],
                                    additional_directories=additional_directories,
                                    field_meta={**meta, "session_id": upstream})
-        from box_agent.session_log import SessionLogCorrupted, SessionLogInUseError, SessionLogWorkspaceMismatch
         try:
             return await self._new_session_with_binding(params, load_existing=True)
-        except (FileNotFoundError, SessionLogCorrupted, SessionLogInUseError, SessionLogWorkspaceMismatch) as exc:
+        except SessionLogInUseError as exc:
+            data = {"code": "SESSION_BUSY", "resource": "writer_lock"}
+            winerror = getattr(exc.__cause__, "winerror", None)
+            if winerror is not None:
+                data["winerror"] = winerror
+            raise RequestError(-32012, "SESSION_BUSY", data) from exc
+        except (FileNotFoundError, SessionLogCorrupted, SessionLogReplayError, SessionLogWorkspaceMismatch) as exc:
             code = ("UNKNOWN_SESSION_ID" if isinstance(exc, FileNotFoundError) else
                     "SESSION_WORKSPACE_MISMATCH" if isinstance(exc, SessionLogWorkspaceMismatch) else
-                    "SESSION_BUSY" if isinstance(exc, SessionLogInUseError) else "SESSION_LOG_CORRUPTED")
+                    "SESSION_LOG_CORRUPTED")
             raise RequestError(-32012, code, {"code": code}) from exc
 
     async def resume_session(
@@ -2629,18 +2724,53 @@ class BoxACPAgent:
         self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,
     ) -> LoadSessionResponse:
         """Open and replay existing facts; never create a missing session or run tools."""
-        response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
-        await self._replay_session_history(session_id)
-        return LoadSessionResponse(field_meta={**(response.field_meta or {}), "replayed": True})
+        self._require_accepting_requests()
+        request_id = meta.pop("replayRequestId", None)
+        if request_id is not None and (type(request_id) is not int or request_id < 1):
+            raise RequestError(-32602, "Invalid replay request ID")
+        if session_id in self._session_replays:
+            raise _session_busy_error(session_id, rebinding=True)
+        stop = Event()
+
+        async def restore_and_replay() -> LoadSessionResponse:
+            started = perf_counter()
+            response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
+            log.info("session/replay", session_id=session_id, request_id=request_id,
+                     phase="bound", duration_ms=round((perf_counter() - started) * 1000))
+            await self._replay_session_history(session_id, request_id=request_id, stop=stop)
+            return LoadSessionResponse(field_meta={**(response.field_meta or {}), "replayed": True})
+
+        task = asyncio.create_task(restore_and_replay(), name="acp-session-load")
+        replay = self._session_replays[session_id] = _SessionReplay(request_id, stop, task)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled() and stop.is_set():
+                raise RequestError(-32012, "SESSION_REPLAY_CANCELLED", {"code": "SESSION_REPLAY_CANCELLED"}) from None
+            replay.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            if self._session_replays.get(session_id) is replay:
+                self._session_replays.pop(session_id)
 
     async def _replay_session_history(
         self, session_id: str, *, replay_from_turn_id: str | None = None,
+        request_id: int | None = None, stop: Event | None = None,
     ) -> None:
         """Send retained history using the same wire format for load and resume."""
         state = self._sessions[session_id]
         state._prompt_in_progress = True
-        try:
-            history = state.agent.session_log.history_messages()
+        started = perf_counter()
+
+        def checkpoint() -> None:
+            if stop is not None and stop.is_set():
+                raise asyncio.CancelledError
+
+        def prepare_history():
+            session_log = state.agent.session_log
+            events = session_log._active_events(checkpoint=checkpoint)
+            history = session_log.history_messages(events=events, checkpoint=checkpoint)
             if replay_from_turn_id is not None:
                 # Resolve against effective display history, not physical log records:
                 # revised/reset turns must never become valid replay anchors again.
@@ -2656,13 +2786,21 @@ class BoxACPAgent:
                 history = history[starts[0]:]
             replay_status = {}
             bound_turn = None
-            for event in state.agent.session_log._active_events():
+            for event in events:
+                checkpoint()
                 if event["type"] == "turn/binding":
                     bound_turn = event["data"].get("turn_id")
                 if event["type"] == "turn/end" and bound_turn:
                     replay_status[bound_turn] = {"completed": "complete", "aborted": "cancelled",
                                                  "error": "error"}.get(event["data"].get("reason", {}).get("kind"), "interrupted")
+            return history, replay_status
+
+        try:
+            history, replay_status = await run_session_io(prepare_history)
+            log.info("session/replay", session_id=session_id, request_id=request_id,
+                     phase="history_ready", duration_ms=round((perf_counter() - started) * 1000))
             replay_turn_id = None
+            sent = 0
             for seq, message, saved_data in history:
                 if message.input_facts and message.input_facts.get("kind") != "user_supplement":
                     replay_turn_id = message.input_facts["id"]
@@ -2677,7 +2815,9 @@ class BoxACPAgent:
                             index = block.get("imageIndex", -1)
                             if 0 <= index < len(refs):
                                 try:
-                                    image = state.agent.image_context.store.load_block(refs[index])
+                                    image = await run_session_io(
+                                        lambda: state.agent.image_context.store.load_block(refs[index]),
+                                    )
                                     block = {"type": "image", "data": image["data"], "mimeType": image["media_type"]}
                                 except (OSError, ValueError):
                                     block = {"type": "text", "text": "[Image unavailable in saved history]"}
@@ -2707,6 +2847,12 @@ class BoxACPAgent:
                         "replay": True, "eventId": f"{seq}:{index}", "turnId": replay_turn_id,
                         "turnStatus": replay_status.get(replay_turn_id, "interrupted"),
                     }
+                    if request_id is not None:
+                        update.field_meta["replayRequestId"] = request_id
+                    tool_error = saved_data.get("error")
+                    if (message.role == "tool" and isinstance(tool_error, dict)
+                            and tool_error.get("code") == TOOL_OUTCOME_UNKNOWN):
+                        update.field_meta["toolOutcomeUnknown"] = True
                     if message.input_facts and message.input_facts.get("kind") == "user_supplement":
                         update.field_meta.update(inputKind="user_supplement", inputId=message.input_facts["id"])
                     call_id = getattr(update, "tool_call_id", None)
@@ -2715,12 +2861,24 @@ class BoxACPAgent:
                         if app_marker is not None:
                             update.field_meta["mcpApp"] = app_marker
                     await self._send(session_id, update)
+                    sent += 1
+                    if sent == 1:
+                        log.info("session/replay", session_id=session_id, request_id=request_id,
+                                 phase="first_update_written",
+                                 duration_ms=round((perf_counter() - started) * 1000))
+                    if sent % 32 == 0:
+                        await asyncio.sleep(0)
         except BaseException:
             try:
-                await state.aclose()
+                await self._mcp_apps.close_session(session_id)
             finally:
-                state.agent.session_log.close()
-                self._sessions.pop(session_id, None)
+                try:
+                    await state.aclose()
+                finally:
+                    try:
+                        state.agent.session_log.close()
+                    finally:
+                        self._sessions.pop(session_id, None)
             raise
         finally:
             state._prompt_in_progress = False
@@ -2893,6 +3051,8 @@ class BoxACPAgent:
             config = state.config or self._config
             with private_payload_scope(config.agent.memory_backend_type == "desktop"):
                 return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
+        except SessionLogDurabilityError as exc:
+            raise _session_storage_error(exc, "prompt") from exc
         except Exception as exc:
             if edit is not None:
                 history = state.agent.session_log
@@ -3164,7 +3324,8 @@ class BoxACPAgent:
                     opened_source = source_log is None
                     if source_log is None:
                         source_log = SessionLog.open(
-                            state_path("sessions"), session_id=continuation.source_session_id,
+                            _session_storage_root(continuation.source_session_id),
+                            session_id=continuation.source_session_id,
                             cwd=destination_log.header["cwd"], recover=False,
                         )
                     try:
@@ -4047,6 +4208,17 @@ class BoxACPAgent:
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
+        if method == "cancel_session_replay":
+            session_id, request_id = params.get("sessionId"), params.get("requestId")
+            if not isinstance(session_id, str) or type(request_id) is not int or request_id < 1:
+                raise RequestError(-32602, "Invalid replay cancellation")
+            replay = self._session_replays.get(session_id)
+            if replay is not None and replay.request_id == request_id:
+                replay.cancel()
+                await asyncio.gather(asyncio.shield(replay.task), return_exceptions=True)
+                if self._session_replays.get(session_id) is replay:
+                    self._session_replays.pop(session_id)
+            return {"settled": True}
         if method.startswith("mcp/apps/"):
             self._require_accepting_requests()
             return await self._mcp_apps.dispatch(method, params)
@@ -5725,6 +5897,18 @@ class BoxACPAgent:
                             web_search_payload = {**payload, "type": "web_search"}
                             log.debug("web_search/payload", session_id=session_id, tool_call_id=tid, payload=web_search_payload)
                             await self._send(session_id, update_tool_call(tid, raw_output=web_search_payload))
+
+                        case ErrorEvent(error_code="TURN_COMPLETION_CHECK_SKIPPED"):
+                            notice = {
+                                "zh": "任务进度暂未确认，已有输出已保留。",
+                                "ja": "タスクの進捗は未確認です。生成済みの内容は保持されています。",
+                                "en": "Task progress is unconfirmed. Existing output was kept.",
+                            }.get(ui_language, "Task progress is unconfirmed. Existing output was kept.")
+                            await self._send(session_id, update_tool_call(
+                                "agent-progress-completion-check",
+                                raw_output={"type": "agent_progress", "content": notice,
+                                            "code": "TURN_COMPLETION_CHECK_SKIPPED"},
+                            ))
 
                         case ErrorEvent(
                             message=msg,

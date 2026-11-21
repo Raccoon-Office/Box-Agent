@@ -22,6 +22,7 @@ from uuid import uuid4
 from .schema import Message
 from .schema.schema import RequestUsageSnapshot
 from .session_projection import SessionProjection
+from .windows_session_lock import WINDOWS_LOCK_CONTENTION, WindowsSessionLock
 
 
 _log = logging.getLogger(__name__)
@@ -280,7 +281,17 @@ def _apply_surface_message(
     return message
 
 
-def _acquire_writer_lock(path: Path) -> BinaryIO:
+def _acquire_writer_lock(path: Path) -> BinaryIO | WindowsSessionLock:
+    if os.name == "nt":
+        try:
+            return WindowsSessionLock(path)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) in WINDOWS_LOCK_CONTENTION:
+                raise SessionLogInUseError("session already has an active writer") from exc
+            raise
+
+    import fcntl
+
     handle = path.open("a+b")
     try:
         handle.seek(0, os.SEEK_END)
@@ -288,35 +299,27 @@ def _acquire_writer_lock(path: Path) -> BinaryIO:
             handle.write(b"\0")
             handle.flush()
         handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
+        try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise SessionLogInUseError("session already has an active writer") from exc
+            raise
+    except BaseException:
         handle.close()
-        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-            raise SessionLogInUseError(
-                "session already has an active writer"
-            ) from exc
         raise
     return handle
 
 
-def _release_writer_lock(handle: BinaryIO) -> None:
+def _release_writer_lock(handle: BinaryIO | WindowsSessionLock) -> None:
+    if isinstance(handle, WindowsSessionLock):
+        handle.close()
+        return
+
+    import fcntl
+
     try:
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
 
@@ -324,13 +327,17 @@ def _release_writer_lock(handle: BinaryIO) -> None:
 class SessionLog:
     """Own JSONL encoding, ordered append, durability, and replay."""
 
+    @staticmethod
+    def has_session_directory(root: Path, session_id: str) -> bool:
+        return _session_dir(root, session_id).is_dir()
+
     def __init__(
         self,
         path: Path,
         header: dict[str, Any],
         events: list[dict[str, Any]],
         handle: BinaryIO,
-        lock_handle: BinaryIO,
+        lock_handle: BinaryIO | WindowsSessionLock,
     ) -> None:
         self.path = path
         self.header = dict(header)
@@ -689,7 +696,7 @@ class SessionLog:
         path: Path,
         session_id: str,
         cwd: str | Path,
-        lock_handle: BinaryIO,
+        lock_handle: BinaryIO | WindowsSessionLock,
     ) -> "SessionLog":
         """Keep the original bytes before replacing a damaged runtime log.
 
@@ -1063,11 +1070,18 @@ class SessionLog:
         self._surface_cursor = end
         return surface
 
-    def history_messages(self) -> list[tuple[int, Message, dict[str, Any]]]:
+    def history_messages(
+        self, *, events: list[dict[str, Any]] | None = None,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> list[tuple[int, Message, dict[str, Any]]]:
         """Replay original effective history, excluding model compaction copies."""
         history = []
         compacting = False
-        for event in self._active_events():
+        if events is None:
+            events = self._active_events(checkpoint=checkpoint)
+        for event in events:
+            if checkpoint is not None:
+                checkpoint()
             kind, data = event["type"], event["data"]
             if kind == "surface/reset":
                 history.clear()
@@ -1189,13 +1203,16 @@ class SessionLog:
         self._pending_message_metadata.clear()
         return event
 
-    def _active_events(self, *, through_seq: int | None = None) -> list[dict[str, Any]]:
+    def _active_events(
+        self, *, through_seq: int | None = None,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> list[dict[str, Any]]:
         """Return the effective timeline, optionally at an earlier checkpoint."""
         from .session_history import effective_events
 
         events = self._events if through_seq is None else self._events[:through_seq + 1]
         try:
-            return effective_events(events)
+            return effective_events(events, checkpoint=checkpoint)
         except (KeyError, TypeError, ValueError) as exc:
             raise SessionLogRevisionCorrupted("invalid history revision") from exc
 

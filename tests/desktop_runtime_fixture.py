@@ -187,7 +187,23 @@ class SmallService(AgentService):
 
 def install_fixture(acp, root):
     from box_agent.acp import stdio_compat
+    from box_agent.session_log import SessionLog
     from box_agent.tools.sub_agent_capabilities import BUILTIN_TOOL_CAPABILITIES, ToolCapabilityMetadata
+    from time import sleep
+
+    history_messages = SessionLog.history_messages
+    replay_gate = root / "replay-gate"
+
+    def gated_history_messages(log, *, events=None, checkpoint=None):
+        if replay_gate.exists() and replay_gate.read_text() == log.header["id"]:
+            (root / "replay-preparing").touch()
+            while replay_gate.exists():
+                if checkpoint is not None:
+                    checkpoint()
+                sleep(0.01)
+        return history_messages(log, events=events, checkpoint=checkpoint)
+
+    SessionLog.history_messages = gated_history_messages
 
     binding_phase = os.environ.get("BOX_AGENT_DESKTOP_TEST_BINDING_PHASE", "")
     block_binding = ContextVar("desktop_test_block_binding", default=False)
