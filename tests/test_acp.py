@@ -4977,7 +4977,7 @@ async def test_acp_prompt_exposes_structured_points_insufficient_error(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_acp_completion_check_timeout_keeps_answer_and_sends_notice(tmp_path):
+async def test_acp_completion_check_timeout_keeps_answer_and_reports_failure(tmp_path):
     class TimeoutJudgeLLM(DummyLLM):
         async def generate(self, messages, tools=None, **kwargs):
             raise TimeoutError("fixture completion check deadline")
@@ -4991,12 +4991,10 @@ async def test_acp_completion_check_timeout_keeps_answer_and_sends_notice(tmp_pa
     session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "echo ping"}])))
     assert response.stopReason == "end_turn"
-    assert response.field_meta["ok"] is True
-    assert any(
-        getattr(item.update, "toolCallId", None) == "agent-progress-completion-check"
-        and item.update.rawOutput["code"] == "TURN_COMPLETION_CHECK_SKIPPED"
-        for item in conn.updates
-    )
+    assert response.field_meta["ok"] is False
+    assert response.field_meta["errorCode"] == "TURN_COMPLETION_CHECK_TIMEOUT"
+    assert response.field_meta["errorCategory"] == "timeout"
+    assert any(item.update.sessionUpdate == "agent_message_chunk" for item in conn.updates)
 
 
 @pytest.mark.asyncio

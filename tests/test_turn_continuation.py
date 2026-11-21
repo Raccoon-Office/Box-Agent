@@ -632,7 +632,7 @@ async def test_judge_deadline_cancels_request_instead_of_assuming_completion():
 
 
 @pytest.mark.asyncio
-async def test_agent_keeps_existing_answer_when_completion_check_times_out(monkeypatch):
+async def test_agent_reports_incomplete_delivery_when_completion_check_times_out(monkeypatch):
     monkeypatch.delenv("BOX_AGENT_PROVIDER_STALE_SECONDS", raising=False)
     llm = BlockingJudgeLLM()
     tool = SearchTool()
@@ -641,14 +641,12 @@ async def test_agent_keeps_existing_answer_when_completion_check_times_out(monke
         tools={tool.name: tool}, max_steps=3, provider_stale_seconds=0.01,
     )), 0.5)
     errors = [event for event in events if isinstance(event, ErrorEvent)]
-    assert errors[-1].error_code == "TURN_COMPLETION_CHECK_SKIPPED"
-    assert not errors[-1].is_fatal
-    done = [event for event in events if isinstance(event, DoneEvent)]
-    assert len(done) == 1 and done[0].stop_reason is StopReason.END_TURN
-    assert done[0].final_content
+    assert errors[-1].error_code == "TURN_COMPLETION_CHECK_TIMEOUT"
+    assert [event for event in events if isinstance(event, DoneEvent)][-1].stop_reason is StopReason.ERROR
     assert [event.step for event in events if isinstance(event, StepEnd)] == [
         event.step for event in events if isinstance(event, StepStart)
     ]
+    assert isinstance(events[-3], StepEnd)
     assert llm.judge_closed.is_set()
 
 
