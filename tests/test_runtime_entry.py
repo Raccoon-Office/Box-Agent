@@ -17,7 +17,13 @@ from box_agent.tools import mcp_bootstrap
 
 @pytest.mark.parametrize(
     ("platform", "frozen", "skip_docs"),
-    [("win32", True, True), ("win32", False, False), ("darwin", True, False)],
+    [
+        ("win32", True, True),
+        ("win32", False, False),
+        ("darwin", True, True),
+        ("darwin", False, False),
+        ("linux", True, False),
+    ],
 )
 def test_runtime_entry_cold_acp_import_preserves_protocol_validation(
     platform, frozen, skip_docs,
