@@ -1,0 +1,43 @@
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -216,17 +216,24 @@
+         getState(opts) { return this.#observe('getState', opts); }
+         getScreenshot(opts) { return this.#observe('getScreenshot', opts); }
+         getStateAndScreenshot(opts) { return this.#observe('getStateAndScreenshot', opts); }
+-        async goto(url) { await call('browser.goto', this.#handle, {url}); }
++        async #action(method, args) {
++            const result = await call('browser.' + method, this.#handle, args);
++            if (result?.notice) write(result.notice);
++        }
++        async goto(url) { await this.#action('goto', {url}); }
++        async back() { await this.#action('back'); }
+         async activate() { await call('browser.activate', this.#handle); }
+-        async click(target, options = {}) { await call('browser.click', this.#handle, {target, options}); }
+-        async fill(target, text) { await call('browser.fill', this.#handle, {target, text}); }
+-        async hover(target) { await call('browser.hover', this.#handle, {target}); }
++        async click(target, options = {}) { await this.#action('click', {target, options}); }
++        async fill(target, text) { await this.#action('fill', {target, text}); }
++        async hover(target) { await this.#action('hover', {target}); }
+         async typeText(text) { await call('browser.typeText', this.#handle, {text}); }
+         async pressKey(key) {
+             const parsed = parsePressKey(arguments, 'Tab');
+-            await call('browser.pressKey', this.#handle, {key: parsed.key, modifiers: parsed.modifiers});
+-        }
+-        async scroll({x, y, deltaX = 0, deltaY = 0}) { await call('browser.scroll', this.#handle, {x, y, deltaX, deltaY}); }
++            await this.#action('pressKey', {key: parsed.key, modifiers: parsed.modifiers});
++        }
++        async scroll({x, y, deltaX = 0, deltaY = 0}) { await this.#action('scroll', {x, y, deltaX, deltaY}); }
++        async selectOption(target, values) { await this.#action('selectOption', {target, values}); }
++        async waitForText(text, {state = 'visible'} = {}) { await this.#action('waitForText', {text, state}); }
+         async waitForLoad({timeoutMs = 15000} = {}) { await call('browser.waitForLoad', this.#handle, {timeoutMs}); }
+         async waitForElement(selector, {timeoutMs = 10000, visible = false} = {}) {
+             await call('browser.waitForElement', this.#handle, {selector, timeoutMs, visible});
+@@ -237,7 +244,7 @@
+             return value;
+         }
+         async uploadFile(selector, path) { await call('browser.uploadFile', this.#handle, {selector, path}); }
+-        async handleDialog({accept, promptText = ''}) { await call('browser.handleDialog', this.#handle, {accept, promptText}); }
++        async handleDialog({accept, promptText}) { await this.#action('handleDialog', {accept, promptText}); }
+         async close() { await call('browser.close', this.#handle); }
+     }
+     class Browser {

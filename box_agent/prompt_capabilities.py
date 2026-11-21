@@ -113,7 +113,7 @@ def render_web_access_policy(tools: Collection[str] | None) -> str:
     managed = any(name.startswith("managed_browser_") for name in known)
     user = any(name.startswith("user_browser_") for name in known)
     if tools is not None and not (
-        managed or user or known & {"web_search", "web_extract", "tool_search"}
+        managed or user or known & {"web_search", "web_extract", "tool_search", "browser_repl_js"}
     ):
         return ""
     return "\n".join([

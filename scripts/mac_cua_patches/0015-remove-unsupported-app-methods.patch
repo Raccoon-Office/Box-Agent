@@ -1,0 +1,24 @@
+diff --git a/cua_adapter/cua_repl.mjs b/cua_adapter/cua_repl.mjs
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -189,8 +189,6 @@
+         async setValue(elementIndex, value) { await call('setValue', this.#handle, {target: elementIndex, value}); }
+         async scroll(target, direction, pages = 1) { await call('scroll', this.#handle, {target, direction, pages}); }
+         async paste(text, options = {}) { await call('paste', this.#handle, {text, options}); }
+-        async selectText(elementIndex, text, options = {}) { throw Error('UnsupportedCapability: selectText requires a driver extension'); }
+-        async performSecondaryAction(elementIndex, action) { throw Error('UnsupportedCapability: performSecondaryAction requires a driver extension'); }
+     }
+     function writeBrowserState(state) {
+         const {dom, ...page} = state;
+diff --git a/cua_api.md b/cua_api.md
+--- a/cua_api.md
++++ b/cua_api.md
+@@ -165,8 +165,6 @@
+ | `scroll(indexOrXY, direction, pages=1)` | `void` | Element ID (`number`) or `Vec2`; direction up/down/left/right or u/d/l/r. Pages: integer 1–50 driver steps, not exact viewport heights. |
+ | `paste(text: string, {format?})` | `void` | Pastes plain text into the focused control; takes no element index. Omit `format` or use `text`; rich formats are unsupported. Leaves text on the shared clipboard. Observe to verify insertion. After errors the clipboard may have changed; observe before continuing and do not replay. |
+ 
+-`selectText` and `performSecondaryAction` are unsupported.
+-
+ ### Observations and targets
+ 
+ Await actions and observe their effects; a successful call does not prove task completion.

@@ -1,0 +1,29 @@
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -225,8 +225,12 @@
+         async #action(method, args) {
+             const result = await call('browser.' + method, this.#handle, args);
+             if (result?.notice) write(result.notice);
+-        }
+-        async goto(url) { await this.#action('goto', {url}); }
++            if (result?.page) {
++                write(result.page);
++                return result.page;
++            }
++        }
++        async goto(url) { return this.#action('goto', {url}); }
+         async back() { await this.#action('back'); }
+         async activate() { await call('browser.activate', this.#handle); }
+         async click(target, options = {}) { await this.#action('click', {target, options}); }
+@@ -254,6 +258,11 @@
+         async close() { await call('browser.close', this.#handle); }
+     }
+     class Browser {
++        async openAndRead(url) {
++            const page = await call('browser.openAndRead', null, {url});
++            write(page);
++            return page;
++        }
+         async listTabs(opts) {
+             opts = options(opts, ['emit']);
+             const tabs = await call('browser.listTabs');

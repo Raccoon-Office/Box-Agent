@@ -212,7 +212,7 @@ def _image_messages(messages):
 @pytest.mark.parametrize("capability", [True, False, None])
 @pytest.mark.parametrize("feed_screenshots", [True, False])
 @pytest.mark.parametrize("persist_images", [True, False])
-async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
+async def test_cua_repl_loop_respects_image_persistence_and_feed_settings(
     tmp_path, capability, feed_screenshots, persist_images,
 ):
     from box_agent.agent_session import AgentSession
@@ -222,6 +222,20 @@ async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
     from box_agent.session_log import SessionLog
     from tests.test_agent_session import session_config
 
+    from unittest.mock import AsyncMock, Mock
+    from box_agent.plugins.repl.runtime import ReplRuntime
+    from box_agent.plugins.repl.tools import ReplTool
+
+    worker = Mock()
+    worker.execute.return_value = {"content": [
+        {"type": "text", "text": "captured desktop"},
+        {"type": "image", "data": _image_b64(), "mimeType": "image/png"},
+    ]}
+    runtime = ReplRuntime(node="unused", workspace=tmp_path,
+                          cua_service=SimpleNamespace(name="desktop", prepare=AsyncMock()))
+    runtime._service = Mock(return_value=worker)
+    capture_code = "await app.getScreenshot()"
+
     class ScreenshotThenGoalLLM:
         def __init__(self):
             self.capabilities = {"image_input": capability}
@@ -229,13 +243,15 @@ async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
 
         async def generate_stream(self, messages, **kwargs):
             self.requests.append([message.model_copy(deep=True) for message in messages])
-            if len(self.requests) <= 2:
-                name = "screenshot" if len(self.requests) == 1 else "goal_read"
+            calls = [("tool_search", {"tool_names": ["cua_repl_js"]}),
+                     ("cua_repl_js", {"code": capture_code}), ("goal_read", {})]
+            if len(self.requests) <= len(calls):
+                name, arguments = calls[len(self.requests) - 1]
                 yield StreamEvent(
                     type="finish", finish_reason="tool_use",
                     tool_calls=[ToolCall(
                         id=f"call-{len(self.requests)}", type="function",
-                        function=FunctionCall(name=name, arguments={}),
+                        function=FunctionCall(name=name, arguments=arguments),
                     )],
                 )
             else:
@@ -253,7 +269,7 @@ async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
     session = await AgentSession.open(
         config=config,
         host=HostBindings(
-            llm_client=llm, system_prompt="system", tools=[_make_tool(_result())],
+            llm_client=llm, system_prompt="system", tools=[ReplTool(runtime, "cua")],
             session_log=session_log,
         ),
         options=SessionOptions(workspace_dir=tmp_path),
@@ -264,16 +280,17 @@ async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
             options=session.build_run_options(logger=None),
         )]
         assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.END_TURN]
-        assert len(llm.requests) == 3
+        worker.execute.assert_called_once_with(capture_code, None, 60000)
+        assert len(llm.requests) == 4
         assert [len(_image_messages(request)) for request in llm.requests] == (
-            [0, 1, int(persist_images)] if capability is True and feed_screenshots else [0, 0, 0]
+            [0, 0, 1, int(persist_images)] if capability is True and feed_screenshots else [0, 0, 0, 0]
         )
         if capability is True and feed_screenshots:
-            overlay = _image_messages(llm.requests[1])[0]
+            overlay = _image_messages(llm.requests[2])[0]
             assert overlay.role == "user"
             assert overlay.trace_redact_content
             assert any(block.get("data") for block in overlay.content if block.get("type") == "input_image")
-            assert bool(_image_messages(llm.requests[2])) is persist_images
+            assert bool(_image_messages(llm.requests[3])) is persist_images
             assert not _image_messages(session.agent.messages)
         else:
             assert not _image_messages(session.agent.messages)
@@ -290,6 +307,7 @@ async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
         assert current_mcp_result_adapters() == ()
         assert "run_events" not in vars(session.agent)
     finally:
+        await runtime.close()
         await session.aclose()
         session_log.close()
 

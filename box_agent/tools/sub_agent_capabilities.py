@@ -104,11 +104,16 @@ BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "obsidian_daily_note": ToolCapabilityMetadata(write=True, external_side_effect=True),
 }
 
-_PLAYWRIGHT_BLOCKED_TOOLS = frozenset(
-    {
-        "managed_browser_file_upload",
-    }
-)
+_GUI_SERVERS = frozenset({"playwright", "browser-gateway", "computer-use", "cua-repl"})
+
+
+def _is_disabled_gui_tool(name: str, tool: Tool) -> bool:
+    """Browser and CUA are parent-only, including legacy and REPL entrypoints."""
+    return (
+        name.startswith(("managed_browser_", "user_browser_", "browser_repl_", "cua_repl_"))
+        or name == "ensure_cua_ready"
+        or getattr(tool, "server_name", "") in _GUI_SERVERS
+    )
 
 
 def _is_managed_browser_tool(name: str) -> bool:
@@ -141,18 +146,6 @@ def _tool_capability_metadata(name: str, tool: Tool) -> ToolCapabilityMetadata |
     if metadata is not None:
         return metadata
 
-    # MCP tool names alone are not a trustworthy security boundary. The live
-    # wrapper also records the server that supplied them, so recognize the
-    # managed Playwright server explicitly. Managed-browser tools are
-    # delegable when named; file uploads stay external-side-effect.
-    if getattr(tool, "server_name", "") == "playwright":
-        if name in _PLAYWRIGHT_BLOCKED_TOOLS:
-            return ToolCapabilityMetadata(
-                read=True,
-                network=True,
-                external_side_effect=True,
-            )
-        return ToolCapabilityMetadata(read=True, network=True)
     return None
 
 
@@ -565,6 +558,8 @@ def _tool_denial_reason(
     strategy: str,
     constraints: DelegationConstraints,
 ) -> str | None:
+    if _is_disabled_gui_tool(name, tool):
+        return "gui_delegation_disabled"
     if strategy == "batch_files" and name not in _BATCH_FILES_ALLOWED_TOOLS:
         return "not_allowed_by_strategy"
 

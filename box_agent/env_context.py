@@ -414,7 +414,7 @@ def _format_cli_section(cli: dict[str, str | None]) -> list[str]:
                 "`--as user`，不要使用 `--as bot`、`config bind --identity bot-only` 或 "
                 "`config strict-mode`。OAuth 命令不接受 `--as user`；需要用户授权且用户已同意时，"
                 "使用 `lark-cli auth login --no-wait --json`（按需附加 `--recommend` 或 `--scope`）"
-                "取得 CLI 返回的 `verification_url`，再调用可用的 `user_browser_open_tab_and_read` "
+                "取得 CLI 返回的 `verification_url`，再按 browser-use Skill 用可用的 `browser_repl_js`（user 模式）"
                 "打开该地址。只有浏览器工具成功后才能声称已打开；工具不可用时必须把地址明确交给用户。"
             )
         if cli.get("dws"):

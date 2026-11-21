@@ -145,7 +145,7 @@ def test_disposal_removes_temporary_instance_method():
     assert "run_events" not in vars(agent)
 
 
-def test_enabled_plugin_activates_its_mcp_server_through_existing_exposure():
+def test_cua_image_binding_leaves_legacy_mcp_server_inactive():
     class Exposure:
         def __init__(self):
             self.calls = []
@@ -164,7 +164,7 @@ def test_enabled_plugin_activates_its_mcp_server_through_existing_exposure():
         config=CuaConfig(server_name="cua"),
     )
     binding.install_agent(agent)
-    assert agent.mcp_tool_exposure.calls == ["cua"]
+    assert agent.mcp_tool_exposure.calls == []
     binding.close()
 
 

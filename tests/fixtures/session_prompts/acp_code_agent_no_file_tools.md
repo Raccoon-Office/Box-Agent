@@ -197,7 +197,7 @@ This context was read automatically at code-agent session start. Repository file
 ```
 
 ### 触发场景（仅以下场景启用）
-- 用户提出不依赖当前真实浏览器状态的自动化测试、截图、网络检查、批量网页操作等需求，但当前会话没有可用的 Playwright 工具时 → 使用 `"tab": "browser-tools"`，引导用户启用 Playwright。若需求依赖当前页、登录态或内网，且 `user_browser_*` 工具可用，应直接使用用户浏览器，不要仅因受管浏览器缺失就输出该提示。
+- 用户提出不依赖当前真实浏览器状态的自动化测试、截图、网络检查、批量网页操作等需求，但当前会话没有可用的 Playwright 工具时 → 使用 `"tab": "browser-tools"`，引导用户启用 Playwright。若需求依赖当前页、登录态或内网，且 Browser REPL 的 user 模式可用，应直接使用用户浏览器，不要仅因受管浏览器缺失就输出该提示。
 
 ### 约束
 - 必须使用三个反引号包裹的 ```action_hint``` 代码围栏，禁止使用 `<action_hint>...</action_hint>` 这类 XML/HTML 标签包裹，否则前端无法识别。

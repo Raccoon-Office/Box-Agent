@@ -1,0 +1,58 @@
+--- a/cua_adapter/cua_actions.py
++++ b/cua_adapter/cua_actions.py
+@@ -420,6 +420,35 @@
+                 {**params, 'x': round(screen_x, 2), 'y': round(screen_y, 2),
+                  'delivery_mode': 'foreground'})
+ 
++
++    def activate_keyboard_target(self, state, window):
++        """Reconcile a z-order-only activation refusal with fresh semantic focus."""
++        wid = window['window_id']
++        try:
++            return self.result_data(self.call('bring_to_front', {
++                'pid': state['pid'], 'window_id': wid}))
++        except self.action_error as error:
++            report = self.result_data(error.result)
++            exact = report.get('exact_window_effect') or {}
++            if not (report.get('code') == 'bring_to_front_exact_window_unverified'
++                    and report.get('status') == 'partial'
++                    and report.get('pid') == state['pid']
++                    and report.get('window_id') == wid
++                    and report.get('process_activated') is True
++                    and exact.get('focused') is True
++                    and exact.get('front_in_process_on_display') is False):
++                raise
++            # Activation has not dispatched the requested key. Re-observe once;
++            # reuse the existing semantic-focus gate, never replay activation/input.
++            self.windows.clear_action_app_inventory()
++            self.windows.refresh_keyboard_focus(state, window)
++            if not (state.get('app_active') is True
++                    and state.get('active_window_id') == wid
++                    and state.get('ax_focused_window_id') == wid):
++                raise
++            self.driver.record({'phase': 'keyboard_activation_reconciled',
++                                'window_id': wid, 'activation_report': report})
++            return {'activated': True}
+ 
+     def execute(self, state, method, args):
+         # Any intervening action attempt invalidates an unobserved creation context.
+@@ -568,8 +597,7 @@
+                 # TODO(cua-background): remove this foreground activation once exact-window
+                 # keyboard delivery is reliable end to end in background mode.
+                 self.windows.verify_frame(state, active_window)
+-                focused = self.result_data(self.call('bring_to_front', {
+-                    'pid': state['pid'], 'window_id': wid}))
++                focused = self.activate_keyboard_target(state, active_window)
+                 if (focused.get('activated') is not True
+                         and focused.get('exact_window_effect', {}).get('verified') is not True):
+                     raise ValueError('Window focus was not verified; input not sent')
+--- a/cua_adapter/cua_evidence.py
++++ b/cua_adapter/cua_evidence.py
+@@ -9,6 +9,7 @@
+ DRIVER_PHASES = frozenset({'dispatch', 'result', 'error'})
+ CELL_PHASES = frozenset({'cell_start', 'cell_end'})
+ DIAGNOSTIC_FIELDS = {
++    'keyboard_activation_reconciled': {'window_id': int, 'activation_report': dict},
+     'main_window_fallback': {'window_id': int, 'source_window_id': int, 'reason': str},
+     'window_relationships': {'pid': int, 'current_window_id': int, 'windows': list,
+                              'ax_sources': list, 'attachments': dict, 'conflicts': list},

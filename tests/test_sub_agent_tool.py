@@ -315,10 +315,8 @@ def test_description_explains_flat_contract_and_derived_policy():
     assert "`web_extract`" in description
     assert "restricted to assigned Skills and dependencies" in description
     assert "fail-closed runtime policy" in description
-    assert "`managed_browser_click`" in description
-    assert "`managed_browser_evaluate`" in description
-    assert "`managed_browser_take_screenshot`" in description
-    assert "`managed_browser_run_code`" in description
+    assert "All Browser and CUA tools are parent-only" in description
+    assert "both REPL interfaces" in description
     assert "uploads" in description
     assert "run_code and file uploads cannot" not in (
         tool.parameters["properties"]["required_tools"]["description"]
