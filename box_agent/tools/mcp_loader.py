@@ -3616,14 +3616,17 @@ async def read_mcp_app_resource(
             if not isinstance(exc, McpError):
                 raise
             error = exc.error
-            # -32002 is the legacy resource-not-found code. Newer servers use
-            # Invalid Params; require a precise missing-resource message. data.uri
-            # identifies the failed resource, not whether it is missing.
+            # Typed resource-not-found errors use -32602 and only data.uri.
+            # Match the requested URI without depending on the message language;
+            # retain the legacy code and precise messages for older servers.
             missing = error.code == -32002 or (
-                error.code == -32602 and error.message in {
-                    "Resource not found", f"Resource not found: {resource_uri}",
-                    f"Resource {resource_uri} not found", f"Unknown resource: {resource_uri}",
-                }
+                error.code == -32602 and (
+                    (isinstance(error.data, dict) and error.data == {"uri": resource_uri})
+                    or error.message in {
+                        "Resource not found", f"Resource not found: {resource_uri}",
+                        f"Resource {resource_uri} not found", f"Unknown resource: {resource_uri}",
+                    }
+                )
             )
             if missing:
                 raise McpAppError("APP_RESOURCE_NOT_FOUND") from exc

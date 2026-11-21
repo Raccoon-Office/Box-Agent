@@ -62,7 +62,8 @@ async def test_initialize_and_session_negotiation_keep_legacy_fallback(tmp_path,
         await prompt(host, session.sessionId, metadata={"connector_discovery": snapshot()})
         request = json.dumps(llm.requests[-1], ensure_ascii=False)
         assert ("Search or call only connected connectors" in request) is not expected
-        assert ("With no video preference, recommend SEKO Canvas" in request) is expected
+        assert ("For videos, short videos or storyboard stories, suggest SEKO Canvas" in request) is expected
+        assert ("unless the user chose otherwise" in request) is expected
         assert ("<connector-status>" in request) is not expected
         assert "腾讯会议" not in request
     finally:

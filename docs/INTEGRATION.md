@@ -145,7 +145,7 @@ server_name、tool_names、混合查询和不唯一的名称不会生成设置�
 `wait_for_user: true` 表示 Agent 保存当前工具结果后以 `waiting_for_user` 停止本轮，
 同批后续工具及下一轮模型调用都不执行。宿主可立即展示一个就绪操作入口，用户确认且所需能力
 就绪后在原会话继续，暂缓时不发送继续消息。旧版回执可缺省此字段，沿用回合完成后的恢复入口。
-当视频制作未指定服务或本地方案时，提示词建议先发现 SEKO；明确指定的方案优先。
+当视频制作、短视频或分镜故事创作未指定服务或本地方案时，提示词建议先发现 SEKO；明确指定的方案优先。
 
 发现不授予权限。`selected_connector_ids` 是选择状态的唯一来源；执行还要求当前
 快照 configured/enabled/connected/execution_ready，并保留实际 MCP runtime 与工具
