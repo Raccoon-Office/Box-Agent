@@ -5694,6 +5694,7 @@ def test_snapshot_workspace_excludes_dependencies_caches_and_agent_internals(tmp
     for directory in (
         ".git",
         ".box-agent",
+        ".box-agent/scratch/session",
         ".box-agent-scratch",
         ".pytest_cache",
         ".venv",
@@ -5701,10 +5702,56 @@ def test_snapshot_workspace_excludes_dependencies_caches_and_agent_internals(tmp
         "__pycache__",
     ):
         ignored = tmp_path / directory / "ignored.txt"
-        ignored.parent.mkdir()
+        ignored.parent.mkdir(parents=True, exist_ok=True)
         ignored.write_text("ignored", encoding="utf-8")
 
     assert _snapshot_workspace(str(tmp_path)) == {included}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relink_replacement", [False, True], ids=["old-link", "new-link"])
+async def test_scratch_preview_cleanup_respects_same_turn_deletion(tmp_path, relink_replacement):
+    from box_agent.tools.chat_references import ChatReferences
+    from box_agent.tools.skill_scratch import cleanup_skill_scratch_dir, prepare_skill_scratch_dir
+
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / ".box-agent" / "scratch" / "session",
+    )
+    preview = scratch.path / "preview.png"
+    preview.write_bytes(b"original")
+    link = f"[Preview]({preview.as_uri()})"
+    log = SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)
+
+    class ReplacePreviewTool(EchoTool):
+        async def execute(self, **kwargs):
+            references = ChatReferences(tmp_path, session_log=log)
+            assert preview in references.paths
+            preview.unlink()
+            references.deleted(frozenset({preview}))
+            preview.write_bytes(b"replacement")
+            return ToolResult(success=True, content="Replaced the preview")
+
+    llm = MockLLM([
+        LLMResponse(
+            content=link,
+            finish_reason="tool_calls",
+            tool_calls=[ToolCall(
+                id="replace", type="function", function=FunctionCall(name="echo", arguments={"text": "replace"}),
+            )],
+        ),
+        LLMResponse(content=link if relink_replacement else "Done", finish_reason="stop"),
+    ])
+    try:
+        events = await collect(run_agent_loop(
+            llm=llm, messages=_msgs(), tools={"echo": ReplacePreviewTool()},
+            workspace_dir=str(tmp_path), session_log=log, max_steps=2,
+        ))
+        assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.END_TURN for event in events)
+        assert len(list(log.events_of_type("chat/reference_deleted"))) == 1
+        cleanup_skill_scratch_dir(scratch)
+        assert preview.exists() is relink_replacement
+    finally:
+        log.close()
 
 
 def test_snapshot_workspace_file_cap_warns_and_keeps_explicit_path_fallback(
