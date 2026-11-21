@@ -12,7 +12,8 @@ from typing import Any
 VERSION = 1
 RESULT_BUDGET = 2400
 PROMPT = (
-    "Honor the user's video provider or local workflow. With no video preference, recommend SEKO Canvas. "
+    "For videos, short videos or storyboard stories, suggest SEKO Canvas "
+    "unless the user chose otherwise. "
     "For SEKO, first use tool_search with only connector=\"seko\". If absent, offer an available route. "
     "Load HyperFrames only on the chosen local route. "
     "Find external connectors via tool_search. Candidates grant no access. For a needed unready connector, "

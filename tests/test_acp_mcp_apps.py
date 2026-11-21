@@ -117,6 +117,106 @@ def calls(record):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failure,expected', [
+    ('rpc', 'MCP_APP_UNAVAILABLE'),
+    ('validation', 'MCP_APP_UNAVAILABLE'),
+    ('http401', 'APP_AUTH_REQUIRED'),
+    ('logging_failure', 'APP_AUTH_REQUIRED'),
+    ('timeout', 'MCP_APP_REQUEST_TIMEOUT'),
+    ('unexpected', 'MCP_APP_UNAVAILABLE'),
+])
+async def test_resource_failure_logs_codes_and_stack_without_private_payloads(
+    tmp_path, monkeypatch, caplog, capsys, failure, expected,
+):
+    from hashlib import sha256
+    import httpx
+
+    async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
+        secret = 'PRIVATE-CREDENTIAL-AND-CARD-CONTENT'
+        uri = f'ui://user:{secret}@flight-fixture/{secret}?token={secret}#{secret}'
+
+        async def read(resource_uri):
+            assert resource_uri == uri
+            if failure == 'rpc':
+                raise McpError(types.ErrorData(code=-32603, message=secret,
+                                              data={'authorization': secret, 'html': secret}))
+            if failure == 'validation':
+                return types.ReadResourceResult.model_validate({'contents': secret})
+            if failure in {'http401', 'logging_failure'}:
+                req = httpx.Request('POST', f'https://user:{secret}@fixture.invalid/mcp?token={secret}',
+                                    headers={'Authorization': f'Bearer {secret}'})
+                response = httpx.Response(401, request=req, text=secret)
+                raise httpx.HTTPStatusError(secret, request=req, response=response)
+            if failure == 'timeout':
+                raise TimeoutError(secret)
+            raise ValueError(secret)
+
+        monkeypatch.setattr(backend.session, 'read_resource', read)
+        if failure == 'logging_failure':
+            from box_agent.acp.mcp_apps import log
+            def unavailable(*args, **kwargs):
+                raise OSError('Diagnostic sink unavailable')
+            monkeypatch.setattr(log, 'warning', unavailable)
+        caplog.clear()
+        with pytest.raises(RequestError, match=expected):
+            await host.ext_method('mcp/apps/resource', request(session_id, uri=uri))
+        entries = [item for item in caplog.records
+                   if item.name == 'box_agent.acp.mcp_apps'
+                   and item.getMessage().startswith('MCP App resource read failed ')]
+        if failure == 'logging_failure':
+            assert entries == []
+            assert len(calls(record)) == 1 and len(llm.requests) == 2
+            return
+        assert len(entries) == 1
+        entry = entries[0]
+        message = entry.getMessage()
+        assert secret not in message and uri not in message
+        assert entry.exc_info is None and entry.stack_info is None
+        payload = json.loads(message.removeprefix('MCP App resource read failed '))
+        assert payload['session_id'] == session_id
+        assert payload['tool_call_id'] == 'flights-original'
+        assert payload['server_name'] == 'flight-fixture'
+        assert payload['tool_name'] == 'list_flights'
+        assert payload['resource_uri_hash'] == sha256(uri.encode()).hexdigest()
+        assert payload['payload_redacted'] is True
+        assert payload['initial_ui'] is False and payload['fallback'] is False
+        errors = payload['errors']
+        assert any(frame['function'] == 'read' for error in errors for frame in error['frames'])
+        if failure == 'rpc':
+            assert errors[0]['mcp_code'] == -32603
+        elif failure == 'validation':
+            assert errors[0]['type'].endswith('.ValidationError')
+            assert errors[0]['validation_types'] == ['list_type']
+        elif failure == 'http401':
+            assert errors[0]['app_code'] == 'APP_AUTH_REQUIRED'
+            assert errors[1]['http_status'] == 401
+        else:
+            assert errors[0]['type'] == f'builtins.{"TimeoutError" if failure == "timeout" else "ValueError"}'
+        assert 'MCP App resource read failed' not in capsys.readouterr().out
+        assert len(calls(record)) == 1 and len(llm.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cancelled', [False, True])
+async def test_resource_success_and_cancellation_do_not_log_failure(tmp_path, monkeypatch, caplog, cancelled):
+    async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
+        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
+        if cancelled:
+            async def read(uri):
+                raise asyncio.CancelledError()
+            monkeypatch.setattr(backend.session, 'read_resource', read)
+        caplog.clear()
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await host.ext_method('mcp/apps/resource', request(session_id, uri=snapshot['resourceUri']))
+        else:
+            result = await host.ext_method('mcp/apps/resource', request(session_id, uri=snapshot['resourceUri']))
+            assert result['contents'][0]['uri'] == snapshot['resourceUri']
+        assert not any('MCP App resource read failed' in item.getMessage() for item in caplog.records)
+        assert len(calls(record)) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("interface_version", [1, 2])
 async def test_app_workflow_guidance_reaches_model_without_changing_card_result(
     tmp_path, monkeypatch, interface_version,
@@ -137,10 +237,10 @@ async def test_app_workflow_guidance_reaches_model_without_changing_card_result(
             }]
         assert MCP_APP_MODEL_GUIDANCE in description
         guidance = ' '.join(description.split())
-        assert '30-second interaction window from that invitation' in guidance
-        assert 'Actually wait between checks using an available tool' in guidance
-        assert 'Space checks at least 5 seconds apart' in guidance
-        assert 'an immediate status query followed by a final reply is not sufficient' in guidance
+        assert 'invite the user to act in the card and hand off' in guidance
+        assert '30-second' not in guidance
+        assert '5 seconds apart' not in guidance
+        assert 'Actually wait between checks using an available tool' not in guidance
         assert 'Do not repeat transient request statuses' in guidance
         assert 'do not repeat quoted prices, fees, credits, request parameters or prompt details' in guidance
         assert 'not a verified final result or failure, or an explicit user question' in guidance
@@ -169,10 +269,10 @@ async def test_real_stdio_app_roundtrip_keeps_complete_data_out_of_model_and_ref
         assert "Cathay Pacific" not in model_history
         assert "not-for-model-context" not in json.dumps(conn.updates)
         resource = await host.ext_method("mcp/apps/resource", request(session_id,
-            bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
+            uri=snapshot['resourceUri']))
         assert resource['contents'][0]['mimeType'] == 'text/html;profile=mcp-app'
         assert resource['contents'][0]['_meta']['ui']['csp']['connectDomains'] == []
-        args = request(session_id, bindingId=snapshot['bindingId'], interactionId="refresh-1",
+        args = request(session_id, interactionId="refresh-1",
                        name="refresh_flights", arguments={"previous": 1})
         first = await host.ext_method("mcp/apps/call", args)
         second = await host.ext_method("mcp/apps/call", args)
@@ -194,7 +294,7 @@ async def test_app_call_enforces_session_policy_before_remote_dispatch(
 ):
     async with environment(tmp_path, monkeypatch) as (host, _, llm, _, session_id, record):
         agent = host._sessions[session_id].agent
-        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        await host.ext_method("mcp/apps/snapshot", request(session_id))
         hook_calls = []
 
         async def before(context):
@@ -261,7 +361,7 @@ async def test_app_call_enforces_session_policy_before_remote_dispatch(
                 await asyncio.wait_for(entered.wait(), timeout=5)
                 assert agent.active_tool_run_context is not None
             params = request(
-                session_id, bindingId=snapshot["bindingId"], interactionId="app-policy-check",
+                session_id, interactionId="app-policy-check",
                 name="refresh_flights", arguments={"previous": 1},
             )
             if policy == "hook-deny":
@@ -285,11 +385,10 @@ async def test_app_call_enforces_session_policy_before_remote_dispatch(
 @pytest.mark.asyncio
 async def test_app_call_waits_for_current_turn_authorization_context(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, _, _, _, session_id, record):
-        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        await host.ext_method("mcp/apps/snapshot", request(session_id))
         reserved, proceed = asyncio.Event(), asyncio.Event()
         run_prompt = host._prompt_for_session
-        params = request(session_id, bindingId=snapshot["bindingId"],
-                         interactionId="during-preparation", name="refresh_flights",
+        params = request(session_id, interactionId="during-preparation", name="refresh_flights",
                          arguments={"previous": 1})
 
         async def hold_preparation(*args, **kwargs):
@@ -335,8 +434,8 @@ async def test_accepted_credential_change_revokes_app_binding_before_reconnect(
         assert backend.session is not None
         for method, extra in (
             ("snapshot", {}),
-            ("resource", {"bindingId": snapshot["bindingId"], "uri": snapshot["resourceUri"]}),
-            ("call", {"bindingId": snapshot["bindingId"], "interactionId": "after-revoke",
+            ("resource", {"uri": snapshot["resourceUri"]}),
+            ("call", {"interactionId": "after-revoke",
                       "name": "refresh_flights", "arguments": {"previous": 1}}),
         ):
             expected = "APP_SERVER_UNAVAILABLE" if method == "snapshot" else "APP_SERVER_CHANGED"
@@ -346,11 +445,14 @@ async def test_accepted_credential_change_revokes_app_binding_before_reconnect(
 
 
 @pytest.mark.asyncio
-async def test_app_reply_is_withheld_after_binding_revocation_but_receipt_survives(tmp_path, monkeypatch):
-    async with environment(tmp_path, monkeypatch) as (host, _, _, backend, session_id, record):
-        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+@pytest.mark.parametrize("change", ["revoked", "catalog", "connection"])
+async def test_app_reply_is_withheld_after_connection_change_but_receipt_survives(tmp_path, monkeypatch, change):
+    async with environment(tmp_path, monkeypatch) as (host, _, llm, backend, session_id, record):
+        await host.ext_method("mcp/apps/snapshot", request(session_id))
         result_received, send_reply = asyncio.Event(), asyncio.Event()
         remote_call = backend.session.call_tool
+        replacement = None
+        replacement_log = tmp_path / "replacement-calls.jsonl"
 
         async def hold_reply(*args, **kwargs):
             result = await remote_call(*args, **kwargs)
@@ -359,27 +461,54 @@ async def test_app_reply_is_withheld_after_binding_revocation_but_receipt_surviv
             return result
 
         monkeypatch.setattr(backend.session, "call_tool", hold_reply)
-        params = request(session_id, bindingId=snapshot["bindingId"], interactionId="revoked-before-reply",
+        params = request(session_id, interactionId="changed-before-reply",
                          name="refresh_flights", arguments={"previous": 1})
         pending = asyncio.create_task(host.ext_method("mcp/apps/call", params))
         try:
             await asyncio.wait_for(result_received.wait(), timeout=5)
-            mcp_loader._begin_mcp_connection(backend.name)
+            if change == "revoked":
+                mcp_loader._begin_mcp_connection(backend.name)
+            elif change == "catalog":
+                mcp_loader._replace_server_catalog(backend)
+            else:
+                await backend.disconnect()
+                replacement = mcp_loader.MCPServerConnection(backend.name, command=backend.command,
+                    args=backend.args, env={"MCP_APPS_FIXTURE_LOG": str(replacement_log)}, connect_timeout=10)
+                monkeypatch.setattr(mcp_loader, "_mcp_connections", [replacement])
+                mcp_loader._begin_mcp_connection(backend.name)
+                assert await replacement.connect(), replacement.last_error
+                mcp_loader._replace_server_catalog(replacement)
             send_reply.set()
-            with pytest.raises(RequestError, match="APP_SERVER_CHANGED"):
+            expected = "APP_SERVER_CHANGED" if change == "revoked" else "APP_BINDING_EXPIRED"
+            with pytest.raises(RequestError, match=expected):
                 await asyncio.wait_for(pending, timeout=5)
             log = host._sessions[session_id].agent.session_log
-            assert [e["data"]["status"] for e in log.events_of_type(INTERACTION_EVENT)] == [
-                "started", "completed",
-            ]
-            assert len(calls(record)) == 2
+            receipts = [event["data"] for event in log.events_of_type(INTERACTION_EVENT)]
+            assert [item["status"] for item in receipts] == ["started", "completed"]
+            completed = receipts[-1]["result"]
+            assert completed["structuredContent"]["revision"] == 2
+            assert [item["name"] for item in calls(record)] == ["list_flights", "refresh_flights"]
+
+            if change == "revoked":
+                mcp_loader._replace_server_catalog(backend)
+            # A new request may recover the completed receipt on the current
+            # connection, including after reload, without repeating the write.
+            for reload in (False, True):
+                if reload:
+                    await host.load_session(str(tmp_path), session_id)
+                assert await host.ext_method("mcp/apps/call", params) == completed
+                assert [item["name"] for item in calls(record)] == ["list_flights", "refresh_flights"]
+                assert not replacement_log.exists()
+            assert len(llm.requests) == 2
         finally:
             send_reply.set()
             await asyncio.gather(pending, return_exceptions=True)
+            if replacement is not None:
+                await replacement.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_history_recovers_snapshot_without_running_tools_or_accepting_old_binding(tmp_path, monkeypatch):
+async def test_history_recovers_snapshot_and_resources_without_running_tools(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         original = await host.ext_method('mcp/apps/snapshot', request(session_id))
         conn.updates.clear()
@@ -389,10 +518,9 @@ async def test_history_recovers_snapshot_without_running_tools_or_accepting_old_
         assert any(u.get('_meta', {}).get('mcpApp') for u in conn.updates)
         restored = await host.ext_method('mcp/apps/snapshot', request(session_id))
         assert restored['result'] == original['result']
-        assert restored['bindingId'] != original['bindingId']
-        with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
-            await host.ext_method('mcp/apps/resource', request(session_id,
-                bindingId=original['bindingId'], uri=original['resourceUri']))
+        assert restored == original
+        resource = await host.ext_method('mcp/apps/resource', request(session_id, uri=original['resourceUri']))
+        assert resource['contents'][0]['uri'] == original['resourceUri']
         host._sessions[session_id].agent.session_log.append('surface/reset', {})
         with pytest.raises(RequestError, match='MCP_APP_SNAPSHOT_UNAVAILABLE'):
             await host.ext_method('mcp/apps/snapshot', request(session_id))
@@ -400,9 +528,15 @@ async def test_history_recovers_snapshot_without_running_tools_or_accepting_old_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('missing_code', [None, -32002, -32602])
+@pytest.mark.parametrize('missing_code,missing_message', [
+    (None, None),
+    (-32002, 'Resource not found'),
+    (-32602, 'Resource not found'),
+    (-32602, '未知卡片资源'),
+    (-32602, 'リソースが見つかりません'),
+])
 async def test_history_restores_old_resource_or_current_ui_without_rewriting_snapshot(
-    tmp_path, monkeypatch, missing_code,
+    tmp_path, monkeypatch, missing_code, missing_message,
 ):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         original = await host.ext_method('mcp/apps/snapshot', request(session_id))
@@ -410,18 +544,13 @@ async def test_history_restores_old_resource_or_current_ui_without_rewriting_sna
         current_uri = 'ui://new-flight-pages/v2.html'
         tool.mcp_ui_resource_uri = current_uri
         mcp_loader._replace_server_catalog(backend)
-        with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
-            await host.ext_method('mcp/apps/resource', request(
-                session_id, bindingId=original['bindingId'], uri=original['resourceUri']))
-        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
-        assert {k: v for k, v in snapshot.items() if k != 'bindingId'} == {
-            k: v for k, v in original.items() if k != 'bindingId'}
+        snapshot = original
         events = deepcopy(host._sessions[session_id].agent.session_log.events)
         seen = []
         async def read(uri):
             seen.append(uri)
             if missing_code is not None and uri == original['resourceUri']:
-                raise McpError(types.ErrorData(code=missing_code, message='Resource not found', data={'uri': uri}))
+                raise McpError(types.ErrorData(code=missing_code, message=missing_message, data={'uri': uri}))
             return types.ReadResourceResult.model_validate({
                 'resolvedResourceUri': 'ui://untrusted/override.html',
                 'contents': [{'uri': uri, 'mimeType': 'text/html;profile=mcp-app',
@@ -429,7 +558,7 @@ async def test_history_restores_old_resource_or_current_ui_without_rewriting_sna
             })
         monkeypatch.setattr(backend.session, 'read_resource', read)
         result = await host.ext_method('mcp/apps/resource', request(
-            session_id, bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
+            session_id, uri=snapshot['resourceUri']))
         selected_uri = current_uri if missing_code is not None else original['resourceUri']
         assert seen == [original['resourceUri']] + ([current_uri] if missing_code is not None else [])
         assert result['resolvedResourceUri'] == selected_uri
@@ -443,7 +572,7 @@ async def test_history_restores_old_resource_or_current_ui_without_rewriting_sna
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['auth', 'timeout', 'invalid', 'empty', 'http401', 'http403', 'http404',
                                      'invalid_parameters', 'forbidden_uri', 'both_missing'])
-async def test_history_resource_fallback_is_only_for_a_definite_missing_entry(tmp_path, monkeypatch, failure):
+async def test_history_resource_fallback_is_only_for_a_definite_missing_entry(tmp_path, monkeypatch, caplog, failure):
     import httpx
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         tool = next(t for t in backend.tools if t.remote_name == 'list_flights')
@@ -466,7 +595,8 @@ async def test_history_resource_fallback_is_only_for_a_definite_missing_entry(tm
                 raise McpError(types.ErrorData(
                     code=-32602,
                     message='Invalid resource parameters: locale is required' if failure == 'invalid_parameters' else 'URI forbidden',
-                    data={'uri': uri},
+                    data={'uri': uri, **({'parameter': 'locale'} if failure == 'invalid_parameters'
+                                         else {'reason': 'forbidden'})},
                 ))
             raise McpError(types.ErrorData(code=-32002 if failure == 'both_missing' else -32000,
                                           message='Resource not found' if failure == 'both_missing' else 'Unauthorized'))
@@ -476,14 +606,22 @@ async def test_history_resource_fallback_is_only_for_a_definite_missing_entry(tm
                     'empty': 'APP_RESOURCE_INVALID', 'both_missing': 'APP_RESOURCE_NOT_FOUND'}.get(failure, 'MCP_APP_UNAVAILABLE')
         with pytest.raises(RequestError, match=expected):
             await host.ext_method('mcp/apps/resource', request(
-                session_id, bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
+                session_id, uri=snapshot['resourceUri']))
         assert seen == [snapshot['resourceUri']] + ([tool.mcp_ui_resource_uri] if failure == 'both_missing' else [])
+        if failure == 'both_missing':
+            failures = [json.loads(item.getMessage().removeprefix('MCP App resource read failed '))
+                        for item in caplog.records if item.name == 'box_agent.acp.mcp_apps'
+                        and item.getMessage().startswith('MCP App resource read failed ')]
+            assert [item['fallback'] for item in failures] == [False, True]
+            assert all(item['initial_ui'] for item in failures)
+            assert failures[0]['resource_uri_hash'] != failures[1]['resource_uri_hash']
+            assert all(item['errors'][1]['mcp_code'] == -32002 for item in failures)
         assert len(calls(record)) == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['connection', 'history', 'server'])
-async def test_history_fallback_rechecks_binding_before_reading_new_page(tmp_path, monkeypatch, change):
+async def test_history_fallback_rechecks_request_connection_before_reading_new_page(tmp_path, monkeypatch, change):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         tool = next(t for t in backend.tools if t.remote_name == 'list_flights')
         tool.mcp_ui_resource_uri = 'ui://flight-fixture/v2.html'
@@ -499,11 +637,11 @@ async def test_history_fallback_rechecks_binding_before_reading_new_page(tmp_pat
                 host._sessions[session_id].agent.session_log.append('surface/reset', {})
             raise McpError(types.ErrorData(code=-32002, message='Resource not found'))
         monkeypatch.setattr(backend.session, 'read_resource', read)
-        expected = {'connection': 'MCP_APP_BINDING_EXPIRED', 'history': 'MCP_APP_SNAPSHOT_UNAVAILABLE',
-                    'server': 'MCP_APP_BINDING_EXPIRED'}[change]
+        expected = {'connection': 'APP_BINDING_EXPIRED', 'history': 'MCP_APP_SNAPSHOT_UNAVAILABLE',
+                    'server': 'APP_SERVER_CHANGED'}[change]
         with pytest.raises(RequestError, match=expected):
             await host.ext_method('mcp/apps/resource', request(
-                session_id, bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
+                session_id, uri=snapshot['resourceUri']))
         assert seen == [snapshot['resourceUri']]
         assert len(calls(record)) == 1
 
@@ -522,39 +660,36 @@ async def test_acp_enables_apps_without_host_capability_negotiation(tmp_path, mo
 async def test_app_calls_reject_cross_session_resources_visibility_and_changed_requests(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
-        binding = snapshot['bindingId']
         peer = await host.new_session(str(tmp_path))
         with pytest.raises(RequestError, match='MCP_APP_SNAPSHOT_UNAVAILABLE'):
             await host.ext_method('mcp/apps/snapshot', request(peer.session_id))
         with pytest.raises(RequestError, match='MCP_APP_UNAVAILABLE'):
-            await host.ext_method('mcp/apps/resource', request(session_id, bindingId=binding, uri='ui://other/private'))
+            await host.ext_method('mcp/apps/resource', request(session_id, uri='ui://other/private'))
         with pytest.raises(RequestError, match='APP_TOOL_NOT_ALLOWED'):
-            await host.ext_method('mcp/apps/call', request(session_id, bindingId=binding,
-                interactionId='forbidden', name='model_only', arguments={}))
-        invalid = await host.ext_method('mcp/apps/call', request(session_id, bindingId=binding,
-            interactionId='bad-arguments', name='refresh_flights', arguments={'previous': 'not-an-integer'}))
+            await host.ext_method('mcp/apps/call', request(session_id, interactionId='forbidden', name='model_only', arguments={}))
+        invalid = await host.ext_method('mcp/apps/call', request(session_id, interactionId='bad-arguments', name='refresh_flights', arguments={'previous': 'not-an-integer'}))
         assert invalid['isError'] is True
         assert len(calls(record)) == 1
-        valid = request(session_id, bindingId=binding, interactionId='refresh-1', name='refresh_flights', arguments={'previous': 1})
+        valid = request(session_id, interactionId='refresh-1', name='refresh_flights', arguments={'previous': 1})
         await host.ext_method('mcp/apps/call', valid)
         with pytest.raises(RequestError, match='MCP_APP_INTERACTION_CONFLICT'):
             await host.ext_method('mcp/apps/call', {**valid, 'arguments': {'previous': 2}})
         mcp_loader._replace_server_catalog(backend)
-        with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
-            await host.ext_method('mcp/apps/resource', request(session_id, bindingId=binding, uri=snapshot['resourceUri']))
+        resource = await host.ext_method('mcp/apps/resource', request(session_id, uri=snapshot['resourceUri']))
+        assert resource['contents'][0]['uri'] == snapshot['resourceUri']
         assert len(calls(record)) == 2
 
 
 @pytest.mark.asyncio
 async def test_cancel_only_the_named_app_interaction_without_cancelling_conversation(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
-        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
+        await host.ext_method('mcp/apps/snapshot', request(session_id))
         entered = asyncio.Event()
         async def waiting(*args, **kwargs):
             entered.set()
             await asyncio.Event().wait()
         monkeypatch.setattr(mcp_loader, 'call_mcp_app_tool', waiting)
-        params = request(session_id, bindingId=snapshot['bindingId'], interactionId='wait-1',
+        params = request(session_id, interactionId='wait-1',
                          name='refresh_flights', arguments={'previous': 1})
         pending = asyncio.create_task(host.ext_method('mcp/apps/call', params))
         await asyncio.wait_for(entered.wait(), 2)
@@ -571,8 +706,8 @@ async def test_cancel_only_the_named_app_interaction_without_cancelling_conversa
 @pytest.mark.asyncio
 async def test_app_call_and_cancel_admitted_together_return_a_terminal_receipt(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, _, _, _, session_id, record):
-        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
-        params = request(session_id, bindingId=snapshot["bindingId"], interactionId="cancel-on-admission",
+        await host.ext_method("mcp/apps/snapshot", request(session_id))
+        params = request(session_id, interactionId="cancel-on-admission",
                          name="refresh_flights", arguments={"previous": 1})
         # Both requests are ready before the new interaction task first runs.
         call, cancel = await asyncio.gather(
@@ -583,9 +718,9 @@ async def test_app_call_and_cancel_admitted_together_return_a_terminal_receipt(t
         assert cancel == {"cancelled": True}
         assert isinstance(call, RequestError) and call.data == {"code": "MCP_APP_OUTCOME_UNKNOWN"}
         await host.load_session(str(tmp_path), session_id)
-        restored = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        await host.ext_method("mcp/apps/snapshot", request(session_id))
         with pytest.raises(RequestError, match="MCP_APP_OUTCOME_UNKNOWN"):
-            await host.ext_method("mcp/apps/call", {**params, "bindingId": restored["bindingId"]})
+            await host.ext_method("mcp/apps/call", params)
         assert [item["name"] for item in calls(record)] == ["list_flights"]
 
 
@@ -605,8 +740,8 @@ async def test_app_call_replies_when_cancelled_during_its_initial_checkpoint(tmp
         server = AgentSideConnection(host, StdioTransport(agent_reader, agent_writer))
         client = ClientSideConnection(conn, StdioTransport(client_reader, client_writer))
         try:
-            snapshot = await client.ext_method("mcp/apps/snapshot", request(session_id))
-            params = request(session_id, bindingId=snapshot["bindingId"], interactionId="cancel-at-start",
+            await client.ext_method("mcp/apps/snapshot", request(session_id))
+            params = request(session_id, interactionId="cancel-at-start",
                              name="refresh_flights", arguments={"previous": 1})
             entered = asyncio.Event()
             with ExitStack() as gate:
@@ -715,10 +850,9 @@ async def test_offline_agent_fixture_uses_real_acp_stdio_for_app_operations(tmp_
         snapshot = await rpc('_mcp/apps/snapshot', request(session_id))
         assert len(snapshot['result']['structuredContent']['flights']) == 125
         resource = await rpc('_mcp/apps/resource', request(session_id,
-            bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
+            uri=snapshot['resourceUri']))
         assert resource['contents'][0]['mimeType'] == 'text/html;profile=mcp-app'
-        refreshed = await rpc('_mcp/apps/call', request(session_id, bindingId=snapshot['bindingId'],
-            interactionId='wire-refresh', name='refresh_flights', arguments={'previous': 1}))
+        refreshed = await rpc('_mcp/apps/call', request(session_id, interactionId='wire-refresh', name='refresh_flights', arguments={'previous': 1}))
         assert refreshed['structuredContent']['revision'] == 2
         assert any(item.get('params', {}).get('update', {}).get('_meta', {}).get('mcpApp') for item in updates)
         assert [item['name'] for item in calls(state_dir / 'calls.jsonl')] == ['list_flights', 'refresh_flights']
@@ -736,13 +870,13 @@ async def test_offline_agent_fixture_uses_real_acp_stdio_for_app_operations(tmp_
 @pytest.mark.asyncio
 async def test_session_rebind_cancels_app_work_before_closing_its_log(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
-        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
+        await host.ext_method('mcp/apps/snapshot', request(session_id))
         entered = asyncio.Event()
         async def waiting(*args, **kwargs):
             entered.set()
             await asyncio.Event().wait()
         monkeypatch.setattr(mcp_loader, 'call_mcp_app_tool', waiting)
-        params = request(session_id, bindingId=snapshot['bindingId'], interactionId='rebind-wait',
+        params = request(session_id, interactionId='rebind-wait',
                          name='refresh_flights', arguments={'previous': 1})
         task = asyncio.create_task(host.ext_method('mcp/apps/call', params))
         await asyncio.wait_for(entered.wait(), 2)
@@ -758,7 +892,7 @@ async def test_session_rebind_cancels_app_work_before_closing_its_log(tmp_path, 
 @pytest.mark.asyncio
 async def test_rebind_revokes_old_state_before_waiting_for_app_cancellation(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
-        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
+        await host.ext_method('mcp/apps/snapshot', request(session_id))
         old_state = host._sessions[session_id]
         entered, cancelling, release_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
         dispatched = []
@@ -775,7 +909,7 @@ async def test_rebind_revokes_old_state_before_waiting_for_app_cancellation(tmp_
                 raise
 
         monkeypatch.setattr(mcp_loader, 'call_mcp_app_tool', waiting)
-        params = request(session_id, bindingId=snapshot['bindingId'], interactionId='closing-first',
+        params = request(session_id, interactionId='closing-first',
                          name='refresh_flights', arguments={'previous': 1})
         first = asyncio.create_task(host.ext_method('mcp/apps/call', params))
         await asyncio.wait_for(entered.wait(), 2)
@@ -795,9 +929,9 @@ async def test_rebind_revokes_old_state_before_waiting_for_app_cancellation(tmp_
         replacement = host._sessions[session_id]
         assert replacement is not old_state and not replacement._mcp_apps_closing
         monkeypatch.setattr(mcp_loader, 'call_mcp_app_tool', real_call)
-        refreshed_snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
+        await host.ext_method('mcp/apps/snapshot', request(session_id))
         result = await host.ext_method('mcp/apps/call', {**params,
-            'bindingId': refreshed_snapshot['bindingId'], 'interactionId': 'replacement-refresh'})
+            'interactionId': 'replacement-refresh'})
         assert result['structuredContent']['revision'] == 2
         assert [item['name'] for item in calls(record)] == ['list_flights', 'refresh_flights']
 
@@ -805,21 +939,20 @@ async def test_rebind_revokes_old_state_before_waiting_for_app_cancellation(tmp_
 @pytest.mark.asyncio
 async def test_app_reads_same_server_data_without_model_turns_or_tool_execution(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
-        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
-        binding = snapshot['bindingId']
+        await host.ext_method('mcp/apps/snapshot', request(session_id))
         count = len(llm.requests)
         data = await host.ext_method('mcp/apps/resource', request(session_id,
-            bindingId=binding, uri='flight://details/1'))
+            uri='flight://details/1'))
         assert data['contents'][0]['mimeType'] == 'application/json'
         assert json.loads(data['contents'][0]['text']) == {"flight": 1, "airline": "ANA"}
         ticket = await host.ext_method('mcp/apps/resource', request(session_id,
-            bindingId=binding, uri='flight://ticket/1'))
+            uri='flight://ticket/1'))
         assert ticket['contents'][0]['blob'] == 'Zml4dHVyZS10aWNrZXQ='
         assert len(llm.requests) == count
         assert len(calls(record)) == 1
-        with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
+        with pytest.raises(RequestError, match='MCP_APP_SNAPSHOT_UNAVAILABLE'):
             await host.ext_method('mcp/apps/resource', request(session_id,
-                bindingId='foreign-binding', uri='flight://details/1'))
+                toolCallId='foreign-call', uri='flight://details/1'))
 
 
 @pytest.mark.asyncio
@@ -838,8 +971,7 @@ async def test_app_context_persistence_endpoints_are_removed_and_old_ignorable_e
         assert 'old-app-selection' not in json.dumps([m.model_dump() for m in host._sessions[session_id].agent.messages])
         for method in ['mcp/apps/context', 'mcp/apps/contexts']:
             with pytest.raises(RequestError, match='MCP_APP_METHOD_UNSUPPORTED'):
-                await host.ext_method(method, request(session_id, bindingId=new['bindingId'],
-                    context={'structuredContent': {'new': 'must-not-save'}}))
+                await host.ext_method(method, request(session_id, context={'structuredContent': {'new': 'must-not-save'}}))
         events = host._sessions[session_id].agent.session_log.events
         assert len([event for event in events if event['type'] == 'mcp-app/model-context']) == 1
         assert 'must-not-save' not in json.dumps(events)
@@ -852,7 +984,7 @@ async def test_history_edit_preserves_app_interaction_receipts_after_reload(tmp_
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
         await host.prompt(session_id, [{'type': 'text', 'text': 'A later question'}], turn_id='later-turn')
-        params = request(session_id, bindingId=snapshot['bindingId'], interactionId='same-write',
+        params = request(session_id, interactionId='same-write',
                          name='refresh_flights', arguments={'previous': 1})
         if outcome == 'unknown':
             original_call = mcp_loader.call_mcp_app_tool
@@ -873,14 +1005,14 @@ async def test_history_edit_preserves_app_interaction_receipts_after_reload(tmp_
         log = host._sessions[session_id].agent.session_log
         assert not any(event['type'] == INTERACTION_EVENT for event in log._active_events())
         current = await host.ext_method('mcp/apps/snapshot', request(session_id))
-        assert current['bindingId'] == snapshot['bindingId']
+        assert current == snapshot
 
         # Verify both the live adapter and recovery from the persisted audit log.
         for reload in (False, True):
             if reload:
                 await host.load_session(str(tmp_path), session_id)
                 current = await host.ext_method('mcp/apps/snapshot', request(session_id))
-                params = {**params, 'bindingId': current['bindingId']}
+                assert current == snapshot
             if outcome == 'unknown':
                 with pytest.raises(RequestError, match='MCP_APP_OUTCOME_UNKNOWN'):
                     await host.ext_method('mcp/apps/call', params)
@@ -925,14 +1057,11 @@ async def test_saved_result_survives_restart_and_reauthorization_without_reexecu
             assert await replacement.connect(), replacement.last_error
             mcp_loader._replace_server_catalog(replacement)
             current = await host.ext_method("mcp/apps/snapshot", request(session_id))
-            assert current["bindingId"] != old["bindingId"]
+            assert current == old
             assert current["arguments"] == saved["arguments"]
             assert current["result"] == saved["result"]
-            with pytest.raises(RequestError, match="BINDING_EXPIRED"):
-                await host.ext_method("mcp/apps/resource", request(session_id,
-                    bindingId=old["bindingId"], uri=old["resourceUri"]))
             resource = await host.ext_method("mcp/apps/resource", request(session_id,
-                bindingId=current["bindingId"], uri=current["resourceUri"]))
+                uri=current["resourceUri"]))
             assert resource["contents"][0]["mimeType"] == "text/html;profile=mcp-app"
             assert [i["name"] for i in calls(record)] == ["list_flights"]
             log = host._sessions[session_id].agent.session_log
@@ -950,7 +1079,7 @@ async def test_history_loads_original_page_after_last_tool_is_removed(tmp_path, 
         backend.tools.clear()
         mcp_loader._replace_server_catalog(backend)
         snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
-        params = request(session_id, bindingId=snapshot["bindingId"], uri=snapshot["resourceUri"])
+        params = request(session_id, uri=snapshot["resourceUri"])
         if missing_page:
             async def missing(uri):
                 raise McpError(types.ErrorData(code=-32002, message="Resource not found"))
@@ -1013,56 +1142,38 @@ async def test_history_open_renews_changed_hosted_login_without_a_prompt(tmp_pat
             mcp_loader._replace_server_catalog(backend)
             return {"success": True}
         monkeypatch.setattr(mcp_loader, "reconnect_mcp_server", reconnect)
-        stale = request(session_id, bindingId=first["bindingId"], uri=first["resourceUri"])
+        stale = request(session_id, uri=first["resourceUri"])
         with pytest.raises(RequestError, match="APP_SERVER_CHANGED"):
             await host.ext_method("mcp/apps/resource", stale)
         assert not renewals
         current = await host.ext_method("mcp/apps/snapshot", request(session_id))
-        assert current["bindingId"] != first["bindingId"] and current["result"] == first["result"]
-        page = await host.ext_method("mcp/apps/resource", {**stale, "bindingId": current["bindingId"]})
+        assert current == first
+        page = await host.ext_method("mcp/apps/resource", stale)
         assert page["contents"][0]["uri"] == first["resourceUri"]
         assert renewals == [backend.name] and len(llm.requests) == 2 and len(calls(record)) == 1
 
 
 @pytest.mark.asyncio
-async def test_repeated_session_reload_never_revives_old_app_bindings(tmp_path, monkeypatch):
-    import box_agent.acp.mcp_apps as acp_apps
-
-    # Simulate address reuse deterministically, without depending on Python's allocator.
-    monkeypatch.setattr(acp_apps, 'id', lambda value: 1, raising=False)
+async def test_repeated_session_reload_preserves_resources_and_interaction_deduplication(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
-        expired = []
+        params = request(session_id, interactionId='same-write', name='refresh_flights', arguments={'previous': 1})
+        first = await host.ext_method('mcp/apps/call', params)
         for _ in range(3):
-            assert await host.ext_method('mcp/apps/snapshot', request(session_id)) == snapshot
-            expired.append(snapshot['bindingId'])
             await host.load_session(str(tmp_path), session_id)
-            snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
-            for binding in expired:
-                with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
-                    await host.ext_method('mcp/apps/resource', request(session_id,
-                        bindingId=binding, uri=snapshot['resourceUri']))
-                with pytest.raises(RequestError, match='MCP_APP_BINDING_EXPIRED'):
-                    await host.ext_method('mcp/apps/call', request(session_id,
-                        bindingId=binding, interactionId='stale-write', name='refresh_flights',
-                        arguments={'previous': 1}))
-            resource = await host.ext_method('mcp/apps/resource', request(session_id,
-                bindingId=snapshot['bindingId'], uri=snapshot['resourceUri']))
+            assert await host.ext_method('mcp/apps/snapshot', request(session_id)) == snapshot
+            resource = await host.ext_method('mcp/apps/resource', request(session_id, uri=snapshot['resourceUri']))
             assert resource['contents'][0]['mimeType'] == 'text/html;profile=mcp-app'
-            assert [item['name'] for item in calls(record)] == ['list_flights']
-        result = await host.ext_method('mcp/apps/call', request(session_id,
-            bindingId=snapshot['bindingId'], interactionId='current-write', name='refresh_flights',
-            arguments={'previous': 1}))
-        assert result['structuredContent']['revision'] == 2
-        assert [item['name'] for item in calls(record)] == ['list_flights', 'refresh_flights']
+            assert await host.ext_method('mcp/apps/call', params) == first
+            assert [item['name'] for item in calls(record)] == ['list_flights', 'refresh_flights']
+        assert len(llm.requests) == 2
 
 
 @pytest.mark.asyncio
-async def test_request_connector_context_preserves_session_and_existing_card_binding(tmp_path, monkeypatch):
+async def test_request_connector_context_preserves_session_and_existing_card(tmp_path, monkeypatch):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         original = await host.ext_method('mcp/apps/snapshot', request(session_id))
         state = host._sessions[session_id]
-        nonce = state._mcp_apps_nonce
         controls = (state.thinking_enabled, state.execution_profile)
         messages = deepcopy(state.agent.messages)
         monkeypatch.setattr(backend, 'connector_id', 'travel')
@@ -1076,16 +1187,15 @@ async def test_request_connector_context_preserves_session_and_existing_card_bin
             second = await host.ext_method('mcp/apps/snapshot', request(session_id, connectorContext=second_context))
             assert first == second == original
             resource = await host.ext_method('mcp/apps/resource', request(session_id,
-                connectorContext=second_context, bindingId=original['bindingId'], uri=original['resourceUri']))
+                connectorContext=second_context, uri=original['resourceUri']))
             assert resource['contents'][0]['uri'] == original['resourceUri']
         finally:
             state._prompt_in_progress = False
         result = await host.ext_method('mcp/apps/call', request(session_id,
-            connectorContext=context, bindingId=original['bindingId'], interactionId='context-refresh',
+            connectorContext=context, interactionId='context-refresh',
             name='refresh_flights', arguments={'previous': 1}))
         assert result['structuredContent']['revision'] == 2
         assert host._sessions[session_id] is state
-        assert state._mcp_apps_nonce == nonce
         assert (state.thinking_enabled, state.execution_profile) == controls
         assert state.selected_connector_ids == set()
         assert state.connector_statuses is None
@@ -1103,8 +1213,8 @@ async def test_request_connector_context_preserves_session_and_existing_card_bin
         ]:
             for method, fields in [
                 ('snapshot', {}),
-                ('resource', {'bindingId': original['bindingId'], 'uri': original['resourceUri']}),
-                ('call', {'bindingId': original['bindingId'], 'interactionId': 'denied',
+                ('resource', {'uri': original['resourceUri']}),
+                ('call', {'interactionId': 'denied',
                           'name': 'refresh_flights', 'arguments': {'previous': 1}}),
             ]:
                 with pytest.raises(RequestError, match='APP_CONNECTOR_DISABLED'):
@@ -1125,3 +1235,45 @@ async def test_malformed_app_connector_context_never_falls_back_to_session_grant
             with pytest.raises(RequestError, match='MCP_APP_INVALID_REQUEST'):
                 await host.ext_method('mcp/apps/snapshot', request(session_id, connectorContext=context))
         assert len(calls(record)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reconnect", [False, True], ids=["catalog-refresh", "new-connection"])
+async def test_open_app_uses_current_connection_without_reopening_or_reexecuting(tmp_path, monkeypatch, reconnect):
+    async with environment(tmp_path, monkeypatch) as (host, _, llm, backend, session_id, record):
+        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        assert "bindingId" not in snapshot
+        params = request(session_id, interactionId="before-reconnect", name="refresh_flights", arguments={"previous": 1})
+        first = await host.ext_method("mcp/apps/call", params)
+        replacement = None
+        replacement_log = tmp_path / "replacement-calls.jsonl"
+        try:
+            if reconnect:
+                await backend.disconnect()
+                replacement = mcp_loader.MCPServerConnection(backend.name, command=backend.command,
+                    args=backend.args, env={"MCP_APPS_FIXTURE_LOG": str(replacement_log)},
+                    headers={"Authorization": "Bearer refreshed-fixture"}, connect_timeout=10)
+                monkeypatch.setattr(mcp_loader, "_mcp_connections", [replacement])
+                mcp_loader._begin_mcp_connection(backend.name)
+                assert await replacement.connect(), replacement.last_error
+                mcp_loader._replace_server_catalog(replacement)
+            else:
+                mcp_loader._replace_server_catalog(backend)
+
+            # Keep the original card. No new snapshot request or business tool execution.
+            resource = await host.ext_method("mcp/apps/resource", request(session_id, uri=snapshot["resourceUri"]))
+            assert resource["contents"][0]["uri"] == snapshot["resourceUri"]
+            assert await host.ext_method("mcp/apps/call", params) == first
+            result = await host.ext_method("mcp/apps/call", {**params, "interactionId": "after-reconnect"})
+            assert result["structuredContent"]["revision"] == (1 if reconnect else 3)
+            assert await host.ext_method("mcp/apps/call", {**params, "interactionId": "after-reconnect"}) == result
+            if reconnect:
+                assert [item["name"] for item in calls(replacement_log)] == ["refresh_flights"]
+                assert [item["name"] for item in calls(record)] == ["list_flights", "refresh_flights"]
+            else:
+                assert [item["name"] for item in calls(record)] == ["list_flights", "refresh_flights", "refresh_flights"]
+            assert len(llm.requests) == 2
+            assert (await host.ext_method("mcp/apps/snapshot", request(session_id))) == snapshot
+        finally:
+            if replacement is not None:
+                await replacement.disconnect()

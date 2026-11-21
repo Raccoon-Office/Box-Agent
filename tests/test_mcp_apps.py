@@ -174,6 +174,10 @@ def test_app_workflow_guidance_preserves_server_descriptor(monkeypatch, legacy):
     )
     assert tool.description.startswith("Find flights\n\n")
     assert mcp_apps.MCP_APP_MODEL_GUIDANCE in tool.description
+    assert "invite the user to act in the card and hand off" in tool.description
+    assert "30-second" not in tool.description
+    assert "5 seconds apart" not in tool.description
+    assert "Actually wait between checks using an available tool" not in tool.description
     assert tool.mcp_descriptor == original
     assert tool.parameters == original["inputSchema"]
 
@@ -351,10 +355,20 @@ async def test_only_saved_ui_entry_survives_tool_retirement(app_connection):
     (-32602, f'Resource {URI} not found', None, True),
     (-32602, f'Unknown resource: {URI}', None, True),
     (-32602, 'Invalid arguments', None, False),
-    (-32602, 'Invalid arguments', {'uri': URI}, False),
-    (-32602, 'URI forbidden', {'uri': URI}, False),
+    (-32602, '未知卡片资源', {'uri': URI}, True),
+    (-32602, 'リソースが見つかりません', {'uri': URI}, True),
+    (-32602, 'Unknown UI resource', {'uri': URI}, True),
+    (-32602, '未知卡片资源', None, False),
+    (-32602, '未知卡片资源', {}, False),
+    (-32602, '未知卡片资源', {'uri': 'ui://other/page'}, False),
+    (-32602, '未知卡片资源', {'uri': None}, False),
+    (-32602, '未知卡片资源', {'uri': [URI]}, False),
+    (-32602, '未知卡片资源', [URI], False),
+    (-32602, '未知卡片资源', {'uri': URI, 'reason': 'invalid_uri'}, False),
+    (-32602, 'URI forbidden', {'uri': URI, 'reason': 'forbidden'}, False),
     (-32602, 'Invalid resource parameters: locale is required', {'uri': URI, 'parameter': 'locale'}, False),
     (-32603, 'Internal error', None, False),
+    (-32603, 'Internal error', {'uri': URI}, False),
     (-32000, 'Unauthorized', None, False),
 ])
 async def test_resource_not_found_classification_does_not_mask_other_errors(
