@@ -4998,6 +4998,65 @@ async def test_acp_completion_check_timeout_keeps_answer_and_reports_failure(tmp
 
 
 @pytest.mark.asyncio
+async def test_acp_completion_check_budget_failure_preserves_answer_without_restarting(tmp_path, monkeypatch):
+    from box_agent.turn_continuation import (
+        ContinuationJudgeBudgetExceeded,
+        TurnContinuationController,
+    )
+
+    answer = "分析结果：本期收入合计为100，已按原始数据完成核对。"
+    checked_answers = []
+
+    class AnswerLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            yield StreamEvent(type="text", delta=answer)
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+        async def generate(self, *args, **kwargs):
+            pytest.fail("An over-budget completion check must not call the model")
+
+    async def exceed_budget(self, **kwargs):
+        checked_answers.append(kwargs["messages"][-1].content)
+        raise ContinuationJudgeBudgetExceeded(estimated_tokens=2049, token_limit=2048)
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", exceed_budget)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn, llm = DummyConn(), AnswerLLM()
+    agent = BoxACPAgent(conn, config, llm, [EchoTool()], "system")
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
+
+    response = await agent.prompt(**acp_params(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "分析本期收入。"}],
+    )))
+
+    assert response.field_meta["ok"] is False
+    assert response.field_meta["errorCode"] == "TURN_COMPLETION_CHECK_INPUT_BUDGET_EXCEEDED"
+    assert response.field_meta["errorCategory"] == "incomplete"
+    assert response.field_meta["errorDetails"] == {
+        "source": "turn_continuation",
+        "reason": "input_budget_exceeded",
+        "estimatedInputTokens": 2049,
+        "inputTokenLimit": 2048,
+    }
+    assert checked_answers == [answer]
+    assert llm.calls == 1
+    messages = agent._sessions[session.sessionId].agent.messages
+    assert [message.content for message in messages if message.role == "assistant"] == [answer]
+    assert any(
+        getattr(getattr(update.update, "content", None), "text", None) == answer
+        for update in conn.updates
+    )
+
+
+@pytest.mark.asyncio
 async def test_acp_prompt_exposes_structured_unsupported_model_error(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),

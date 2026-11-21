@@ -191,6 +191,7 @@ from ..tools.browser_intent import BrowserToolIntentPolicy
 from ..tool_result_storage import ToolResultStorage
 from ..turn_continuation import (
     ContinuationJudgeFacts,
+    ContinuationJudgeBudgetExceeded,
     ContinuationJudgeTimeout,
     ContinuationLimitReached,
     TurnContinuationController,
@@ -1874,6 +1875,7 @@ async def _run_agent_loop_impl(
             request_usage_snapshot = capture_request_usage(
                 provider_request_messages, len(messages), tool_list, llm,
             )
+            continuation_history = tuple(provider_request_messages)
             llm_stream = llm.generate_stream(**stream_kwargs)
             async with aclosing(_stream_with_activity(
                 llm_stream,
@@ -2726,13 +2728,13 @@ async def _run_agent_loop_impl(
                 )
                 return
 
-            # assistant_msg was appended above; pass the live transcript so the
-            # judge can fork it without reconstructing or duplicating candidate
-            # text.  The judge request itself is kept out of this list.
+            # Check the effective request the model saw, not raw history that
+            # may retain removed legacy Skill text. Append the complete candidate
+            # once; the judge forks this view without mutating durable history.
             try:
                 continuation = await turn_continuation.evaluate(
                     llm=llm,
-                    messages=messages,
+                    messages=[*continuation_history, assistant_msg],
                     facts=ContinuationJudgeFacts(
                         user_request=continuation_user_request,
                         decision_tool_available=(
@@ -2749,11 +2751,12 @@ async def _run_agent_loop_impl(
                     turn_id=turn_id,
                     title=title,
                     timeout_seconds=effective_provider_stale_seconds,
+                    input_token_limit=token_limit,
                     should_interrupt=lambda: cancelled() or (
                         inject_queue is not None and not inject_queue.empty()
                     ),
                 )
-            except (ContinuationJudgeTimeout, ContinuationLimitReached) as exc:
+            except (ContinuationJudgeTimeout, ContinuationJudgeBudgetExceeded, ContinuationLimitReached) as exc:
                 if cancelled() or (inject_queue is not None and not inject_queue.empty()):
                     continuation = None
                 else:
@@ -2761,6 +2764,13 @@ async def _run_agent_loop_impl(
                         msg = "任务结束检查超时，暂时无法确认任务完成。已有输出已保留，请重试。"
                         code, category = "TURN_COMPLETION_CHECK_TIMEOUT", "timeout"
                         details = {"source": "turn_continuation", "timeoutSeconds": effective_provider_stale_seconds}
+                    elif isinstance(exc, ContinuationJudgeBudgetExceeded):
+                        msg = "任务结束检查输入超出当前模型预算，暂时无法确认任务完成。已有输出已保留，本次未触发自动续执行。"
+                        code, category = "TURN_COMPLETION_CHECK_INPUT_BUDGET_EXCEEDED", "incomplete"
+                        details = {
+                            "source": "turn_continuation", "reason": "input_budget_exceeded",
+                            "estimatedInputTokens": exc.estimated_tokens, "inputTokenLimit": exc.token_limit,
+                        }
                     else:
                         msg = "自动续执行预算已用尽，任务仍未完成。已有输出已保留，请继续任务。"
                         code, category = "TURN_COMPLETION_INCOMPLETE", "incomplete"

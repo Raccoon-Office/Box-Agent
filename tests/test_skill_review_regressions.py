@@ -20,7 +20,14 @@ from tests.test_skill_entry_boundaries import CapturingProvider, loader_at
 
 
 class SummaryProvider(CapturingProvider):
-    async def generate(self, *args, **kwargs):
+    def __init__(self):
+        super().__init__()
+        self.judge_requests = []
+
+    async def generate(self, messages, *args, **kwargs):
+        if kwargs.get('call_kind') == 'turn_continuation_judge':
+            self.judge_requests.append([message.model_copy(deep=True) for message in messages])
+            return LLMResponse(content='{"continue":false}', finish_reason='stop')
         return LLMResponse(content='<summary>Continue without the removed Skill.</summary>',
                            finish_reason='stop')
 
@@ -50,6 +57,11 @@ async def test_removed_legacy_skill_is_absent_before_budget_and_child_request(tm
         assert not [event.message for event in events if isinstance(event, ErrorEvent)]
     assert provider.requests
     assert body not in str(provider.requests)
+    assert body not in str(provider.judge_requests)
+    if not child_case:
+        assert len(provider.judge_requests) == 1
+        assert provider.judge_requests[0][0].content == provider.requests[-1][0].content
+        assert provider.judge_requests[0][-2].content == 'done'
     assert agent.messages[0].content == old_system
 
 
@@ -74,6 +86,11 @@ async def test_constructor_legacy_cleanup_preserves_host_rules_and_raw_history(t
     assert provider.requests
     sent = str(provider.requests)
     assert 'CONSTRUCTOR_LEGACY_BODY' not in sent
+    assert 'CONSTRUCTOR_LEGACY_BODY' not in str(provider.judge_requests)
+    if not child_case:
+        assert len(provider.judge_requests) == 1
+        assert provider.judge_requests[0][0].content == provider.requests[-1][0].content
+        assert provider.judge_requests[0][-2].content == 'done'
     assert 'Current Workspace' in sent
     if not child_case:
         assert 'Discoverable tools' in sent
