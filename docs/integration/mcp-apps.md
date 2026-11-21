@@ -41,9 +41,9 @@ Seko，或继续该指定任务的图片修改时使用 Seko；无关新任务�
 
 | 方法 | 参数 | 返回 |
 | --- | --- | --- |
-| `_mcp/apps/snapshot` | `{sessionId, toolCallId}` | `{version:1, bindingId, resourceUri, tool, arguments, result}` |
-| `_mcp/apps/resource` | `{sessionId, toolCallId, bindingId, uri}` | `ReadResourceResult`：`{contents:[...]}`；读取历史入口 UI 时另返回 `resolvedResourceUri` |
-| `_mcp/apps/call` | `{sessionId, toolCallId, bindingId, interactionId, name, arguments}` | 标准 `CallToolResult` |
+| `_mcp/apps/snapshot` | `{sessionId, toolCallId}` | `{version:1, resourceUri, tool, arguments, result}` |
+| `_mcp/apps/resource` | `{sessionId, toolCallId, uri}` | `ReadResourceResult`：`{contents:[...]}`；读取历史入口 UI 时另返回 `resolvedResourceUri` |
+| `_mcp/apps/call` | `{sessionId, toolCallId, interactionId, name, arguments}` | 标准 `CallToolResult` |
 | `_mcp/apps/cancel` | `{sessionId, interactionId}` | `{cancelled:boolean}` |
 
 快照中的 `tool` 保留原 descriptor，至少包含 `name`、`inputSchema`，可包含
@@ -59,9 +59,9 @@ Seko，或继续该指定任务的图片修改时使用 Seko；无关新任务�
 
 提供此字段时，仅本次请求中已选且原生状态为 `connected` 的 connector 可用；状态缺失、
 不可用或未连接时不回退到会话旧授权，格式错误直接拒绝。省略字段的旧宿主仍使用原会话选择。
-实际 MCP 连接、服务身份、工具可见性和 binding 校验继续执行。该上下文不写回
-`selected_connector_ids` / 模型状态，不触发 `session/resume`，不改变会话 nonce、思考配置
-或已有卡片绑定；正常会话恢复仍只在 Agent 会话不存在时执行。客户端与 Box-Agent 需配套升级。
+实际 MCP 连接、单次请求的连接一致性及工具可见性校验继续执行。该上下文不写回
+`selected_connector_ids` / 模型状态，不触发 `session/resume`，不改变思考配置或已有卡片；
+正常会话恢复仍只在 Agent 会话不存在时执行。客户端与 Box-Agent 需配套升级。
 
 ### 页面升级后的历史恢复
 
@@ -73,33 +73,49 @@ ACP 根据有效 Session Log 中的原调用定位当前已选服务。首次打
 原工具改名、下线或移除 UI 声明时，原页面仍可由当前 MCP 提供。
 
 只有 `resources/read` 明确返回资源不存在，才从同一工具的当前 descriptor 取得新 URI，
-重新检查 binding/历史后最多读取一次。兼容旧代码 `-32002`；`-32602` 必须包含明确的
-missing-resource 消息，仅匹配 `data.uri` 不能认定缺页。普通参数错误或 URI 禁止访问
-即使携带相同 `data.uri` 也不回退。参见
-[MCP Resources 错误约定](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#error-handling)。
+重新检查本次请求的连接和历史后最多读取一次。兼容旧代码 `-32002`；对 `-32602`，
+按官方 TypeScript SDK 的 `ResourceNotFoundError` 约定识别精确的 `data: {"uri": 请求 URI}`，
+不依赖错误消息的语言。URI 不匹配、缺失或附带其他字段时，不据此认定缺页；同时保留已有
+精确英文 missing-resource 消息的兼容。未匹配上述约定的参数错误或 URI 禁止访问不回退。
+参见 [MCP Resources 错误约定](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#error-handling)
+及 [SDK ResourceNotFoundError](https://ts.sdk.modelcontextprotocol.io/v2/api/index/@modelcontextprotocol/client/#resourcenotfounderror)。
 鉴权失败、传输 HTTP 404、超时、空内容、MIME/正文不合法和普通内部错误不触发回退。
 缺页返回 `APP_RESOURCE_NOT_FOUND`；可识别的 HTTP 401/403 返回 `APP_AUTH_REQUIRED`，
 超时返回 `MCP_APP_REQUEST_TIMEOUT`。服务端任意诊断文本不透传到宿主错误提示。
+
+资源读取失败时，stderr 日志输出 `MCP App resource read failed`，包含 session/tool call ID、
+服务和工具名称、资源 URI 的 SHA-256、是否入口 UI/回退读取、异常链的类型与栈位置，
+以及可用的 MCP 原始错误码、HTTP 状态码和响应结构校验错误类型。
+URI 只记录摘要，不记录路径、查询参数或片段；异常消息、响应正文、校验输入、
+凭证和栈中的源码/局部变量不写入诊断。成功和主动取消不产生失败日志，原有错误返回、
+页面回退与业务调用行为不变。这些日志用于区分协议错误、传输错误及响应解析错误。
 
 入口读取成功时，ACP 覆盖返回 `resolvedResourceUri` 为实际选定地址，不能由服务端正文
 伪造。Lab 使用它校验、加载 HTML 和其 CSP，并在视图内单独记录；历史快照地址不改写。
 AppBridge 仍回放原输入和完整结果，恢复不会重跑原业务工具或代确认。
 新页面解释旧数据的兼容性由 MCP 服务负责；宿主不猜版本号或迁移服务业务字段。
 
-`bindingId` 绑定运行时、会话实例、原调用、服务身份及连接代次。Lab 主进程保管它，
-不写入历史、不向第三方 iframe 暴露。每个会话实例使用独立随机 nonce，不依赖可复用的
-对象地址。会话重绑定、连接替换或服务目录重新发布后，客户端需要重新获取 binding。
-卡片按保存的服务名通过当前 MCP 连接读取原 URI，由服务检查本次请求的权限。
+卡片不再持有跨请求的连接 `bindingId`。每次资源读取或工具调用都由
+`sessionId` 和 `toolCallId` 定位有效历史中的原调用，再使用当前同名 MCP 连接。
+重连或工具目录重新发布后，已打开的卡片可以继续交互，无需重新读取快照或重建页面。
 历史授权签名、旧连接器 ID、HTTP origin 和 UI 命名空间均不参与匹配，HTML 不落盘。
-AppBridge 回放快照中的输入和完整结果。已打开的资源或工具请求遇到失效 binding 时结束，
-只有新的快照请求能够等待或续接当前连接。
-宿主更新或清除凭据后，旧连接的卡片访问立即拒绝。App 结果返回前再次校验 binding，
-已经发生的远端交互仍保存结果以便去重。
+AppBridge 回放快照中的输入和完整结果；恢复不会重跑原工具。
+
+单次请求仍固定其开始时解析的连接，执行前继续校验连接器授权、工具可见性和取消状态。
+宿主更新或清除凭据后，尚未被替换的旧连接仍拒绝访问；完成重连后的新请求使用新连接。
+连接在确认或执行期间变化时，不自动转移或重放该操作。
+工具调用回包前再次核对本次请求开始时的连接身份与目录代次；当前连接已被替换或目录
+重新发布时返回 `APP_BINDING_EXPIRED`。已完成的远端交互仍保留结果用于去重，
+后续使用当前连接的同一 `interactionId` 请求可读取完成回执，不重新执行业务工具。
+会话关闭、历史删除和客户端窗口/view 生命周期校验保持有效。
+
+协议变更：`snapshot` 响应以及 `resource` / `call` 请求移除 `bindingId`，
+客户端与 Box-Agent 必须配套升级；旧宿主要求该字段时无法直接使用新版响应。
 
 ## 执行与授权边界
 
 - 沿用 Box-Agent 已有 MCP 连接及认证，不由 renderer 新建连接或获取凭据。
-- App 调用限定原服务、当前连接代次及当前请求获准的 connector（未提供请求级状态时使用会话选择）。
+- App 调用限定原服务、单次请求解析的当前连接及当前请求获准的 connector（未提供请求级状态时使用会话选择）。
   `visibility` 必须包含 `app`；仅含 `app` 的工具不进入模型发现/调用目录。
 - App 调用使用会话配置的调用前 Hook 和现有 invocation guards。会话正在运行时使用
   当前能力门，暂停时读取已保存的能力门。Hook 拒绝返回 `MCP_APP_TOOL_DENIED`，
@@ -123,13 +139,8 @@ AppBridge 回放快照中的输入和完整结果。已打开的资源或工具�
 远端原始 descriptor、工具结果和 App 快照保持原样；App-only 工具仍不进入模型目录。
 
 模型结合实际返回结果区分最终结果、失败、等待用户交互、已提交执行中和状态不明：
-需要用户操作时，若有模型可见的只读状态查询和真实 ID，先以可见进度消息邀请用户
-操作，再给出从该提示开始的 30 秒交互窗口。通过现有可用工具实际等待后再核查，
-不能仅立即查询一次就结束；查询至少间隔 5 秒，服务要求更长间隔时遵循服务要求。
-窗口不因无变化或中间状态而重置；用户操作完成则继续，取得终态、用户取消或达到
-现有全局限制时提前结束等待。窗口到期，或缺少查询入口、真实 ID、允许的等待手段
-时才交接。这是模型提示策略，不是运行时保证的固定 30 秒计时器。
-不得代确认、开放 App-only 工具或另起重复确认。已提交执行中的任务也沿用现有 Agent
+需要用户操作时，邀请用户在卡片中完成操作并交接。
+不得代确认、开放 App-only 工具或另起重复确认。已提交执行中的任务沿用现有 Agent
 循环按需查询，遵守服务端查询间隔及全局步数、超时、取消和权限边界，
 没有新增轮询框架或每个 App 的固定查询次数保证，也不自动重提业务操作。
 普通交接只用简短操作引导说明卡片入口及下一步，不复述“尚未生成／未完成／待处理”、
