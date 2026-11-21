@@ -208,6 +208,20 @@ async def test_acp_reuses_validated_history_and_refreshes_crash_repair(
 
 
 @pytest.mark.asyncio
+async def test_acp_replays_unconfirmed_tool_outcome_without_running_it(tmp_path, host):
+    stored_session(tmp_path, pending_tool=True)
+    try:
+        await host.load_session(cwd=str(tmp_path), session_id="acp-v1-cmVzdG9yZQ")
+        unconfirmed = [payload.update for payload in host._conn.updates
+                       if (payload.update.field_meta or {}).get("toolOutcomeUnknown")]
+        assert len(unconfirmed) == 1
+        assert unconfirmed[0].tool_call_id == "call"
+        assert unconfirmed[0].status == "failed"
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["open", "repair"])
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_slow_restore_keeps_control_responsive_and_owns_lock_until_worker_finishes(

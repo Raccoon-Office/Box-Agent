@@ -52,8 +52,12 @@ class StdioTransport:
             if self._closed:
                 raise ConnectionError("Transport closed")
             try:
-                self._writer.write(frame)
-                await self._writer.drain()
+                transport = getattr(self._writer, "transport", None)
+                if isinstance(transport, _StdoutTransport):
+                    await transport.write_frame(frame)
+                else:
+                    self._writer.write(frame)
+                    await self._writer.drain()
             except Exception:
                 self._disconnect()
                 raise
@@ -82,7 +86,11 @@ class StdioTransport:
     async def close(self) -> None:
         self._closed = True
         async with self._send_lock:
-            await self._writer.drain()
+            transport = getattr(self._writer, "transport", None)
+            if isinstance(transport, _StdoutTransport):
+                await transport.drain_frame()
+            else:
+                await self._writer.drain()
 
 
 class _StdioStreamReader(asyncio.StreamReader):
@@ -154,6 +162,24 @@ class _StdoutTransport(asyncio.BaseTransport):
         # run_acp_server redirects sys.stdout to stderr after constructing us.
         # Keep protocol bytes on the original pipe, including on Windows.
         self._stdout = sys.stdout.buffer
+        self._frame: asyncio.Task[None] | None = None
+
+    async def write_frame(self, data: bytes) -> None:
+        # Windows pipe writes can block even with the asyncio send lock held.
+        # A cancelled sender must leave its frame ordered ahead of the next one.
+        await self.drain_frame()
+        self._frame = asyncio.create_task(asyncio.to_thread(self.write, data))
+        await self.drain_frame()
+
+    async def drain_frame(self) -> None:
+        frame = self._frame
+        if frame is None:
+            return
+        try:
+            await asyncio.shield(frame)
+        finally:
+            if frame.done():
+                self._frame = None
 
     def write(self, data: bytes) -> None:  # type: ignore[override]
         if self._is_closing:

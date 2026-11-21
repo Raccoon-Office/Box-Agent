@@ -224,6 +224,31 @@ JSON-RPC 错误 `code=-32010`、`data.code="SESSION_BUSY"`，
 首次创建尚无旧句柄时，错误中不包含 `data.sessionId`。服务端不会排队或自动重试；
 其他产品会话不受此限制。请求结束后可正常重建并恢复历史。
 
+`initialize._meta.session_replay.protocol_version=1` 表示支持按请求取消历史回放。
+宿主在 `session/load._meta.replayRequestId` 中传入该 JSON-RPC 请求的数字 ID。
+此回放的每条更新都带相同的 `_meta.replayRequestId`。超时后，宿主可调用
+`_cancel_session_replay`，传入 `{sessionId, requestId}` 并等待 `{settled: true}`。
+取消完成后，该会话可以通过相同 ID 的 `session/resume` 恢复上下文，再发送新消息。
+与旧版运行时通信时，宿主可等原请求的迟到响应或该进程退出，确认恢复占用已结束。
+
+Agent 将历史整理放到工作线程，并在整理和发送时检查取消。`session/replay` 记录
+`bound`、`history_ready`、`first_update_written`，对应绑定、整理和首条更新写出。
+
+`session/load` 和 `session/resume` 遇到会话写锁占用时，返回 `code=-32012`、
+`data.code="SESSION_BUSY"` 和 `data.resource="writer_lock"`。Windows 会保留
+`data.winerror`，共享冲突为 32，字节锁冲突为 33。会话存储访问或 I/O 失败返回
+`data.code="SESSION_STORAGE_UNAVAILABLE"`，并提供 `operation`（`open`、`restore`、
+`prompt` 或 `workspace`）和 `reason`（`access_denied` 或 `io_error`）。
+
+宿主可在同一聊天下用独立的 `desktop-recovery-<UUID>` 创建运行会话，并用
+`session_continuation` 传入可读的聊天文字。已在 `sessions` 中的会话继续使用原目录和写锁。
+新建的独立恢复会话使用 `recovered-sessions`。若 `operation` 是 `prompt`，本轮可能已执行部分操作，宿主应
+保留已收到的内容并等待用户发送新消息。
+原会话恢复时，已发出但缺失结果的工具操作会在历史更新中标注 `_meta.toolOutcomeUnknown`。
+
+辅助续执行检查超时会通过 `agent_progress` 回报 `TURN_COMPLETION_CHECK_SKIPPED`，
+保留已生成的回答并结束该检查。确定性的完成校验仍照常执行。
+
 宿主关闭 stdin 或终止服务时，ACP 先停止接收新的 `session/new` 和
 `session/prompt`，取消并等待在途会话创建/重绑完成回滚，再释放会话资源。
 关闭期间的新请求返回 `code=-32000`、`data.code="AGENT_CLOSING"`；
