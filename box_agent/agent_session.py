@@ -247,7 +247,8 @@ class AgentSession:
                 records = projection.skills
                 names = tuple(dict.fromkeys(row["name"] for row in records
                                             if isinstance(row, dict) and isinstance(row.get("name"), str)))
-                restore_validation = await skill_runtime.loader.avalidate_references(names, allow_stale=False)
+                if names:
+                    restore_validation = await skill_runtime.loader.avalidate_references(names, allow_stale=False)
             scope = (skill_runtime.reference_scope(restore_validation)
                      if restore_validation is not None else nullcontext())
             with scope:

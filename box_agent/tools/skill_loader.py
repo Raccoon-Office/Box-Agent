@@ -737,6 +737,9 @@ class SkillLoader:
             entry.containment_root = original.containment_root
             entry.bound_skill_names = original.bound_skill_names
             entry.bound_skill_paths = dict(original.bound_skill_paths)
+            # The new catalog can use the known paths for its pre-parse signature.
+            entry.manifest_names = original.manifest_names
+            entry.manifest_paths = original.manifest_paths
         loader.discover_skills()
         return loader
 
@@ -1126,7 +1129,12 @@ class SkillLoader:
             if error:
                 # 根目录本身被替换时不递归扫描外部目录，保留入口用于不可用诊断。
                 return [entry.directory / "SKILL.md"]
-        return list(entry.directory.rglob("SKILL.md"))
+        paths: list[Path] = []
+        try:
+            paths.extend(entry.directory.rglob("SKILL.md"))
+        except OSError as exc:
+            _warn(f"⚠️  Could not finish scanning skill source {entry.directory}: {exc}.")
+        return paths
 
     @staticmethod
     def _expert_path_state(path: Path, root: Path) -> Tuple[str, Optional[str]]:
@@ -1147,15 +1155,14 @@ class SkillLoader:
 
         entry.unavailable_skills.clear()
         manifest_path = entry.directory / MANIFEST_FILENAME
-        if not manifest_path.is_file():
-            entry.manifest_names = None
-            entry.manifest_paths = None
-            entry.manifest_loaded = True
-            return
-
         try:
+            if not manifest_path.is_file():
+                entry.manifest_names = None
+                entry.manifest_paths = None
+                entry.manifest_loaded = True
+                return
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             _warn(
                 f"⚠️  Failed to read builtin skills manifest at {manifest_path}: {exc}. "
                 f"Falling back to unfiltered discovery."
@@ -1280,10 +1287,7 @@ class SkillLoader:
         if not entry.directory.exists():
             return ()
 
-        candidates: list[Path] = []
-        manifest = entry.directory / MANIFEST_FILENAME
-        if manifest.is_file():
-            candidates.append(manifest)
+        candidates = [entry.directory / MANIFEST_FILENAME]
 
         if (
             entry.source == "builtin"

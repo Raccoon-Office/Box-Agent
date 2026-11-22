@@ -516,6 +516,32 @@ def test_builtin_manifest_reload_detects_listed_skill_change():
         assert loader.get_skill("kept").description == "new desc"
 
 
+def test_expert_catalog_uses_builtin_manifest_without_walking_resources(tmp_path, monkeypatch):
+    builtin = tmp_path / "builtin"
+    package = tmp_path / "package"
+    package.mkdir()
+    create_test_skill(package, "expert", "expert desc", "expert instructions")
+    for name in ("old", "new"):
+        directory = builtin / name
+        directory.mkdir(parents=True)
+        create_test_skill(directory, name, f"{name} desc", f"{name} instructions")
+    _write_manifest(builtin, ["old"])
+    loader = SkillLoader(sources=[(builtin, "builtin")])
+    loader.discover_skills()
+    _write_manifest(builtin, ["new"])
+    original = Path.rglob
+
+    def rglob(path, pattern, *args, **kwargs):
+        assert path != builtin, "the builtin manifest already provides skill paths"
+        return original(path, pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rglob", rglob)
+    scoped = loader.with_expert_skill_sources([], skill_directories=[package])
+
+    assert set(scoped.list_skills()) == {"expert", "new"}
+    assert set(loader.list_skills()) == {"old"}
+
+
 def test_user_source_reload_detects_new_skill_without_manifest():
     """User skills remain dynamically discoverable without a manifest."""
     with tempfile.TemporaryDirectory() as tmpdir:

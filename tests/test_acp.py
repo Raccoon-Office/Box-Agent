@@ -2313,6 +2313,83 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [None, "manifest-encoding", "manifest-stat", "expert-listing"])
+async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults(
+    tmp_path, monkeypatch, fault
+):
+    monkeypatch.setattr(acp_module, "state_path", lambda relative: tmp_path / "profile" / relative)
+    builtin = tmp_path / "builtin"
+    package = tmp_path / "package"
+    directory = package / "bound"
+    for path in (builtin / "ordinary", directory):
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text(
+            f"---\nname: {path.name}\ndescription: A test skill\n---\nInstructions\n",
+            encoding="utf-8",
+        )
+    manifest = builtin / "_manifest.json"
+    manifest.write_text(json.dumps({"skills": [{"name": "ordinary", "path": "ordinary/SKILL.md"}]}),
+                        encoding="utf-8")
+    loader = SkillLoader(sources=[(builtin, "builtin")])
+    loader.discover_skills()
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path), enable_memory=False),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system", skill_loader=loader)
+    expert = {
+        "id": "expert", "name": "Expert", "defaultSkills": ["bound"],
+        "skillBindings": [{"source": "BUNDLED", "key": "bound", "slug": "bound"}],
+        "packageSnapshot": {"directory": str(package), "skills": [
+            {"directory": str(directory), "key": "bound", "slug": "bound"},
+        ]},
+    }
+    try:
+        session = await agent.new_session(str(tmp_path), session_id="skill-source-fault", session_mode="general")
+        await agent.prompt(session.sessionId, [text_block("remember me")])
+        with monkeypatch.context() as resume_patch:
+            if fault == "manifest-encoding":
+                manifest.write_bytes(b"\xff")
+            elif fault == "manifest-stat":
+                original_is_file = Path.is_file
+
+                def is_file(path):
+                    if path == manifest:
+                        raise PermissionError("manifest metadata is unavailable")
+                    return original_is_file(path)
+
+                resume_patch.setattr(Path, "is_file", is_file)
+            elif fault == "expert-listing":
+                original_rglob = Path.rglob
+
+                def rglob(path, pattern, *args, **kwargs):
+                    if path == directory:
+                        raise PermissionError("expert directory listing is unavailable")
+                    return original_rglob(path, pattern, *args, **kwargs)
+
+                resume_patch.setattr(Path, "rglob", rglob)
+            else:
+                async def validate_references(_loader, names, **_options):
+                    pytest.fail(f"History did not reference skills, got a validation request for {names!r}")
+
+                resume_patch.setattr(SkillLoader, "avalidate_references", validate_references)
+
+            await agent.resume_session(str(tmp_path), session.sessionId, expert=expert, session_mode="general")
+            if fault is None:
+                resume_patch.undo()
+            state = agent._sessions[session.sessionId]
+            assert "remember me" in [msg.content for msg in state.agent.messages]
+            assert state.skill_loader.get_skill("bound").skill_path == directory / "SKILL.md"
+            assert state.skill_loader.get_skill("ordinary") is not None
+            reply = await agent.prompt(session.sessionId, [text_block("continue after recovery")])
+            assert reply.stopReason == "end_turn"
+            assert state.agent.messages[-1].content == "done"
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "damage", ["skill-fields", "skill-list", "todo-fields", "todo-list", "orphan"]
 )
