@@ -109,7 +109,8 @@ class StdioTransport:
                 try:
                     await transport.drain_frame()
                 finally:
-                    transport.close_timing_log()
+                    # Also retires the dedicated write thread on normal close.
+                    transport.close()
             else:
                 await self._writer.drain()
 

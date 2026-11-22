@@ -126,6 +126,25 @@ async def test_windows_stdout_writes_do_not_queue_behind_a_saturated_default_exe
 
 
 @pytest.mark.asyncio
+async def test_windows_stdout_normal_close_retires_the_write_thread(monkeypatch):
+    output = io.BytesIO()
+    monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    stdout_transport = stdio_compat._StdoutTransport()
+    transport = stdio_compat.StdioTransport(asyncio.StreamReader(), SimpleNamespace(transport=stdout_transport))
+    await transport.send({"id": 1})
+    workers = tuple(stdout_transport._executor._threads)
+    assert workers
+    # The SDK's Connection.close() reaches only StdioTransport.close().
+    await transport.close()
+    for worker in workers:
+        await asyncio.to_thread(worker.join, 2)
+        assert not worker.is_alive()
+    assert output.getvalue() == b'{"id":1}\n'
+    with pytest.raises(ConnectionError):
+        await stdout_transport.write_frame(b'{"id":2}\n')
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stall", ["executor", "write", "flush", "send_lock"])
 async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monkeypatch, tmp_path, stall):
     trace_id = "d1ec4f70-4800-4b8d-9687-105c2a0edeaa"
