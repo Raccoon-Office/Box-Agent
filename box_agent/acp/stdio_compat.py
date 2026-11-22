@@ -9,6 +9,7 @@ The SDK continues to own JSON-RPC routing, requests and response correlation.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import json
 import logging
@@ -107,8 +108,12 @@ class StdioTransport:
             if isinstance(transport, _StdoutTransport):
                 try:
                     await transport.drain_frame()
-                finally:
-                    transport.close_timing_log()
+                except BaseException:
+                    # The frame may still hold the pipe; never flush on the loop.
+                    transport.release()
+                    raise
+                # Drained: retire the dedicated write thread and flush.
+                transport.close()
             else:
                 await self._writer.drain()
 
@@ -239,6 +244,11 @@ class _StdoutTransport(asyncio.BaseTransport):
         # Keep protocol bytes on the original pipe, including on Windows.
         self._stdout = sys.stdout.buffer
         self._frame: asyncio.Task[None] | None = None
+        # Protocol writes must not queue behind tools or session I/O in the
+        # loop's shared default executor; a starved write times out the turn.
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="acp-stdout",
+        )
         self._trace_id = ""
         self._timing_log: _StdoutTimingLog | None = None
         timing_config = os.environ.get("BOX_AGENT_ACP_STDIO_TIMING")
@@ -271,12 +281,18 @@ class _StdoutTransport(asyncio.BaseTransport):
             self._timing = timing
             self._frame = asyncio.create_task(self._write_timed_frame(data, timing))
         else:
-            self._frame = asyncio.create_task(asyncio.to_thread(self.write, data))
+            self._frame = asyncio.create_task(self._run_write(data))
         await self.drain_frame()
+
+    async def _run_write(self, data: bytes, timing: _StdoutWriteTiming | None = None) -> None:
+        if self._is_closing:
+            raise ConnectionError("stdout closed")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._executor, self.write, data, timing)
 
     async def _write_timed_frame(self, data: bytes, timing: _StdoutWriteTiming) -> None:
         timing.submitted_ns = time.monotonic_ns()
-        await asyncio.to_thread(self.write, data, timing)
+        await self._run_write(data, timing)
 
     async def drain_frame(self) -> None:
         frame = self._frame
@@ -359,9 +375,15 @@ class _StdoutTransport(asyncio.BaseTransport):
         if self._timing_log is not None:
             self._timing_log.close()
 
-    def close(self) -> None:  # type: ignore[override]
+    def release(self) -> None:
+        """Stop accepting frames without touching the pipe; never blocks."""
         self._is_closing = True
         self.close_timing_log()
+        # Let an in-flight frame settle on its own thread.
+        self._executor.shutdown(wait=False)
+
+    def close(self) -> None:  # type: ignore[override]
+        self.release()
         with contextlib.suppress(Exception):
             self._stdout.flush()
 
