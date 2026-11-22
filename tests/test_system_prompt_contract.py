@@ -23,10 +23,11 @@ def test_system_prompt_keeps_the_stable_template_compact():
     assert prompt.count("{PLANNING_TOOLS}") == 1
 
 
-def test_system_prompt_renders_current_date_without_leaving_legacy_tokens():
+def test_system_prompt_refers_to_the_request_date_without_embedding_a_date():
     rendered = render_system_prompt_template(_prompt(), current_date="2026-08-26")
 
-    assert "2026-08-26" in rendered
+    assert "2026-08-26" not in rendered
+    assert "最近一条由运行时提供的 `<current_date>`" in rendered
     assert "{{.CurrentDate}}" not in rendered
     assert "{{.Language}}" not in rendered
 
