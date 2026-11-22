@@ -82,6 +82,27 @@ protocol for repository work.
 - Never put secrets, tokens, local config, user data, logs, `workspace/`
   contents, caches, or temporary analysis artifacts in a patch.
 
+### ACP Failure Isolation
+
+- Validate required fields at the narrowest boundary that owns the request.
+  Return a structured error for the affected operation. Accept compatible
+  legacy inputs, ignore unknown optional metadata, and omit or degrade an
+  unavailable optional capability when the core request can still proceed.
+  Enforce session identity, authorization, and durable-state integrity.
+- Preserve readable history and completed output on a session failure. Keep
+  unconfirmed side effects marked as unknown and retain write ownership until
+  the writer has stopped or a fenced recovery is safe.
+- Keep blocking pipe, filesystem, and diagnostics work off the shared event
+  loop. Bound sending, draining, cancellation, and shutdown while preserving
+  frame order and memory limits. Keep optional telemetry and diagnostics
+  best effort. Scope invalid or oversized frames to the request when the
+  stream can be safely resynchronized within a bounded budget. Treat failed
+  transport and unrecoverable framing as connection-wide faults.
+- For changes to shared validation, timeouts, or transport, verify over a
+  real ACP connection that one stalled or rejected request leaves a second
+  session able to reply in the same process. Cover genuine disconnects
+  separately.
+
 ### Verification Matrix
 
 Run focused checks first, then broaden only when the ownership or blast radius
