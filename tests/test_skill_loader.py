@@ -472,6 +472,19 @@ def test_builtin_manifest_availability_requires_platform_and_env_path(
     loader = SkillLoader(sources=[(builtin_dir, "builtin")])
     assert [skill.name for skill in loader.discover_skills()] == ["hosted"]
 
+    original_stat = Path.stat
+
+    def stat(path, *args, **kwargs):
+        if path == cli_home:
+            raise PermissionError("host runtime cannot be inspected")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    (builtin_dir / "_manifest.json").write_bytes(b"\xff")
+    assert loader.maybe_reload()
+    assert loader.get_skill("hosted") is None
+    assert [skill["name"] for skill in loader.unavailable_skills_metadata()] == ["hosted"]
+
 
 def test_builtin_manifest_reload_signature_ignores_resource_files():
     """Builtin reload checks should not stat every bundled resource file."""
@@ -540,6 +553,28 @@ def test_expert_catalog_uses_builtin_manifest_without_walking_resources(tmp_path
 
     assert set(scoped.list_skills()) == {"expert", "new"}
     assert set(loader.list_skills()) == {"old"}
+
+
+def test_bound_expert_skill_reloads_when_directory_listing_is_unavailable(tmp_path, monkeypatch):
+    directory = tmp_path / "bound"
+    directory.mkdir()
+    create_test_skill(directory, "bound", "original", "body")
+    original_rglob = Path.rglob
+
+    def rglob(path, *args, **kwargs):
+        if path == directory:
+            raise PermissionError("directory cannot be listed")
+        return original_rglob(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rglob", rglob)
+    loader = SkillLoader(sources=[])
+    scoped = loader.with_expert_skill_sources(["bound"], skill_directories=[directory])
+    assert scoped.get_skill("bound").description == "original"
+
+    create_test_skill(directory, "bound", "updated description", "updated body")
+
+    assert scoped.maybe_reload()
+    assert scoped.get_skill("bound").description == "updated description"
 
 
 def test_user_source_reload_detects_new_skill_without_manifest():
@@ -720,18 +755,52 @@ def test_missing_manifest_falls_back_to_unfiltered():
         assert loader.get_skill("any-skill") is not None
 
 
-def test_malformed_manifest_falls_back_to_unfiltered():
-    """Malformed manifest → warn + load everything (don't break startup)."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        builtin_dir = Path(tmpdir) / "builtin"
-        builtin_dir.mkdir()
+@pytest.mark.parametrize("content", [b"not json {", b"\xff", b'{"unrecognized": []}'])
+def test_malformed_manifest_without_cache_only_hides_builtins(tmp_path, content):
+    builtin = tmp_path / "builtin"
+    user = tmp_path / "user"
+    skill_dir = builtin / "on-demand"
+    skill_dir.mkdir(parents=True)
+    user.mkdir()
+    create_test_skill(skill_dir, "on-demand", "x", "x")
+    create_test_skill(user, "personal", "x", "x")
+    (builtin / "_manifest.json").write_bytes(content)
+    loader = SkillLoader(sources=[(user, "user"), (builtin, "builtin")])
 
-        sd = builtin_dir / "any-skill"
-        sd.mkdir()
-        create_test_skill(sd, "any-skill", "x", "x")
-        (builtin_dir / "_manifest.json").write_text("not json {", encoding="utf-8")
+    loader.discover_skills()
 
-        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+    assert loader.list_skills() == ["personal"]
+
+    _write_manifest(builtin, ["on-demand"])
+    assert loader.maybe_reload()
+    assert set(loader.list_skills()) == {"personal", "on-demand"}
+
+
+def test_builtin_manifest_loads_after_access_recovers_with_unchanged_metadata(tmp_path, monkeypatch):
+    builtin = tmp_path / "builtin"
+    directory = builtin / "kept"
+    directory.mkdir(parents=True)
+    create_test_skill(directory, "kept", "x", "x")
+    manifest = builtin / "_manifest.json"
+    _write_manifest(builtin, ["kept"])
+    original_read = Path.read_text
+    clock = [0.0]
+    monkeypatch.setattr("box_agent.tools.skill_loader.perf_counter", lambda: clock[0])
+
+    def read_text(path, *args, **kwargs):
+        if path == manifest:
+            raise PermissionError("manifest is temporarily locked")
+        return original_read(path, *args, **kwargs)
+
+    loader = SkillLoader(sources=[(builtin, "builtin")])
+    with monkeypatch.context() as locked:
+        locked.setattr(Path, "read_text", read_text)
         loader.discover_skills()
+        assert loader.get_skill("kept") is None
+        # The next scan records the signature of the restricted source.
+        loader.maybe_reload()
 
-        assert loader.get_skill("any-skill") is not None
+    assert not loader.maybe_reload()
+    clock[0] = 60.0
+    assert loader.maybe_reload()
+    assert loader.get_skill("kept") is not None

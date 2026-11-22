@@ -12,7 +12,6 @@ Supports:
 """
 
 import asyncio
-import copy
 import json
 import logging
 from collections.abc import Collection, Mapping
@@ -25,6 +24,7 @@ import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from stat import S_ISREG
 from time import perf_counter
 from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
@@ -56,6 +56,7 @@ SKILL_USAGE_GUIDANCE = (
 )
 
 MANIFEST_FILENAME = "_manifest.json"
+_MANIFEST_IO_RETRY_SECONDS = 5.0
 RESERVED_BUILTIN_SKILL_NAMES = frozenset({"roadmap"})
 _METADATA_PROMPT_BYTES = 12_000
 _METADATA_ENTRY_BYTES = 2_048
@@ -300,11 +301,13 @@ class _SourceEntry:
     last_mtime: float = 0.0
     signature: Tuple[Tuple[str, int, int], ...] = field(default_factory=tuple)
     # Optional whitelist of skill names. None means "no manifest, accept all".
-    # Empty set means "manifest present but lists zero skills" → load nothing.
+    # Empty set restricts the source to zero skills.
     manifest_names: Optional[Set[str]] = None
     # Optional manifest-listed SKILL.md paths. None means "scan with rglob".
     manifest_paths: Optional[Tuple[Path, ...]] = None
-    manifest_loaded: bool = False
+    # Last valid entries, kept so availability rules can still be evaluated during an I/O fault.
+    manifest_entries: tuple[object, ...] = ()
+    manifest_retry_at: float | None = None
     unavailable_skills: Dict[str, Dict[str, object]] = field(default_factory=dict)
     # 专家技能固定真实根目录，发现和刷新时都不能通过链接读取目录外正文。
     containment_root: Optional[Path] = None
@@ -700,7 +703,7 @@ class SkillLoader:
                     continue
                 candidate = entry.directory / name
                 skill_path = candidate / "SKILL.md"
-                if not skill_path.is_file():
+                if not self._is_skill_file(skill_path):
                     continue
                 skill = self.load_skill(skill_path, source="builtin")
                 if skill is not None and skill.name == name:
@@ -737,9 +740,10 @@ class SkillLoader:
             entry.containment_root = original.containment_root
             entry.bound_skill_names = original.bound_skill_names
             entry.bound_skill_paths = dict(original.bound_skill_paths)
-            # The new catalog can use the known paths for its pre-parse signature.
+            # Use known paths for the signature and keep the last valid manifest for recovery.
             entry.manifest_names = original.manifest_names
             entry.manifest_paths = original.manifest_paths
+            entry.manifest_entries = original.manifest_entries
         loader.discover_skills()
         return loader
 
@@ -968,7 +972,10 @@ class SkillLoader:
     def _discover_skills(self) -> List[Skill]:
         loaded: Dict[str, Skill] = {}
         all_skills: Dict[str, Skill] = {}
-        sources = copy.deepcopy(self._sources)
+        sources = [
+            replace(entry, bound_skill_paths=dict(entry.bound_skill_paths), unavailable_skills={})
+            for entry in self._sources
+        ]
         previous_by_path = {skill.skill_path: skill for skill in self._all_skills.values()}
         selected_bound_names: set[str] = set()
         orphan_count = 0
@@ -981,8 +988,7 @@ class SkillLoader:
         # Reverse order: load lower-priority sources first, then higher-priority
         # ones overwrite by dict assignment.
         for entry in reversed(sources):
-            entry.unavailable_skills.clear()
-            if not entry.directory.exists() and not entry.bound_skill_paths:
+            if not entry.bound_skill_paths and not self._source_exists(entry.directory):
                 entry.signature = ()
                 entry.last_mtime = 0
                 continue
@@ -1122,7 +1128,7 @@ class SkillLoader:
             and entry.manifest_names is not None
             and entry.manifest_paths is not None
         ):
-            return [path for path in entry.manifest_paths if path.is_file()]
+            return [path for path in entry.manifest_paths if self._is_skill_file(path)]
 
         if entry.containment_root is not None:
             _, error = self._expert_path_state(entry.directory, entry.containment_root)
@@ -1137,6 +1143,22 @@ class SkillLoader:
         return paths
 
     @staticmethod
+    def _is_skill_file(path: Path) -> bool:
+        try:
+            return path.is_file()
+        except OSError as exc:
+            _log.debug("Could not inspect Skill file %s: %s", path, exc)
+            return False
+
+    @staticmethod
+    def _source_exists(directory: Path) -> bool:
+        try:
+            return directory.exists()
+        except OSError as exc:
+            _log.debug("Could not inspect Skill source %s: %s", directory, exc)
+            return False
+
+    @staticmethod
     def _expert_path_state(path: Path, root: Path) -> Tuple[str, Optional[str]]:
         try:
             resolved = path.resolve()
@@ -1146,54 +1168,46 @@ class SkillLoader:
         return str(resolved), error
 
     def _load_manifest(self, entry: _SourceEntry) -> None:
-        """Populate ``entry.manifest_names`` from ``_manifest.json`` if present.
-
-        Missing manifest → ``manifest_names`` stays ``None`` (no filtering),
-        preserving backward compatibility with builtin skills directories that
-        pre-date the manifest (dev trees, third-party bundles, etc.).
-        """
-
-        entry.unavailable_skills.clear()
+        """Apply the current manifest or keep the last valid policy on failure."""
         manifest_path = entry.directory / MANIFEST_FILENAME
+        entry.manifest_retry_at = None
         try:
-            if not manifest_path.is_file():
-                entry.manifest_names = None
-                entry.manifest_paths = None
-                entry.manifest_loaded = True
-                return
+            try:
+                mode = manifest_path.stat().st_mode
+            except FileNotFoundError:
+                if entry.manifest_names is None and not manifest_path.is_symlink():
+                    # Legacy builtin directories support discovery without a manifest.
+                    return
+                raise
+            if not S_ISREG(mode):
+                raise ValueError("expected a regular file")
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raw_skills = data.get("skills") if isinstance(data, dict) else None
+            if not isinstance(raw_skills, list):
+                raise ValueError("missing 'skills' list")
+        except (OSError, ValueError, RecursionError) as exc:
+            if isinstance(exc, OSError):
+                # Read access can recover without changing the file signature.
+                entry.manifest_retry_at = perf_counter() + _MANIFEST_IO_RETRY_SECONDS
             _warn(
                 f"⚠️  Failed to read builtin skills manifest at {manifest_path}: {exc}. "
-                f"Falling back to unfiltered discovery."
+                "Using the last valid manifest if available."
             )
-            entry.manifest_names = None
-            entry.manifest_paths = None
-            entry.manifest_loaded = True
-            return
-
-        raw_skills = data.get("skills") if isinstance(data, dict) else None
-        if not isinstance(raw_skills, list):
-            _warn(
-                f"⚠️  Builtin skills manifest {manifest_path} is malformed "
-                f"(missing 'skills' list); falling back to unfiltered discovery."
-            )
-            entry.manifest_names = None
-            entry.manifest_paths = None
-            entry.manifest_loaded = True
-            return
+        else:
+            entry.manifest_entries = tuple(raw_skills)
 
         names: Set[str] = set()
         paths: list[Path] = []
         all_paths_known = True
-        for item in raw_skills:
+        for item in entry.manifest_entries:
             if isinstance(item, dict) and isinstance(item.get("name"), str):
                 unavailable_reason = self._manifest_item_unavailable_reason(item)
                 if unavailable_reason is not None:
                     raw_path = item.get("path")
+                    description = item.get("description")
                     entry.unavailable_skills[item["name"]] = {
                         "name": item["name"],
-                        "description": item.get("description", ""),
+                        "description": description if isinstance(description, str) else "",
                         "source": entry.source,
                         "path": str(entry.directory / raw_path)
                         if isinstance(raw_path, str) and raw_path.strip() else None,
@@ -1212,7 +1226,6 @@ class SkillLoader:
                 all_paths_known = False
         entry.manifest_names = names
         entry.manifest_paths = tuple(paths) if all_paths_known else None
-        entry.manifest_loaded = True
 
     @staticmethod
     def _manifest_item_is_available(item: dict[str, object]) -> bool:
@@ -1246,7 +1259,11 @@ class SkillLoader:
                 return "Invalid required environment paths in the builtin manifest."
             for name in required_env_paths:
                 value = os.environ.get(name, "").strip()
-                if not value or not Path(value).expanduser().exists():
+                try:
+                    available = bool(value) and Path(value).expanduser().exists()
+                except (OSError, RuntimeError):
+                    available = False
+                if not available:
                     return f"Required environment path {name!r} is not available."
 
         if platforms is None and required_env_paths is None:
@@ -1257,7 +1274,7 @@ class SkillLoader:
     def _stat_signature(path: Path, root: Path) -> tuple[str, int, int] | None:
         try:
             stat = path.stat()
-        except OSError:
+        except (OSError, ValueError):
             return None
         try:
             rel = str(path.relative_to(root))
@@ -1284,7 +1301,7 @@ class SkillLoader:
             self._record_time("source_scan", started)
 
     def _scan_source_signature(self, entry: _SourceEntry) -> Tuple[Tuple[str, int, int], ...]:
-        if not entry.directory.exists():
+        if not entry.bound_skill_paths and not self._source_exists(entry.directory):
             return ()
 
         candidates = [entry.directory / MANIFEST_FILENAME]
@@ -1298,8 +1315,9 @@ class SkillLoader:
         else:
             candidates.extend(self._iter_skill_files(entry))
 
+        candidates.extend(entry.bound_skill_paths)
         signatures = []
-        for path in candidates:
+        for path in dict.fromkeys(candidates):
             if entry.containment_root is not None:
                 resolved, error = self._expert_path_state(path, entry.containment_root)
                 # 目标身份也参与刷新，不能只依赖可能相同的文件大小和修改时间。
@@ -1361,7 +1379,9 @@ class SkillLoader:
         for entry in self._sources:
             current = self._source_signature(entry)
             scanned[(entry.directory, entry.source)] = current
-            if current != entry.signature:
+            if current != entry.signature or (
+                entry.manifest_retry_at is not None and perf_counter() >= entry.manifest_retry_at
+            ):
                 changed = True
 
         if changed:

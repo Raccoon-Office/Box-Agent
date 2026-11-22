@@ -319,6 +319,10 @@ Skill 的写保护也覆盖新位置。显式的 `tools.skills_dir`、宿主
 未设置 `BOX_AGENT_HOME` 时，显式相对 Skill 路径仍优先查找工作目录；
 未显式配置 `tools.skills_dir` 时，独立 runtime 默认使用随包 `skills/`。
 
+内置 Skill 清单损坏或暂时无法读取时，运行时沿用当前进程最近一次有效的清单。
+没有可用清单缓存时，受影响的内置来源暂时跳过，会话仍可使用其他来源。
+目录扫描或单个 Skill 文件访问失败时，会话仍可恢复历史、续聊并使用可读的 Skill。
+
 这里的 `config/` 是发行资源，不是用户状态目录。实际 `config.yaml`、认证、
 MCP 配置及会话状态仍使用原有用户目录或显式 `BOX_AGENT_HOME`；启用独立
 profile 后，不会从运行包回退读取认证或 MCP 配置。

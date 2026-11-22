@@ -2313,24 +2313,32 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", [None, "manifest-encoding", "manifest-stat", "expert-listing"])
+@pytest.mark.parametrize(
+    "fault",
+    [None, "manifest-encoding", "manifest-stat", "expert-listing", "listed-skill-stat", "source-root-stat"],
+)
 async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults(
     tmp_path, monkeypatch, fault
 ):
     monkeypatch.setattr(acp_module, "state_path", lambda relative: tmp_path / "profile" / relative)
     builtin = tmp_path / "builtin"
+    user_skills = tmp_path / "user"
     package = tmp_path / "package"
     directory = package / "bound"
-    for path in (builtin / "ordinary", directory):
+    for path in (
+        builtin / "ordinary", builtin / "optional", builtin / "on-demand", user_skills / "personal", directory
+    ):
         path.mkdir(parents=True)
         (path / "SKILL.md").write_text(
             f"---\nname: {path.name}\ndescription: A test skill\n---\nInstructions\n",
             encoding="utf-8",
         )
     manifest = builtin / "_manifest.json"
-    manifest.write_text(json.dumps({"skills": [{"name": "ordinary", "path": "ordinary/SKILL.md"}]}),
-                        encoding="utf-8")
-    loader = SkillLoader(sources=[(builtin, "builtin")])
+    manifest.write_text(
+        json.dumps({"skills": [{"name": name, "path": f"{name}/SKILL.md"} for name in ("ordinary", "optional")]}),
+        encoding="utf-8",
+    )
+    loader = SkillLoader(sources=[(user_skills, "user"), (builtin, "builtin")])
     loader.discover_skills()
     config = Config(
         llm=LLMConfig(api_key="test-key"),
@@ -2347,19 +2355,30 @@ async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults
     }
     try:
         session = await agent.new_session(str(tmp_path), session_id="skill-source-fault", session_mode="general")
+        other = await agent.new_session(str(tmp_path), session_id="other-session", session_mode="general")
         await agent.prompt(session.sessionId, [text_block("remember me")])
+        if fault is not None:
+            original = agent._sessions[session.sessionId].agent
+            for name in ("ordinary", "optional", "personal"):
+                original.activate_skill_instructions(name, loader.get_skill(name).to_prompt())
         with monkeypatch.context() as resume_patch:
+            metadata_faults = {
+                "manifest-stat": manifest,
+                "listed-skill-stat": builtin / "optional" / "SKILL.md",
+                "source-root-stat": user_skills,
+            }
             if fault == "manifest-encoding":
                 manifest.write_bytes(b"\xff")
-            elif fault == "manifest-stat":
-                original_is_file = Path.is_file
+            elif fault in metadata_faults:
+                original_stat = Path.stat
+                blocked_path = metadata_faults[fault]
 
-                def is_file(path):
-                    if path == manifest:
-                        raise PermissionError("manifest metadata is unavailable")
-                    return original_is_file(path)
+                def stat(path, *args, **kwargs):
+                    if path == blocked_path:
+                        raise PermissionError("skill metadata is unavailable")
+                    return original_stat(path, *args, **kwargs)
 
-                resume_patch.setattr(Path, "is_file", is_file)
+                resume_patch.setattr(Path, "stat", stat)
             elif fault == "expert-listing":
                 original_rglob = Path.rglob
 
@@ -2370,18 +2389,32 @@ async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults
 
                 resume_patch.setattr(Path, "rglob", rglob)
             else:
-                async def validate_references(_loader, names, **_options):
+                original_validate = SkillLoader.avalidate_references
+
+                async def validate_references(current_loader, names, **options):
+                    if current_loader is loader:
+                        return await original_validate(current_loader, names, **options)
                     pytest.fail(f"History did not reference skills, got a validation request for {names!r}")
 
                 resume_patch.setattr(SkillLoader, "avalidate_references", validate_references)
 
-            await agent.resume_session(str(tmp_path), session.sessionId, expert=expert, session_mode="general")
+            _, other_reply = await asyncio.gather(
+                agent.resume_session(str(tmp_path), session.sessionId, expert=expert, session_mode="general"),
+                agent.prompt(other.sessionId, [text_block("keep the other session responsive")]),
+            )
+            assert other_reply.stopReason == "end_turn"
             if fault is None:
                 resume_patch.undo()
             state = agent._sessions[session.sessionId]
             assert "remember me" in [msg.content for msg in state.agent.messages]
             assert state.skill_loader.get_skill("bound").skill_path == directory / "SKILL.md"
             assert state.skill_loader.get_skill("ordinary") is not None
+            assert state.skill_loader.get_skill("on-demand", include_disabled=True) is None
+            assert (state.skill_loader.get_skill("optional") is None) == (fault == "listed-skill-stat")
+            assert (state.skill_loader.get_skill("personal") is None) == (fault == "source-root-stat")
+            if fault is not None:
+                restored_names = set(state.agent.active_skill_diagnostics()["names"])
+                assert restored_names == {"ordinary", "optional", "personal"} & set(state.skill_loader.list_skills())
             reply = await agent.prompt(session.sessionId, [text_block("continue after recovery")])
             assert reply.stopReason == "end_turn"
             assert state.agent.messages[-1].content == "done"
