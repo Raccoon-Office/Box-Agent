@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
@@ -2052,6 +2053,48 @@ async def test_batch_files_keeps_permission_denial_fail_closed(tmp_path):
     assert result.raw_output["code"] == "BATCH_FILES_PREFETCH_FAILED"
     assert len(negotiator.requests) == 1
     llm.generate.assert_not_called()
+
+
+async def test_batch_child_cancelled_during_final_flush_can_be_reopened(tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    parent = SessionLog.create(root, session_id="parent", cwd=tmp_path)
+    (tmp_path / "one.md").write_text("fixture", encoding="utf-8")
+    llm = AsyncMock()
+    llm.generate.return_value = LLMResponse(content="child answer", finish_reason="stop")
+    tool = SubAgentTool(llm=llm, parent_tools={"read_file": ReadTool(workspace_dir=str(tmp_path))},
+                        workspace_dir=str(tmp_path))
+    tool.set_parent_session_log(parent)
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+    child_id = None
+    flush = SessionLog.flush
+
+    def hold_final(log):
+        nonlocal child_id
+        if log.header.get("parentSession") == "parent" and log.events[-1]["type"] == "turn/end":
+            child_id = log.header["id"]
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+        flush(log)
+
+    monkeypatch.setattr(SessionLog, "flush", hold_final)
+    execution = asyncio.create_task(tool.execute(task="Summarize", files=["one.md"]))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        execution.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        child = SessionLog.open(root, session_id=child_id, cwd=tmp_path)
+        try:
+            assert [e["data"]["reason"]["kind"] for e in child.events if e["type"] == "turn/end"] == ["completed"]
+            assert child.replay().messages[-1].content == "child answer"
+        finally:
+            child.close()
+    finally:
+        release.set()
+        await asyncio.gather(execution, return_exceptions=True)
+        parent.close()
 
 
 async def test_batch_files_prefetch_propagates_cancellation():

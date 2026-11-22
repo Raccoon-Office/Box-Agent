@@ -116,7 +116,7 @@ from .mcp_apps import (
     MCP_APP_MODEL_GUIDANCE,
     MCPAppsClientSession, McpAppError, UI_MIME_TYPE, bounded_json,
     bind_mcp_app_admission, check_mcp_app_dispatch,
-    capture_mcp_app_result, capture_raw_app_result, mcp_app_invocation,
+    acapture_mcp_app_result, capture_raw_app_result, mcp_app_invocation,
     mcp_app_result_is_host_only, mcp_apps_host_enabled, mcp_tool_allows,
     tool_visibility, ui_resource_uri,
 )
@@ -1343,7 +1343,7 @@ class MCPTool(Tool):
 
             host_only_result = mcp_app_result_is_host_only(self)
             try:
-                capture_mcp_app_result(self, result)
+                await acapture_mcp_app_result(self, result)
             except Exception as capture_error:
                 # The remote operation already ran. A failed optional UI handoff
                 # must not turn it into a retryable business failure.

@@ -50,7 +50,7 @@ from .kernel.ports import KernelServices
 from .injections import InjectionManager
 from .runtime import run_agent_loop
 from .schema import Message
-from .session_log import SessionLog, SessionLogReplayError
+from .session_log import SessionLog, SessionLogReplayError, run_session_write
 from .session_projection import SessionProjection
 from .tools.base import Tool, ToolResult, build_tool_name_index
 from .tools.local_tool_exposure import LocalToolExposurePolicy
@@ -375,8 +375,8 @@ class _GoalWriteTool(Tool):
         if action == "set":
             if not objective or not objective.strip():
                 return ToolResult(success=False, error="'objective' is required for set.")
-            goal = self._agent.set_goal(
-                objective,
+            goal = await run_session_write(
+                self._agent.session_log, self._agent.set_goal, objective,
                 evidence=evidence_items,
                 progress=progress_items,
                 blocked_reason=blocked_reason,
@@ -389,7 +389,7 @@ class _GoalWriteTool(Tool):
             )
 
         if action == "pause":
-            if self._agent.pause_goal() is None:
+            if await run_session_write(self._agent.session_log, self._agent.pause_goal) is None:
                 return ToolResult(success=False, error="No goal to pause.")
             return ToolResult(
                 success=True,
@@ -398,7 +398,7 @@ class _GoalWriteTool(Tool):
             )
 
         if action == "resume":
-            if self._agent.resume_goal() is None:
+            if await run_session_write(self._agent.session_log, self._agent.resume_goal) is None:
                 return ToolResult(success=False, error="No goal to resume.")
             return ToolResult(
                 success=True,
@@ -412,7 +412,8 @@ class _GoalWriteTool(Tool):
                     success=False,
                     error="'evidence' is required for complete. Include files, tests, logs, command output, or artifacts.",
                 )
-            if self._agent.complete_goal(
+            if await run_session_write(
+                self._agent.session_log, self._agent.complete_goal,
                 evidence=evidence_items,
                 progress=progress_items,
                 completed_by=completed_by or "model",
@@ -427,7 +428,8 @@ class _GoalWriteTool(Tool):
         if action == "progress":
             if not progress_items:
                 return ToolResult(success=False, error="'progress' is required for progress.")
-            if self._agent.update_goal_progress(progress_items, evidence=evidence_items) is None:
+            if await run_session_write(self._agent.session_log, self._agent.update_goal_progress,
+                                       progress_items, evidence=evidence_items) is None:
                 return ToolResult(success=False, error="No goal to update.")
             return ToolResult(
                 success=True,
@@ -439,7 +441,8 @@ class _GoalWriteTool(Tool):
             reason = (blocked_reason or "").strip()
             if not reason:
                 return ToolResult(success=False, error="'blocked_reason' is required for block.")
-            if self._agent.block_goal(reason, evidence=evidence_items, progress=progress_items) is None:
+            if await run_session_write(self._agent.session_log, self._agent.block_goal, reason,
+                                       evidence=evidence_items, progress=progress_items) is None:
                 return ToolResult(success=False, error="No goal to block.")
             return ToolResult(
                 success=True,
@@ -448,7 +451,7 @@ class _GoalWriteTool(Tool):
             )
 
         if action == "clear":
-            self._agent.clear_goal()
+            await run_session_write(self._agent.session_log, self._agent.clear_goal)
             return ToolResult(
                 success=True,
                 content="Cleared the current goal.",
@@ -980,9 +983,11 @@ class Agent:
         image_context_eligible = image_context_eligible and eligible
         validation = await self.skill_runtime.avalidate_references(self.skill_runtime.selected_names)
         with self.skill_runtime.reference_scope(validation):
-            self.add_user_message(content, image_content=image_content, image_source=image_source,
-                                  image_context_eligible=image_context_eligible,
-                                  host_connector_status=host_connector_status, input_facts=input_facts)
+            await run_session_write(
+                self.session_log, self.add_user_message, content, image_content=image_content,
+                image_source=image_source, image_context_eligible=image_context_eligible,
+                host_connector_status=host_connector_status, input_facts=input_facts,
+            )
 
     async def _prepare_input_attachments(self, record, images):
         from .input_preparation import resource_image_paths
@@ -1328,7 +1333,7 @@ class Agent:
         calling the low-level core loop.
         """
         if self._skill_persistence_pending:
-            self._persist_active_skills()
+            await run_session_write(self.session_log, self._persist_active_skills)
         if self._pending_skill_restore:
             pending = self._pending_skill_restore
             await self.skill_runtime.arestore_records(pending)
@@ -1386,7 +1391,7 @@ class Agent:
 
         self._restore_session_surface_after_replay_failure()
 
-        session_turn: int | None = None
+        session_turn = self._next_session_turn() if self.session_log is not None else None
         session_step: int | None = None
         session_turn_open = False
         session_step_open = False
@@ -1405,15 +1410,6 @@ class Agent:
                         "Historical tool results remain conversation facts; do not replay completed calls.",
             ))
             self._pending_tool_restore_notice = False
-        if self.session_log is not None:
-            session_turn = self._next_session_turn()
-            self.session_log.append(
-                "turn/start",
-                {"turn": session_turn},
-            )
-            session_turn_open = True
-            self._persist_unlogged_messages(turn=session_turn, step=None)
-
         if (
             effective_options.artifact_root_dir is not None
             and not self._deprecated_artifact_root_warned
@@ -1505,8 +1501,86 @@ class Agent:
         )
         if own_injections is not None:
             own_injections.begin_run()
+        def record_session_event(event: AgentEvent) -> None:
+            nonlocal session_step, session_step_open, session_turn_open
+            if isinstance(event, (ContentEvent, ThinkingEvent)):
+                self.session_log.append(
+                    "assistant/chunk",
+                    {
+                        "turn": session_turn,
+                        "step": session_step,
+                        "kind": (
+                            "thinking"
+                            if isinstance(event, ThinkingEvent)
+                            else "text"
+                        ),
+                        "content": event.content,
+                    },
+                )
+            elif isinstance(event, StepStart):
+                session_step = event.step
+                self._persist_unlogged_messages(
+                    turn=session_turn,
+                    step=session_step,
+                )
+                self.session_log.append(
+                    "step/start",
+                    {"turn": session_turn, "step": session_step},
+                )
+                session_step_open = True
+            elif isinstance(event, StepEnd):
+                self._persist_unlogged_messages(
+                    turn=session_turn,
+                    step=event.step,
+                )
+                if session_step_open:
+                    self.session_log.append(
+                        "step/end",
+                        {"turn": session_turn, "step": event.step},
+                    )
+                    self.session_log.flush()
+                    session_step_open = False
+            elif isinstance(event, DoneEvent):
+                if event.stop_reason is StopReason.END_TURN:
+                    acknowledge = getattr(
+                        self.skill_runtime,
+                        "acknowledge_pending_materialized",
+                        None,
+                    )
+                    if callable(acknowledge):
+                        acknowledge()
+                    if self.session_log is not None:
+                        self._persist_active_skills()
+                self._persist_unlogged_messages(
+                    turn=session_turn,
+                    step=session_step,
+                )
+                if session_step_open:
+                    self.session_log.append(
+                        "step/end",
+                        {"turn": session_turn, "step": session_step},
+                    )
+                    session_step_open = False
+                self.session_log.append(
+                    "turn/end",
+                    {
+                        "turn": session_turn,
+                        "reason": self._session_turn_reason(event.stop_reason),
+                    },
+                )
+                self.session_log.flush()
+                session_turn_open = False
+
         events = run_agent_loop(**run_arguments)
         try:
+            if session_turn is not None:
+                def start_turn():
+                    nonlocal session_turn_open
+                    self.session_log.append("turn/start", {"turn": session_turn})
+                    session_turn_open = True
+                    self._persist_unlogged_messages(turn=session_turn, step=None)
+
+                await run_session_write(self.session_log, start_turn)
             async for event in events:
                 # LLMOutputEvent is emitted only after the kernel has flushed
                 # request/context and invoked the projection commit callback.
@@ -1521,75 +1595,11 @@ class Agent:
                         None,
                     )
                     if callable(acknowledge):
-                        acknowledge()
-                if self.session_log is not None and session_turn is not None:
-                    if isinstance(event, (ContentEvent, ThinkingEvent)):
-                        self.session_log.append(
-                            "assistant/chunk",
-                            {
-                                "turn": session_turn,
-                                "step": session_step,
-                                "kind": (
-                                    "thinking"
-                                    if isinstance(event, ThinkingEvent)
-                                    else "text"
-                                ),
-                                "content": event.content,
-                            },
-                        )
-                    elif isinstance(event, StepStart):
-                        session_step = event.step
-                        self._persist_unlogged_messages(
-                            turn=session_turn,
-                            step=session_step,
-                        )
-                        self.session_log.append(
-                            "step/start",
-                            {"turn": session_turn, "step": session_step},
-                        )
-                        session_step_open = True
-                    elif isinstance(event, StepEnd):
-                        self._persist_unlogged_messages(
-                            turn=session_turn,
-                            step=event.step,
-                        )
-                        if session_step_open:
-                            self.session_log.append(
-                                "step/end",
-                                {"turn": session_turn, "step": event.step},
-                            )
-                            self.session_log.flush()
-                            session_step_open = False
-                    elif isinstance(event, DoneEvent):
-                        if event.stop_reason is StopReason.END_TURN:
-                            acknowledge = getattr(
-                                self.skill_runtime,
-                                "acknowledge_pending_materialized",
-                                None,
-                            )
-                            if callable(acknowledge):
-                                acknowledge()
-                            if self.session_log is not None:
-                                self._persist_active_skills()
-                        self._persist_unlogged_messages(
-                            turn=session_turn,
-                            step=session_step,
-                        )
-                        if session_step_open:
-                            self.session_log.append(
-                                "step/end",
-                                {"turn": session_turn, "step": session_step},
-                            )
-                            session_step_open = False
-                        self.session_log.append(
-                            "turn/end",
-                            {
-                                "turn": session_turn,
-                                "reason": self._session_turn_reason(event.stop_reason),
-                            },
-                        )
-                        self.session_log.flush()
-                        session_turn_open = False
+                        await run_session_write(self.session_log, acknowledge)
+                if self.session_log is not None and session_turn is not None and isinstance(
+                    event, (ContentEvent, ThinkingEvent, StepStart, StepEnd, DoneEvent),
+                ):
+                    await run_session_write(self.session_log, record_session_event, event)
 
                 # Track token usage on Agent instance for backward compat
                 if isinstance(event, TokenUsageEvent):
@@ -1635,20 +1645,23 @@ class Agent:
                     and session_turn_open
                     and not self.session_log.failed
                 ):
-                    self._persist_unlogged_messages(
-                        turn=session_turn,
-                        step=session_step,
-                    )
-                    if session_step_open:
-                        self.session_log.append(
-                            "step/end",
-                            {"turn": session_turn, "step": session_step},
+                    def record_interruption():
+                        self._persist_unlogged_messages(
+                            turn=session_turn,
+                            step=session_step,
                         )
-                    self.session_log.append(
-                        "turn/end",
-                        {"turn": session_turn, "reason": {"kind": "interrupted"}},
-                    )
-                    self.session_log.flush()
+                        if session_step_open:
+                            self.session_log.append(
+                                "step/end",
+                                {"turn": session_turn, "step": session_step},
+                            )
+                        self.session_log.append(
+                            "turn/end",
+                            {"turn": session_turn, "reason": {"kind": "interrupted"}},
+                        )
+                        self.session_log.flush()
+
+                    await run_session_write(self.session_log, record_interruption)
 
     # ── Backward-compatible run() ───────────────────────────
 

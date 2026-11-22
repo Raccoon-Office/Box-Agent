@@ -9,6 +9,7 @@ from contextlib import nullcontext
 import inspect
 from typing import Any, Callable, Dict, List, Mapping, MutableSet, Optional, Tuple
 
+from ..session_log import run_session_write
 from ..execution_profile import is_skill_blocked
 from ..skill_dependencies import SkillDependencyError
 from .base import Tool, ToolResult, ToolInvocationContext
@@ -176,7 +177,9 @@ class GetSkillTool(Tool):
         # projection. Worker validation never records observations/delivery.
         scope = runtime.reference_scope(validation) if hasattr(runtime, "reference_scope") else nullcontext()
         with scope:
-            result = (reader or runtime.read)(name, **arguments)
+            result = await run_session_write(
+                getattr(runtime, "session_log", None), reader or runtime.read, name, **arguments,
+            )
         return await result if inspect.isawaitable(result) else result
 
     async def _invoke_validated(self, arguments: dict[str, Any], *,
@@ -189,7 +192,9 @@ class GetSkillTool(Tool):
                 return ToolResult(success=False, error="Skill deferral requires an active recovery checkpoint.")
             if any(key in arguments for key in ("offset", "limit", "revision")):
                 return ToolResult(success=False, error="Do not combine Skill deferral with reading arguments.")
-            return gate.defer(arguments["skill_name"], arguments["not_needed_reason"])
+            return await run_session_write(
+                gate.context.session_log, gate.defer, arguments["skill_name"], arguments["not_needed_reason"],
+            )
         return await self._aread(**arguments, reader=context.skill_reader if context is not None else None)
 
 

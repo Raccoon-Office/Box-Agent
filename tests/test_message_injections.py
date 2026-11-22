@@ -1,5 +1,7 @@
 """Message and host-event contracts for typed runtime injections."""
 
+import asyncio
+import threading
 from dataclasses import asdict
 
 import pytest
@@ -9,6 +11,43 @@ from box_agent.injections import (
     parse_queued_injection,
 )
 from box_agent.schema import Message
+from box_agent.session_log import SessionLog
+
+
+@pytest.mark.asyncio
+async def test_cancelling_during_a_supplement_commit_keeps_its_durable_receipt(tmp_path):
+    queue = InjectionManager()
+    queue.submit({"id": "supplement", "content": "one more detail"})
+    messages = []
+    log = SessionLog.create(tmp_path, session_id="supplements", cwd=tmp_path)
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def commit():
+        log.append_unlogged_messages(messages, turn=1, step=1)
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+        log.flush()
+
+    applying = asyncio.create_task(queue.aapply_next(messages, commit=commit, session_log=log))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert not queue.cancel("supplement")
+        applying.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await applying
+        assert queue.status("supplement") is InjectionStatus.INJECTED
+        assert len(messages) == 1
+    finally:
+        release.set()
+        await asyncio.gather(applying, return_exceptions=True)
+        log.close()
+    reopened = SessionLog.open(tmp_path, session_id="supplements", cwd=tmp_path)
+    try:
+        assert [m.content for m in reopened.replay().messages] == [messages[0].content]
+    finally:
+        reopened.close()
 
 
 @pytest.mark.parametrize("kind", list(InjectionKind))

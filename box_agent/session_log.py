@@ -13,10 +13,13 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, TypeVar
 from uuid import uuid4
 
 from .schema import Message
@@ -26,18 +29,28 @@ from .windows_session_lock import WINDOWS_LOCK_CONTENTION, WindowsSessionLock
 
 
 _log = logging.getLogger(__name__)
+_session_io_pool = ThreadPoolExecutor(thread_name_prefix="session-io")
+_T = TypeVar("_T")
 
 
-async def run_session_io(operation: Callable[[], Any]) -> Any:
+async def run_session_io(operation: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
     """Settle file work before cancellation can release its session ownership."""
-    worker = asyncio.create_task(asyncio.to_thread(operation))
+    # Windows stdout uses the loop's default executor. Slow disk work must not
+    # consume the threads needed to deliver a different session's notifications.
+    worker = asyncio.get_running_loop().run_in_executor(
+        _session_io_pool, copy_context().run, partial(operation, *args, **kwargs),
+    )
     cancellation: asyncio.CancelledError | None = None
     while True:
         try:
             result = await asyncio.shield(worker)
             break
         except asyncio.CancelledError as error:
-            if worker.cancelled():
+            if worker.done():
+                # A replay callback can itself raise CancelledError. An executor
+                # Future records that as an exception rather than a cancellation.
+                if not worker.cancelled():
+                    worker.exception()
                 raise
             cancellation = error
         except BaseException:
@@ -47,6 +60,15 @@ async def run_session_io(operation: Callable[[], Any]) -> Any:
     if cancellation is not None:
         raise cancellation
     return result
+
+
+async def run_session_write(store: object, operation: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+    """Run file work in order for this log and wait for its durability barrier."""
+    if not isinstance(store, SessionLog):
+        # Custom synchronous stores keep their original calling convention.
+        return operation(*args, **kwargs)
+    async with store._write_lock:
+        return await run_session_io(operation, *args, **kwargs)
 
 
 def _timed_fsync(fd: int) -> None:
@@ -342,9 +364,11 @@ class SessionLog:
         self.path = path
         self.header = dict(header)
         self._events = events
+        self._durable_event_count = len(events)
         self._surface: list[tuple[int, Message]] = []
         self._surface_cursor: int | None = None if events else 0
         self._handle = handle
+        self._write_lock = asyncio.Lock()
         self._lock_handle = lock_handle
         self._closed = False
         self._failed = False
@@ -400,9 +424,11 @@ class SessionLog:
                      if event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id), None)
 
     def has_committed_input(self, input_id: str) -> bool:
+        # A retry may arrive on the ACP loop while the writer is inside fsync.
+        # Only the successfully flushed prefix can acknowledge the earlier input.
         return any(event["type"] == "user/message" and
                    (event["data"].get("input_facts") or {}).get("id") == input_id
-                   for event in self._active_events())
+                   for event in self._active_events(through_seq=self._durable_event_count - 1))
 
     def has_turn_binding(self, turn_id: str) -> bool:
         """Check request idempotency without copying unrelated history."""
@@ -778,12 +804,14 @@ class SessionLog:
     def flush(self) -> None:
         if self._closed:
             raise RuntimeError("session log is closed")
+        event_count = len(self._events)
         try:
             self._handle.flush()
             _timed_fsync(self._handle.fileno())
         except OSError as exc:
             self._failed = True
             raise SessionLogDurabilityError("session log flush failed") from exc
+        self._durable_event_count = event_count
 
     def _message_metadata(self, message: Message) -> dict[str, Any]:
         if self._closed:

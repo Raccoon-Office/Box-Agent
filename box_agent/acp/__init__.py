@@ -200,7 +200,7 @@ from box_agent.session_trace import (
 )
 from box_agent.session_log import (
     SessionLog, SessionLogCorrupted, SessionLogDurabilityError, SessionLogInUseError,
-    SessionLogReplayError, SessionLogWorkspaceMismatch, TOOL_OUTCOME_UNKNOWN, run_session_io,
+    SessionLogReplayError, SessionLogWorkspaceMismatch, TOOL_OUTCOME_UNKNOWN, run_session_io, run_session_write,
 )
 from box_agent.windows_session_lock import ERROR_ACCESS_DENIED
 from box_agent.api.input import UserInput
@@ -1443,7 +1443,7 @@ class BoxACPAgent:
                 errors.append(error)
             if state._closed:
                 if state.agent.session_log is not None:
-                    state.agent.session_log.close()
+                    await run_session_write(state.agent.session_log, state.agent.session_log.close)
                 self._sessions.pop(handle, None)
         if self._mcp_finalize_task is not None:
             self._mcp_finalize_task.cancel()
@@ -2342,7 +2342,7 @@ class BoxACPAgent:
                 await existing_state.aclose()
                 if existing_log is not None:
                     try:
-                        existing_log.close()
+                        await run_session_write(existing_log, existing_log.close)
                     except OSError as error:
                         log.warn("session/log_close_failed", session_id=existing_handle,
                                  error_type=type(error).__name__)
@@ -2392,15 +2392,15 @@ class BoxACPAgent:
                     await SkillRuntime(restore_loader, allow_partial_restore=True).arestore_records(session_projection.skills)
                     session_log_restored = session_projection.has_messages
                     try:
-                        session_projection = await run_session_io(
-                            lambda: session_log.prepare_resume_projection(session_projection)
+                        session_projection = await run_session_write(
+                            session_log, session_log.prepare_resume_projection, session_projection,
                         )
                     except OSError as exc:
                         raise _session_storage_error(exc, "restore") from exc
             except BaseException as error:
                 if session_log is not None:
                     try:
-                        session_log.close()
+                        await run_session_write(session_log, session_log.close)
                     except OSError as cleanup_error:
                         from box_agent.session_assembly import attach_cleanup_error
 
@@ -2517,8 +2517,8 @@ class BoxACPAgent:
                 mcp_fallback_tools=dict(self._base_mcp_fallback_tools),
             )
             if connector_discovery is not None:
-                bind_discovery_mode(
-                    session_log, requested=True, new_session=not resumed,
+                await run_session_write(
+                    session_log, bind_discovery_mode, session_log, requested=True, new_session=not resumed,
                     tool_version=state.agent.tool_interface_version,
                 )
             agent = state.agent
@@ -2563,7 +2563,9 @@ class BoxACPAgent:
                 )
 
             if initial_goal_request is not None:
-                goal_result = self._apply_goal_action(agent, initial_goal_request)
+                goal_result = await run_session_write(
+                    agent.session_log, self._apply_goal_action, agent, initial_goal_request,
+                )
                 if "error" in goal_result:
                     log.warn(
                         "session/goal_init_error",
@@ -2656,7 +2658,7 @@ class BoxACPAgent:
                     attach_cleanup_error(error, cleanup_error)
             if session_log is not None:
                 try:
-                    session_log.close()
+                    await run_session_write(session_log, session_log.close)
                 except BaseException as cleanup_error:
                     attach_cleanup_error(error, cleanup_error)
             if isinstance(error, OSError) and error.filename:
@@ -2796,7 +2798,7 @@ class BoxACPAgent:
             return history, replay_status
 
         try:
-            history, replay_status = await run_session_io(prepare_history)
+            history, replay_status = await run_session_write(state.agent.session_log, prepare_history)
             log.info("session/replay", session_id=session_id, request_id=request_id,
                      phase="history_ready", duration_ms=round((perf_counter() - started) * 1000))
             replay_turn_id = None
@@ -2876,7 +2878,7 @@ class BoxACPAgent:
                     await state.aclose()
                 finally:
                     try:
-                        state.agent.session_log.close()
+                        await run_session_write(state.agent.session_log, state.agent.session_log.close)
                     finally:
                         self._sessions.pop(session_id, None)
             raise
@@ -3027,22 +3029,26 @@ class BoxACPAgent:
         try:
             log_store = state.agent.session_log
             turn_id = _meta_string(meta, "turn_id", "turnId")
-            if log_store is not None and turn_id:
-                binding = log_store.turn_binding(turn_id)
-                if binding is not None:
-                    if binding.get("input_fingerprint", input_value.fingerprint()) != input_value.fingerprint():
-                        raise ValueError("TURN_IDEMPOTENCY_CONFLICT")
-                    if "input_fingerprint" not in binding or log_store.has_committed_input(turn_id):
-                        raise ValueError("TURN_ALREADY_ACCEPTED")
-                else:
-                    log_store.append("turn/binding", {
-                        "turn_id": turn_id,
-                        "prompt_fingerprint": prompt_fingerprint(params.prompt, context),
-                        "input_fingerprint": input_value.fingerprint(),
-                    })
-                    log_store.flush()
-            if log_store is not None and context:
-                log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
+            if log_store is not None and (turn_id or context):
+                def bind_input():
+                    if turn_id:
+                        binding = log_store.turn_binding(turn_id)
+                        if binding is not None:
+                            if binding.get("input_fingerprint", input_value.fingerprint()) != input_value.fingerprint():
+                                raise ValueError("TURN_IDEMPOTENCY_CONFLICT")
+                            if "input_fingerprint" not in binding or log_store.has_committed_input(turn_id):
+                                raise ValueError("TURN_ALREADY_ACCEPTED")
+                        else:
+                            log_store.append("turn/binding", {
+                                "turn_id": turn_id,
+                                "prompt_fingerprint": prompt_fingerprint(params.prompt, context),
+                                "input_fingerprint": input_value.fingerprint(),
+                            })
+                            log_store.flush()
+                    if context:
+                        log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
+
+                await run_session_write(log_store, bind_input)
             # Routing, memory refresh and final QA handoff run outside the
             # main model iterator. Their tasks inherit this prompt's writer.
             turn_id = turn_id or f"{session_id}-turn-{state.turn_counter + 1}"
@@ -3321,25 +3327,34 @@ class BoxACPAgent:
                         if existing.upstream_session_id == continuation.source_session_id
                         and existing.agent.session_log is not None
                     ), None)
-                    opened_source = source_log is None
-                    if source_log is None:
-                        source_log = SessionLog.open(
-                            _session_storage_root(continuation.source_session_id),
-                            session_id=continuation.source_session_id,
-                            cwd=destination_log.header["cwd"], recover=False,
+                    if source_log is not None:
+                        imported = await run_session_write(
+                            source_log, import_continuation_images, continuation,
+                            source_log=source_log, destination_log=destination_log,
                         )
-                    try:
-                        imported = import_continuation_images(
-                            continuation, source_log=source_log, destination_log=destination_log,
-                        )
-                        seeded_count = state.agent.seed_continuation_messages(
-                            imported.messages, model_round=imported.model_round,
-                        )
-                    finally:
-                        if opened_source:
-                            source_log.close()
+                    else:
+                        def import_from_disk():
+                            source = SessionLog.open(
+                                _session_storage_root(continuation.source_session_id),
+                                session_id=continuation.source_session_id,
+                                cwd=destination_log.header["cwd"], recover=False,
+                            )
+                            try:
+                                return import_continuation_images(
+                                    continuation, source_log=source, destination_log=destination_log,
+                                )
+                            finally:
+                                source.close()
+
+                        imported = await run_session_write(destination_log, import_from_disk)
+                    seeded_count = await run_session_write(
+                        destination_log, state.agent.seed_continuation_messages,
+                        imported.messages, model_round=imported.model_round,
+                    )
                 else:
-                    seeded_count = state.agent.seed_continuation_messages(continuation.messages)
+                    seeded_count = await run_session_write(
+                        state.agent.session_log, state.agent.seed_continuation_messages, continuation.messages,
+                    )
                 seeded_chars = sum(
                     len(message.content) for message in continuation.messages
                 )
@@ -3504,7 +3519,9 @@ class BoxACPAgent:
         require_plan_approval = force_plan_start and not auto_approve_plan
         prompt_goal_request = _goal_request_from_meta(prompt_meta)
         if prompt_goal_request is not None:
-            goal_result = self._apply_goal_action(state.agent, prompt_goal_request)
+            goal_result = await run_session_write(
+                state.agent.session_log, self._apply_goal_action, state.agent, prompt_goal_request,
+            )
             if "error" in goal_result:
                 log.warn(
                     "session/goal_prompt_error",
@@ -3696,8 +3713,8 @@ class BoxACPAgent:
 
         if not cloud_handoff and state.pending_plan_approval is not None:
             if not (plan_approval_approved or revises_pending_plan):
-                CompletionChecks.close_pending(
-                    state.agent.tools,
+                await run_session_write(
+                    state.agent.session_log, CompletionChecks.close_pending, state.agent.tools,
                     CompletionContext(
                         (), lambda: state.cancelled, state.agent.session_log, turn_id,
                         resume_scope=state.agent.messages,
@@ -4307,7 +4324,7 @@ class BoxACPAgent:
             state = self._sessions.get(session_id)
             if not state:
                 return {"error": "session_not_found"}
-            result = self._apply_goal_action(state.agent, params)
+            result = await run_session_write(state.agent.session_log, self._apply_goal_action, state.agent, params)
             log.info(
                 "session/goal",
                 session_id=session_id,
@@ -5578,7 +5595,7 @@ class BoxACPAgent:
             control=control,
         ))
         from box_agent.tools.mcp_apps import set_mcp_app_capture, reset_mcp_app_capture
-        app_capture_token = set_mcp_app_capture(self._mcp_apps.capture(state))
+        app_capture_token = set_mcp_app_capture(self._mcp_apps.capture(state), state.agent.session_log)
         try:
             with scoped_request_context(
                 session_id=billing_session_id or state.upstream_session_id or session_id,

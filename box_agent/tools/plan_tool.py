@@ -11,6 +11,7 @@ from datetime import datetime
 from itertools import count
 from typing import TYPE_CHECKING, Any
 
+from ..session_log import run_session_write
 from .base import Tool, ToolResult
 
 if TYPE_CHECKING:
@@ -301,8 +302,11 @@ class PlanWriteTool(Tool):
             normalized_action = "set"
 
         if normalized_action == "clear":
-            self._store.clear()
-            self._persist()
+            def clear_plan():
+                self._store.clear()
+                self._persist()
+
+            await run_session_write(self._session_log, clear_plan)
             return ToolResult(
                 success=True,
                 content="Cleared the current plan.",
@@ -321,17 +325,21 @@ class PlanWriteTool(Tool):
         if not normalized_title:
             return ToolResult(success=False, error="'title' is required for set.")
 
-        plan = self._store.set(
-            title=normalized_title,
-            objective=objective,
-            scope=scope,
-            status=status,
-            steps=steps,
-            verification=verification,
-            risks=risks,
-            assumptions=assumptions,
-        )
-        self._persist()
+        def set_plan():
+            plan = self._store.set(
+                title=normalized_title,
+                objective=objective,
+                scope=scope,
+                status=status,
+                steps=steps,
+                verification=verification,
+                risks=risks,
+                assumptions=assumptions,
+            )
+            self._persist()
+            return plan
+
+        plan = await run_session_write(self._session_log, set_plan)
         return ToolResult(
             success=True,
             content=f"Set plan #{plan['id']}: {plan['title']}",

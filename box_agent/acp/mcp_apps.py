@@ -9,7 +9,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from hmac import compare_digest
 import json
@@ -21,6 +21,7 @@ from acp import RequestError
 
 from box_agent.composition import standalone_tool_hooks
 from box_agent.kernel.hook_types import copy_data
+from box_agent.session_log import run_session_write
 from box_agent.tools.base import ToolInvocationContext
 from box_agent.tools.chat_references import ChatReferences
 from box_agent.tools.completion_checks import CompletionChecks, CompletionContext
@@ -72,6 +73,22 @@ def _saved_snapshot(state: Any, call_id: str) -> dict[str, Any] | None:
 
 
 
+@dataclass
+class _Interaction:
+    signature: str
+    task: asyncio.Task = field(init=False)
+    cancellable: bool = False
+    cancel_requested: bool = False
+
+    def cancel(self) -> bool:
+        if self.task.done():
+            return False
+        if self.cancellable and not self.cancel_requested:
+            self.task.cancel()
+        self.cancel_requested = True
+        return True
+
+
 class McpAppsACP:
     """Thin, session-bound adapter over the owning MCP runtime."""
 
@@ -81,7 +98,7 @@ class McpAppsACP:
         from box_agent.tools.mcp_apps import set_mcp_apps_host_capability
         set_mcp_apps_host_capability(True)
         self._epoch = token_hex(32)
-        self._interactions: dict[tuple[str, str], tuple[str, asyncio.Task]] = {}
+        self._interactions: dict[tuple[str, str], _Interaction] = {}
 
     def capture(self, state: Any):
         def save(snapshot: dict[str, Any]) -> None:
@@ -189,10 +206,7 @@ class McpAppsACP:
                 session_id, _ = self._state(params)
                 key = session_id, _string(params.get("interactionId"))
                 running = self._interactions.get(key)
-                if running is None or running[1].done():
-                    return {"cancelled": False}
-                running[1].cancel()
-                return {"cancelled": True}
+                return {"cancelled": running is not None and running.cancel()}
             if method == "mcp/apps/snapshot":
                 from box_agent.tools.mcp_loader import prepare_mcp_app_connection
                 session_id, state, saved = self._history(params)
@@ -298,9 +312,9 @@ class McpAppsACP:
         key = session_id, interaction_id
         running = self._interactions.get(key)
         if running is not None:
-            if running[0] != signature:
+            if running.signature != signature:
                 raise _error("MCP_APP_INTERACTION_CONFLICT")
-            return await asyncio.shield(running[1])
+            return await asyncio.shield(running.task)
         previous = self._interaction_record(state, interaction_id)
         if previous is not None:
             if previous.get("signature") != signature:
@@ -310,21 +324,24 @@ class McpAppsACP:
             raise _error(previous.get("error", "MCP_APP_OUTCOME_UNKNOWN"))
         if self._turn_is_preparing(state):
             raise _error("MCP_APP_SESSION_BUSY")
-        task = asyncio.create_task(self._execute(session_id, state, snapshot, binding,
-                                               interaction_id, signature, name, target.name, arguments,
-                                               lambda: self._allowed_connectors(state, params)),
-                                   name="mcp-app-interaction")
-        self._interactions[key] = signature, task
+        interaction = _Interaction(signature)
+        interaction.task = asyncio.create_task(
+            self._execute(session_id, state, snapshot, binding, interaction_id, interaction, name, target.name,
+                          arguments, lambda: self._allowed_connectors(state, params)),
+            name="mcp-app-interaction",
+        )
+        self._interactions[key] = interaction
+
         def retire(completed):
-            if self._interactions.get(key, (None, None))[1] is completed:
+            if self._interactions.get(key) is interaction:
                 self._interactions.pop(key, None)
             if not completed.cancelled():
                 completed.exception()  # Observe abandoned request failures too.
-        task.add_done_callback(retire)
+        interaction.task.add_done_callback(retire)
         try:
-            return await asyncio.shield(task)
+            return await asyncio.shield(interaction.task)
         finally:
-            if task.done() and self._interactions.get(key, (None, None))[1] is task:
+            if interaction.task.done() and self._interactions.get(key) is interaction:
                 self._interactions.pop(key, None)
 
     @contextmanager
@@ -404,17 +421,23 @@ class McpAppsACP:
 
         return arguments, gates, still_authorized
 
-    async def _execute(self, session_id, state, snapshot, binding, interaction_id, signature,
+    async def _execute(self, session_id, state, snapshot, binding, interaction_id, interaction: _Interaction,
                        name, tool_name, arguments, allowed_connectors):
         from box_agent.tools.mcp_loader import call_mcp_app_tool
         record = {"version": VERSION, "toolCallId": snapshot["toolCallId"],
-                  "interactionId": interaction_id, "signature": signature, "name": name, "arguments": arguments}
+                  "interactionId": interaction_id, "signature": interaction.signature, "name": name, "arguments": arguments}
         session_log = state.agent.session_log
         self._assert_current(session_id, state)
         if _saved_snapshot(state, snapshot["toolCallId"]) is None:
             raise _error("MCP_APP_SNAPSHOT_UNAVAILABLE")
-        session_log.append(INTERACTION_EVENT, {**record, "status": "started"}, ignorable=True)
-        session_log.flush()
+
+        completed = False
+
+        def checkpoint(status, **fields):
+            nonlocal completed
+            session_log.append(INTERACTION_EVENT, {**record, "status": status, **fields}, ignorable=True)
+            session_log.flush()
+            completed = status == "completed"
 
         def revoked() -> bool:
             return (self.sessions.get(session_id) is not state
@@ -425,13 +448,20 @@ class McpAppsACP:
                     or _saved_snapshot(state, snapshot["toolCallId"]) is None)
 
         try:
+            # A cancel can arrive after admission but before this task first runs.
+            if interaction.cancel_requested:
+                raise asyncio.CancelledError
+            interaction.cancellable = True
+            await run_session_write(session_log, checkpoint, "started")
             with self._execution_scope(session_id, state):
                 arguments, gates, still_authorized = await self._authorize(
                     state, session_id, tool_name, interaction_id, arguments, revoked,
                 )
                 context = ToolInvocationContext(
                     parent_tool_call_id=interaction_id,
-                    chat_references=ChatReferences(state.agent.workspace_dir, state.agent.messages, session_log),
+                    chat_references=await run_session_write(
+                        session_log, ChatReferences, state.agent.workspace_dir, state.agent.messages, session_log,
+                    ),
                     capability_gates=gates,
                 )
                 result = await call_mcp_app_tool(
@@ -444,18 +474,19 @@ class McpAppsACP:
             if _saved_snapshot(state, snapshot["toolCallId"]) is None:
                 raise _error("MCP_APP_SNAPSHOT_UNAVAILABLE")
             result = _bounded_copy(result, MAX_SNAPSHOT_BYTES)
-            session_log.append(INTERACTION_EVENT, {**record, "status": "completed", "result": result}, ignorable=True)
-            session_log.flush()
+            await run_session_write(session_log, checkpoint, "completed", result=result)
             return result
         except BaseException as exc:
+            # A retried cancel or session close must let the failure receipt settle.
+            interaction.cancellable = False
             code = "MCP_APP_OUTCOME_UNKNOWN" if isinstance(exc, asyncio.CancelledError) else getattr(exc, "code", "MCP_APP_CALL_FAILED")
             if isinstance(exc, RequestError):
                 code = (exc.data or {}).get("code", "MCP_APP_CALL_FAILED")
             if not isinstance(code, str):
                 code = "MCP_APP_CALL_FAILED"
             try:
-                session_log.append(INTERACTION_EVENT, {**record, "status": "failed", "error": code}, ignorable=True)
-                session_log.flush()
+                if not completed:
+                    await run_session_write(session_log, checkpoint, "failed", error=code)
             except Exception:
                 pass
             if isinstance(exc, asyncio.CancelledError):
@@ -468,18 +499,18 @@ class McpAppsACP:
         state = self.sessions.get(session_id)
         if state is not None:
             state._mcp_apps_closing = True
-        tasks = [item[1] for key, item in self._interactions.items() if key[0] == session_id]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        interactions = [item for key, item in self._interactions.items() if key[0] == session_id]
+        for item in interactions:
+            item.cancel()
+        if interactions:
+            await asyncio.gather(*(item.task for item in interactions), return_exceptions=True)
 
     async def close(self) -> None:
         for state in self.sessions.values():
             state._mcp_apps_closing = True
-        tasks = [item[1] for item in self._interactions.values()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        interactions = list(self._interactions.values())
+        for item in interactions:
+            item.cancel()
+        if interactions:
+            await asyncio.gather(*(item.task for item in interactions), return_exceptions=True)
         self._interactions.clear()

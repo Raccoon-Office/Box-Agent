@@ -1,10 +1,12 @@
 """MCP Apps retain host-only data and run UI callbacks without model turns."""
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from copy import deepcopy
 import json
 from pathlib import Path
+import socket
 import sys
+import threading
 
 import pytest
 from acp import PROTOCOL_VERSION, RequestError
@@ -564,6 +566,100 @@ async def test_cancel_only_the_named_app_interaction_without_cancelling_conversa
         with pytest.raises(RequestError, match='MCP_APP_OUTCOME_UNKNOWN'):
             await host.ext_method('mcp/apps/call', params)
         assert len(calls(record)) == 1
+
+
+@pytest.mark.asyncio
+async def test_app_call_and_cancel_admitted_together_return_a_terminal_receipt(tmp_path, monkeypatch):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, _, session_id, record):
+        snapshot = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        params = request(session_id, bindingId=snapshot["bindingId"], interactionId="cancel-on-admission",
+                         name="refresh_flights", arguments={"previous": 1})
+        # Both requests are ready before the new interaction task first runs.
+        call, cancel = await asyncio.gather(
+            host.ext_method("mcp/apps/call", params),
+            host.ext_method("mcp/apps/cancel", {"sessionId": session_id, "interactionId": params["interactionId"]}),
+            return_exceptions=True,
+        )
+        assert cancel == {"cancelled": True}
+        assert isinstance(call, RequestError) and call.data == {"code": "MCP_APP_OUTCOME_UNKNOWN"}
+        await host.load_session(str(tmp_path), session_id)
+        restored = await host.ext_method("mcp/apps/snapshot", request(session_id))
+        with pytest.raises(RequestError, match="MCP_APP_OUTCOME_UNKNOWN"):
+            await host.ext_method("mcp/apps/call", {**params, "bindingId": restored["bindingId"]})
+        assert [item["name"] for item in calls(record)] == ["list_flights"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", ["queued", "flushing"])
+async def test_app_call_replies_when_cancelled_during_its_initial_checkpoint(tmp_path, monkeypatch, checkpoint):
+    from acp.agent.connection import AgentSideConnection
+    from acp.client.connection import ClientSideConnection
+    from box_agent import session_log
+    from box_agent.acp.stdio_compat import StdioTransport
+
+    async with environment(tmp_path, monkeypatch) as (host, conn, _, _, session_id, record):
+        log = host._sessions[session_id].agent.session_log
+        local, remote = socket.socketpair()
+        client_reader, client_writer = await asyncio.open_connection(sock=local)
+        agent_reader, agent_writer = await asyncio.open_connection(sock=remote)
+        server = AgentSideConnection(host, StdioTransport(agent_reader, agent_writer))
+        client = ClientSideConnection(conn, StdioTransport(client_reader, client_writer))
+        try:
+            snapshot = await client.ext_method("mcp/apps/snapshot", request(session_id))
+            params = request(session_id, bindingId=snapshot["bindingId"], interactionId="cancel-at-start",
+                             name="refresh_flights", arguments={"previous": 1})
+            entered = asyncio.Event()
+            with ExitStack() as gate:
+                if checkpoint == "queued":
+                    await log._write_lock.acquire()
+                    gate.callback(log._write_lock.release)
+                    acquire = log._write_lock.acquire
+
+                    async def observe_waiter():
+                        entered.set()
+                        return await acquire()
+
+                    monkeypatch.setattr(log._write_lock, "acquire", observe_waiter)
+                else:
+                    loop = asyncio.get_running_loop()
+                    release = threading.Event()
+                    gate.callback(release.set)
+                    fsync = session_log._timed_fsync
+                    log_fd = log._handle.fileno()
+
+                    def hold_started(fd):
+                        if fd == log_fd and log.events[-1]["data"].get("status") == "started":
+                            loop.call_soon_threadsafe(entered.set)
+                            assert release.wait(10)
+                        fsync(fd)
+
+                    monkeypatch.setattr(session_log, "_timed_fsync", hold_started)
+
+                call = asyncio.create_task(client.ext_method("mcp/apps/call", params))
+                await asyncio.wait_for(entered.wait(), 5)
+                cancel = {"sessionId": session_id, "interactionId": params["interactionId"]}
+                # A retried cancel must not interrupt the durable failure receipt.
+                for _ in range(2):
+                    assert await asyncio.wait_for(client.ext_method("mcp/apps/cancel", cancel), 5) == {"cancelled": True}
+
+            with pytest.raises(RequestError, match="MCP_APP_OUTCOME_UNKNOWN") as error:
+                await asyncio.wait_for(call, 3)
+            assert error.value.data == {"code": "MCP_APP_OUTCOME_UNKNOWN"}
+            receipts = [e["data"] for e in map(json.loads, log.path.read_bytes().splitlines())
+                        if e.get("type") == INTERACTION_EVENT]
+            assert [r["status"] for r in receipts] == (["failed"] if checkpoint == "queued" else ["started", "failed"])
+            assert receipts[-1]["error"] == "MCP_APP_OUTCOME_UNKNOWN"
+            with pytest.raises(RequestError, match="MCP_APP_OUTCOME_UNKNOWN"):
+                await asyncio.wait_for(client.ext_method("mcp/apps/call", params), 3)
+            assert [item["name"] for item in calls(record)] == ["list_flights"]
+            fresh = await asyncio.wait_for(client.ext_method("mcp/apps/call", {**params, "interactionId": "fresh"}), 5)
+            assert fresh["structuredContent"]["revision"] == 2
+        finally:
+            await client.close()
+            await server.close()
+            client_writer.close()
+            agent_writer.close()
+            await asyncio.gather(client_writer.wait_closed(), agent_writer.wait_closed())
 
 
 @pytest.mark.asyncio

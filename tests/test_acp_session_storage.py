@@ -1,4 +1,7 @@
+import asyncio
 import errno
+import socket
+import threading
 from pathlib import Path
 
 import pytest
@@ -7,6 +10,96 @@ from acp import RequestError
 from box_agent.session_log import SessionLog, SessionLogDurabilityError, SessionLogInUseError
 from tests.acp_helpers import acp_params
 from tests.test_acp_history_edit import CaptureLLM, adapter, request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", ["turn/binding", "user/message", "assistant/message", "turn/end"])
+async def test_another_session_can_finish_while_a_checkpoint_is_on_disk(tmp_path, monkeypatch, checkpoint):
+    from acp.agent.connection import AgentSideConnection
+    from acp.connection import Connection
+    from box_agent import session_log
+    from box_agent.acp.stdio_compat import StdioTransport
+
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    entered = asyncio.Event()
+    release = threading.Event()
+    flush_threads = []
+    updates = []
+
+    async def on_message(method, params, notification):
+        if method == "session/update":
+            updates.append(params)
+
+    host = adapter(workspace, CaptureLLM())
+    local, remote = socket.socketpair()
+    client_reader, client_writer = await asyncio.open_connection(sock=local)
+    agent_reader, agent_writer = await asyncio.open_connection(sock=remote)
+    server = AgentSideConnection(host, StdioTransport(agent_reader, agent_writer))
+    host._conn = server
+    client = Connection(on_message, StdioTransport(client_reader, client_writer))
+
+    async def prompt(session, turn):
+        return await client.send_request("session/prompt", {
+            "sessionId": session, "prompt": [{"type": "text", "text": turn}], "_meta": {"turn_id": turn},
+        })
+
+    first = None
+    try:
+        await client.send_request("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+        sessions = []
+        for name in ("slow", "independent"):
+            response = await client.send_request("session/new", {
+                "cwd": str(workspace), "mcpServers": [], "_meta": {"session_id": name},
+            })
+            sessions.append(response["sessionId"])
+        slow, independent = sessions
+        log = host._sessions[slow].agent.session_log
+        slow_fd = log._handle.fileno()
+        fsync = session_log._timed_fsync
+
+        def slow_fsync(fd):
+            if fd == slow_fd and not flush_threads and log.events[-1]["type"] == checkpoint:
+                flush_threads.append(threading.get_ident())
+                loop.call_soon_threadsafe(entered.set)
+                if flush_threads[0] != loop_thread:
+                    assert release.wait(10), "independent session did not finish during fsync"
+            fsync(fd)
+
+        monkeypatch.setattr(session_log, "_timed_fsync", slow_fsync)
+        first = asyncio.create_task(prompt(slow, "slow-turn"))
+        await asyncio.wait_for(entered.wait(), 8)
+        assert flush_threads != [loop_thread], "session fsync ran on the ACP event loop"
+        if checkpoint == "user/message":
+            # A retry must not receive a durable acceptance receipt while the
+            # input is only in the writer's in-memory history.
+            assert not log.has_committed_input("slow-turn")
+            with pytest.raises(RequestError) as busy:
+                await asyncio.wait_for(prompt(slow, "slow-turn"), 3)
+            assert busy.value.data["code"] == "SESSION_BUSY"
+        second = await asyncio.wait_for(prompt(independent, "second-turn"), 8)
+        assert second["stopReason"] == "end_turn"
+        assert any(item["sessionId"] == independent and
+                   item["update"]["sessionUpdate"] == "agent_message_chunk" for item in updates)
+        assert not first.done()
+        release.set()
+        assert (await asyncio.wait_for(first, 8))["stopReason"] == "end_turn"
+        assert log.has_committed_input("slow-turn")
+        assert [event["seq"] for event in log.events] == list(range(len(log.events)))
+        assert log.replay().messages[-1].content == "generated-answer"
+    finally:
+        release.set()
+        if first is not None:
+            await asyncio.gather(first, return_exceptions=True)
+        await host.aclose()
+        await client.close()
+        await server.close()
+        client_writer.close()
+        agent_writer.close()
+        await asyncio.gather(client_writer.wait_closed(), agent_writer.wait_closed())
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from ..session_log import run_session_write
 from .base import Tool, ToolResult
 
 if TYPE_CHECKING:
@@ -526,12 +527,14 @@ class TodoWriteTool(Tool):
 
     def __init__(self, store: TodoStore):
         self._store = store
+        self._session_log: SessionLog | None = None
 
     def configure_session_persistence(
         self,
         session_log: SessionLog,
         items: list[dict],
     ) -> None:
+        self._session_log = session_log
         self._store.restore(items)
 
         def persist(current: list[dict]) -> None:
@@ -691,7 +694,7 @@ class TodoWriteTool(Tool):
                 validation_error = self._validate_todos(normalized_todos)
                 if validation_error:
                     return ToolResult(success=False, error=validation_error)
-                items = self._store.replace(normalized_todos or [])
+                items = await run_session_write(self._session_log, self._store.replace, normalized_todos or [])
                 return self._result(
                     content=(
                         f"Set todo list with {len(items)} "
@@ -707,7 +710,7 @@ class TodoWriteTool(Tool):
                     return ToolResult(success=False, error=f"Invalid status: {status}.")
                 if priority not in _VALID_PRIORITIES:
                     return ToolResult(success=False, error=f"Invalid priority: {priority}.")
-                item = self._store.create(task, priority, status)
+                item = await run_session_write(self._session_log, self._store.create, task, priority, status)
                 return self._result(
                     content=f"Created todo #{item['id']}: {item['task']}",
                     action="create",
@@ -720,7 +723,7 @@ class TodoWriteTool(Tool):
                         success=False,
                         error="'todo_id' is required for transition.",
                     )
-                changed = self._store.transition(todo_id, next_todo_id)
+                changed = await run_session_write(self._session_log, self._store.transition, todo_id, next_todo_id)
                 if changed is None:
                     return ToolResult(success=False, error=f"Todo #{todo_id} not found.")
                 completed, next_item = changed
@@ -745,7 +748,7 @@ class TodoWriteTool(Tool):
                     return ToolResult(success=False, error=f"Invalid status: {status}.")
                 if task is not None and not task.strip():
                     return ToolResult(success=False, error="'task' must not be empty.")
-                item = self._store.update(todo_id, status=status, task=task)
+                item = await run_session_write(self._session_log, self._store.update, todo_id, status=status, task=task)
                 if item is None:
                     return ToolResult(success=False, error=f"Todo #{todo_id} not found.")
                 return self._result(
@@ -757,7 +760,7 @@ class TodoWriteTool(Tool):
             if action == "delete":
                 if not todo_id:
                     return ToolResult(success=False, error="'todo_id' is required for delete.")
-                removed = self._store.delete(todo_id)
+                removed = await run_session_write(self._session_log, self._store.delete, todo_id)
                 if removed is None:
                     return ToolResult(success=False, error=f"Todo #{todo_id} not found.")
                 return self._result(

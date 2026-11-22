@@ -85,7 +85,7 @@ from .tool_messages import (
 )
 from ..logger import AgentLogger
 from ..payload_privacy import redact_diagnostic_text
-from ..session_log import SessionLogReplayError
+from ..session_log import SessionLogReplayError, run_session_write
 from ..llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from ..loop_guards import (
     EMPTY_ARGS_LIMIT,
@@ -1027,6 +1027,12 @@ async def _run_agent_loop_impl(
     tool_messages = ToolMessageCommitter(messages, session_log, session_turn,
                                         image_context=getattr(context_engine, "image_context", None))
 
+    def checkpoint_messages(checkpoint_step: int) -> None:
+        session_log.append_unlogged_messages(
+            session_log_messages(messages), turn=session_turn, step=checkpoint_step,
+        )
+        session_log.flush()
+
     def commit_model_response(message: Message) -> None:
         if not (message.content or message.thinking or message.tool_calls):
             return
@@ -1040,9 +1046,7 @@ async def _run_agent_loop_impl(
                     break
         messages.append(message)
         if session_log is not None and session_turn is not None:
-            session_log.append_unlogged_messages(session_log_messages(messages),
-                                                 turn=session_turn, step=step + 1)
-            session_log.flush()
+            checkpoint_messages(step + 1)
 
     def validate_followup(result, tool, pending):
         accepted, blocks, tokens = _validate_transient_followup_result(
@@ -1095,7 +1099,8 @@ async def _run_agent_loop_impl(
         skill_reader=context_engine.tool_reader if context_engine is not None else None,
         correction_observer=_correction_observer if memory_lookup else None,
     )
-    tool_engine.configure_run(
+    configure = getattr(tool_engine, "aconfigure_run", tool_engine.configure_run)
+    configured = configure(
         tool_run_context,
         ToolExecutionOptions(
             tool_call_limits=tool_call_limits, max_tool_calls=max_tool_calls,
@@ -1111,6 +1116,8 @@ async def _run_agent_loop_impl(
             artifact_detection_enabled=artifact_detection_enabled,
         ),
     )
+    if inspect.isawaitable(configured):
+        await configured
     if tool_run_context_sink is not None:
         tool_run_context_sink(tool_run_context)
     visible_tool_call_total = 0
@@ -1176,7 +1183,7 @@ async def _run_agent_loop_impl(
             summary_llm=(initial_context_transition.summary_llm
                          if initial_context_transition is not None else summary_llm),
             allow_llm_summary=summary_failure_cooldown_steps == 0,
-            before_summary=before_summary,
+            before_summary=before_summary, session_log=session_log,
             force=force, estimate_tools=estimate_tools,
             skip_check=skip_check,
             summary_input_token_limit=(initial_context_transition.previous_token_limit
@@ -1298,7 +1305,7 @@ async def _run_agent_loop_impl(
         result = await prepare_compaction(
             history_token_limit, force=force, estimate_tools=estimate_tools, skip_check=skip_check,
         )
-        return result, commit_compaction(result)
+        return result, await run_session_write(session_log, commit_compaction, result)
 
     for step in range(max_steps):
         if resource_ledger is not None:
@@ -1326,10 +1333,9 @@ async def _run_agent_loop_impl(
                 if isinstance(inject_queue, InjectionManager):
                     def commit_injection():
                         if session_log is not None:
-                            session_log.append_unlogged_messages(session_log_messages(messages), turn=session_turn, step=step)
-                            session_log.flush()
+                            checkpoint_messages(step)
                     injection, injected_event = await inject_queue.aapply_next(
-                        messages, commit=commit_injection, cancelled=cancelled,
+                        messages, commit=commit_injection, cancelled=cancelled, session_log=session_log,
                     )
                 else:
                     injection = parse_queued_injection(inject_queue.get_nowait())
@@ -1509,12 +1515,7 @@ async def _run_agent_loop_impl(
         # injections, including wrap-up nudges. Persist before either request
         # projection or compaction, even for callers without an Agent wrapper.
         if session_log is not None and session_turn is not None:
-            session_log.append_unlogged_messages(
-                session_log_messages(messages),
-                turn=session_turn,
-                step=step + 1,
-            )
-            session_log.flush()
+            await run_session_write(session_log, checkpoint_messages, step + 1)
 
         # ── LLM call (streaming) ──────────────────────────────
         request_overlay_tokens = pending_transient_followup_tokens if transient_message is not None else 0
@@ -1587,7 +1588,8 @@ async def _run_agent_loop_impl(
                     )
                     yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                     return
-                summarization_event = commit_compaction(result) if result is not None else None
+                summarization_event = (await run_session_write(session_log, commit_compaction, result)
+                                       if result is not None else None)
                 if summarization_event is not None:
                     context_engine.bind_history(messages)
                     yield summarization_event
@@ -1731,10 +1733,7 @@ async def _run_agent_loop_impl(
             messages.extend(materialized_messages)
         if ((materialized_messages or stable_tool_context or tool_context_added)
                 and session_log is not None and session_turn is not None):
-            session_log.append_unlogged_messages(
-                session_log_messages(messages), turn=session_turn, step=step + 1,
-            )
-            session_log.flush()
+            await run_session_write(session_log, checkpoint_messages, step + 1)
 
         acknowledge_search = getattr(tool_exposure_manager, "acknowledge_search_results", None)
         if acknowledge_search is not None:
@@ -1763,22 +1762,19 @@ async def _run_agent_loop_impl(
             request_max_output = getattr(llm, "max_output_tokens", None)
             if not isinstance(request_max_output, int):
                 request_max_output = None
-            session_log.append(
-                "request/header",
-                {
-                    "turn": session_turn,
-                    "step": step + 1,
-                    "header": {
-                        "config": {
-                            "provider": request_provider,
-                            "model": request_model,
-                            "maxOutputTokens": request_max_output,
-                        },
-                        "system": messages[0].content,
-                        "tools": [tool.to_schema() for tool in tool_list],
+            request_header = {
+                "turn": session_turn,
+                "step": step + 1,
+                "header": {
+                    "config": {
+                        "provider": request_provider,
+                        "model": request_model,
+                        "maxOutputTokens": request_max_output,
                     },
+                    "system": messages[0].content,
+                    "tools": [tool.to_schema() for tool in tool_list],
                 },
-            )
+            }
             request_context = {
                 "turn": session_turn,
                 "step": step + 1,
@@ -1808,8 +1804,13 @@ async def _run_agent_loop_impl(
             input_manifest = getattr(projection, "input_context", None) if context_engine is not None else None
             if input_manifest is not None:
                 request_context["inputContext"] = input_manifest
-            session_log.append("request/context", request_context)
-            session_log.flush()
+
+            def record_request_context():
+                session_log.append("request/header", request_header)
+                session_log.append("request/context", request_context)
+                session_log.flush()
+
+            await run_session_write(session_log, record_request_context)
 
         cache_fingerprint = build_cache_fingerprint(
             messages=request_messages,
@@ -1834,7 +1835,7 @@ async def _run_agent_loop_impl(
             yield await cancellation_done_event()
             return
         if callable(on_request_committed):
-            on_request_committed()
+            await run_session_write(session_log, on_request_committed)
         if initial_context_transition is not None:
             initial_context_transition.commit()
             initial_context_transition = None
@@ -2059,7 +2060,8 @@ async def _run_agent_loop_impl(
                 partial_text = exc.partial_text or ""
                 partial_thinking = exc.partial_thinking or ""
                 if partial_text or partial_thinking:
-                    commit_model_response(
+                    await run_session_write(
+                        session_log, commit_model_response,
                         Message(
                             role="assistant",
                             content=partial_text,
@@ -2269,7 +2271,7 @@ async def _run_agent_loop_impl(
                 if not has_partial_content:
                     provider_stale_retries += 1
                 if has_partial_content:
-                    commit_model_response(assistant_msg)
+                    await run_session_write(session_log, commit_model_response, assistant_msg)
                     recovery_text = (
                         "模型服务在上一轮已经输出部分内容、但尚未完成动作时长时间没有返回"
                         "新数据。请从未完成的动作继续，不要重复已经输出的说明，也不要把"
@@ -2330,7 +2332,7 @@ async def _run_agent_loop_impl(
                 for item in details
             ) or "unknown tool"
             if response.content.strip():
-                commit_model_response(assistant_msg)
+                await run_session_write(session_log, commit_model_response, assistant_msg)
             if oversized_tool_argument_retries < 1:
                 oversized_tool_argument_retries += 1
                 repair_text = (
@@ -2475,7 +2477,7 @@ async def _run_agent_loop_impl(
             # No tool attempt: preserve the existing text continuation and
             # empty-response retry behavior.
             if visible_text and truncation_continuations < max_truncation_continuations:
-                commit_model_response(assistant_msg)
+                await run_session_write(session_log, commit_model_response, assistant_msg)
                 truncation_continuations += 1
                 tail = response.content.rstrip()[-40:]
                 cont_text = truncation_continuation_text(tail)
@@ -2547,7 +2549,7 @@ async def _run_agent_loop_impl(
 
             # Retries / continuations exhausted — persist plain text and
             # surface the error.
-            commit_model_response(assistant_msg)
+            await run_session_write(session_log, commit_model_response, assistant_msg)
             usage = response.usage
             diag_parts: list[str] = []
             if usage is not None:
@@ -2587,7 +2589,7 @@ async def _run_agent_loop_impl(
             return
 
         # ── Append assistant message (non-truncated path) ───
-        commit_model_response(assistant_msg)
+        await run_session_write(session_log, commit_model_response, assistant_msg)
 
         # Reset the retry counter now that a clean turn landed — a future
         # truncation on a later step should get its own fresh budget.
@@ -2975,7 +2977,7 @@ async def _run_agent_loop_impl(
             ).apply(messages)
 
         if completed_turn_ending_tool is not None:
-            completion_checks.suspend()
+            await run_session_write(session_log, completion_checks.suspend)
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -3000,7 +3002,7 @@ async def _run_agent_loop_impl(
             return
 
         if plan_approval_gate_completed:
-            completion_checks.suspend()
+            await run_session_write(session_log, completion_checks.suspend)
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -3154,7 +3156,7 @@ class AgentLoopKernel:
         try:
             async for event in events:
                 if isinstance(event, DoneEvent) and completion_checks is not None and not completion_checks.suspended:
-                    completion_checks.close()
+                    await run_session_write(completion_checks.context.session_log, completion_checks.close)
                 yield event
         finally:
             await events.aclose()

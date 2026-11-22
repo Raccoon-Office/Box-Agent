@@ -10,6 +10,8 @@ from typing import Any
 
 from mcp import ClientSession, types
 
+from ..session_log import SessionLog, run_session_write
+
 
 class McpAppError(ValueError):
     def __init__(self, code: str):
@@ -63,7 +65,9 @@ succeeded, or promise background monitoring after this reply. Later card
 interactions do not automatically update your context; use new observations
 when answering follow-up questions."""
 _host_enabled = False
-_capture: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar("mcp_app_capture", default=None)
+_capture: ContextVar[tuple[Callable[[dict[str, Any]], None], SessionLog | None] | None] = ContextVar(
+    "mcp_app_capture", default=None,
+)
 _invocation: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar("mcp_app_invocation", default=None)
 _raw_capture: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar("mcp_app_raw_capture", default=None)
 _dispatch_admission: ContextVar[Callable[[], str | None] | None] = ContextVar("mcp_app_dispatch_admission", default=None)
@@ -158,8 +162,10 @@ def call_result_json(result: Any) -> dict[str, Any]:
     return bounded_json(value)
 
 
-def set_mcp_app_capture(callback: Callable[[dict[str, Any]], None] | None) -> Token:
-    return _capture.set(callback)
+def set_mcp_app_capture(
+    callback: Callable[[dict[str, Any]], None] | None, session_log: SessionLog | None = None,
+) -> Token:
+    return _capture.set((callback, session_log) if callback is not None else None)
 
 
 def reset_mcp_app_capture(token: Token) -> None:
@@ -209,7 +215,8 @@ def mcp_app_result_is_host_only(tool: Any) -> bool:
 def capture_mcp_app_result(tool: Any, result: Any) -> bool:
     """Hand a complete result to the host without putting it in ToolResult."""
     raw_callback = _raw_capture.get()
-    callback = _capture.get()
+    capture = _capture.get()
+    callback = capture[0] if capture else None
     invocation = _invocation.get()
     uri = tool.mcp_ui_resource_uri
     if raw_callback is None and (callback is None or invocation is None or not invocation[0] or
@@ -233,3 +240,9 @@ def capture_mcp_app_result(tool: Any, result: Any) -> bool:
     })
     callback(snapshot)
     return True
+
+
+async def acapture_mcp_app_result(tool: Any, result: Any) -> bool:
+    capture = _capture.get()
+    store = capture[1] if capture and tool.mcp_ui_resource_uri and _raw_capture.get() is None else None
+    return await run_session_write(store, capture_mcp_app_result, tool, result)

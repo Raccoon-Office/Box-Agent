@@ -22,6 +22,7 @@ from urllib.parse import unquote, urlsplit
 import zipfile
 from xml.etree import ElementTree
 
+from ..session_log import run_session_write
 from ..artifact_metadata import read_metadata as read_file_metadata, legacy_metadata_path, remove_metadata
 from ..artifact_publication import (
     retain_chat_file, retained_chat_file_in,
@@ -538,9 +539,7 @@ class ChatReferences:
     async def acheck(self, name: str, arguments: dict, approval: dict | None = None) -> tuple[ToolResult | None, frozenset[Path]]:
         """Keep cleanup scans off the event loop and serialize guard state."""
         async with self._check_lock:
-            # Reference/Session Log commits stay on the run's event loop;
-            # only read-only filesystem inspection runs on a worker.
-            self._prepare_check()
+            await run_session_write(self.log, self._prepare_check)
             task = asyncio.create_task(asyncio.to_thread(self._check_mutations, name, arguments, approval))
             try:
                 return await asyncio.shield(task)
