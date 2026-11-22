@@ -105,15 +105,19 @@ async def test_windows_stdout_backpressure_keeps_reads_available_and_preserves_f
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stall", ["executor", "write", "flush", "send_lock"])
-async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monkeypatch, stall):
+async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monkeypatch, tmp_path, stall):
     trace_id = "d1ec4f70-4800-4b8d-9687-105c2a0edeaa"
-    monkeypatch.setenv("BOX_AGENT_ACP_STDIO_TRACE_ID", trace_id)
+    log_path = tmp_path / stdio_compat._STDOUT_TIMING_LOG_NAME
+    monkeypatch.setenv(
+        "BOX_AGENT_ACP_STDIO_TIMING",
+        json.dumps({"traceId": trace_id, "writeLogPath": str(log_path)}),
+    )
     loop = asyncio.get_running_loop()
     submitted, writing = asyncio.Event(), asyncio.Event()
     diagnostics = asyncio.Queue()
     release = Event()
     monkeypatch.setattr(
-        stdio_compat._StderrTimingLog, "_write",
+        stdio_compat._StdoutTimingLog, "_write",
         lambda _self, record: loop.call_soon_threadsafe(diagnostics.put_nowait, record),
     )
 
@@ -199,7 +203,7 @@ async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monk
 
 
 @pytest.mark.asyncio
-async def test_stdout_timing_queue_stays_bounded_when_stderr_is_blocked(monkeypatch):
+async def test_stdout_timing_queue_stays_bounded_when_the_file_writer_is_blocked(monkeypatch, tmp_path):
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     written = asyncio.Queue()
@@ -211,8 +215,8 @@ async def test_stdout_timing_queue_stays_bounded_when_stderr_is_blocked(monkeypa
             assert release.wait(5)
         loop.call_soon_threadsafe(written.put_nowait, record["sequence"])
 
-    monkeypatch.setattr(stdio_compat._StderrTimingLog, "_write", blocked_write)
-    sink = stdio_compat._StderrTimingLog(2)
+    monkeypatch.setattr(stdio_compat._StdoutTimingLog, "_write", blocked_write)
+    sink = stdio_compat._StdoutTimingLog(tmp_path / stdio_compat._STDOUT_TIMING_LOG_NAME)
     capacity = stdio_compat._STDOUT_TIMING_QUEUE_LIMIT
     try:
         sink.emit({"sequence": 0})
@@ -229,6 +233,62 @@ async def test_stdout_timing_queue_stays_bounded_when_stderr_is_blocked(monkeypa
     assert [
         await asyncio.wait_for(written.get(), 2) for _ in range(capacity + 1)
     ] == list(range(capacity + 1))
+
+
+@pytest.mark.asyncio
+async def test_timing_file_failure_leaves_stdout_order_and_stderr_intact(
+    monkeypatch, tmp_path, capfd,
+):
+    # Opening a directory as a log fails on every supported platform.
+    log_path = tmp_path / stdio_compat._STDOUT_TIMING_LOG_NAME
+    log_path.mkdir()
+    monkeypatch.setenv("BOX_AGENT_ACP_STDIO_TIMING", json.dumps({
+        "traceId": "d1ec4f70-4800-4b8d-9687-105c2a0edeaa",
+        "writeLogPath": str(log_path),
+    }))
+    loop = asyncio.get_running_loop()
+    writing = asyncio.Event()
+    attempts = asyncio.Queue()
+    release = Event()
+    write_timing = stdio_compat._StdoutTimingLog._write
+
+    def observe_write(sink, record):
+        try:
+            write_timing(sink, record)
+        finally:
+            loop.call_soon_threadsafe(attempts.put_nowait, record["event"])
+
+    class Output(io.BytesIO):
+        def write(self, data):
+            if data == b'{"id":1}\n':
+                loop.call_soon_threadsafe(writing.set)
+                assert release.wait(5)
+            return super().write(data)
+
+    monkeypatch.setattr(stdio_compat._StdoutTimingLog, "_write", observe_write)
+    output = Output()
+    monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    transport = stdio_compat.StdioTransport(
+        asyncio.StreamReader(), SimpleNamespace(transport=stdio_compat._StdoutTransport()),
+    )
+    first = asyncio.create_task(transport.send({"id": 1}))
+    try:
+        await asyncio.wait_for(writing.wait(), 2)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert await asyncio.wait_for(attempts.get(), 2) == "wait_cancelled"
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+
+    try:
+        await asyncio.wait_for(transport.send({"id": 2}), 2)
+        assert await asyncio.wait_for(attempts.get(), 2) == "write_settled"
+    finally:
+        await asyncio.wait_for(transport.close(), 2)
+    assert output.getvalue() == b'{"id":1}\n{"id":2}\n'
+    assert "ACP_STDOUT_TIMING" not in capfd.readouterr().err
 
 
 @pytest.mark.asyncio

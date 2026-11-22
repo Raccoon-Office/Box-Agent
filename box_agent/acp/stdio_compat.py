@@ -22,7 +22,10 @@ import time
 from asyncio import transports as aio_transports
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
+
+from box_agent.log_files import open_private_log
 
 # 32 MiB. Default asyncio limit (64 KiB) is too small for ACP frames that may
 # include restored conversation context, generated artifacts, or base64-inlined
@@ -30,6 +33,8 @@ from typing import cast
 # resume prompts so the ACP receive loop does not die before it can respond.
 _READ_LIMIT = 32 * 1024 * 1024
 _STDOUT_TIMING_QUEUE_LIMIT = 32
+_STDOUT_TIMING_LOG_MAX_BYTES = 512 * 1024
+_STDOUT_TIMING_LOG_NAME = "box-agent-stdout-write-timing.log"
 
 
 class StdioTransport:
@@ -187,11 +192,11 @@ class _StdoutWriteTiming:
         return None if stamp_ns is None else round((stamp_ns - self.scheduled_ns) / 1_000_000, 3)
 
 
-class _StderrTimingLog:
-    """Best-effort diagnostics isolated from ACP and its default executor."""
+class _StdoutTimingLog:
+    """Best-effort file sink isolated from the protocol and both child pipes."""
 
-    def __init__(self, fd: int) -> None:
-        self._fd = fd
+    def __init__(self, path: Path) -> None:
+        self._path = path
         self._records: queue.Queue[dict[str, object] | None] = queue.Queue(
             maxsize=_STDOUT_TIMING_QUEUE_LIMIT,
         )
@@ -212,21 +217,19 @@ class _StderrTimingLog:
 
     def _run(self) -> None:
         while (record := self._records.get()) is not None:
-            with contextlib.suppress(OSError):
+            # A diagnostic failure, including a writer exception, is silent.
+            with contextlib.suppress(Exception):
                 self._write(record)
             if self._closed and self._records.empty():
                 return
 
     def _write(self, record: dict[str, object]) -> None:
-        # Avoid a shared logging handler or buffered stream lock while the pipe
-        # is stalled. The daemon can also outlive a bounded ACP shutdown.
         body = json.dumps(record, separators=(",", ":"))
-        remaining = memoryview(f"ACP_STDOUT_TIMING {body}\n".encode("ascii"))
-        while remaining:
-            written = os.write(self._fd, remaining)
-            if not written:
-                return
-            remaining = remaining[written:]
+        line = f"ACP_STDOUT_TIMING {body}\n"
+        with open_private_log(self._path, "a") as output:
+            # Reserve a byte for Windows text-mode newline translation.
+            if output.tell() + len(line) + 1 <= _STDOUT_TIMING_LOG_MAX_BYTES:
+                output.write(line)
 
 
 class _StdoutTransport(asyncio.BaseTransport):
@@ -236,14 +239,21 @@ class _StdoutTransport(asyncio.BaseTransport):
         # Keep protocol bytes on the original pipe, including on Windows.
         self._stdout = sys.stdout.buffer
         self._frame: asyncio.Task[None] | None = None
-        trace_id = os.environ.get("BOX_AGENT_ACP_STDIO_TRACE_ID", "")
-        self._trace_id = (
-            trace_id if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", trace_id) else ""
-        )
-        self._timing_log: _StderrTimingLog | None = None
-        if self._trace_id:
-            with contextlib.suppress(AttributeError, OSError, RuntimeError, ValueError):
-                self._timing_log = _StderrTimingLog(sys.stderr.fileno())
+        self._trace_id = ""
+        self._timing_log: _StdoutTimingLog | None = None
+        timing_config = os.environ.get("BOX_AGENT_ACP_STDIO_TIMING")
+        if timing_config:
+            with contextlib.suppress(Exception):
+                config = json.loads(timing_config)
+                trace_id = config["traceId"]
+                log_path = Path(config["writeLogPath"])
+                if (
+                    log_path.is_absolute()
+                    and log_path.name == _STDOUT_TIMING_LOG_NAME
+                    and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", trace_id)
+                ):
+                    self._timing_log = _StdoutTimingLog(log_path)
+                    self._trace_id = trace_id
         # Offsets are from process launch and include the NDJSON newline.
         self._next_byte = 0
         self._timing: _StdoutWriteTiming | None = None
@@ -324,7 +334,8 @@ class _StdoutTransport(asyncio.BaseTransport):
             "writeReturnedAfterMs": timing.elapsed_ms(written),
             "flushReturnedAfterMs": timing.elapsed_ms(flushed),
         }
-        timing_log.emit(record)
+        with contextlib.suppress(Exception):
+            timing_log.emit(record)
 
     def write(self, data: bytes, timing: _StdoutWriteTiming | None = None) -> None:  # type: ignore[override]
         if self._is_closing:
