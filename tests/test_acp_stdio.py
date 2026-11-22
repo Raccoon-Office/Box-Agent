@@ -104,6 +104,28 @@ async def test_windows_stdout_backpressure_keeps_reads_available_and_preserves_f
 
 
 @pytest.mark.asyncio
+async def test_windows_stdout_writes_do_not_queue_behind_a_saturated_default_executor(monkeypatch):
+    # Tools and session I/O share the loop's default executor. A protocol frame
+    # queued behind them would hit the session update timeout and fail the turn.
+    loop = asyncio.get_running_loop()
+    release = Event()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+    output = io.BytesIO()
+    monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    transport = stdio_compat.StdioTransport(
+        asyncio.StreamReader(), SimpleNamespace(transport=stdio_compat._StdoutTransport()),
+    )
+    blockers = [loop.run_in_executor(None, release.wait, 5) for _ in range(2)]
+    try:
+        await asyncio.wait_for(transport.send({"id": 1}), 1)
+        assert output.getvalue() == b'{"id":1}\n'
+    finally:
+        release.set()
+        await asyncio.gather(*blockers)
+        await transport.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stall", ["executor", "write", "flush", "send_lock"])
 async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monkeypatch, tmp_path, stall):
     trace_id = "d1ec4f70-4800-4b8d-9687-105c2a0edeaa"
@@ -145,18 +167,22 @@ async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monk
                 self.flush_blocked = False
             super().flush()
 
-    loop.set_default_executor(ObservedExecutor(max_workers=1))
     output = BlockedOutput()
     monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    stdout_transport = stdio_compat._StdoutTransport()
+    stdout_transport._executor.shutdown()
+    stdout_transport._executor = ObservedExecutor(max_workers=1)
     transport = stdio_compat.StdioTransport(
-        asyncio.StreamReader(), SimpleNamespace(transport=stdio_compat._StdoutTransport()),
+        asyncio.StreamReader(), SimpleNamespace(transport=stdout_transport),
     )
 
     await transport.send({"id": 0})
     frame_start = len(output.getvalue())
     assert diagnostics.empty()
     payload = {"id": 1, "result": "private fixture data"}
-    blocker = loop.run_in_executor(None, release.wait, 5) if stall == "executor" else None
+    blocker = (
+        loop.run_in_executor(stdout_transport._executor, release.wait, 5) if stall == "executor" else None
+    )
     submitted.clear()
     sending = asyncio.create_task(transport.send(payload))
     waiter = sending
