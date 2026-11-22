@@ -108,9 +108,12 @@ class StdioTransport:
             if isinstance(transport, _StdoutTransport):
                 try:
                     await transport.drain_frame()
-                finally:
-                    # Also retires the dedicated write thread on normal close.
-                    transport.close()
+                except BaseException:
+                    # The frame may still hold the pipe; never flush on the loop.
+                    transport.release()
+                    raise
+                # Drained: retire the dedicated write thread and flush.
+                transport.close()
             else:
                 await self._writer.drain()
 
@@ -372,11 +375,15 @@ class _StdoutTransport(asyncio.BaseTransport):
         if self._timing_log is not None:
             self._timing_log.close()
 
-    def close(self) -> None:  # type: ignore[override]
+    def release(self) -> None:
+        """Stop accepting frames without touching the pipe; never blocks."""
         self._is_closing = True
         self.close_timing_log()
-        # Let an in-flight frame settle on its own thread; never block here.
+        # Let an in-flight frame settle on its own thread.
         self._executor.shutdown(wait=False)
+
+    def close(self) -> None:  # type: ignore[override]
+        self.release()
         with contextlib.suppress(Exception):
             self._stdout.flush()
 

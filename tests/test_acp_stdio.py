@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -142,6 +142,51 @@ async def test_windows_stdout_normal_close_retires_the_write_thread(monkeypatch)
     assert output.getvalue() == b'{"id":1}\n'
     with pytest.raises(ConnectionError):
         await stdout_transport.write_frame(b'{"id":2}\n')
+
+
+@pytest.mark.asyncio
+async def test_windows_stdout_cancelled_close_under_backpressure_keeps_the_loop_responsive(monkeypatch):
+    # A stalled pipe write holds the buffer lock; flush() would wait for it.
+    entered, release = Event(), Event()
+    buffer_lock = Lock()
+
+    class BackpressuredOutput(io.BytesIO):
+        def write(self, data):
+            with buffer_lock:
+                entered.set()
+                assert release.wait(5)
+                return super().write(data)
+
+        def flush(self):
+            with buffer_lock:
+                super().flush()
+
+    output = BackpressuredOutput()
+    monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    stdout_transport = stdio_compat._StdoutTransport()
+    transport = stdio_compat.StdioTransport(asyncio.StreamReader(), SimpleNamespace(transport=stdout_transport))
+    sending = asyncio.create_task(transport.send({"id": 1}))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        sending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sending
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        ticked = loop.create_future()
+        loop.call_later(0.1, lambda: ticked.done() or ticked.set_result(loop.time()))
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(transport.close(), 0.05)
+        assert loop.time() - started < 0.3
+        assert await asyncio.wait_for(ticked, 1) - started < 0.3
+        assert stdout_transport.is_closing()
+    finally:
+        release.set()
+    # The cancelled frame still completes on its own thread, then it exits.
+    for worker in tuple(stdout_transport._executor._threads):
+        await asyncio.to_thread(worker.join, 2)
+        assert not worker.is_alive()
+    assert output.getvalue() == b'{"id":1}\n'
 
 
 @pytest.mark.asyncio
