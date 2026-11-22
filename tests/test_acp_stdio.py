@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from types import SimpleNamespace
 
@@ -100,6 +101,194 @@ async def test_windows_stdout_backpressure_keeps_reads_available_and_preserves_f
             await second
         await transport.close()
     assert output.getvalue() == b'{"id":1}\n{"id":2}\n'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stall", ["executor", "write", "flush", "send_lock"])
+async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monkeypatch, tmp_path, stall):
+    trace_id = "d1ec4f70-4800-4b8d-9687-105c2a0edeaa"
+    log_path = tmp_path / stdio_compat._STDOUT_TIMING_LOG_NAME
+    monkeypatch.setenv(
+        "BOX_AGENT_ACP_STDIO_TIMING",
+        json.dumps({"traceId": trace_id, "writeLogPath": str(log_path)}),
+    )
+    loop = asyncio.get_running_loop()
+    submitted, writing = asyncio.Event(), asyncio.Event()
+    diagnostics = asyncio.Queue()
+    release = Event()
+    monkeypatch.setattr(
+        stdio_compat._StdoutTimingLog, "_write",
+        lambda _self, record: loop.call_soon_threadsafe(diagnostics.put_nowait, record),
+    )
+
+    class ObservedExecutor(ThreadPoolExecutor):
+        def submit(self, fn, /, *args, **kwargs):
+            future = super().submit(fn, *args, **kwargs)
+            submitted.set()
+            return future
+
+    class BlockedOutput(io.BytesIO):
+        flush_blocked = False
+
+        def write(self, data):
+            if b'"id":1,' in data:
+                if stall in {"write", "send_lock"}:
+                    loop.call_soon_threadsafe(writing.set)
+                    assert release.wait(5)
+                self.flush_blocked = stall == "flush"
+            return super().write(data)
+
+        def flush(self):
+            if self.flush_blocked:
+                loop.call_soon_threadsafe(writing.set)
+                assert release.wait(5)
+                self.flush_blocked = False
+            super().flush()
+
+    loop.set_default_executor(ObservedExecutor(max_workers=1))
+    output = BlockedOutput()
+    monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    transport = stdio_compat.StdioTransport(
+        asyncio.StreamReader(), SimpleNamespace(transport=stdio_compat._StdoutTransport()),
+    )
+
+    await transport.send({"id": 0})
+    frame_start = len(output.getvalue())
+    assert diagnostics.empty()
+    payload = {"id": 1, "result": "private fixture data"}
+    blocker = loop.run_in_executor(None, release.wait, 5) if stall == "executor" else None
+    submitted.clear()
+    sending = asyncio.create_task(transport.send(payload))
+    waiter = sending
+
+    try:
+        ready = submitted if stall == "executor" else writing
+        await asyncio.wait_for(ready.wait(), 2)
+        if stall == "send_lock":
+            waiter = asyncio.create_task(transport.send({"id": 9}))
+            await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        pending = await asyncio.wait_for(diagnostics.get(), 2)
+        assert pending["event"] == "wait_cancelled"
+        assert pending["waitAt"] == ("send_lock" if stall == "send_lock" else "write_completion")
+        assert pending["traceId"] == trace_id
+        assert pending["frameStartByte"] == frame_start
+        assert pending["submittedAfterMs"] is not None
+        assert (pending["threadStartedAfterMs"] is None) == (stall == "executor")
+        assert (pending["writeReturnedAfterMs"] is not None) == (stall == "flush")
+        assert pending["flushReturnedAfterMs"] is None
+    finally:
+        release.set()
+        if blocker is not None:
+            await blocker
+        await asyncio.gather(sending, waiter, return_exceptions=True)
+        await asyncio.wait_for(transport.close(), 2)
+
+    settled = await asyncio.wait_for(diagnostics.get(), 2)
+    assert settled["event"] == "write_settled"
+    assert settled["outcome"] == "completed"
+    assert settled["frameStartByte"] == frame_start
+    assert settled["frameEndByte"] == pending["frameEndByte"] == len(output.getvalue())
+    assert (
+        settled["submittedAfterMs"]
+        <= settled["threadStartedAfterMs"]
+        <= settled["writeReturnedAfterMs"]
+        <= settled["flushReturnedAfterMs"]
+        <= settled["observedAfterMs"]
+    )
+    assert "private fixture data" not in json.dumps([pending, settled])
+    assert [json.loads(line) for line in output.getvalue().splitlines()] == [{"id": 0}, payload]
+
+
+@pytest.mark.asyncio
+async def test_stdout_timing_queue_stays_bounded_when_the_file_writer_is_blocked(monkeypatch, tmp_path):
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    written = asyncio.Queue()
+    release = Event()
+
+    def blocked_write(_sink, record):
+        if record["sequence"] == 0:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+        loop.call_soon_threadsafe(written.put_nowait, record["sequence"])
+
+    monkeypatch.setattr(stdio_compat._StdoutTimingLog, "_write", blocked_write)
+    sink = stdio_compat._StdoutTimingLog(tmp_path / stdio_compat._STDOUT_TIMING_LOG_NAME)
+    capacity = stdio_compat._STDOUT_TIMING_QUEUE_LIMIT
+    try:
+        sink.emit({"sequence": 0})
+        await asyncio.wait_for(entered.wait(), 2)
+        for sequence in range(1, capacity + 4):
+            sink.emit({"sequence": sequence})
+        assert sink._records.qsize() == capacity
+        sink.close()
+        assert written.empty()
+    finally:
+        sink.close()
+        release.set()
+
+    assert [
+        await asyncio.wait_for(written.get(), 2) for _ in range(capacity + 1)
+    ] == list(range(capacity + 1))
+
+
+@pytest.mark.asyncio
+async def test_timing_file_failure_leaves_stdout_order_and_stderr_intact(
+    monkeypatch, tmp_path, capfd,
+):
+    # Opening a directory as a log fails on every supported platform.
+    log_path = tmp_path / stdio_compat._STDOUT_TIMING_LOG_NAME
+    log_path.mkdir()
+    monkeypatch.setenv("BOX_AGENT_ACP_STDIO_TIMING", json.dumps({
+        "traceId": "d1ec4f70-4800-4b8d-9687-105c2a0edeaa",
+        "writeLogPath": str(log_path),
+    }))
+    loop = asyncio.get_running_loop()
+    writing = asyncio.Event()
+    attempts = asyncio.Queue()
+    release = Event()
+    write_timing = stdio_compat._StdoutTimingLog._write
+
+    def observe_write(sink, record):
+        try:
+            write_timing(sink, record)
+        finally:
+            loop.call_soon_threadsafe(attempts.put_nowait, record["event"])
+
+    class Output(io.BytesIO):
+        def write(self, data):
+            if data == b'{"id":1}\n':
+                loop.call_soon_threadsafe(writing.set)
+                assert release.wait(5)
+            return super().write(data)
+
+    monkeypatch.setattr(stdio_compat._StdoutTimingLog, "_write", observe_write)
+    output = Output()
+    monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    transport = stdio_compat.StdioTransport(
+        asyncio.StreamReader(), SimpleNamespace(transport=stdio_compat._StdoutTransport()),
+    )
+    first = asyncio.create_task(transport.send({"id": 1}))
+    try:
+        await asyncio.wait_for(writing.wait(), 2)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert await asyncio.wait_for(attempts.get(), 2) == "wait_cancelled"
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+
+    try:
+        await asyncio.wait_for(transport.send({"id": 2}), 2)
+        assert await asyncio.wait_for(attempts.get(), 2) == "write_settled"
+    finally:
+        await asyncio.wait_for(transport.close(), 2)
+    assert output.getvalue() == b'{"id":1}\n{"id":2}\n'
+    assert "ACP_STDOUT_TIMING" not in capfd.readouterr().err
 
 
 @pytest.mark.asyncio
