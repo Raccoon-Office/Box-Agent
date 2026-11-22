@@ -2371,24 +2371,27 @@ async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults
                 original.activate_skill_instructions(name, loader.get_skill(name).to_prompt())
         with monkeypatch.context() as resume_patch:
             metadata_faults = {
-                "manifest-stat": manifest,
-                "listed-skill-stat": builtin / "optional" / "SKILL.md",
-                "source-root-stat": user_skills,
+                "manifest-stat": ("stat", manifest),
+                "listed-skill-stat": ("is_file", builtin / "optional" / "SKILL.md"),
+                "source-root-stat": ("exists", user_skills),
             }
+            metadata_failure_injected = False
             if fault == "manifest-encoding":
                 manifest.write_bytes(b"\xff")
             elif fault == "settings-encoding":
                 skill_settings.write_bytes(b"\xff")
             elif fault in metadata_faults:
-                original_stat = os.stat
-                blocked_path = metadata_faults[fault]
+                method, blocked_path = metadata_faults[fault]
+                original_check = getattr(Path, method)
 
-                def stat(path, *args, **kwargs):
-                    if path == blocked_path or path == str(blocked_path):
+                def check(path, *args, **kwargs):
+                    nonlocal metadata_failure_injected
+                    if path == blocked_path:
+                        metadata_failure_injected = True
                         raise PermissionError("skill metadata is unavailable")
-                    return original_stat(path, *args, **kwargs)
+                    return original_check(path, *args, **kwargs)
 
-                resume_patch.setattr(os, "stat", stat)
+                resume_patch.setattr(Path, method, check)
             elif fault == "expert-listing":
                 original_rglob = Path.rglob
 
@@ -2413,6 +2416,8 @@ async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults
                 agent.prompt(other.sessionId, [text_block("keep the other session responsive")]),
             )
             assert other_reply.stopReason == "end_turn"
+            if fault in metadata_faults:
+                assert metadata_failure_injected
             if fault is None:
                 resume_patch.undo()
             state = agent._sessions[session.sessionId]
