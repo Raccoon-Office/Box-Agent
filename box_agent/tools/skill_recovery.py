@@ -132,7 +132,7 @@ class SkillRecoveryGate:
             return None
         issue = self._issue()
         if issue is not None:
-            self.context.record("skill.execution_blocked", {"tool": name, "code": issue.code,
+            await self.context.arecord("skill.execution_blocked", {"tool": name, "code": issue.code,
                                                           "skills": sorted(self._pending())})
         return issue
 

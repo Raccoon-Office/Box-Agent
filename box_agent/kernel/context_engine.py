@@ -17,7 +17,7 @@ from ..llm.base import closing_llm_stream
 from ..llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS, cap_auxiliary_client
 from ..schema import Message
 from ..schema.schema import RequestUsageSnapshot
-from ..session_log import SessionLog
+from ..session_log import SessionLog, run_session_write
 from ..tools.base import Tool, ToolResult
 from .context_types import CompactionOutcome
 from .tool_messages import InvalidToolHistory, tool_message_groups
@@ -173,6 +173,7 @@ async def _create_summary(
     title: str = "",
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None,
     input_token_limit: int | None = None,
+    session_log=None,
 ) -> str:
     """Append one instruction to the exact history so provider KV cache survives."""
 
@@ -186,7 +187,7 @@ async def _create_summary(
     summary_llm = cap_auxiliary_client(llm, SMALL_TASK_MAX_OUTPUT_TOKENS)
     summary_messages = [*messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)]
     if summary_projector is not None:
-        summary_messages = summary_projector(summary_messages, summary_llm)
+        summary_messages = await run_session_write(session_log, summary_projector, summary_messages, summary_llm)
     window = getattr(summary_llm, "context_window", None)
     output = getattr(summary_llm, "max_output_tokens", None)
     if type(window) is int and window > 0 and type(output) is int and output > 0:
@@ -825,23 +826,26 @@ async def _maybe_summarize(
     ]
 
     if before_summary is not None:
-        before_summary(estimated)
+        await run_session_write(session_log, before_summary, estimated)
     elif session_log is not None and session_turn is not None and session_step is not None:
-        session_log.append_unlogged_messages(
-            messages[1:],
-            turn=session_turn,
-            step=session_step,
-        )
-        session_log.append(
-            "compaction/start",
-            {
-                "turn": session_turn,
-                "step": session_step,
-                "estimatedBefore": estimated,
-                "tokenLimit": token_limit,
-            },
-        )
-        session_log.flush()
+        def record_compaction_start():
+            session_log.append_unlogged_messages(
+                messages[1:],
+                turn=session_turn,
+                step=session_step,
+            )
+            session_log.append(
+                "compaction/start",
+                {
+                    "turn": session_turn,
+                    "step": session_step,
+                    "estimatedBefore": estimated,
+                    "tokenLimit": token_limit,
+                },
+            )
+            session_log.flush()
+
+        await run_session_write(session_log, record_compaction_start)
 
     summary_source = compaction_source_projector(messages) if compaction_source_projector else messages
     summary_calls = 0
@@ -859,7 +863,8 @@ async def _maybe_summarize(
             session_id=session_id,
             turn_id=turn_id,
             title=title,
-            **({"summary_projector": summary_projector} if summary_projector is not None else {}),
+            **({"summary_projector": summary_projector, "session_log": session_log}
+               if summary_projector is not None else {}),
             **({"input_token_limit": summary_input_token_limit} if summary_input_token_limit is not None else {}),
         )
         if not summary.strip():

@@ -221,7 +221,7 @@ class AgentSession:
         from .composition import _attach_cleanup_error
         from .plugins.runtime import PluginRuntime
         from .session_context import HostBindings, SessionContext, SessionOptions
-        from .session_log import SessionLog, run_session_io
+        from .session_log import run_session_write
 
         options = options or SessionOptions()
         if state:
@@ -241,8 +241,7 @@ class AgentSession:
             replay = getattr(session_log, "replay", None)
             projection = resources.state.pop("session_projection", session_projection)
             if projection is None and callable(replay):
-                projection = (await run_session_io(replay)
-                              if isinstance(session_log, SessionLog) else replay())
+                projection = await run_session_write(session_log, replay)
             if skill_runtime is not None and skill_runtime.loader is not None and callable(replay):
                 records = projection.skills
                 names = tuple(dict.fromkeys(row["name"] for row in records
@@ -252,7 +251,8 @@ class AgentSession:
             scope = (skill_runtime.reference_scope(restore_validation)
                      if restore_validation is not None else nullcontext())
             with scope:
-                session = cls.create(
+                session = await run_session_write(
+                    session_log if agent_factory is Agent else None, cls.create,
                     config=config,
                     agent_factory=agent_factory,
                     llm_client=resources.llm_client,

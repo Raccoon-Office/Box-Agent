@@ -47,6 +47,7 @@ class CompactionInput:
     request_headroom_tokens: int | None = None
     compacted_history_projector: Callable[[list[Message]], list[Message]] | None = None
     compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None
+    session_log: Any = None
 
 
 @dataclass(frozen=True)

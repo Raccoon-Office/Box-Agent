@@ -16,6 +16,7 @@ from .kernel.context_engine import (
 )
 from .kernel.context_types import InitialContextTransition
 from .schema import Message
+from .session_log import run_session_write
 from .llm.capabilities import bound_context_token_limit
 from .connector_context import restore_connector_status
 from .input_context import project_user_message
@@ -275,14 +276,14 @@ class DefaultContextEngine:
         runtime = self.references.runtime if self.references is not None else None
         validate = getattr(runtime, "avalidate_references", None)
         if not callable(validate):
-            return self.prepare_request(messages, **arguments)
+            return await run_session_write(self._session_store, self.prepare_request, messages, **arguments)
         started = perf_counter()
         names = self._source_names(messages, arguments)
         validation = None
         try:
             validation = await validate(names)
             with runtime.reference_scope(validation):
-                return self.prepare_request(messages, **arguments)
+                return await run_session_write(self._session_store, self.prepare_request, messages, **arguments)
         finally:
             _log.info("context/prepare duration_ms=%.3f unique_skills=%d validation_timeouts=%d",
                       (perf_counter() - started) * 1000, len(names), int(getattr(validation, "timed_out", False)))

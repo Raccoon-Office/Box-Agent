@@ -93,13 +93,14 @@ async def revise_agent_history(
     from .kernel.tool_messages import (
         InvalidToolHistory, _sanitize_dangling_tool_calls, validate_tool_history,
     )
+    from .session_log import run_session_write
     from .session_projection import SessionProjection
     from .skill_runtime import SkillRuntime
 
     log = agent.session_log
     if log is None:
         raise ValueError("HISTORY_LOG_UNAVAILABLE")
-    projection = log.replay(through_seq=revision["restore_through_seq"])
+    projection = await run_session_write(log, log.replay, through_seq=revision["restore_through_seq"])
     original = projection.messages
     repaired = list(original)
     _sanitize_dangling_tool_calls(repaired, fill_missing=False)
@@ -110,20 +111,25 @@ async def revise_agent_history(
     # Validate references before changing the durable or live session.
     candidate = SkillRuntime(agent.skill_runtime.loader, session_log=log)
     await candidate.arestore_records(projection.skills)
-    if cancelled is not None and cancelled():
-        raise ValueError("HISTORY_CANCELLED")
-    existing = any(event["type"] == "history/revise"
-                   and event["data"].get("turn_id") == revision["turn_id"]
-                   for event in log.events)
-    if not existing:
-        log.append("history/revise", revision)
+
+    def commit_revision():
+        if cancelled is not None and cancelled():
+            raise ValueError("HISTORY_CANCELLED")
+        existing = any(event["type"] == "history/revise"
+                       and event["data"].get("turn_id") == revision["turn_id"]
+                       for event in log.events)
+        if not existing:
+            log.append("history/revise", revision)
+            if repaired != original:
+                log.replace_surface(repaired, turn=log.next_turn_number(), step=0)
+            log.flush()
+        restored = projection
         if repaired != original:
-            log.replace_surface(repaired, turn=log.next_turn_number(), step=0)
-        log.flush()
-    if repaired != original:
-        projection = SessionProjection(
-            repaired, projection.goal, projection.plan, projection.todos,
-            projection.skills, projection.images, projection.model_round,
-        )
-    agent.skill_runtime.clear_references()
-    agent.restore_session_projection(projection)
+            restored = SessionProjection(
+                repaired, projection.goal, projection.plan, projection.todos,
+                projection.skills, projection.images, projection.model_round,
+            )
+        agent.skill_runtime.clear_references()
+        agent.restore_session_projection(restored)
+
+    await run_session_write(log, commit_revision)

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..schema import Message
+from ..session_log import run_session_write
 from ..session_trace import emit_session_trace
 
 
@@ -26,6 +27,9 @@ class CompletionContext:
             self.session_log.append(kind, payload, ignorable=True)
             self.session_log.flush()
         emit_session_trace(kind, turn_id=self.turn_id, data=payload)
+
+    async def arecord(self, kind: str, data: dict) -> None:
+        await run_session_write(self.session_log, self.record, kind, data)
 
 
 @dataclass(frozen=True)
@@ -176,7 +180,7 @@ class CompletionChecks:
             if issue is not None:
                 issues.append(issue)
         if self.gates or issues:
-            self.context.record("completion.check", {
+            await self.context.arecord("completion.check", {
                 "passed": not issues,
                 "checks": list(self.gates),
                 "issues": [{"code": i.code, "message": i.message} for i in issues],

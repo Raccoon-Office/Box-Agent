@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import tracemalloc
 from dataclasses import replace
 from hashlib import sha256
@@ -312,6 +313,54 @@ async def test_tool_side_effect_starts_only_after_exact_call_is_durable(tmp_path
         "child_session_id": "child-session"
     }
     restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disk_error", [False, True])
+async def test_tool_waits_for_background_dispatch_fsync(tmp_path, monkeypatch, disk_error):
+    from box_agent import session_log
+
+    log = SessionLog.create(tmp_path, session_id="dispatch", cwd=tmp_path)
+    tool = _DurabilityInspectingTool(log.path)
+    agent = Agent(
+        llm_client=_ToolCallingLLM(), system_prompt="system", tools=[tool],
+        workspace_dir=str(tmp_path), hooks=[_ArgumentHook()], session_log=log,
+        deferred_mcp_loading_enabled=False,
+    )
+    agent.add_user_message("perform it")
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    fsync = session_log._timed_fsync
+
+    def hold_dispatch(fd):
+        if fd == log._handle.fileno() and log.events[-1]["type"] == "tool/call":
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+            if disk_error:
+                raise OSError("simulated disk failure")
+        fsync(fd)
+
+    async def run():
+        return [event async for event in agent.run_events()]
+
+    monkeypatch.setattr(session_log, "_timed_fsync", hold_dispatch)
+    turn = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert not tool.executed
+        release.set()
+        if disk_error:
+            with pytest.raises(SessionLogDurabilityError):
+                await turn
+            assert not tool.executed
+        else:
+            await turn
+            assert tool.executed and tool.saw_durable_call
+    finally:
+        release.set()
+        await asyncio.gather(turn, return_exceptions=True)
+        log.close()
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from .events import InjectedMessageEvent
 from .loop_guards import format_injected_message, format_runtime_context_update
 from .schema import Message
 from .input_context import project_input_context
+from .session_log import run_session_write
 
 
 class InjectionKind(Enum):
@@ -170,6 +171,7 @@ class InjectionManager(asyncio.Queue[Any]):
         self.run_id = str(uuid4())
         self._statuses: dict[str, InjectionStatus] = {}
         self._inputs: dict[str, str] = {}
+        self._committing: set[str] = set()
         self._run_finished = False
         self.prepare_input = None
 
@@ -228,6 +230,8 @@ class InjectionManager(asyncio.Queue[Any]):
 
     def cancel(self, injection_id: str) -> bool:
         """Cancel pending input without forgetting already consumed IDs."""
+        if injection_id in self._committing:
+            return False
         if self.status(injection_id) is InjectionStatus.TAKEN:
             self._statuses[injection_id] = InjectionStatus.CANCELLED
             return True
@@ -297,35 +301,44 @@ class InjectionManager(asyncio.Queue[Any]):
             self._statuses[injection.injection_id] = InjectionStatus.INJECTED
         return injection, event
 
-    async def aapply_next(self, messages, *, commit=None, cancelled=lambda: False):
+    async def aapply_next(self, messages, *, commit=None, cancelled=lambda: False, session_log=None):
         injection = parse_queued_injection(self.get_nowait())
         assert injection is not None
         temporary = []
         length = len(messages)
         accept_input = None
+        status = InjectionStatus.DISCARDED
+
+        def accept_and_commit():
+            nonlocal status
+            if accept_input is not None:
+                accept_input()
+            messages.extend(temporary)
+            if commit is not None:
+                commit()
+            status = InjectionStatus.INJECTED
+
         try:
             event = injection.apply(temporary)
             if self.prepare_input is not None:
                 accept_input = await self.prepare_input(temporary[0], injection)
+            # Reserve admission on the loop before yielding to the disk writer.
+            # A cancellation receipt can no longer win after the commit starts.
             if cancelled() or self.status(injection.injection_id) is InjectionStatus.CANCELLED:
                 status = InjectionStatus.CANCELLED
             else:
-                # No await between the cancellation check, image adoption and commit.
-                if accept_input is not None:
-                    accept_input()
-                messages.extend(temporary)
-                if commit is not None:
-                    commit()
-                status = InjectionStatus.INJECTED
+                if injection.injection_id is not None:
+                    self._committing.add(injection.injection_id)
+                await run_session_write(session_log, accept_and_commit)
         except BaseException:
-            del messages[length:]
-            if injection.injection_id is not None:
-                self._statuses[injection.injection_id] = InjectionStatus.DISCARDED
+            if status is not InjectionStatus.INJECTED:
+                del messages[length:]
             raise
         finally:
+            if injection.injection_id is not None:
+                self._statuses[injection.injection_id] = status
+                self._committing.discard(injection.injection_id)
             self.task_done()
-        if injection.injection_id is not None:
-            self._statuses[injection.injection_id] = status
         if status is not InjectionStatus.INJECTED:
             from dataclasses import replace
             event = replace(event, status=status.value)

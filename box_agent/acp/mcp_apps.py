@@ -21,6 +21,7 @@ from acp import RequestError
 
 from box_agent.composition import standalone_tool_hooks
 from box_agent.kernel.hook_types import copy_data
+from box_agent.session_log import run_session_write
 from box_agent.tools.base import ToolInvocationContext
 from box_agent.tools.chat_references import ChatReferences
 from box_agent.tools.completion_checks import CompletionChecks, CompletionContext
@@ -413,8 +414,16 @@ class McpAppsACP:
         self._assert_current(session_id, state)
         if _saved_snapshot(state, snapshot["toolCallId"]) is None:
             raise _error("MCP_APP_SNAPSHOT_UNAVAILABLE")
-        session_log.append(INTERACTION_EVENT, {**record, "status": "started"}, ignorable=True)
-        session_log.flush()
+
+        completed = False
+
+        def checkpoint(status, **fields):
+            nonlocal completed
+            session_log.append(INTERACTION_EVENT, {**record, "status": status, **fields}, ignorable=True)
+            session_log.flush()
+            completed = status == "completed"
+
+        await run_session_write(session_log, checkpoint, "started")
 
         def revoked() -> bool:
             return (self.sessions.get(session_id) is not state
@@ -431,7 +440,9 @@ class McpAppsACP:
                 )
                 context = ToolInvocationContext(
                     parent_tool_call_id=interaction_id,
-                    chat_references=ChatReferences(state.agent.workspace_dir, state.agent.messages, session_log),
+                    chat_references=await run_session_write(
+                        session_log, ChatReferences, state.agent.workspace_dir, state.agent.messages, session_log,
+                    ),
                     capability_gates=gates,
                 )
                 result = await call_mcp_app_tool(
@@ -444,8 +455,7 @@ class McpAppsACP:
             if _saved_snapshot(state, snapshot["toolCallId"]) is None:
                 raise _error("MCP_APP_SNAPSHOT_UNAVAILABLE")
             result = _bounded_copy(result, MAX_SNAPSHOT_BYTES)
-            session_log.append(INTERACTION_EVENT, {**record, "status": "completed", "result": result}, ignorable=True)
-            session_log.flush()
+            await run_session_write(session_log, checkpoint, "completed", result=result)
             return result
         except BaseException as exc:
             code = "MCP_APP_OUTCOME_UNKNOWN" if isinstance(exc, asyncio.CancelledError) else getattr(exc, "code", "MCP_APP_CALL_FAILED")
@@ -454,8 +464,8 @@ class McpAppsACP:
             if not isinstance(code, str):
                 code = "MCP_APP_CALL_FAILED"
             try:
-                session_log.append(INTERACTION_EVENT, {**record, "status": "failed", "error": code}, ignorable=True)
-                session_log.flush()
+                if not completed:
+                    await run_session_write(session_log, checkpoint, "failed", error=code)
             except Exception:
                 pass
             if isinstance(exc, asyncio.CancelledError):

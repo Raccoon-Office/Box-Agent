@@ -11,6 +11,7 @@ from copy import deepcopy
 from typing import Any
 
 from ..memory import MemoryRuntime, _MemoryTurn
+from ..session_log import run_session_write
 from .backend import TurnScope
 from .evidence import EvidenceCursor, _redact, no_evidence
 from .experience import ExperienceRuntime
@@ -166,8 +167,12 @@ class DesktopMemoryRuntime(MemoryRuntime):
                 self._remember_attempt(key, timestamp, bounded=log is not None)
             else:
                 if log is not None:
-                    log.append("memory/desktop-attempt", {"turn_key": key, "timestamp": turn.timestamp}, ignorable=True)
-                    log.flush()
+                    def record_attempt():
+                        log.append("memory/desktop-attempt",
+                                   {"turn_key": key, "timestamp": turn.timestamp}, ignorable=True)
+                        log.flush()
+
+                    await run_session_write(log, record_attempt)
                 self._remember_attempt(key, turn.timestamp, bounded=log is not None)
         except Exception as exc:
             self.backend.context_attempt_durable = False
@@ -230,9 +235,10 @@ class DesktopMemoryRuntime(MemoryRuntime):
             evidence = no_evidence(turn.session_id, turn.turn_id, scope.qa_event_id, "log_unavailable")
             if cursor is not None:
                 try:
-                    evidence = cursor.capture(session_id=turn.session_id, turn_id=turn.turn_id,
-                                              event_id=scope.qa_event_id, user=turn.user,
-                                              assistant=result.final_content, end=end)
+                    evidence = await run_session_write(
+                        cursor.log, cursor.capture, session_id=turn.session_id, turn_id=turn.turn_id,
+                        event_id=scope.qa_event_id, user=turn.user, assistant=result.final_content, end=end,
+                    )
                 except Exception:
                     self.backend.log_failure("evidence", "log_unavailable")
             if not turn.user.strip() and not _has_original_user_view(evidence, turn.user):

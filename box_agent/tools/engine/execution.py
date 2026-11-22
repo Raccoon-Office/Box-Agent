@@ -9,7 +9,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from ...session_log import SessionLogDurabilityError
+from ...session_log import SessionLogDurabilityError, run_session_write
 from ..base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
 from ..delegated_budget import current_budgets
 from ..schema_validation import validate_tool_arguments, ToolSchemaValidationError
@@ -110,7 +110,7 @@ async def invoke_tool_once(
         else:
             result = await tool.invoke(arguments)
     if guard is not None and allowed_deletions:
-        guard.deleted(allowed_deletions)
+        await run_session_write(getattr(guard, "log", None), guard.deleted, allowed_deletions)
     if result.permission_request or result._invocation_rejected:
         context.budget_charge.release_unexecuted()
     return result

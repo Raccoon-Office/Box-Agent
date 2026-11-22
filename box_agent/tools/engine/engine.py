@@ -22,7 +22,7 @@ from ...loop_guards import (
     tool_call_budget_wrapup_text, total_tool_call_budget_wrapup_text,
 )
 from ...schema import Message, ToolCall
-from ...session_log import SessionLogDurabilityError
+from ...session_log import SessionLogDurabilityError, run_session_write
 from ...session_trace import emit_session_trace
 from ..base import Tool, ToolResult, ToolInvocationContext, bind_tool_cancellation
 from ..file_change_receipts import persist_file_change
@@ -100,6 +100,10 @@ class DefaultToolEngine:
                 else None
             ),
         )
+
+    async def aconfigure_run(self, context: ToolRunContext, options: ToolExecutionOptions) -> None:
+        # Rebuilding ChatReferences can persist legacy file references.
+        await run_session_write(context.session_log, self.configure_run, context, options)
 
     def configure_run(self, context: ToolRunContext, options: ToolExecutionOptions) -> None:
         """Bind run services once; keep every session-owned object borrowed."""
@@ -290,7 +294,7 @@ class DefaultToolEngine:
             # Reclassify before dispatch using the final, validated arguments.
             if call.parallel and call.target.invocation_may_require_user_input(call.arguments):
                 call.parallel = False
-            context.record_call(call, control.step)
+            await run_session_write(context.session_log, context.record_call, call, control.step)
         call.started_at = perf_counter()
         trace = {
             "tool_name": call.name, "tool_id": call.tool_id, "server_name": call.server_name,
@@ -347,9 +351,9 @@ class DefaultToolEngine:
                 tool_id=call.tool_id, server_name=call.server_name,
             )
 
-    def _retain_displayed_file(self, artifact: ArtifactEvent) -> None:
+    async def _retain_displayed_file(self, artifact: ArtifactEvent) -> None:
         if self._references is not None:
-            self._references.retain(Path(artifact.abs_path))
+            await run_session_write(self._context.session_log, self._references.retain, Path(artifact.abs_path))
 
     async def _finish_call(self, call: ToolCallRecord, result: ToolResult,
                            prepared: PreparedTools, control: ToolStepControl,
@@ -378,7 +382,9 @@ class DefaultToolEngine:
                         if isinstance(record, PermissionChainCompleted):
                             result, call.policy_decision = record.result, record.policy_decision
                             if self._references is not None and call.policy_decision and call.policy_decision.get("decision") == "denied":
-                                self._references.denied(result.permission_request or {})
+                                await run_session_write(
+                                    context.session_log, self._references.denied, result.permission_request or {},
+                                )
                         else:
                             yield self._event(record, control.step)
             else:
@@ -448,7 +454,7 @@ class DefaultToolEngine:
                 content=content, error=error,
             )
         hook_text_modified = bool(text_resolution and text_resolution.modified)
-        outcome = process_tool_result(ToolResultPipelineInput(
+        outcome = await run_session_write(context.session_log, process_tool_result, ToolResultPipelineInput(
             messages=context.messages, tool_call_id=call.call_id, tool_name=call.name,
             arguments=call.arguments, result=result, visible_content=content, visible_error=error,
             result_storage=context.result_storage, tool=call.target, session_id=context.session_id,
@@ -530,10 +536,13 @@ class DefaultToolEngine:
         # Commit retention before exposing either the structured result or its
         # artifact events. A consumer may render a file from either channel.
         if self._references is not None and call.user_visible and result.success and not temporary:
-            self._references.retain_text(outcome.visible_content)
-            self._references.retain_output(result.raw_output)
+            def retain_result():
+                self._references.retain_text(outcome.visible_content)
+                self._references.retain_output(result.raw_output)
+
+            await run_session_write(context.session_log, retain_result)
         for artifact in artifacts:
-            self._retain_displayed_file(artifact)
+            await self._retain_displayed_file(artifact)
         for event in outcome.events:
             yield event
         for artifact in artifacts:
@@ -639,7 +648,7 @@ class DefaultToolEngine:
                     parallel = parallel[:index]
                     break
         if parallel:
-            context.flush_calls()
+            await run_session_write(context.session_log, context.flush_calls)
             results = {}
             async with aclosing(self._scheduler.invoke_parallel([self._request(call, prepared) for call in parallel])) as records:
                 async for record in records:
@@ -674,7 +683,7 @@ class DefaultToolEngine:
                         call_id, before, after, emitted, context.workspace_dir, content=content,
                     ):
                         emitted.add(artifact.abs_path)
-                        self._retain_displayed_file(artifact)
+                        await self._retain_displayed_file(artifact)
                         yield artifact
                     extra = _detect_file_artifacts(
                         call_id, tool_name, evidence_files,
@@ -682,7 +691,7 @@ class DefaultToolEngine:
                     )
                     for artifact in extra:
                         emitted.add(artifact.abs_path)
-                        self._retain_displayed_file(artifact)
+                        await self._retain_displayed_file(artifact)
                         yield artifact
                     if evidence_text:
                         extra = _detect_text_artifacts(
@@ -691,7 +700,7 @@ class DefaultToolEngine:
                         )
                         for artifact in extra:
                             emitted.add(artifact.abs_path)
-                            self._retain_displayed_file(artifact)
+                            await self._retain_displayed_file(artifact)
                             yield artifact
             if context.is_cancelled():
                 return
@@ -706,7 +715,10 @@ class DefaultToolEngine:
             if context.is_cancelled():
                 return
         for duplicate, source in duplicates:
-            duplicate_events = self._finish_duplicate(duplicate, source, outcomes.get(source.call_id), control.step)
+            duplicate_events = await run_session_write(
+                context.session_log, self._finish_duplicate, duplicate, source,
+                outcomes.get(source.call_id), control.step,
+            )
             if context.hook_dispatch is not None and not context.is_cancelled():
                 final = duplicate_events[-1]
                 await context.hook_dispatch.observe(self._hook_context(

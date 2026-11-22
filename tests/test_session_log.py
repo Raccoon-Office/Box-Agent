@@ -1,5 +1,6 @@
 """Behavior tests for the durable append-only Session Log."""
 
+import asyncio
 import json
 import errno
 import ntpath
@@ -7,6 +8,7 @@ import os
 import posixpath
 import subprocess
 import sys
+import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -20,7 +22,63 @@ from box_agent.session_log import (
     SessionLogDurabilityError,
     SessionLogInUseError,
     SessionLogWorkspaceMismatch,
+    run_session_write,
 )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_checkpoint_keeps_its_place_until_disk_write_finishes(tmp_path, monkeypatch):
+    log = SessionLog.create(tmp_path, session_id="ordered", cwd=tmp_path)
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    fsync = session_log_module._timed_fsync
+    started = []
+
+    def hold_first(fd):
+        if started == ["first"]:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+        fsync(fd)
+
+    def record(name):
+        started.append(name)
+        log.append("assistant/chunk", {"turn": 1, "step": 1, "kind": "text", "content": name})
+        log.flush()
+
+    monkeypatch.setattr(session_log_module, "_timed_fsync", hold_first)
+    pending = []
+    try:
+        first = asyncio.create_task(run_session_write(log, record, "first"))
+        pending.append(first)
+        await asyncio.wait_for(entered.wait(), 3)
+        for name in ("second", "cancelled in queue", "third"):
+            pending.append(asyncio.create_task(run_session_write(log, record, name)))
+        await asyncio.sleep(0)
+        first.cancel()
+        pending[2].cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+        await asyncio.sleep(0)
+        assert not first.done()
+        assert started == ["first"]
+        release.set()
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert isinstance(results[2], asyncio.CancelledError)
+        assert results[1] is results[3] is None
+    finally:
+        release.set()
+        await asyncio.gather(*pending, return_exceptions=True)
+        log.close()
+
+    reopened = SessionLog.open(tmp_path, session_id="ordered", cwd=tmp_path)
+    try:
+        assert [(e["seq"], e["data"]["content"]) for e in reopened.events] == [
+            (0, "first"), (1, "second"), (2, "third"),
+        ]
+    finally:
+        reopened.close()
 
 
 @pytest.mark.parametrize("replace_surface", [False, True])

@@ -12,6 +12,7 @@ from threading import Event
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from ...session_log import run_session_write
 from ..completion_checks import CompletionContext, CompletionIssue
 from ..base import ToolInvocationContext, ToolResult
 from .read_tool import ReadTool
@@ -118,7 +119,7 @@ class TableCompletionGate:
             # Read authorization can still be negotiated by the tool invocation.
             await self.pin(path)
         if added:
-            context.record("table.inputs", {"sources": {str(p): sha for p, sha in self.sources.items()}})
+            await context.arecord("table.inputs", {"sources": {str(p): sha for p, sha in self.sources.items()}})
 
     def bind_purpose(self, purpose: str) -> None:
         if self.purpose is not None and self.purpose != purpose:
@@ -284,7 +285,7 @@ class TableCompletionGate:
                     "TABLE_SOURCE_UNVERIFIED",
                     f"{path}: {denial.error if denial else 'validated source hash does not match'}", False,
                 )
-            self.context.record("table.execution_blocked", {
+            await self.context.arecord("table.execution_blocked", {
                 "tool": tool_name, "path": str(path), "code": issue.code,
             })
             return issue
@@ -448,7 +449,7 @@ class ValidateTableTool(ReadTool):
                 if denial:
                     return denial
                 gate.source_modes[source] = selected_mode
-                return gate.prepared_operation(source)
+                return await run_session_write(gate.context.session_log, gate.prepared_operation, source)
 
             previous = gate.contracts.get(source) if gate else None
             expected_fields = previous["fields"] if previous else None
@@ -492,10 +493,10 @@ class ValidateTableTool(ReadTool):
                 denial = await gate.pin(source, allow_edit=allow_edit)
                 if denial:
                     return denial
-                gate.bind_purpose(selected_purpose)
+                await run_session_write(gate.context.session_log, gate.bind_purpose, selected_purpose)
                 if selected_mode == "replace_target" and previous is None:
                     gate.contracts[source] = contract
-                    return gate.prepared_operation(source)
+                    return await run_session_write(gate.context.session_log, gate.prepared_operation, source)
             receipt = await _in_thread(
                 scan_table, source, scan_fields, encoding=encoding, profile=selected_profile,
                 cancelled=gate.context.is_cancelled if gate else lambda: False,
@@ -512,7 +513,7 @@ class ValidateTableTool(ReadTool):
             if gate is not None:
                 if receipt.source_sha256 != gate.sources[source] and not allow_edit:
                     return ToolResult(success=False, error="TABLE_SOURCE_CHANGED: scan does not match the original input")
-                gate.context.record("table.validation", {**payload, "contract": contract})
+                await gate.context.arecord("table.validation", {**payload, "contract": contract})
                 gate.contracts.setdefault(source, contract)
                 gate.receipts[source] = receipt
                 if selected_mode != "replace_target":
