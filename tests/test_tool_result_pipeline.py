@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from box_agent.kernel.tool_result_pipeline import (
 )
 from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
-from box_agent.tool_result_storage import ToolResultStorage
+from box_agent.tool_result_storage import MAX_RAW_OUTPUT_BYTES, MAX_TOOL_RESULT_BYTES, ToolResultStorage
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.engine import artifact_results
 
@@ -781,6 +782,46 @@ def test_search_citations_match_model_and_events_across_repeated_local_ranks(tmp
     assert tags[0] != tags[1]
     assert tags[0] == tags[2]
     assert all(tag.startswith("ref_web_") for tag in tags)
+
+
+@pytest.mark.parametrize("passage_size", [64, MAX_TOOL_RESULT_BYTES], ids=["inline-refs", "compact-refs"])
+def test_search_refs_survive_structured_result_externalization(tmp_path, passage_size):
+    from box_agent.events import WebSearchEvent
+
+    urls = ["https://example.com/first", "https://example.com/second"]
+    structured = {
+        "SearchStatus": "ok",
+        "Result": {"WebResults": [
+            {"Title": url, "Url": url, "Snippet": "p" * passage_size} for url in urls
+        ]},
+        "ProviderTrace": "x" * MAX_RAW_OUTPUT_BYTES,
+    }
+    content = json.dumps(structured)
+    raw_output = {"mcp_structured_content": structured}
+    outcome = process_tool_result(ToolResultPipelineInput(
+        messages=[], tool_call_id="large-search", tool_name="web_search", arguments={},
+        result=ToolResult(
+            success=True, content=content, raw_output=raw_output, model_context="Search summary",
+        ),
+        visible_content=content, visible_error=None, result_storage=ToolResultStorage(tmp_path),
+    ))
+
+    tool_event = outcome.events[0]
+    assert isinstance(tool_event, ToolCallResult)
+    receipt = tool_event.raw_output["_persisted_output"]
+    assert receipt["file_complete"]
+    assert json.loads(Path(receipt["path"]).read_text(encoding="utf-8")) == raw_output
+    assert "Structured output externalized." in tool_event.content
+    search_events = [event for event in outcome.events if isinstance(event, WebSearchEvent)]
+    assert len(search_events) == 1
+    assert search_events[0].tool_call_id == tool_event.tool_call_id
+    expected = {"ref_web_" + sha256(url.encode()).hexdigest()[:24]: url for url in urls}
+    refs = search_events[0].payload["refs"]
+    assert {ref["reference_tag"]: ref["url"] for ref in refs} == expected
+    assert len(json.dumps(search_events[0].payload).encode()) <= MAX_TOOL_RESULT_BYTES
+    if passage_size < MAX_TOOL_RESULT_BYTES:
+        assert all(ref["passage"] == "p" * passage_size for ref in refs)
+        assert all(tag in outcome.model_content for tag in expected)
 
 
 @pytest.mark.parametrize("result_key", ["Documents", "ProviderRows"])

@@ -37,6 +37,7 @@ from ..web_search_runtime import (
     _dedupe_web_search_content,
     _extract_web_search_payload,
     _log_web_search_model_results,
+    _normalize_web_search_refs,
 )
 from .execution import _permission_event_kwargs
 
@@ -96,6 +97,23 @@ def _failure_preview(value: str | None) -> str:
     if len(value) > 4096:
         value = value[:2048] + "\n...[preview omitted]...\n" + value[-2048:]
     return value.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def _web_search_payload_for_delivery(content: str) -> dict[str, Any] | None:
+    payload = _extract_web_search_payload("web_search", content)
+    if payload is None or _json_fits(payload, MAX_TOOL_RESULT_BYTES):
+        return payload
+
+    # Keep links within the event budget. The full result has its own delivery.
+    citation_fields = ("url", "title", "domain", "reference_tag", "reference_aliases")
+    compact = {
+        "type": "web_search",
+        "refs": [
+            {field: ref[field] for field in citation_fields if field in ref}
+            for ref in _normalize_web_search_refs(payload["refs"])
+        ],
+    }
+    return compact if _json_fits(compact, MAX_TOOL_RESULT_BYTES) else None
 
 
 def process_tool_result(
@@ -166,10 +184,14 @@ def process_tool_result(
                 "The first matching tool result contains the full diagnostic and repair "
                 "guidance. Do not retry the unchanged call."
             )
+    web_search_payload = None
     if result.success and pipeline_input.tool_name == "web_search":
         visible_content, model_content = _bind_web_search_citations(
             visible_content, model_content,
         )
+        # Delivery can replace the JSON or append a file receipt to it.
+        if pipeline_input.user_visible:
+            web_search_payload = _web_search_payload_for_delivery(visible_content)
         _log_web_search_model_results(
             pipeline_input.arguments,
             visible_content,
@@ -319,18 +341,13 @@ def process_tool_result(
     )
 
     events: list[AgentEvent] = [result_event]
-    if result.success and pipeline_input.user_visible:
-        web_search_payload = _extract_web_search_payload(
-            pipeline_input.tool_name,
-            visible_content,
-        )
-        if web_search_payload is not None:
-            events.append(
-                WebSearchEvent(
-                    tool_call_id=pipeline_input.tool_call_id,
-                    payload=web_search_payload,
-                )
+    if web_search_payload is not None:
+        events.append(
+            WebSearchEvent(
+                tool_call_id=pipeline_input.tool_call_id,
+                payload=web_search_payload,
             )
+        )
     if (
         not result.success
         and result.permission_request
