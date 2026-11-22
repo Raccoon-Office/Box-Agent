@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import platform
+import queue
 import re
 import sys
 import threading
@@ -28,7 +29,7 @@ from typing import cast
 # images. Keep an explicit ceiling, but leave enough room for large officev3
 # resume prompts so the ACP receive loop does not die before it can respond.
 _READ_LIMIT = 32 * 1024 * 1024
-_LOGGER = logging.getLogger(__name__)
+_STDOUT_TIMING_QUEUE_LIMIT = 32
 
 
 class StdioTransport:
@@ -99,7 +100,10 @@ class StdioTransport:
         async with self._send_lock:
             transport = getattr(self._writer, "transport", None)
             if isinstance(transport, _StdoutTransport):
-                await transport.drain_frame()
+                try:
+                    await transport.drain_frame()
+                finally:
+                    transport.close_timing_log()
             else:
                 await self._writer.drain()
 
@@ -183,6 +187,48 @@ class _StdoutWriteTiming:
         return None if stamp_ns is None else round((stamp_ns - self.scheduled_ns) / 1_000_000, 3)
 
 
+class _StderrTimingLog:
+    """Best-effort diagnostics isolated from ACP and its default executor."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+        self._records: queue.Queue[dict[str, object] | None] = queue.Queue(
+            maxsize=_STDOUT_TIMING_QUEUE_LIMIT,
+        )
+        self._closed = False
+        threading.Thread(target=self._run, name="acp-stdout-timing", daemon=True).start()
+
+    def emit(self, record: dict[str, object]) -> None:
+        if not self._closed:
+            with contextlib.suppress(queue.Full):
+                self._records.put_nowait(record)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(queue.Full):
+            self._records.put_nowait(None)
+
+    def _run(self) -> None:
+        while (record := self._records.get()) is not None:
+            with contextlib.suppress(OSError):
+                self._write(record)
+            if self._closed and self._records.empty():
+                return
+
+    def _write(self, record: dict[str, object]) -> None:
+        # Avoid a shared logging handler or buffered stream lock while the pipe
+        # is stalled. The daemon can also outlive a bounded ACP shutdown.
+        body = json.dumps(record, separators=(",", ":"))
+        remaining = memoryview(f"ACP_STDOUT_TIMING {body}\n".encode("ascii"))
+        while remaining:
+            written = os.write(self._fd, remaining)
+            if not written:
+                return
+            remaining = remaining[written:]
+
+
 class _StdoutTransport(asyncio.BaseTransport):
     def __init__(self) -> None:
         self._is_closing = False
@@ -194,6 +240,10 @@ class _StdoutTransport(asyncio.BaseTransport):
         self._trace_id = (
             trace_id if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", trace_id) else ""
         )
+        self._timing_log: _StderrTimingLog | None = None
+        if self._trace_id:
+            with contextlib.suppress(AttributeError, OSError, RuntimeError, ValueError):
+                self._timing_log = _StderrTimingLog(sys.stderr.fileno())
         # Offsets are from process launch and include the NDJSON newline.
         self._next_byte = 0
         self._timing: _StdoutWriteTiming | None = None
@@ -202,7 +252,7 @@ class _StdoutTransport(asyncio.BaseTransport):
         # Windows pipe writes can block even with the asyncio send lock held.
         # A cancelled sender must leave its frame ordered ahead of the next one.
         await self.drain_frame()
-        if self._trace_id:
+        if self._timing_log is not None:
             timing = _StdoutWriteTiming(
                 self._next_byte, self._next_byte + len(data),
                 time.monotonic_ns(), time.time_ns() // 1_000_000,
@@ -251,12 +301,15 @@ class _StdoutTransport(asyncio.BaseTransport):
         self, timing: _StdoutWriteTiming, event: str, *,
         outcome: str | None = None, wait_at: str | None = None,
     ) -> None:
+        timing_log = self._timing_log
+        if timing_log is None:
+            return
         # Read latest phases first, so the snapshot always includes prerequisites
         # even if the worker thread advances while we read its timestamps.
         flushed, written = timing.flushed_ns, timing.written_ns
         started, submitted = timing.started_ns, timing.submitted_ns
         observed_ns = time.monotonic_ns()
-        record = {
+        record: dict[str, object] = {
             "event": event,
             "outcome": outcome,
             "waitAt": wait_at,
@@ -271,9 +324,7 @@ class _StdoutTransport(asyncio.BaseTransport):
             "writeReturnedAfterMs": timing.elapsed_ms(written),
             "flushReturnedAfterMs": timing.elapsed_ms(flushed),
         }
-        # This diagnostic belongs on stderr, like other ACP runtime logs.
-        with contextlib.suppress(Exception):
-            _LOGGER.warning("ACP_STDOUT_TIMING %s", json.dumps(record, separators=(",", ":")))
+        timing_log.emit(record)
 
     def write(self, data: bytes, timing: _StdoutWriteTiming | None = None) -> None:  # type: ignore[override]
         if self._is_closing:
@@ -293,8 +344,13 @@ class _StdoutTransport(asyncio.BaseTransport):
     def is_closing(self) -> bool:  # type: ignore[override]
         return self._is_closing
 
+    def close_timing_log(self) -> None:
+        if self._timing_log is not None:
+            self._timing_log.close()
+
     def close(self) -> None:  # type: ignore[override]
         self._is_closing = True
+        self.close_timing_log()
         with contextlib.suppress(Exception):
             self._stdout.flush()
 

@@ -105,12 +105,17 @@ async def test_windows_stdout_backpressure_keeps_reads_available_and_preserves_f
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stall", ["executor", "write", "flush", "send_lock"])
-async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monkeypatch, caplog, stall):
+async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monkeypatch, stall):
     trace_id = "d1ec4f70-4800-4b8d-9687-105c2a0edeaa"
     monkeypatch.setenv("BOX_AGENT_ACP_STDIO_TRACE_ID", trace_id)
     loop = asyncio.get_running_loop()
     submitted, writing = asyncio.Event(), asyncio.Event()
+    diagnostics = asyncio.Queue()
     release = Event()
+    monkeypatch.setattr(
+        stdio_compat._StderrTimingLog, "_write",
+        lambda _self, record: loop.call_soon_threadsafe(diagnostics.put_nowait, record),
+    )
 
     class ObservedExecutor(ThreadPoolExecutor):
         def submit(self, fn, /, *args, **kwargs):
@@ -143,16 +148,9 @@ async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monk
         asyncio.StreamReader(), SimpleNamespace(transport=stdio_compat._StdoutTransport()),
     )
 
-    def timing_records():
-        return [
-            json.loads(record.getMessage().split("ACP_STDOUT_TIMING ", 1)[1])
-            for record in caplog.records
-            if record.getMessage().startswith("ACP_STDOUT_TIMING ")
-        ]
-
     await transport.send({"id": 0})
     frame_start = len(output.getvalue())
-    assert not timing_records()
+    assert diagnostics.empty()
     payload = {"id": 1, "result": "private fixture data"}
     blocker = loop.run_in_executor(None, release.wait, 5) if stall == "executor" else None
     submitted.clear()
@@ -168,7 +166,7 @@ async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monk
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
-        pending, = timing_records()
+        pending = await asyncio.wait_for(diagnostics.get(), 2)
         assert pending["event"] == "wait_cancelled"
         assert pending["waitAt"] == ("send_lock" if stall == "send_lock" else "write_completion")
         assert pending["traceId"] == trace_id
@@ -184,7 +182,7 @@ async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monk
         await asyncio.gather(sending, waiter, return_exceptions=True)
         await asyncio.wait_for(transport.close(), 2)
 
-    _, settled = timing_records()
+    settled = await asyncio.wait_for(diagnostics.get(), 2)
     assert settled["event"] == "write_settled"
     assert settled["outcome"] == "completed"
     assert settled["frameStartByte"] == frame_start
@@ -196,8 +194,41 @@ async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monk
         <= settled["flushReturnedAfterMs"]
         <= settled["observedAfterMs"]
     )
-    assert "private fixture data" not in caplog.text
+    assert "private fixture data" not in json.dumps([pending, settled])
     assert [json.loads(line) for line in output.getvalue().splitlines()] == [{"id": 0}, payload]
+
+
+@pytest.mark.asyncio
+async def test_stdout_timing_queue_stays_bounded_when_stderr_is_blocked(monkeypatch):
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    written = asyncio.Queue()
+    release = Event()
+
+    def blocked_write(_sink, record):
+        if record["sequence"] == 0:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+        loop.call_soon_threadsafe(written.put_nowait, record["sequence"])
+
+    monkeypatch.setattr(stdio_compat._StderrTimingLog, "_write", blocked_write)
+    sink = stdio_compat._StderrTimingLog(2)
+    capacity = stdio_compat._STDOUT_TIMING_QUEUE_LIMIT
+    try:
+        sink.emit({"sequence": 0})
+        await asyncio.wait_for(entered.wait(), 2)
+        for sequence in range(1, capacity + 4):
+            sink.emit({"sequence": sequence})
+        assert sink._records.qsize() == capacity
+        sink.close()
+        assert written.empty()
+    finally:
+        sink.close()
+        release.set()
+
+    assert [
+        await asyncio.wait_for(written.get(), 2) for _ in range(capacity + 1)
+    ] == list(range(capacity + 1))
 
 
 @pytest.mark.asyncio
