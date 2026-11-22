@@ -1522,7 +1522,7 @@ async def _run_agent_loop_impl(
         image_manifest = None
         on_request_committed = None
         on_response_received = None
-        materialized_skill_messages = ()
+        materialized_messages = ()
         if context_engine is not None:
             output_budget = getattr(llm, "max_output_tokens", 0)
             prepare = getattr(context_engine, "aprepare_request", context_engine.prepare_request)
@@ -1692,7 +1692,10 @@ async def _run_agent_loop_impl(
             request_overlay_tokens = projection.request_only_input_tokens
             on_request_committed = getattr(projection, "on_committed", None)
             on_response_received = getattr(projection, "on_response", None)
-            materialized_skill_messages = getattr(projection, "materialized_skill_messages", ())
+            materialized_messages = (
+                *getattr(projection, "history_updates", ()),
+                *getattr(projection, "materialized_skill_messages", ()),
+            )
             image_manifest = getattr(projection, "image_context", None)
             for notice in getattr(projection, "image_notices", ()):
                 yield ErrorEvent(message=notice, is_fatal=False, error_code="IMAGE_NOT_DELIVERED")
@@ -1723,12 +1726,10 @@ async def _run_agent_loop_impl(
             yield await cancellation_done_event()
             return
 
-        # The final Context projection may materialize bounded reference text.
-        # Commit these exact tail messages before dispatch; preview/compaction
-        # attempts must never publish their provisional projections.
-        if materialized_skill_messages:
-            messages.extend(materialized_skill_messages)
-        if ((materialized_skill_messages or stable_tool_context or tool_context_added)
+        # Only the accepted projection may publish new durable context.
+        if materialized_messages:
+            messages.extend(materialized_messages)
+        if ((materialized_messages or stable_tool_context or tool_context_added)
                 and session_log is not None and session_turn is not None):
             session_log.append_unlogged_messages(
                 session_log_messages(messages), turn=session_turn, step=step + 1,

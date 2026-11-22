@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from contextlib import nullcontext
+from datetime import date
 import logging
 from time import perf_counter
 from typing import Any, Callable
@@ -25,6 +26,23 @@ from .tools.base import ToolResult
 from .tools.engine.contracts import PreparedTools
 
 _log = logging.getLogger(__name__)
+
+
+def _latest_current_date(messages: list[Message]) -> Message | None:
+    return next((message for message in reversed(messages) if message.role == "user"
+                 and message.source == "runtime" and message.name == "current_date"), None)
+
+
+def _current_date_update(messages: list[Message]) -> tuple[Message, ...]:
+    """Stage a runtime date only when the effective history needs an update."""
+    if (not messages or messages[0].role != "system" or not isinstance(messages[0].content, str)
+            or "`<current_date>`" not in messages[0].content):
+        return ()
+    content = f"<current_date>{date.today().isoformat()}</current_date>"
+    previous = _latest_current_date(messages)
+    if previous is not None and previous.content == content:
+        return ()
+    return (Message(role="user", source="runtime", name="current_date", content=content),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +66,7 @@ class PreparedContext:
     materialized_skill_messages: tuple[Message, ...] = ()
     # Complete request cost used by the guard; None preserves older contexts.
     total_input_tokens: int | None = None
+    history_updates: tuple[Message, ...] = ()
 
 
 class ModelInputGuard(ABC):
@@ -187,12 +206,15 @@ class DefaultContextEngine:
 
     def compact_history(self, original: list[Message], compacted: list[Message]) -> list[Message]:
         """Apply resource retention only after the existing compaction decision."""
-        if self.references is None:
-            return compacted
-        definitions = self.prepared_tools.definitions if self.prepared_tools is not None else ()
-        budget = skill_reference_budget_chars(compacted, definitions, self._token_limit,
-                                             self._output_tokens, llm=self.llm)
-        return self.references.compact_history(original, compacted, budget_chars=budget)
+        if self.references is not None:
+            definitions = self.prepared_tools.definitions if self.prepared_tools is not None else ()
+            budget = skill_reference_budget_chars(compacted, definitions, self._token_limit,
+                                                 self._output_tokens, llm=self.llm)
+            compacted = self.references.compact_history(original, compacted, budget_chars=budget)
+        latest_date = _latest_current_date(original)
+        if latest_date is not None and _latest_current_date(compacted) != latest_date:
+            return [*compacted, latest_date]
+        return compacted
 
     def compaction_source(self, messages: list[Message]) -> list[Message]:
         """Keep method bodies out of both generated and deterministic summaries."""
@@ -301,9 +323,12 @@ class DefaultContextEngine:
         self.bind_history(messages)
         self._pending_followup_blocks = []
         self.prepared_tools = prepared_tools
+        history_updates = _current_date_update(messages)
+        history = [*messages, *history_updates] if history_updates else messages
+        request_tail = (transient_message,) if transient_message is not None else ()
         from .correction import prepare_correction_context
         available = skill_reference_budget_chars(
-            self.project_history([*messages, *extra_messages, *((transient_message,) if transient_message else ())]),
+            self.project_history([*history, *extra_messages, *request_tail]),
             prepared_tools.definitions, max(0, token_limit - max(0, transient_tokens)), output_tokens, llm=self.llm,
         )
         correction_context = prepare_correction_context(
@@ -313,7 +338,7 @@ class DefaultContextEngine:
         )
         if correction_context is not None:
             extra_messages = (*extra_messages, correction_context)
-        self._extra_messages = (*extra_messages, *((transient_message,) if transient_message is not None else ()))
+        self._extra_messages = (*extra_messages, *request_tail)
         self._token_limit, self._output_tokens = token_limit, output_tokens
         transient_input_tokens = (request_input_tokens([transient_message], {}, llm=self.llm)
                                   if transient_message is not None else 0)
@@ -322,11 +347,11 @@ class DefaultContextEngine:
         self._transient_reserve_tokens = (max(
             0, self._transient_tokens - transient_input_tokens,
         ) if transient_message is not None else 0)
-        context_messages = self.project_history([*messages, *extra_messages])
+        context_messages = self.project_history([*history, *extra_messages])
         if self._input_guard is not None:
             context_messages = self._input_guard.project_messages(
                 context_messages, tools=prepared_tools, token_limit=token_limit,
-                tail=(transient_message,) if transient_message is not None else (),
+                tail=request_tail,
                 reserve_tokens=self._transient_reserve_tokens,
             )
         references: tuple[dict[str, Any], ...] = ()
@@ -338,8 +363,7 @@ class DefaultContextEngine:
         required_reference_tokens = 0
         on_committed = None
         on_response = None
-        full_request = ([*context_messages, transient_message]
-                        if transient_message is not None else context_messages)
+        full_request = [*context_messages, *request_tail] if request_tail else context_messages
         base_input_tokens = (request_input_tokens(full_request, prepared_tools.definitions, llm=self.llm)
                              + self._transient_reserve_tokens)
         if self.references is not None:
@@ -361,7 +385,7 @@ class DefaultContextEngine:
                 count = len(materialized_skill_messages)
                 tail = context_messages[-count:]
                 rest = context_messages[:-count]
-                insertion = min(len(messages), len(rest))
+                insertion = min(len(history), len(rest))
                 context_messages = [*rest[:insertion], *tail, *rest[insertion:]]
             blocked_reason = projection.blocked_reason
             budget_blocked = projection.budget_blocked
@@ -392,7 +416,7 @@ class DefaultContextEngine:
         actual_input_tokens = base_input_tokens + self._request_reference_tokens
         if getattr(self.references.runtime if self.references else None, "append_only_context", False):
             actual_input_tokens = request_input_tokens(
-                [*context_messages, *((transient_message,) if transient_message is not None else ())],
+                [*context_messages, *request_tail],
                 prepared_tools.definitions, llm=self.llm,
             ) + self._transient_reserve_tokens
         total_input_tokens = max(base_input_tokens + self._request_reference_tokens, actual_input_tokens)
@@ -401,8 +425,7 @@ class DefaultContextEngine:
             budget_blocked = True
             on_committed = None
             on_response = None
-        provider_messages = ([*context_messages, transient_message]
-                             if transient_message is not None else context_messages)
+        provider_messages = [*context_messages, *request_tail] if request_tail else context_messages
         image_projection = None
         if self.image_context is not None:
             prepare_images = self.image_context.preview if defer_image_changes else self.image_context.prepare
@@ -493,5 +516,6 @@ class DefaultContextEngine:
             image_projection.notices if image_projection else (),
             required_reference_tokens, input_manifest, materialized_skill_messages,
             total_input_tokens=total_input_tokens,
+            history_updates=history_updates,
         )
         return self._input_guard.prepare_context(projection) if self._input_guard is not None else projection

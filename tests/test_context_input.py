@@ -63,6 +63,21 @@ def test_context_uses_the_exact_prepared_tool_snapshot_without_filtering(runtime
     assert [message.model_dump() for message in messages] == before
 
 
+def test_compaction_retains_the_latest_runtime_date():
+    engine = DefaultContextEngine()
+    system = Message(role="system", content="Use the latest runtime `<current_date>`.")
+    old = Message(role="user", source="runtime", name="current_date", content="<current_date>2026-11-22</current_date>")
+    latest = old.model_copy(update={"content": "<current_date>2026-11-23</current_date>"})
+    user = Message(role="user", content="continue")
+    original = [system, old, latest, user]
+    compacted = [system, user]
+
+    restored = engine.compact_history(original, compacted)
+    assert restored == [*compacted, latest]
+    assert engine.compact_history(original, restored) == restored
+    assert original == [system, old, latest, user]
+
+
 def test_custom_session_store_receives_bounded_inline_reference_metadata(runtime):
     class Store:
         def replay(self):

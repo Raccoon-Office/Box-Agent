@@ -384,6 +384,8 @@ class ContextEnginePort(Protocol):
     Prepared results may supply ``on_committed`` for logged request delivery
     and ``on_response`` for a nonempty response without stale/truncation flags.
     Both callbacks are optional; the Kernel does not interpret their state.
+    If present, ``history_updates`` names the new durable tail messages of the
+    accepted projection, committed before request dispatch and Skill references.
     An optional ``total_input_tokens`` reports the complete cost used by the
     request guard, including schemas, references, images and reserved input.
     Older results omit it; Kernel then estimates their projected messages.
