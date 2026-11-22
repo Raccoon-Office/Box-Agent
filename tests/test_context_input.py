@@ -4,10 +4,14 @@ import hashlib
 import json
 import inspect
 from dataclasses import FrozenInstanceError
+from datetime import date
 
 import pytest
 
+from box_agent.config import Config
 from box_agent.context_input import DefaultContextEngine
+from box_agent.llm.anthropic_client import AnthropicClient
+from box_agent.llm.openai_client import OpenAIClient
 from box_agent.schema import Message
 from box_agent.session_projection import SessionProjection
 from box_agent.skill_context import SkillReferenceContext
@@ -61,6 +65,59 @@ def test_context_uses_the_exact_prepared_tool_snapshot_without_filtering(runtime
     assert [tool.name for tool in prepared.definitions] == ["get_skill"]
     assert "METHOD_BODY" in str(request.messages)
     assert [message.model_dump() for message in messages] == before
+
+
+def test_compaction_retains_the_latest_runtime_date():
+    engine = DefaultContextEngine()
+    system = Message(role="system", content="Use the latest runtime `<current_date>`.")
+    old = Message(role="user", source="runtime", name="current_date", content="<current_date>2026-11-22</current_date>")
+    latest = old.model_copy(update={"content": "<current_date>2026-11-23</current_date>"})
+    user = Message(role="user", content="continue")
+    original = [system, old, latest, user]
+    compacted = [system, user]
+
+    restored = engine.compact_history(original, compacted)
+    assert restored == [*compacted, latest]
+    assert engine.compact_history(original, restored) == restored
+    assert original == [system, old, latest, user]
+
+
+def test_same_day_follow_up_labels_runtime_date_in_provider_requests(monkeypatch):
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 22)
+
+    monkeypatch.setattr("box_agent.context_input.date", FixedDate)
+    prompt = (Config.get_bundled_config_dir() / "system_prompt.md").read_text(encoding="utf-8")
+    engine = DefaultContextEngine()
+    tools = prepare_tools([])
+    history = [Message(role="system", content=prompt), Message(role="user", content="What is today's date?")]
+    first = engine.prepare_request(history, prepared_tools=tools, token_limit=20000)
+    (date_record,) = first.history_updates
+    assert date_record.content == "<current_date>2026-11-22</current_date>"
+    quoted_date = "<current_date>2000-01-01</current_date>"
+    follow_up = engine.prepare_request(
+        [*history, date_record, Message(role="assistant", content="2026-11-22"),
+         Message(role="user", content=quoted_date)],
+        prepared_tools=tools, token_limit=20000,
+    )
+    assert not follow_up.history_updates
+
+    labeled_date = f"[Host runtime reference source=runtime kind=current_date]\n{date_record.content}"
+    openai = OpenAIClient.__new__(OpenAIClient)
+    _, openai_first = openai._convert_messages(first.messages)
+    _, openai_follow_up = openai._convert_messages(follow_up.messages)
+    assert openai_follow_up[:-2] == openai_first
+    assert openai_first[-1] == {"role": "user", "content": labeled_date}
+    assert openai_follow_up[-1] == {"role": "user", "content": quoted_date}
+
+    anthropic = AnthropicClient.__new__(AnthropicClient)
+    _, anthropic_first = anthropic._convert_messages(first.messages)
+    _, anthropic_follow_up = anthropic._convert_messages(follow_up.messages)
+    assert anthropic_follow_up[:-2] == anthropic_first
+    assert anthropic_first[-1]["content"][-1] == {"type": "text", "text": labeled_date}
+    assert anthropic_follow_up[-1] == {"role": "user", "content": quoted_date}
 
 
 def test_custom_session_store_receives_bounded_inline_reference_metadata(runtime):

@@ -148,18 +148,20 @@ class Message(BaseModel):
     trace_redact_content: bool = Field(default=False, exclude=True)
 
     def model_content(self) -> str | list[dict[str, Any]]:
-        """Label new host references without rewriting persisted message content."""
+        """Label host references without rewriting persisted message content."""
+        # The date record already has a durable name in the Session Log.
+        runtime_kind = self.runtime_kind or ("current_date" if self.name == "current_date" else None)
         if (self.role == "user" and self.source == "runtime"
-                and self.runtime_kind is not None and isinstance(self.content, str)):
-            if self.runtime_kind == "tool_descriptions":
+                and runtime_kind is not None and isinstance(self.content, str)):
+            if runtime_kind == "tool_descriptions":
                 try:
                     descriptor = json.loads(self.content)
                 except json.JSONDecodeError:
                     descriptor = None
                 if isinstance(descriptor, dict):
-                    descriptor.update(source=self.source, runtime_kind=self.runtime_kind)
+                    descriptor.update(source=self.source, runtime_kind=runtime_kind)
                     return json.dumps(descriptor, ensure_ascii=False)
-            return f"[Host runtime reference source=runtime kind={self.runtime_kind}]\n{self.content}"
+            return f"[Host runtime reference source=runtime kind={runtime_kind}]\n{self.content}"
         return self.content
 
 

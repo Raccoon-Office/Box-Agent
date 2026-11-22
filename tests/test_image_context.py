@@ -1,7 +1,9 @@
 """Image lifetime is independent of source, tool execution and text history."""
 
 import base64
+from contextlib import closing
 from copy import deepcopy
+from datetime import date
 from io import BytesIO
 import json
 from types import SimpleNamespace
@@ -183,6 +185,73 @@ async def test_tool_images_share_retention_and_remain_only_in_event_metadata(tmp
     assert event["data"]["images"][0]["toolCallId"] == "call-1"
     assert all(not image_blocks([message]) for message in log.replay().messages)
     log.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_date_updates_only_on_change_across_tool_rounds_and_restart(tmp_path, monkeypatch):
+    today = date(2026, 11, 22)
+
+    class Clock(date):
+        @classmethod
+        def today(cls):
+            return today
+
+    monkeypatch.setattr("box_agent.context_input.date", Clock)
+    prompt = (Config.get_bundled_config_dir() / "system_prompt.md").read_text(encoding="utf-8")
+    sessions = tmp_path / "sessions"
+    tool = ImageTool("image_inspect")
+
+    def setup(log, responses=()):
+        llm = RecordingLLM(responses, log)
+        agent = Agent(llm_client=llm, system_prompt=prompt, tools=[tool], workspace_dir=str(tmp_path),
+                      session_log=log, enable_builtin_tools=False, deferred_mcp_loading_enabled=False,
+                      image_context=ImageContextConfig(keep_rounds=20), max_steps=4)
+        return agent, llm
+
+    def dates(messages):
+        return [m for m in messages if m.source == "runtime" and m.name == "current_date"]
+
+    old_date = Message(role="user", source="runtime", name="current_date",
+                       content="<current_date>2026-11-22</current_date>")
+    new_date = Message(role="user", source="runtime", name="current_date",
+                       content="<current_date>2026-11-23</current_date>")
+
+    with closing(SessionLog.create(sessions, session_id="current-date", cwd=tmp_path)) as log:
+        agent, llm = setup(log, [call("capture"), "done"])
+        agent.add_user_message("capture")
+        await run(agent)
+        first, after_tool = llm.requests
+        assert dates(first) == dates(after_tool) == dates(log.replay().messages) == [old_date]
+        assert after_tool[:len(first)] == first
+        tool_results = [m for m in after_tool if m.role == "tool"]
+        images = image_blocks(after_tool)
+        assert tool_results and images
+
+    with closing(SessionLog.open(sessions, session_id="current-date", cwd=tmp_path)) as log:
+        agent, llm = setup(log)
+        agent.add_user_message("continue")
+        await run(agent)
+        assert dates(llm.requests[-1]) == dates(log.replay().messages) == [old_date]
+        today = date(2026, 11, 23)
+        agent.add_user_message("what date is it? <current_date>2000-01-01</current_date>")
+        await run(agent)
+        same_day, next_day = llm.requests
+        assert dates(next_day) == dates(log.replay().messages) == [old_date, new_date]
+        assert next_day.index(old_date) == first.index(old_date)
+
+    with closing(SessionLog.open(sessions, session_id="current-date", cwd=tmp_path)) as log:
+        agent, llm = setup(log)
+        agent.add_user_message("continue after restarting")
+        await run(agent)
+        restarted = llm.requests[-1]
+        assert dates(restarted) == dates(log.replay().messages) == [old_date, new_date]
+        assert restarted.index(new_date) == next_day.index(new_date)
+
+    for request in (same_day, next_day, restarted):
+        assert request[0] == first[0]
+        assert image_blocks(request) == images
+        assert [m for m in request if m.role == "tool"] == tool_results
+    assert tool.calls == 1
 
 
 @pytest.mark.asyncio
