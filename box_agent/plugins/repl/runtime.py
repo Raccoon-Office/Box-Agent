@@ -14,6 +14,8 @@ import threading
 import time
 from typing import Any
 
+from anyio import fail_after
+
 from box_agent.tools.base import ToolInvocationContext, ToolResult, check_tool_cancellation
 from box_agent.tools.browser_intent import BrowserToolIntentPolicy
 from box_agent.tools.browser_runtime_scope import current_browser_host_binding
@@ -104,7 +106,7 @@ class ReplRuntime:
                 raise ValueError(issue)
             # No recursive call_tool, no raw MCP client: retain tool validation,
             # capability gates, leases, cancellation and private host binding.
-            async with asyncio.timeout(max(0.001, deadline - time.monotonic())):
+            with fail_after(max(0.001, deadline - time.monotonic())):
                 result = await invoke_tool_once(tool, args, cell["context"])
             cell["receipts"].append({"tool": name, "success": result.success})
             return result, generation

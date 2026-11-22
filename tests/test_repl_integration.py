@@ -29,7 +29,7 @@ def test_retired_switch_cannot_grant_local_js_or_override_prior_opt_out(legacy, 
 
 
 @pytest.mark.asyncio
-async def test_shared_session_registration_binding_and_cleanup(tmp_path):
+async def test_shared_session_registration_binding_and_cleanup(tmp_path, monkeypatch):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node unavailable")
@@ -39,6 +39,10 @@ async def test_shared_session_registration_binding_and_cleanup(tmp_path):
         }}), workspace=tmp_path), tools=[], cleanup=SessionCleanup(),
     )
     service = SimpleNamespace(config=SimpleNamespace(enabled=True))
+    monkeypatch.setattr("box_agent.plugins.repl.sys", SimpleNamespace(platform="linux"))
+    prepare_repl(resources, allow_full_access=True, cua_service=service)
+    assert resources.tools == []
+    monkeypatch.setattr("box_agent.plugins.repl.sys", SimpleNamespace(platform="darwin"))
     prepare_repl(resources, allow_full_access=False, cua_service=service)
     assert resources.tools == []
     prepare_repl(resources, allow_full_access=True, cua_service=service)
@@ -135,7 +139,7 @@ def test_repl_is_not_implicitly_delegated():
 
 
 @pytest.mark.asyncio
-async def test_managed_agent_session_assembles_repl_and_disposes_workers(tmp_path):
+async def test_managed_agent_session_assembles_repl_and_disposes_workers(tmp_path, monkeypatch):
     from box_agent.agent_session import AgentSession
     from box_agent.plugins.runtime import PluginRuntime
     from box_agent.session_context import HostBindings, SessionOptions
@@ -145,6 +149,7 @@ async def test_managed_agent_session_assembles_repl_and_disposes_workers(tmp_pat
     node = shutil.which("node")
     if not node:
         pytest.skip("Node unavailable")
+    monkeypatch.setattr("box_agent.plugins.repl.sys", SimpleNamespace(platform="darwin"))
     config = session_config(tmp_path)
     config.plugins["repl"] = {"trusted_local_code": True, "node_path": node}
     config.tools.allow_full_access = True

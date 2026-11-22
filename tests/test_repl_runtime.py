@@ -4,11 +4,12 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from box_agent.plugins.repl.runtime import ReplRuntime
+from box_agent.plugins.repl.runtime import Realm, ReplRuntime
 from box_agent.plugins.repl.tools import create_tools
 from box_agent.tools.base import Tool, ToolInvocationContext, ToolResult
 from box_agent.tools.browser_runtime_scope import (
@@ -973,6 +974,43 @@ async def test_managed_press_key_converts_valid_chords_and_rejects_invalid_befor
         assert result.success, result.error
         assert press.calls[-1] == ({"key": chord}, None)
     assert len(press.calls) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_externally", [False, True], ids=["deadline", "cancelled"])
+async def test_interrupted_browser_backend_releases_operation_lock(runtime, cancel_externally):
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    class BlockingTool(RecordingTool):
+        async def execute(self, **arguments):
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                finished.set()
+
+    tool = BlockingTool("managed_browser_snapshot")
+    runtime.agent.tools = {tool.name: tool}
+    realm = Realm(cell={
+        "cancelled": asyncio.Event(),
+        "context": ToolInvocationContext(),
+        "receipts": [],
+    })
+    deadline = time.monotonic() + (5 if cancel_externally else 0.1)
+    call = runtime._invoke(realm, tool.name, {}, deadline, None)
+    if cancel_externally:
+        task = asyncio.create_task(call)
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(TimeoutError):
+            await call
+    assert finished.is_set()
+    assert not runtime.operation_lock.locked()
+    assert realm.cell["receipts"] == []
 
 
 @pytest.mark.asyncio
