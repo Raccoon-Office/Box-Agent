@@ -2380,15 +2380,15 @@ async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults
             elif fault == "settings-encoding":
                 skill_settings.write_bytes(b"\xff")
             elif fault in metadata_faults:
-                original_stat = Path.stat
+                original_stat = os.stat
                 blocked_path = metadata_faults[fault]
 
                 def stat(path, *args, **kwargs):
-                    if path == blocked_path:
+                    if path == blocked_path or path == str(blocked_path):
                         raise PermissionError("skill metadata is unavailable")
                     return original_stat(path, *args, **kwargs)
 
-                resume_patch.setattr(Path, "stat", stat)
+                resume_patch.setattr(os, "stat", stat)
             elif fault == "expert-listing":
                 original_rglob = Path.rglob
 

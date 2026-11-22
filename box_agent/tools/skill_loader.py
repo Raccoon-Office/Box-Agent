@@ -305,8 +305,9 @@ class _SourceEntry:
     manifest_names: Optional[Set[str]] = None
     # Optional manifest-listed SKILL.md paths. None means "scan with rglob".
     manifest_paths: Optional[Tuple[Path, ...]] = None
-    # Last valid entries, kept so availability rules can still be evaluated during an I/O fault.
-    manifest_entries: tuple[object, ...] = ()
+    # Keep the last valid entries to recheck availability during an I/O fault.
+    # None means no valid manifest has been observed. An empty tuple is a valid allowlist.
+    manifest_entries: tuple[object, ...] | None = None
     manifest_retry_at: float | None = None
     unavailable_skills: Dict[str, Dict[str, object]] = field(default_factory=dict)
     # 专家技能固定真实根目录，发现和刷新时都不能通过链接读取目录外正文。
@@ -1175,8 +1176,10 @@ class SkillLoader:
             try:
                 mode = manifest_path.stat().st_mode
             except FileNotFoundError:
-                if entry.manifest_names is None and not manifest_path.is_symlink():
+                if entry.manifest_entries is None and not manifest_path.is_symlink():
                     # Legacy builtin directories support discovery without a manifest.
+                    entry.manifest_names = None
+                    entry.manifest_paths = None
                     return
                 raise
             if not S_ISREG(mode):
@@ -1199,7 +1202,7 @@ class SkillLoader:
         names: Set[str] = set()
         paths: list[Path] = []
         all_paths_known = True
-        for item in entry.manifest_entries:
+        for item in entry.manifest_entries or ():
             if isinstance(item, dict) and isinstance(item.get("name"), str):
                 unavailable_reason = self._manifest_item_unavailable_reason(item)
                 if unavailable_reason is not None:

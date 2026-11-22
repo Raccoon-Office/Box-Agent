@@ -472,14 +472,14 @@ def test_builtin_manifest_availability_requires_platform_and_env_path(
     loader = SkillLoader(sources=[(builtin_dir, "builtin")])
     assert [skill.name for skill in loader.discover_skills()] == ["hosted"]
 
-    original_stat = Path.stat
+    original_exists = Path.exists
 
-    def stat(path, *args, **kwargs):
+    def exists(path, *args, **kwargs):
         if path == cli_home:
             raise PermissionError("host runtime cannot be inspected")
-        return original_stat(path, *args, **kwargs)
+        return original_exists(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(Path, "exists", exists)
     (builtin_dir / "_manifest.json").write_bytes(b"\xff")
     assert loader.maybe_reload()
     assert loader.get_skill("hosted") is None
@@ -804,3 +804,45 @@ def test_builtin_manifest_loads_after_access_recovers_with_unchanged_metadata(tm
     clock[0] = 60.0
     assert loader.maybe_reload()
     assert loader.get_skill("kept") is not None
+
+
+def test_legacy_builtin_discovery_recovers_after_manifest_metadata_failure(tmp_path, monkeypatch):
+    builtin = tmp_path / "builtin"
+    directory = builtin / "legacy"
+    directory.mkdir(parents=True)
+    create_test_skill(directory, "legacy", "x", "x")
+    manifest = builtin / "_manifest.json"
+    original_stat = Path.stat
+    clock = [0.0]
+    monkeypatch.setattr("box_agent.tools.skill_loader.perf_counter", lambda: clock[0])
+
+    def stat(path, *args, **kwargs):
+        if path == manifest:
+            raise PermissionError("manifest metadata is temporarily unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    loader = SkillLoader(sources=[(builtin, "builtin")])
+    with monkeypatch.context() as locked:
+        locked.setattr(Path, "stat", stat)
+        loader.discover_skills()
+        assert loader.list_skills() == []
+        loader.maybe_reload()
+
+    clock[0] = 60.0
+    assert loader.maybe_reload()
+    assert loader.list_skills() == ["legacy"]
+
+
+def test_missing_manifest_keeps_previously_valid_empty_allowlist(tmp_path):
+    builtin = tmp_path / "builtin"
+    directory = builtin / "on-demand"
+    directory.mkdir(parents=True)
+    create_test_skill(directory, "on-demand", "x", "x")
+    _write_manifest(builtin, [])
+
+    loader = SkillLoader(sources=[(builtin, "builtin")])
+    assert loader.discover_skills() == []
+
+    (builtin / "_manifest.json").unlink()
+    assert loader.maybe_reload()
+    assert loader.list_skills() == []
