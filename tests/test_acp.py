@@ -2315,7 +2315,10 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fault",
-    [None, "manifest-encoding", "manifest-stat", "expert-listing", "listed-skill-stat", "source-root-stat"],
+    [
+        None, "manifest-encoding", "manifest-stat", "expert-listing",
+        "listed-skill-stat", "source-root-stat", "settings-encoding",
+    ],
 )
 async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults(
     tmp_path, monkeypatch, fault
@@ -2338,7 +2341,12 @@ async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults
         json.dumps({"skills": [{"name": name, "path": f"{name}/SKILL.md"} for name in ("ordinary", "optional")]}),
         encoding="utf-8",
     )
-    loader = SkillLoader(sources=[(user_skills, "user"), (builtin, "builtin")])
+    skill_settings = tmp_path / "skill-settings.json"
+    skill_settings.write_text('{"disabledSkillNames":[]}', encoding="utf-8")
+    loader = SkillLoader(
+        sources=[(user_skills, "user"), (builtin, "builtin")],
+        skill_settings_path=skill_settings,
+    )
     loader.discover_skills()
     config = Config(
         llm=LLMConfig(api_key="test-key"),
@@ -2369,6 +2377,8 @@ async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults
             }
             if fault == "manifest-encoding":
                 manifest.write_bytes(b"\xff")
+            elif fault == "settings-encoding":
+                skill_settings.write_bytes(b"\xff")
             elif fault in metadata_faults:
                 original_stat = Path.stat
                 blocked_path = metadata_faults[fault]

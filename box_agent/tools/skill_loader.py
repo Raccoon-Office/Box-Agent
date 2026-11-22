@@ -177,7 +177,7 @@ def _read_disabled_skill_names(settings_path: Optional[Path]) -> Set[str]:
 
     try:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
         return set()
 
     raw_names = data.get("disabledSkillNames") if isinstance(data, dict) else None
