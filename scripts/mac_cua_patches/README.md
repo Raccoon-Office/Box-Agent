@@ -30,6 +30,8 @@ and patched SHA-256 hashes. Never edit the generated vendor files directly.
 - 0015: remove the native App placeholders `selectText` and
   `performSecondaryAction` from the public JS API and its manual.
 - 0016: terminate trailing line comments before Node parses top-level await.
+- 0017: report worker errors to the active cell through Node’s REPL error hook
+  or its legacy domain on older runtimes.
 
 All patches are local, not submitted upstream. On upgrade, compare contracts,
 remove patches already incorporated upstream, regenerate and run the REPL tests.

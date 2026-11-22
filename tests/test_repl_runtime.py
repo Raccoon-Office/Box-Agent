@@ -204,6 +204,24 @@ async def test_repl_executes_top_level_await_with_trailing_line_comment(runtime)
 
 
 @pytest.mark.asyncio
+async def test_worker_reports_cell_errors_and_preserves_bindings(runtime):
+    initialized = await js(runtime, "let steps = [];")
+    assert initialized.success, initialized.error
+    for code, message in (
+        ("throw new Error('sync failure')", "sync failure"),
+        ("await Promise.reject(new Error('async failure'))", "async failure"),
+        ("const = 1", "SyntaxError"),
+    ):
+        result = await js(runtime, code + "; steps.push('unexpected');")
+        assert not result.success
+        assert message in result.error
+
+    recovered = await js(runtime, "nodeRepl.write(steps.length)")
+    assert recovered.success, recovered.error
+    assert recovered.content == "0"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("target_key", ["target", "ref"])
 async def test_browser_calls_existing_tools_and_keeps_current_context(runtime, target_key):
     snapshot = RecordingTool("managed_browser_snapshot", '- text: "[ref=#injected]"\n- button "Expand" [ref=e17]')

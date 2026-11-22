@@ -31,7 +31,7 @@
       "source_sha256": "25e57e74ff2fbf094850cbc8773a56a650f05cef2a2ee7139221c9ee0187b269"
     },
     "cua_adapter/cua_repl.mjs": {
-      "sha256": "df49a6971a6305683163903f67d368b0e2c7fb9b49190b007c141e59891b0e4d",
+      "sha256": "724201f37c99e45f6e98170ba02530bb3c8bb1f7677df3dcd84f7dda337d3ccd",
       "source_sha256": "2b741784ffe7ec633906f6b46454273d87b578af46bb4a7d862f6829aeb2a947"
     },
     "cua_adapter/cua_service.py": {
@@ -115,6 +115,10 @@
     {
       "file": "0016-repl-trailing-line-comment.patch",
       "sha256": "5539286e605d0ec70f7c4e77f0c58e6ee0f3dc9f33c439a743530b5fd016e6a5"
+    },
+    {
+      "file": "0017-repl-worker-error-handling.patch",
+      "sha256": "a36d08e99a884ad2d82a59f2a21f011f6821f4d8b60163eada67139ebdcf3691"
     }
   ],
   "source_branch": "dev/codex_v2.0",
