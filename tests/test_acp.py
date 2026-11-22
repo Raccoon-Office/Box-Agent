@@ -2314,6 +2314,131 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "fault",
+    [
+        None, "manifest-encoding", "manifest-stat", "expert-listing",
+        "listed-skill-stat", "source-root-stat", "settings-encoding",
+    ],
+)
+async def test_acp_resumes_history_and_answers_with_optional_skill_source_faults(
+    tmp_path, monkeypatch, fault
+):
+    monkeypatch.setattr(acp_module, "state_path", lambda relative: tmp_path / "profile" / relative)
+    builtin = tmp_path / "builtin"
+    user_skills = tmp_path / "user"
+    package = tmp_path / "package"
+    directory = package / "bound"
+    for path in (
+        builtin / "ordinary", builtin / "optional", builtin / "on-demand", user_skills / "personal", directory
+    ):
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text(
+            f"---\nname: {path.name}\ndescription: A test skill\n---\nInstructions\n",
+            encoding="utf-8",
+        )
+    manifest = builtin / "_manifest.json"
+    manifest.write_text(
+        json.dumps({"skills": [{"name": name, "path": f"{name}/SKILL.md"} for name in ("ordinary", "optional")]}),
+        encoding="utf-8",
+    )
+    skill_settings = tmp_path / "skill-settings.json"
+    skill_settings.write_text('{"disabledSkillNames":[]}', encoding="utf-8")
+    loader = SkillLoader(
+        sources=[(user_skills, "user"), (builtin, "builtin")],
+        skill_settings_path=skill_settings,
+    )
+    loader.discover_skills()
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path), enable_memory=False),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system", skill_loader=loader)
+    expert = {
+        "id": "expert", "name": "Expert", "defaultSkills": ["bound"],
+        "skillBindings": [{"source": "BUNDLED", "key": "bound", "slug": "bound"}],
+        "packageSnapshot": {"directory": str(package), "skills": [
+            {"directory": str(directory), "key": "bound", "slug": "bound"},
+        ]},
+    }
+    try:
+        session = await agent.new_session(str(tmp_path), session_id="skill-source-fault", session_mode="general")
+        other = await agent.new_session(str(tmp_path), session_id="other-session", session_mode="general")
+        await agent.prompt(session.sessionId, [text_block("remember me")])
+        if fault is not None:
+            original = agent._sessions[session.sessionId].agent
+            for name in ("ordinary", "optional", "personal"):
+                original.activate_skill_instructions(name, loader.get_skill(name).to_prompt())
+        with monkeypatch.context() as resume_patch:
+            metadata_faults = {
+                "manifest-stat": ("stat", manifest),
+                "listed-skill-stat": ("is_file", builtin / "optional" / "SKILL.md"),
+                "source-root-stat": ("exists", user_skills),
+            }
+            metadata_failure_injected = False
+            if fault == "manifest-encoding":
+                manifest.write_bytes(b"\xff")
+            elif fault == "settings-encoding":
+                skill_settings.write_bytes(b"\xff")
+            elif fault in metadata_faults:
+                method, blocked_path = metadata_faults[fault]
+                original_check = getattr(Path, method)
+
+                def check(path, *args, **kwargs):
+                    nonlocal metadata_failure_injected
+                    if path == blocked_path:
+                        metadata_failure_injected = True
+                        raise PermissionError("skill metadata is unavailable")
+                    return original_check(path, *args, **kwargs)
+
+                resume_patch.setattr(Path, method, check)
+            elif fault == "expert-listing":
+                original_rglob = Path.rglob
+
+                def rglob(path, pattern, *args, **kwargs):
+                    if path == directory:
+                        raise PermissionError("expert directory listing is unavailable")
+                    return original_rglob(path, pattern, *args, **kwargs)
+
+                resume_patch.setattr(Path, "rglob", rglob)
+            else:
+                original_validate = SkillLoader.avalidate_references
+
+                async def validate_references(current_loader, names, **options):
+                    if current_loader is loader:
+                        return await original_validate(current_loader, names, **options)
+                    pytest.fail(f"History did not reference skills, got a validation request for {names!r}")
+
+                resume_patch.setattr(SkillLoader, "avalidate_references", validate_references)
+
+            _, other_reply = await asyncio.gather(
+                agent.resume_session(str(tmp_path), session.sessionId, expert=expert, session_mode="general"),
+                agent.prompt(other.sessionId, [text_block("keep the other session responsive")]),
+            )
+            assert other_reply.stopReason == "end_turn"
+            if fault in metadata_faults:
+                assert metadata_failure_injected
+            if fault is None:
+                resume_patch.undo()
+            state = agent._sessions[session.sessionId]
+            assert "remember me" in [msg.content for msg in state.agent.messages]
+            assert state.skill_loader.get_skill("bound").skill_path == directory / "SKILL.md"
+            assert state.skill_loader.get_skill("ordinary") is not None
+            assert state.skill_loader.get_skill("on-demand", include_disabled=True) is None
+            assert (state.skill_loader.get_skill("optional") is None) == (fault == "listed-skill-stat")
+            assert (state.skill_loader.get_skill("personal") is None) == (fault == "source-root-stat")
+            if fault is not None:
+                restored_names = set(state.agent.active_skill_diagnostics()["names"])
+                assert restored_names == {"ordinary", "optional", "personal"} & set(state.skill_loader.list_skills())
+            reply = await agent.prompt(session.sessionId, [text_block("continue after recovery")])
+            assert reply.stopReason == "end_turn"
+            assert state.agent.messages[-1].content == "done"
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "damage", ["skill-fields", "skill-list", "todo-fields", "todo-list", "orphan"]
 )
 async def test_acp_recovers_optional_state_and_accepts_matching_host_history(
