@@ -12,11 +12,15 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import platform
+import re
 import sys
 import threading
+import time
 from asyncio import transports as aio_transports
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import cast
 
 # 32 MiB. Default asyncio limit (64 KiB) is too small for ACP frames that may
@@ -24,6 +28,7 @@ from typing import cast
 # images. Keep an explicit ceiling, but leave enough room for large officev3
 # resume prompts so the ACP receive loop does not die before it can respond.
 _READ_LIMIT = 32 * 1024 * 1024
+_LOGGER = logging.getLogger(__name__)
 
 
 class StdioTransport:
@@ -48,19 +53,25 @@ class StdioTransport:
         # Serialization errors reject only this request; a broken pipe ends
         # the connection. Keep each frame and drain under the same lock.
         frame = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
-        async with self._send_lock:
-            if self._closed:
-                raise ConnectionError("Transport closed")
-            try:
-                transport = getattr(self._writer, "transport", None)
-                if isinstance(transport, _StdoutTransport):
-                    await transport.write_frame(frame)
-                else:
-                    self._writer.write(frame)
-                    await self._writer.drain()
-            except Exception:
-                self._disconnect()
-                raise
+        transport = getattr(self._writer, "transport", None)
+        try:
+            async with self._send_lock:
+                if self._closed:
+                    raise ConnectionError("Transport closed")
+                try:
+                    if isinstance(transport, _StdoutTransport):
+                        await transport.write_frame(frame)
+                    else:
+                        self._writer.write(frame)
+                        await self._writer.drain()
+                except Exception:
+                    self._disconnect()
+                    raise
+        except asyncio.CancelledError:
+            # A notification can time out behind another sender holding the lock.
+            if isinstance(transport, _StdoutTransport):
+                transport.report_cancelled_wait("send_lock")
+            raise
 
     async def receive(self) -> dict | None:
         try:
@@ -156,6 +167,22 @@ def _start_stdin_feeder(loop: asyncio.AbstractEventLoop, reader: asyncio.StreamR
     threading.Thread(target=blocking_read, daemon=True).start()
 
 
+@dataclass(slots=True)
+class _StdoutWriteTiming:
+    start_byte: int
+    end_byte: int
+    scheduled_ns: int
+    scheduled_unix_ms: int
+    submitted_ns: int | None = None
+    started_ns: int | None = None
+    written_ns: int | None = None
+    flushed_ns: int | None = None
+    reported: bool = False
+
+    def elapsed_ms(self, stamp_ns: int | None) -> float | None:
+        return None if stamp_ns is None else round((stamp_ns - self.scheduled_ns) / 1_000_000, 3)
+
+
 class _StdoutTransport(asyncio.BaseTransport):
     def __init__(self) -> None:
         self._is_closing = False
@@ -163,13 +190,33 @@ class _StdoutTransport(asyncio.BaseTransport):
         # Keep protocol bytes on the original pipe, including on Windows.
         self._stdout = sys.stdout.buffer
         self._frame: asyncio.Task[None] | None = None
+        trace_id = os.environ.get("BOX_AGENT_ACP_STDIO_TRACE_ID", "")
+        self._trace_id = (
+            trace_id if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", trace_id) else ""
+        )
+        # Offsets are from process launch and include the NDJSON newline.
+        self._next_byte = 0
+        self._timing: _StdoutWriteTiming | None = None
 
     async def write_frame(self, data: bytes) -> None:
         # Windows pipe writes can block even with the asyncio send lock held.
         # A cancelled sender must leave its frame ordered ahead of the next one.
         await self.drain_frame()
-        self._frame = asyncio.create_task(asyncio.to_thread(self.write, data))
+        if self._trace_id:
+            timing = _StdoutWriteTiming(
+                self._next_byte, self._next_byte + len(data),
+                time.monotonic_ns(), time.time_ns() // 1_000_000,
+            )
+            self._next_byte = timing.end_byte
+            self._timing = timing
+            self._frame = asyncio.create_task(self._write_timed_frame(data, timing))
+        else:
+            self._frame = asyncio.create_task(asyncio.to_thread(self.write, data))
         await self.drain_frame()
+
+    async def _write_timed_frame(self, data: bytes, timing: _StdoutWriteTiming) -> None:
+        timing.submitted_ns = time.monotonic_ns()
+        await asyncio.to_thread(self.write, data, timing)
 
     async def drain_frame(self) -> None:
         frame = self._frame
@@ -177,15 +224,68 @@ class _StdoutTransport(asyncio.BaseTransport):
             return
         try:
             await asyncio.shield(frame)
+        except asyncio.CancelledError:
+            self.report_cancelled_wait("write_completion")
+            raise
         finally:
             if frame.done():
                 self._frame = None
+                self._timing = None
 
-    def write(self, data: bytes) -> None:  # type: ignore[override]
+    def report_cancelled_wait(self, wait_at: str) -> None:
+        frame, timing = self._frame, self._timing
+        if frame is None or timing is None or timing.reported:
+            return
+        timing.reported = True
+        self._report_timing(timing, "wait_cancelled", wait_at=wait_at)
+        frame.add_done_callback(lambda done: self._report_settled_timing(timing, done))
+
+    def _report_settled_timing(self, timing: _StdoutWriteTiming, frame: asyncio.Task[None]) -> None:
+        if frame.cancelled():
+            outcome = "cancelled"
+        else:
+            outcome = "failed" if frame.exception() is not None else "completed"
+        self._report_timing(timing, "write_settled", outcome=outcome)
+
+    def _report_timing(
+        self, timing: _StdoutWriteTiming, event: str, *,
+        outcome: str | None = None, wait_at: str | None = None,
+    ) -> None:
+        # Read latest phases first, so the snapshot always includes prerequisites
+        # even if the worker thread advances while we read its timestamps.
+        flushed, written = timing.flushed_ns, timing.written_ns
+        started, submitted = timing.started_ns, timing.submitted_ns
+        observed_ns = time.monotonic_ns()
+        record = {
+            "event": event,
+            "outcome": outcome,
+            "waitAt": wait_at,
+            "traceId": self._trace_id,
+            "frameStartByte": timing.start_byte,
+            "frameEndByte": timing.end_byte,
+            "scheduledAtUnixMs": timing.scheduled_unix_ms,
+            "observedAtUnixMs": time.time_ns() // 1_000_000,
+            "observedAfterMs": timing.elapsed_ms(observed_ns),
+            "submittedAfterMs": timing.elapsed_ms(submitted),
+            "threadStartedAfterMs": timing.elapsed_ms(started),
+            "writeReturnedAfterMs": timing.elapsed_ms(written),
+            "flushReturnedAfterMs": timing.elapsed_ms(flushed),
+        }
+        # This diagnostic belongs on stderr, like other ACP runtime logs.
+        with contextlib.suppress(Exception):
+            _LOGGER.warning("ACP_STDOUT_TIMING %s", json.dumps(record, separators=(",", ":")))
+
+    def write(self, data: bytes, timing: _StdoutWriteTiming | None = None) -> None:  # type: ignore[override]
         if self._is_closing:
             raise ConnectionError("stdout closed")
+        if timing is not None:
+            timing.started_ns = time.monotonic_ns()
         self._stdout.write(data)
+        if timing is not None:
+            timing.written_ns = time.monotonic_ns()
         self._stdout.flush()
+        if timing is not None:
+            timing.flushed_ns = time.monotonic_ns()
 
     def can_write_eof(self) -> bool:  # type: ignore[override]
         return False

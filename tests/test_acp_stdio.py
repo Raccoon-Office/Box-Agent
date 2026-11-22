@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from types import SimpleNamespace
 
@@ -100,6 +101,103 @@ async def test_windows_stdout_backpressure_keeps_reads_available_and_preserves_f
             await second
         await transport.close()
     assert output.getvalue() == b'{"id":1}\n{"id":2}\n'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stall", ["executor", "write", "flush", "send_lock"])
+async def test_windows_stdout_reports_the_stalled_phase_and_late_completion(monkeypatch, caplog, stall):
+    trace_id = "d1ec4f70-4800-4b8d-9687-105c2a0edeaa"
+    monkeypatch.setenv("BOX_AGENT_ACP_STDIO_TRACE_ID", trace_id)
+    loop = asyncio.get_running_loop()
+    submitted, writing = asyncio.Event(), asyncio.Event()
+    release = Event()
+
+    class ObservedExecutor(ThreadPoolExecutor):
+        def submit(self, fn, /, *args, **kwargs):
+            future = super().submit(fn, *args, **kwargs)
+            submitted.set()
+            return future
+
+    class BlockedOutput(io.BytesIO):
+        flush_blocked = False
+
+        def write(self, data):
+            if b'"id":1,' in data:
+                if stall in {"write", "send_lock"}:
+                    loop.call_soon_threadsafe(writing.set)
+                    assert release.wait(5)
+                self.flush_blocked = stall == "flush"
+            return super().write(data)
+
+        def flush(self):
+            if self.flush_blocked:
+                loop.call_soon_threadsafe(writing.set)
+                assert release.wait(5)
+                self.flush_blocked = False
+            super().flush()
+
+    loop.set_default_executor(ObservedExecutor(max_workers=1))
+    output = BlockedOutput()
+    monkeypatch.setattr(stdio_compat.sys, "stdout", SimpleNamespace(buffer=output))
+    transport = stdio_compat.StdioTransport(
+        asyncio.StreamReader(), SimpleNamespace(transport=stdio_compat._StdoutTransport()),
+    )
+
+    def timing_records():
+        return [
+            json.loads(record.getMessage().split("ACP_STDOUT_TIMING ", 1)[1])
+            for record in caplog.records
+            if record.getMessage().startswith("ACP_STDOUT_TIMING ")
+        ]
+
+    await transport.send({"id": 0})
+    frame_start = len(output.getvalue())
+    assert not timing_records()
+    payload = {"id": 1, "result": "private fixture data"}
+    blocker = loop.run_in_executor(None, release.wait, 5) if stall == "executor" else None
+    submitted.clear()
+    sending = asyncio.create_task(transport.send(payload))
+    waiter = sending
+
+    try:
+        ready = submitted if stall == "executor" else writing
+        await asyncio.wait_for(ready.wait(), 2)
+        if stall == "send_lock":
+            waiter = asyncio.create_task(transport.send({"id": 9}))
+            await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        pending, = timing_records()
+        assert pending["event"] == "wait_cancelled"
+        assert pending["waitAt"] == ("send_lock" if stall == "send_lock" else "write_completion")
+        assert pending["traceId"] == trace_id
+        assert pending["frameStartByte"] == frame_start
+        assert pending["submittedAfterMs"] is not None
+        assert (pending["threadStartedAfterMs"] is None) == (stall == "executor")
+        assert (pending["writeReturnedAfterMs"] is not None) == (stall == "flush")
+        assert pending["flushReturnedAfterMs"] is None
+    finally:
+        release.set()
+        if blocker is not None:
+            await blocker
+        await asyncio.gather(sending, waiter, return_exceptions=True)
+        await asyncio.wait_for(transport.close(), 2)
+
+    _, settled = timing_records()
+    assert settled["event"] == "write_settled"
+    assert settled["outcome"] == "completed"
+    assert settled["frameStartByte"] == frame_start
+    assert settled["frameEndByte"] == pending["frameEndByte"] == len(output.getvalue())
+    assert (
+        settled["submittedAfterMs"]
+        <= settled["threadStartedAfterMs"]
+        <= settled["writeReturnedAfterMs"]
+        <= settled["flushReturnedAfterMs"]
+        <= settled["observedAfterMs"]
+    )
+    assert "private fixture data" not in caplog.text
+    assert [json.loads(line) for line in output.getvalue().splitlines()] == [{"id": 0}, payload]
 
 
 @pytest.mark.asyncio
