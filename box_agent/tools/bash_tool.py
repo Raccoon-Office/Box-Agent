@@ -38,12 +38,7 @@ from .pptx_safety import (
 from .runtime import bundled_win_bash, managed_python_shell_command
 from .shell_inspection import inspect_shell_command
 from .owned_file_cleanup import OwnedFileCleanup
-from .skill_scratch import (
-    SKILL_SCRATCH_ENV,
-    SessionSkillScratch,
-    attach_scratch_warning,
-    ensure_scratch_or_warning,
-)
+from .skill_scratch import SKILL_SCRATCH_ENV, SessionSkillScratch, try_prepare_scratch
 from .safety import (
     backup_file,
     builtin_skill_command_write_error,
@@ -1646,16 +1641,14 @@ Examples:
         lifetime: str = BASH_LIFETIME_TURN,
         temporary_files: list[str] | None = None,
     ) -> ToolResult:
-        # Scratch is optional for a shell command: an unavailable directory
-        # becomes a warning on the result instead of failing every command.
-        warning = None
+        # Scratch is optional for a shell command: an unavailable directory is
+        # logged and the command still runs.
         if self._skill_scratch_dir is not None:
-            warning = await ensure_scratch_or_warning(self._skill_scratch_dir)
-        result = await self._execute_command(
+            await try_prepare_scratch(self._skill_scratch_dir)
+        return await self._execute_command(
             command, timeout=timeout, run_in_background=run_in_background,
             lifetime=lifetime, temporary_files=temporary_files,
         )
-        return attach_scratch_warning(result, warning)
 
     async def _execute_command(
         self,

@@ -572,14 +572,14 @@ def _cli_stderr_logging() -> Iterator[None]:
 
 
 @contextmanager
-def _memory_file_logging() -> Iterator[None]:
-    """由 CLI 接管记忆日志，直到后台保存清理完成后恢复原有设置。"""
-    memory_logger = logging.getLogger("box_agent.memory")
-    previous = memory_logger.handlers, memory_logger.level, memory_logger.propagate
+def _quiet_file_logging(logger_name: str, file_prefix: str) -> Iterator[None]:
+    """把可选能力的诊断日志只写入文件，结束后恢复原有设置。"""
+    target_logger = logging.getLogger(logger_name)
+    previous = target_logger.handlers, target_logger.level, target_logger.propagate
     handler: logging.Handler = logging.NullHandler()
     try:
         # 按进程分文件，避免多个 CLI 同时轮转同一个文件。
-        log_path = state_path(f"log/memory_{os.getpid()}.log")
+        log_path = state_path(f"log/{file_prefix}_{os.getpid()}.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handler = _QuietMemoryLogHandler(
             log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
@@ -589,20 +589,34 @@ def _memory_file_logging() -> Iterator[None]:
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         ))
     except OSError:
-        # 无法创建日志目录时保持静默，不能因可选记忆能力阻断主任务。
+        # 无法创建日志目录时保持静默，不能因可选能力阻断主任务。
         pass
-    memory_logger.handlers = [handler]
-    memory_logger.setLevel(logging.INFO)
-    memory_logger.propagate = False
+    target_logger.handlers = [handler]
+    target_logger.setLevel(logging.INFO)
+    target_logger.propagate = False
     try:
         yield
     finally:
-        memory_logger.handlers, previous_level, memory_logger.propagate = previous
-        memory_logger.setLevel(previous_level)
+        target_logger.handlers, previous_level, target_logger.propagate = previous
+        target_logger.setLevel(previous_level)
         try:
             handler.close()
         except OSError:
             pass
+
+
+@contextmanager
+def _memory_file_logging() -> Iterator[None]:
+    """由 CLI 接管记忆日志，直到后台保存清理完成后恢复原有设置。"""
+    with _quiet_file_logging("box_agent.memory", "memory"):
+        yield
+
+
+@contextmanager
+def _skill_scratch_file_logging() -> Iterator[None]:
+    """临时目录不可用是非致命问题：CLI 只写诊断文件，不在终端提示。"""
+    with _quiet_file_logging("box_agent.tools.skill_scratch", "skill_scratch"):
+        yield
 
 
 def show_log_directory(open_file_manager: bool = True) -> None:
@@ -2078,6 +2092,7 @@ async def run_agent(
         return client
 
     try:
+        memory_log_scope.enter_context(_skill_scratch_file_logging())
         if config.agent.enable_memory:
             memory_log_scope.enter_context(_memory_file_logging())
         llm_client = _new_client(

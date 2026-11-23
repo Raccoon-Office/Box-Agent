@@ -437,9 +437,8 @@ async def test_execute_code_runs_with_runtime_env_python(
 
 
 @pytest.mark.asyncio
-async def test_execute_code_runs_with_warning_when_scratch_is_denied(tmp_path, monkeypatch):
+async def test_execute_code_runs_silently_when_scratch_is_denied(tmp_path, monkeypatch):
     from box_agent.tools import skill_scratch
-    from box_agent.tools.base import ToolResult
 
     def deny(*args, **kwargs):
         raise PermissionError("scratch refused")
@@ -449,18 +448,17 @@ async def test_execute_code_runs_with_warning_when_scratch_is_denied(tmp_path, m
     tool = JupyterSandboxTool(workspace_dir=str(tmp_path), skill_scratch_dir=scratch)
     ran = []
 
-    async def fake_execute(code, *args):
-        ran.append(code)
-        return ToolResult(success=True, content="check")
+    def reached_kernel():
+        ran.append(dict(tool.runtime_env))
+        raise RuntimeError("stop before starting a kernel")
 
-    monkeypatch.setattr(tool, "_execute_with_env", fake_execute)
-    result = await tool.execute("print('check')")
-    assert ran == ["print('check')"]
-    assert result.success
+    monkeypatch.setattr(tool, "_get_sandbox_env", reached_kernel)
+    with pytest.raises(RuntimeError, match="stop before starting a kernel"):
+        await tool.execute("print('check')")
+    # Execution continued past scratch preparation instead of failing on it.
+    assert len(ran) == 1
     # Never unset: "$BOX_AGENT_SCRATCH_DIR/x" must not expand to "/x".
-    assert tool.runtime_env[skill_scratch.SKILL_SCRATCH_ENV] == str(scratch.path)
-    assert result.raw_output["scratch_warning"]["code"] == "SKILL_SCRATCH_UNAVAILABLE"
-    assert "scratch refused" in result.content
+    assert ran[0][skill_scratch.SKILL_SCRATCH_ENV] == str(scratch.path)
     assert not scratch.path.exists()
 
 

@@ -240,10 +240,15 @@ Agent 将历史整理放到工作线程，并在整理和发送时检查取消�
 `data.code="SESSION_STORAGE_UNAVAILABLE"`，并提供 `operation`（`open`、`restore`、
 `prompt` 或 `workspace`）和 `reason`（`access_denied` 或 `io_error`）。
 
-会话临时目录由依赖它的工具在调用时准备。准备失败时，Bash 和 Python 沙箱仍执行本次命令，
-`BOX_AGENT_SCRATCH_DIR` 保持指向计划路径，结果附带 `raw_output.scratch_warning.code =
-"SKILL_SCRATCH_UNAVAILABLE"` 警告；视频读取必须使用临时目录，会返回
-`SKILL_SCRATCH_UNAVAILABLE` 工具错误。模型可以根据工具结果继续，ACP 连接继续处理会话请求。
+会话临时目录由依赖它的工具在调用时准备。准备失败属于非致命问题：Bash 和 Python 沙箱照常执行，
+`BOX_AGENT_SCRATCH_DIR` 保持指向计划路径，工具结果不附加提示，命令若写入该目录会自然报错并由模型处理；
+视频读取必须使用临时目录，会返回 `SKILL_SCRATCH_UNAVAILABLE` 工具错误。ACP 连接继续处理会话请求。
+
+失败原因只记日志：ACP 写到 stderr，CLI 写到 `~/.box-agent/log/skill_scratch_<pid>.log`，每个会话同一原因只记一次，
+恢复后记一条 `skill_scratch/recovered`。`skill_scratch/unavailable` 行包含 `error_type`、`winerror`、`errno`、
+`failed_path`、工作区/`.box-agent-scratch`/计划路径各自的状态（含 Windows 文件属性）和位置提示
+`hints`（`onedrive`、`user_documents` 等受控文件夹访问常见目录、`network_share`），用于区分权限、
+Defender 受控文件夹访问、删除挂起和同步盘占用等情况。
 
 宿主可在同一聊天下用独立的 `desktop-recovery-<UUID>` 创建运行会话，并用
 `session_continuation` 传入可读的聊天文字。已在 `sessions` 中的会话继续使用原目录和写锁。

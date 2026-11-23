@@ -305,3 +305,50 @@ async def test_qa_scratch_outputs_are_reclaimed_without_removing_retained_qa(
     assert not crop.exists()
     assert retained.read_bytes() == b"retained preview"
     assert report.read_text(encoding="utf-8") == '{"ok": true}'
+
+
+@pytest.mark.asyncio
+async def test_scratch_failure_logs_diagnostics_once_and_recovery(tmp_path, monkeypatch, caplog):
+    import errno
+    import logging
+
+    prepare = skill_scratch.prepare_skill_scratch_dir
+    denied = [True]
+
+    def flaky_prepare(*args, **kwargs):
+        if denied[0]:
+            error = PermissionError(errno.EACCES, "Access is denied", str(tmp_path / ".box-agent-scratch"))
+            error.winerror = 5
+            raise error
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(skill_scratch, "prepare_skill_scratch_dir", flaky_prepare)
+    (tmp_path / ".box-agent-scratch").write_text("not a directory")
+    scratch = SessionSkillScratch(tmp_path)
+    caplog.set_level(logging.INFO, logger="box_agent.tools.skill_scratch")
+
+    for _ in range(3):
+        assert not await skill_scratch.try_prepare_scratch(scratch)
+    failures = [r for r in caplog.records if "skill_scratch/unavailable" in r.getMessage()]
+    assert len(failures) == 1  # the same failure is not repeated on every tool call
+    message = failures[0].getMessage()
+    for expected in (
+        "error_type='PermissionError'", "winerror=5", f"errno={errno.EACCES}",
+        "failed_path=", "workspace_state='dir", "scratch_root_state='file", "planned_state=",
+        "hints=",
+    ):
+        assert expected in message, (expected, message)
+
+    (tmp_path / ".box-agent-scratch").unlink()
+    denied[0] = False
+    assert await skill_scratch.try_prepare_scratch(scratch)
+    assert any("skill_scratch/recovered" in r.getMessage() for r in caplog.records)
+
+
+def test_location_hints_flag_onedrive_and_protected_folders(tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("OneDrive", str(profile / "OneDrive"))
+    assert skill_scratch._location_hints(profile / "Documents" / "proj") == ["user_documents"]
+    assert skill_scratch._location_hints(profile / "OneDrive" / "proj") == ["onedrive"]
+    assert skill_scratch._location_hints(tmp_path / "elsewhere") == []

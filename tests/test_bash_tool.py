@@ -2225,7 +2225,7 @@ async def test_zsh_login_does_not_change_bash_syntax(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bash_runs_with_warning_when_scratch_is_denied(tmp_path, monkeypatch):
+async def test_bash_runs_silently_when_scratch_is_denied(tmp_path, monkeypatch):
     from box_agent.tools import skill_scratch
 
     def deny(*args, **kwargs):
@@ -2241,6 +2241,7 @@ async def test_bash_runs_with_warning_when_scratch_is_denied(tmp_path, monkeypat
     assert result.success, result.error
     # The command ran, and the variable still names the planned session path.
     assert f"scratch={scratch.path}" in result.stdout
-    assert result.raw_output["scratch_warning"]["code"] == "SKILL_SCRATCH_UNAVAILABLE"
-    assert "scratch refused" in result.content
+    # Non-fatal: nothing about scratch is added to what the model sees.
+    assert "SKILL_SCRATCH_UNAVAILABLE" not in result.content
+    assert "scratch_warning" not in (result.raw_output or {})
     assert not scratch.path.exists()

@@ -592,6 +592,16 @@ def test_cli_unwritable_memory_log_does_not_print_or_interrupt(failure, tmp_path
     assert captured.out == captured.err == ""
 
 
+def test_cli_scratch_diagnostics_go_to_file_not_terminal(tmp_path: Path, monkeypatch, capsys) -> None:
+    log_path = tmp_path / "log" / "skill_scratch.log"
+    monkeypatch.setattr(cli, "state_path", lambda _: log_path)
+    with cli._skill_scratch_file_logging():
+        logging.getLogger("box_agent.tools.skill_scratch").warning("skill_scratch/unavailable winerror=5")
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert "winerror=5" in log_path.read_text(encoding="utf-8")
+
+
 def test_interactive_cli_delivers_explicit_skill_as_ordinary_reference(
     tmp_path: Path,
     monkeypatch,

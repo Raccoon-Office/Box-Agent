@@ -248,7 +248,7 @@ async def test_prompt_write_failure_has_a_terminal_storage_result_without_replay
 
 
 @pytest.mark.asyncio
-async def test_denied_scratch_only_fails_the_tool_and_acp_keeps_serving(tmp_path, monkeypatch):
+async def test_denied_scratch_keeps_tools_running_and_acp_serving(tmp_path, monkeypatch):
     from acp.agent.connection import AgentSideConnection
     from acp.connection import Connection
     from box_agent.acp.stdio_compat import StdioTransport
@@ -264,7 +264,7 @@ async def test_denied_scratch_only_fails_the_tool_and_acp_keeps_serving(tmp_path
                 yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
                     ToolCall(
                         id="scratch-tool", type="function",
-                        function=FunctionCall(name="bash", arguments={"command": "echo scratch"}),
+                        function=FunctionCall(name="bash", arguments={"command": "echo scratch-$((1+1))"}),
                     ),
                 ])
             else:
@@ -332,8 +332,9 @@ async def test_denied_scratch_only_fails_the_tool_and_acp_keeps_serving(tmp_path
 
         release.set()
         await asyncio.wait_for(failed_tool_turn, 5)
-        assert "SKILL_SCRATCH_UNAVAILABLE" in repr(llm.requests[-1])
-        assert "workspace denied" in repr(llm.requests[-1])
+        # Non-fatal: the command still ran and the model is not told about scratch.
+        assert "scratch-2" in repr(llm.requests[-1])
+        assert "SKILL_SCRATCH_UNAVAILABLE" not in repr(llm.requests[-1])
         await asyncio.wait_for(prompt(first, "text-after-the-error"), 5)
         assert "text-after-the-error" in repr(llm.requests[-1])
         assert len(attempts) == 1
