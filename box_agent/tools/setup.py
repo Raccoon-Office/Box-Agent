@@ -14,7 +14,6 @@ from collections.abc import Collection
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Mapping, Optional
-from uuid import uuid4
 
 from box_agent.config import Config, ToolLimitsConfig
 from box_agent.skill_paths import host_plugin_skills_dir, managed_builtin_skills_dir, resolve_builtin_skills_dir
@@ -74,7 +73,7 @@ from box_agent.tools.ripgrep_tool import (
 )
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
 from box_agent.tools.skill_execution_env import build_skill_execution_env
-from box_agent.tools.skill_scratch import SKILL_SCRATCH_DIR_NAME, prepare_skill_scratch_dir
+from box_agent.tools.skill_scratch import SessionSkillScratch
 from box_agent.tools.mcp_config_tool import McpConfigTool
 from box_agent.tools.schedule_tool import CreateScheduledTaskTool
 from box_agent.tools.skill_tool import create_skill_tools
@@ -729,11 +728,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     runtime_env = build_skill_execution_env(runtime_context)
     # Each tool set owns its cleanup boundary, including CLI sessions without
     # a process owner. Other sessions may keep using the same workspace.
-    skill_scratch_dir = prepare_skill_scratch_dir(
-        workspace_dir,
-        scratch_root_dir=workspace_dir / SKILL_SCRATCH_DIR_NAME / uuid4().hex,
-    )
-    runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
+    skill_scratch_dir = SessionSkillScratch(workspace_dir)
     if config.tools.enable_bash:
         sandbox_venv_path = None
         if sandbox_mode and not getattr(sys, "frozen", False):
@@ -746,6 +741,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             sandbox_venv_path=sandbox_venv_path,
             permission_engine=permission_engine,
             runtime_env=runtime_env,
+            skill_scratch_dir=skill_scratch_dir,
             builtin_skills_dir=builtin_skills_dir,
             pptx_sync_script_provider=(
                 lambda: (
@@ -893,12 +889,11 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:
-        sandbox_runtime_env = runtime_context.env()
-        sandbox_runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
         sandbox_tool = JupyterSandboxTool(
             workspace_dir=str(workspace_dir),
-            runtime_env=sandbox_runtime_env,
+            runtime_env=runtime_context.env(),
             process_owner_id=process_owner_id,
+            skill_scratch_dir=skill_scratch_dir,
         )
         tools.append(sandbox_tool)
         # Also add sandbox status tool
@@ -934,7 +929,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         relative_root_dir=str(relative_root),
         proxy_llm_resolver=lambda: _image_capable_llm(llm),
         # Skill runtime values are overrides, not a complete host environment.
-        runtime_env={**os.environ, **runtime_env}, scratch_dir=skill_scratch_dir.path,
+        runtime_env={**os.environ, **runtime_env}, scratch_dir=skill_scratch_dir,
     ))
     _out(f"{Colors.GREEN}✅ Loaded video reading tool (read_video){Colors.RESET}")
 

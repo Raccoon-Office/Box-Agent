@@ -124,11 +124,7 @@ from box_agent.tools.bash_tool import (
     BashTool,
 )
 from box_agent.tools.file_tools import WriteTool
-from box_agent.tools.skill_scratch import (
-    SKILL_SCRATCH_DIR_NAME,
-    SkillScratchDirectory,
-    cleanup_skill_scratch_dir,
-)
+from box_agent.tools.skill_scratch import acleanup_skill_scratch_dir
 from box_agent.tools.skillhub_search_tool import (
     HARD_CAPABILITY_GAP_PROMPT,
     SKILLHUB_SEARCH_CAPABILITY_VERSION,
@@ -2662,10 +2658,8 @@ class BoxACPAgent:
                     await run_session_write(session_log, session_log.close)
                 except BaseException as cleanup_error:
                     attach_cleanup_error(error, cleanup_error)
-            if isinstance(error, OSError) and error.filename:
-                failed_path = Path(error.filename)
-                if failed_path == workspace or failed_path.is_relative_to(workspace / SKILL_SCRATCH_DIR_NAME):
-                    raise _session_storage_error(error, "workspace") from error
+            if isinstance(error, OSError) and error.filename and Path(error.filename) == workspace:
+                raise _session_storage_error(error, "workspace") from error
             raise
         self._sessions[session_id] = state
         return response
@@ -3913,7 +3907,7 @@ class BoxACPAgent:
                     skill_scratch_dir=state.skill_scratch_dir,
                     browser_owner=browser_owner,
                     bash_lifetime=BASH_LIFETIME_TURN,
-                    cleanup_scratch=cleanup_skill_scratch_dir,
+                    cleanup_scratch=acleanup_skill_scratch_dir,
                     release_browser=release_browser_runtime,
                     on_success=_log_cleanup_success,
                     on_error=_log_cleanup_error,

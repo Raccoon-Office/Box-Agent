@@ -2222,3 +2222,26 @@ async def test_zsh_login_does_not_change_bash_syntax(tmp_path, monkeypatch):
     assert result.stdout.strip().splitlines()[1]
     missing = await tool.execute(command="printf 'abc\n' | grep no_such_pattern | head -20")
     assert not missing.success  # pipefail remains part of the tool contract.
+
+
+@pytest.mark.asyncio
+async def test_bash_runs_silently_when_scratch_is_denied(tmp_path, monkeypatch):
+    from box_agent.tools import skill_scratch
+
+    def deny(*args, **kwargs):
+        raise PermissionError("scratch refused")
+
+    monkeypatch.setattr(skill_scratch, "prepare_skill_scratch_dir", deny)
+    scratch = skill_scratch.SessionSkillScratch(tmp_path)
+    tool = BashTool(workspace_dir=str(tmp_path), non_interactive=True, skill_scratch_dir=scratch)
+    command = (
+        f'"{sys.executable}" -c "import os; print(\'scratch=\' + os.environ[\'BOX_AGENT_SCRATCH_DIR\'])"'
+    )
+    result = await tool.execute(command=command)
+    assert result.success, result.error
+    # The command ran, and the variable still names the planned session path.
+    assert f"scratch={scratch.path}" in result.stdout
+    # Non-fatal: nothing about scratch is added to what the model sees.
+    assert "SKILL_SCRATCH_UNAVAILABLE" not in result.content
+    assert "scratch_warning" not in (result.raw_output or {})
+    assert not scratch.path.exists()

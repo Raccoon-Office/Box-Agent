@@ -345,9 +345,9 @@ async def prepare_tools(resources: SessionResources) -> None:
     )
     await _bind_skill_runtime(resources)
     if scratch is not None:
-        from .tools.skill_scratch import cleanup_skill_scratch_dir
+        from .tools.skill_scratch import close_skill_scratch_dir
 
-        resources.cleanup.callback(cleanup_skill_scratch_dir, scratch)
+        resources.cleanup.push_async_callback(close_skill_scratch_dir, scratch)
 
 
 async def _prepare_memory_prompt(resources: SessionResources, prompt: str) -> str:

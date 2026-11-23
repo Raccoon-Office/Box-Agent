@@ -2,11 +2,13 @@ import asyncio
 import errno
 import socket
 import threading
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 from acp import RequestError
 
+from box_agent.schema import FunctionCall, StreamEvent, ToolCall
 from box_agent.session_log import SessionLog, SessionLogDurabilityError, SessionLogInUseError
 from tests.acp_helpers import acp_params
 from tests.test_acp_history_edit import CaptureLLM, adapter, request
@@ -246,20 +248,106 @@ async def test_prompt_write_failure_has_a_terminal_storage_result_without_replay
 
 
 @pytest.mark.asyncio
-async def test_scratch_write_denial_is_scoped_to_the_workspace(tmp_path, monkeypatch):
-    from box_agent.tools import setup
+async def test_denied_scratch_keeps_tools_running_and_acp_serving(tmp_path, monkeypatch):
+    from acp.agent.connection import AgentSideConnection
+    from acp.connection import Connection
+    from box_agent.acp.stdio_compat import StdioTransport
+    from box_agent.tools import skill_scratch
 
-    blocked = tmp_path / ".box-agent-scratch" / "denied"
-    host = adapter(tmp_path, CaptureLLM())
-    monkeypatch.setattr(setup, "prepare_skill_scratch_dir", lambda *args, **kwargs: fail_at(blocked))
+    class ScratchLLM(CaptureLLM):
+        request_scratch = False
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if self.request_scratch:
+                self.request_scratch = False
+                self.requests.append(deepcopy(messages))
+                yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
+                    ToolCall(
+                        id="scratch-tool", type="function",
+                        function=FunctionCall(name="bash", arguments={"command": "echo scratch-$((1+1))"}),
+                    ),
+                ])
+            else:
+                async for event in super().generate_stream(messages, tools, **kwargs):
+                    yield event
+
+    profile = tmp_path / "profile"
+    workspace = profile / "workspace"
+    workspace.mkdir(parents=True)
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started = asyncio.Event()
+    release = threading.Event()
+    attempts = []
+
+    def deny_scratch(root, relative_path):
+        attempts.append(root / relative_path)
+        if threading.get_ident() != loop_thread:
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(10), "scratch preparation was not released"
+        fail_at(root / relative_path)
+
+    monkeypatch.setattr(skill_scratch, "_prepare_real_directory_chain", deny_scratch)
+    llm = ScratchLLM()
+    host = adapter(workspace, llm)
+    local, remote = socket.socketpair()
+    client_reader, client_writer = await asyncio.open_connection(sock=local)
+    agent_reader, agent_writer = await asyncio.open_connection(sock=remote)
+    server = AgentSideConnection(host, StdioTransport(agent_reader, agent_writer))
+    host._conn = server
+
+    async def on_message(method, params, notification):
+        pass
+
+    client = Connection(on_message, StdioTransport(client_reader, client_writer))
+
+    async def new_session(name):
+        result = await client.send_request("session/new", {
+            "cwd": str(workspace), "mcpServers": [], "_meta": {"session_id": name},
+        })
+        return result["sessionId"]
+
+    async def prompt(session_id, turn_id):
+        response = await client.send_request("session/prompt", {
+            "sessionId": session_id, "prompt": [{"type": "text", "text": turn_id}],
+            "_meta": {"turn_id": turn_id},
+        })
+        assert response["stopReason"] == "end_turn"
+
+    failed_tool_turn = None
     try:
-        with pytest.raises(RequestError) as caught:
-            await host.new_session(cwd=str(tmp_path), session_id="workspace-with-denied-scratch")
-        assert caught.value.data["code"] == "SESSION_STORAGE_UNAVAILABLE"
-        assert caught.value.data["operation"] == "workspace"
-        assert host._sessions == {}
+        await client.send_request("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+        first = await asyncio.wait_for(new_session("first"), 5)
+        await asyncio.wait_for(prompt(first, "plain-text"), 5)
+        assert not attempts
+        assert not (workspace / ".box-agent-scratch").exists()
+
+        llm.request_scratch = True
+        failed_tool_turn = asyncio.create_task(prompt(first, "try-scratch"))
+        await asyncio.wait_for(started.wait(), 5)
+        second = await asyncio.wait_for(new_session("second"), 5)
+        await asyncio.wait_for(prompt(second, "independent-text"), 5)
+        assert not failed_tool_turn.done()
+
+        release.set()
+        await asyncio.wait_for(failed_tool_turn, 5)
+        # Non-fatal: the command still ran and the model is not told about scratch.
+        assert "scratch-2" in repr(llm.requests[-1])
+        assert "SKILL_SCRATCH_UNAVAILABLE" not in repr(llm.requests[-1])
+        await asyncio.wait_for(prompt(first, "text-after-the-error"), 5)
+        assert "text-after-the-error" in repr(llm.requests[-1])
+        assert len(attempts) == 1
     finally:
+        release.set()
+        if failed_tool_turn is not None:
+            await asyncio.gather(failed_tool_turn, return_exceptions=True)
         await host.aclose()
+        await client.close()
+        await server.close()
+        client_writer.close()
+        agent_writer.close()
+        await asyncio.gather(client_writer.wait_closed(), agent_writer.wait_closed())
 
 
 def fail_at(path: Path):

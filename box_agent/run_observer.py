@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -150,7 +151,7 @@ async def cleanup_turn_resources(
     skill_scratch_dir: Any | None = None,
     browser_owner: str | None = None,
     bash_lifetime: str | None = None,
-    cleanup_scratch: Callable[[Any], list[str]] | None = None,
+    cleanup_scratch: Callable[[Any], list[str] | Awaitable[list[str]]] | None = None,
     release_browser: Callable[[str], Awaitable[None]] | None = None,
     on_success: Callable[[str, list[str]], None] | None = None,
     on_error: Callable[[str, Exception], None] | None = None,
@@ -208,7 +209,8 @@ async def cleanup_turn_resources(
 
     if skill_scratch_dir is not None and cleanup_scratch is not None:
         try:
-            removed_scratch_paths = list(cleanup_scratch(skill_scratch_dir))
+            result = cleanup_scratch(skill_scratch_dir)
+            removed_scratch_paths = list(await result if inspect.isawaitable(result) else result)
             notify_success("skill_scratch", removed_scratch_paths)
         except Exception as exc:
             errors.append(("skill_scratch", exc))

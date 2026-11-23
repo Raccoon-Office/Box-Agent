@@ -1429,7 +1429,7 @@ async def test_workspace_tools_share_stable_cwd(
             endpoint="https://image.example.test/v1/images/generations",
         )
 
-    add_workspace_tools(
+    scratch = add_workspace_tools(
         tools,
         Config(),
         workspace,
@@ -1475,9 +1475,8 @@ async def test_workspace_tools_share_stable_cwd(
     assert by_name["bash"].workspace_dir == str(workspace)
     assert by_name["bash"].scope_root_dir == str(workspace)
     assert "BOX_AGENT_OUTPUT_DIR" not in by_name["bash"]._subprocess_env
-    scratch_dir = Path(by_name["bash"]._subprocess_env["BOX_AGENT_SCRATCH_DIR"])
-    assert scratch_dir.parent == workspace / ".box-agent-scratch"
-    assert scratch_dir.is_dir()
+    assert scratch.path.parent == workspace / ".box-agent-scratch"
+    assert not scratch.path.parent.exists()
 
     node = shutil.which("node")
     if node is None:

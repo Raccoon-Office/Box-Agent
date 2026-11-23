@@ -38,6 +38,12 @@ from .pptx_safety import (
 from .runtime import bundled_win_bash, managed_python_shell_command
 from .shell_inspection import inspect_shell_command
 from .owned_file_cleanup import OwnedFileCleanup
+from .skill_scratch import (
+    SKILL_SCRATCH_ENV,
+    SessionSkillScratch,
+    SkillScratchUnavailable,
+    try_prepare_scratch,
+)
 from .safety import (
     backup_file,
     builtin_skill_command_write_error,
@@ -980,6 +986,7 @@ class BashTool(Tool):
         max_timeout_seconds: int = _DEFAULT_TOOLS_CONFIG.bash_max_timeout_seconds,
         pptx_sync_script_provider: Callable[[], Path | None] | None = None,
         builtin_skills_dir: Path | None = None,
+        skill_scratch_dir: SessionSkillScratch | None = None,
     ):
         """Initialize BashTool with OS-specific shell detection.
 
@@ -1009,6 +1016,7 @@ class BashTool(Tool):
             )
         self._pptx_sync_script_provider = pptx_sync_script_provider
         self._builtin_skills_dir = builtin_skills_dir
+        self._skill_scratch_dir = skill_scratch_dir
         self.default_timeout_seconds = default_timeout_seconds
         self.max_timeout_seconds = max_timeout_seconds
         self.is_windows = platform.system() == "Windows"
@@ -1063,6 +1071,8 @@ class BashTool(Tool):
             self._subprocess_env = os.environ.copy()
         if self._subprocess_env is not None:
             self._subprocess_env.pop("BOX_AGENT_OUTPUT_DIR", None)
+            if self._skill_scratch_dir is not None:
+                self._subprocess_env.pop(SKILL_SCRATCH_ENV, None)
 
     def _refresh_windows_shell(self, runtime_env: dict[str, str] | None = None) -> None:
         """Resolve the shell again after the host finishes preparing a runtime."""
@@ -1157,9 +1167,15 @@ class BashTool(Tool):
     ) -> asyncio.subprocess.Process:
         from .python_mutation_guard import PythonMutationGuard, uses_python
 
+        environment = self._subprocess_env
+        if self._skill_scratch_dir is not None:
+            environment = {
+                **(environment if environment is not None else os.environ),
+                SKILL_SCRATCH_ENV: str(self._skill_scratch_dir.path),
+            }
         guard = None
         if uses_python(command):
-            startup = asyncio.create_task(asyncio.to_thread(PythonMutationGuard, self._subprocess_env))
+            startup = asyncio.create_task(asyncio.to_thread(PythonMutationGuard, environment))
             try:
                 guard = await asyncio.shield(startup)
             except asyncio.CancelledError:
@@ -1169,7 +1185,7 @@ class BashTool(Tool):
         try:
             process = await self._spawn_subprocess(
                 command, merge_stderr=merge_stderr,
-                environment=guard.environment if guard else self._subprocess_env,
+                environment=guard.environment if guard else environment,
             )
         except BaseException:
             if guard:
@@ -1630,6 +1646,30 @@ Examples:
         lifetime: str = BASH_LIFETIME_TURN,
         temporary_files: list[str] | None = None,
     ) -> ToolResult:
+        # Scratch is optional for a shell command: an access error is logged
+        # and the command still runs. A path rejected by a safety check (or
+        # not yet validated) is never handed to the command.
+        if self._skill_scratch_dir is not None:
+            try:
+                await try_prepare_scratch(self._skill_scratch_dir)
+            except SkillScratchUnavailable as exc:
+                return BashOutputResult(
+                    success=False, error=str(exc), stdout="", stderr=str(exc), exit_code=-1,
+                    raw_output={"code": exc.code},
+                )
+        return await self._execute_command(
+            command, timeout=timeout, run_in_background=run_in_background,
+            lifetime=lifetime, temporary_files=temporary_files,
+        )
+
+    async def _execute_command(
+        self,
+        command: str,
+        timeout: int | None = None,
+        run_in_background: bool = False,
+        lifetime: str = BASH_LIFETIME_TURN,
+        temporary_files: list[str] | None = None,
+    ) -> ToolResult:
         """Execute shell command with optional background execution.
 
         Args:
@@ -1782,11 +1822,14 @@ Examples:
                     self._subprocess_env
                 ),
             )
-            if danger_reason and is_safe_scratch_cleanup(
-                command,
-                (self._subprocess_env or {}).get("BOX_AGENT_SCRATCH_DIR"),
-            ):
-                danger_reason = None
+            if danger_reason:
+                if self._skill_scratch_dir is None:
+                    scratch_root = (self._subprocess_env or {}).get(SKILL_SCRATCH_ENV)
+                else:
+                    prepared = self._skill_scratch_dir.prepared
+                    scratch_root = prepared.path if prepared is not None else None
+                if is_safe_scratch_cleanup(command, scratch_root):
+                    danger_reason = None
             owned_cleanup_targets = (
                 self.owned_file_cleanup.targets(command)
                 if danger_reason == "rm: removes files/directories" else []
