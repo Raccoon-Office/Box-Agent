@@ -379,6 +379,11 @@ class ValidateTableTool(ReadTool):
                             "values": {"type": "array", "items": {"type": "string"}},
                         }, "required": ["type"],
                     },
+                    "description": (
+                        "Use every column header as a key and its validation rule as the value. "
+                        "For a table with headers 订单号 and 退款金额_元, pass "
+                        '{"订单号": {"type": "text"}, "退款金额_元": {"type": "decimal"}}.'
+                    ),
                 },
                 "encoding": {"type": "string", "enum": ["utf-8-sig", "utf-8", "utf-16", "gb18030"]},
             }, "required": ["path"],
