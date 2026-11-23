@@ -199,6 +199,61 @@ async def test_acp_display_progress_timeout_preserves_text_and_completion(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_acp_display_progress_resumes_after_cooldown(tmp_path, monkeypatch):
+    class ProgressKernel(BurstKernel):
+        async def run(self):
+            yield ProgressEvent(step=1, content="stalled")
+            yield ProgressEvent(step=2, content="skipped during cooldown")
+            await asyncio.sleep(0.2)
+            yield ProgressEvent(step=3, content="host recovered")
+            yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="answer")
+
+    attempts = []
+
+    class StallOnce(DummyConn):
+        async def session_update(self, session_id, update, **meta):
+            raw = getattr(update, "raw_output", None)
+            if isinstance(raw, dict) and raw.get("type") == "agent_progress":
+                attempts.append(raw["step"])
+                if raw["step"] == 1:
+                    await asyncio.Event().wait()
+            await super().session_update(session_id=session_id, update=update, **meta)
+
+    conn = StallOnce()
+    adapter, request = await make_adapter(tmp_path, monkeypatch, ProgressKernel, conn, max_events=1)
+    monkeypatch.setattr(adapter, "_SESSION_PROGRESS_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(adapter, "_SESSION_PROGRESS_RETRY_SECONDS", 0.1)
+    try:
+        response = await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
+        assert response.stopReason == "end_turn"
+        assert attempts == [1, 3]
+        delivered = [event.update.raw_output["step"] for event in conn.updates
+                     if isinstance(getattr(event.update, "raw_output", None), dict)
+                     and event.update.raw_output.get("type") == "agent_progress"]
+        assert delivered == [3]
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_best_effort_send_absorbs_any_write_error(tmp_path, monkeypatch):
+    class BrokenConn(DummyConn):
+        async def session_update(self, session_id, update, **meta):
+            raise ConnectionError("simulated write failure")
+
+    adapter, request = await make_adapter(tmp_path, monkeypatch, BurstKernel, BrokenConn())
+    try:
+        update = acp_module.update_tool_call("p", raw_output={"type": "agent_progress"})
+        # Display-only: never raises, reports non-delivery so the caller backs off.
+        assert await adapter._send(request.sessionId, update, best_effort=True) is False
+        # Required updates still surface the failure.
+        with pytest.raises(ConnectionError):
+            await adapter._send(request.sessionId, update)
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
 async def test_acp_send_failure_does_not_return_normal_completion(tmp_path, monkeypatch):
     send_error = TimeoutError("simulated host send timeout")
     class FailedConn(DummyConn):
