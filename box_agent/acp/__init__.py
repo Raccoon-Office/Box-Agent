@@ -1349,6 +1349,7 @@ class BoxACPAgent:
     # Session updates are local ACP notifications. If the host stops draining
     # them, one stuck update must not freeze the agent loop forever.
     _SESSION_UPDATE_TIMEOUT_SECONDS: float = 15.0
+    _SESSION_PROGRESS_TIMEOUT_SECONDS: float = 1.0
 
     def __init__(
         self,
@@ -5361,6 +5362,14 @@ class BoxACPAgent:
                 payload["current"] = current
             return payload
 
+        progress_delivery_available = True
+
+        async def _send_progress(update: Any) -> None:
+            nonlocal progress_delivery_available
+            if progress_delivery_available:
+                # Bound the work of a slow progress consumer for this run.
+                progress_delivery_available = await self._send(session_id, update, best_effort=True)
+
         async def _send_turn_usage(current: dict[str, Any] | None = None) -> None:
             payload = _turn_usage_payload(current)
             log.debug(
@@ -5369,10 +5378,7 @@ class BoxACPAgent:
                 turn_id=turn_id,
                 payload=payload,
             )
-            await self._send(
-                session_id,
-                update_tool_call(usage_tool_call_id, raw_output=payload),
-            )
+            await _send_progress(update_tool_call(usage_tool_call_id, raw_output=payload))
 
         async def _send_skill_usage(
             tool_call_id: str,
@@ -5666,8 +5672,7 @@ class BoxACPAgent:
                                 "content": text,
                             }
                             log.debug("progress", session_id=session_id, step=s, content=text)
-                            await self._send(
-                                session_id,
+                            await _send_progress(
                                 update_tool_call(f"agent-progress-{s}", raw_output=payload),
                             )
 
@@ -6162,22 +6167,29 @@ class BoxACPAgent:
             return StopReason.ERROR.value
         return result.stop_reason
 
-    async def _send(self, session_id: str, update: Any) -> None:
+    async def _send(self, session_id: str, update: Any, *, best_effort: bool = False) -> bool:
+        timeout = self._SESSION_UPDATE_TIMEOUT_SECONDS
+        if best_effort:
+            timeout = min(timeout, self._SESSION_PROGRESS_TIMEOUT_SECONDS)
         try:
             await asyncio.wait_for(
                 self._conn.session_update(session_id=session_id, update=update),
-                timeout=self._SESSION_UPDATE_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except asyncio.TimeoutError as exc:
+            raw = getattr(update, "raw_output", None)
             log.warn(
                 "session/update_timeout",
                 session_id=session_id,
-                timeout_seconds=self._SESSION_UPDATE_TIMEOUT_SECONDS,
+                timeout_seconds=timeout,
                 update_type=getattr(update, "session_update", type(update).__name__),
+                payload_type=raw.get("type") if best_effort and isinstance(raw, dict) else None,
+                best_effort=best_effort,
             )
-            raise TimeoutError(
-                f"ACP session update timed out after {self._SESSION_UPDATE_TIMEOUT_SECONDS:g}s"
-            ) from exc
+            if best_effort:
+                return False
+            raise TimeoutError(f"ACP session update timed out after {timeout:g}s") from exc
+        return True
 
     async def _request_skillhub_search(
         self,

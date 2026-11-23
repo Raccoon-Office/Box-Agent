@@ -14,7 +14,8 @@ import re
 from box_agent.agent_service import AgentService
 from box_agent.api import RunDeliveryOptions
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
-from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
+from box_agent.llm.token_meter import record_usage
+from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.delegated_budget import DelegatedBudget, bind_budgets, current_budgets
 from box_agent.tools.engine.execution import invoke_tool_once
@@ -157,6 +158,16 @@ class FixtureLLM:
             yield StreamEvent(type="finish", finish_reason="tool_use",
                               tool_calls=[call("fixture_permission", {}, 0)])
             return
+        if mode in {"progress_wait", "progress_pipe", "progress_normal"}:
+            usage = TokenUsage(prompt_tokens=12, completion_tokens=6, total_tokens=18)
+            record_usage(usage)
+            if not has_results:
+                yield StreamEvent(type="finish", finish_reason="tool_use", usage=usage,
+                                  tool_calls=[call("fixture_count", {"n": 7}, 0)])
+            else:
+                yield StreamEvent(type="text", delta="PROGRESS_FIXTURE_COMPLETED")
+                yield StreamEvent(type="finish", finish_reason="stop", usage=usage)
+            return
         if mode == "stream_wait":
             try:
                 yield StreamEvent(type="text", delta="STREAM_WAIT_READY")
@@ -179,7 +190,7 @@ class FixtureLLM:
 class SmallService(AgentService):
     async def start(self, *args, **kwargs):
         kwargs["delivery_options"] = (
-            RunDeliveryOptions() if scenario.get() == "stdout_pressure"
+            RunDeliveryOptions() if scenario.get() in {"stdout_pressure", "progress_wait", "progress_pipe"}
             else RunDeliveryOptions(max_events=2, max_bytes=65536, congestion_timeout_seconds=0.25)
         )
         return await super().start(*args, **kwargs)
@@ -246,6 +257,11 @@ def install_fixture(acp, root):
             (root / "stdout-paused").touch()
 
     stdio_compat._WritePipeProtocol = WriteProtocol
+    if os.environ.get("BOX_AGENT_DESKTOP_TEST_WINDOWS_STDOUT") == "1":
+        async def windows_streams(*, on_eof=None):
+            return await stdio_compat._windows_stdio_streams(asyncio.get_running_loop(), on_eof)
+
+        acp.stdio_streams_largebuf = windows_streams
 
     for name in ("fixture_count", "fixture_nested"):
         BUILTIN_TOOL_CAPABILITIES[name] = ToolCapabilityMetadata(read=True)
@@ -259,8 +275,22 @@ def install_fixture(acp, root):
 
         async def session_update(self, session_id, update, **meta):
             payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
+            mode = scenario.get()
+            raw = getattr(payload.update, "raw_output", None)
+            if mode in {"progress_wait", "progress_pipe"} and isinstance(raw, dict) and raw.get("type") == "turn_usage":
+                record_lifecycle("progress_send_started", session_id=session_id)
+                (root / "progress-send-started").touch()
+                try:
+                    if mode == "progress_wait":
+                        await asyncio.Event().wait()
+                    else:
+                        raw["fixture_padding"] = "x" * (512 * 1024)
+                        return await self.wrapped.session_update(**acp_params(payload))
+                except asyncio.CancelledError:
+                    (root / "progress-send-cancelled").touch()
+                    raise
             if getattr(payload.update, "sessionUpdate", "") == "agent_message_chunk":
-                await asyncio.sleep({"slow": 0.01, "timeout": 1}.get(scenario.get(), 0))
+                await asyncio.sleep({"slow": 0.01, "timeout": 1}.get(mode, 0))
             return await self.wrapped.session_update(**acp_params(payload))
 
     original = acp.BoxACPAgent
@@ -362,6 +392,8 @@ def install_fixture(acp, root):
     acp.LLMClient = FixtureLLM
     acp.initialize_base_tools = tools
     acp.AgentService = SmallService
+    if timeout := os.environ.get("BOX_AGENT_DESKTOP_TEST_UPDATE_TIMEOUT"):
+        Adapter._SESSION_UPDATE_TIMEOUT_SECONDS = float(timeout)
     acp.BoxACPAgent = Adapter
 
 

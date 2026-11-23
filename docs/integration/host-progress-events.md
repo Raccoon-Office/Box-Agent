@@ -14,6 +14,8 @@ Recommended host layout:
 
 Box-Agent emits per-user-turn usage snapshots as `update_tool_call.rawOutput.type === "turn_usage"`. A turn is one user-visible prompt/response loop, not one model call. Tool calls, retries, summarization, and auto-continuations within that loop should be aggregated under the same turn id.
 
+Display-only `agent_progress` and `turn_usage` notifications are best effort. If one of these sends times out, further notifications of these types may be omitted for the current execution run. Final token totals remain available in the prompt response when it is delivered.
+
 Hosts should pass the business conversation id and optional display title on
 `session/new._meta`, and the business turn id on every `session/prompt._meta.turnId`
 (or `_meta.turn_id`):

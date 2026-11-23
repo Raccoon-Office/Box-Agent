@@ -13,7 +13,7 @@ import box_agent.composition as composition
 from box_agent.agent_service import AgentService
 from box_agent.api import RunDeliveryOptions
 from box_agent.config import Config, LLMConfig, AgentConfig, ToolsConfig
-from box_agent.events import ContentEvent, DoneEvent, StopReason
+from box_agent.events import ContentEvent, DoneEvent, ProgressEvent, StopReason
 from box_agent.run_events import EventTooLargeError
 from tests.test_acp import DoneLLM, DummyConn
 
@@ -162,6 +162,39 @@ async def test_acp_cancel_wakes_producer_while_host_send_is_blocked(tmp_path, mo
         release.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_acp_display_progress_timeout_preserves_text_and_completion(tmp_path, monkeypatch):
+    class ProgressKernel(BurstKernel):
+        async def run(self):
+            yield ProgressEvent(step=1, content="working")
+            yield ContentEvent(content="answer")
+            yield ProgressEvent(step=2, content="finishing")
+            yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="answer")
+
+    attempts = []
+
+    class BlockedProgress(DummyConn):
+        async def session_update(self, session_id, update, **meta):
+            raw = getattr(update, "raw_output", None)
+            if isinstance(raw, dict) and raw.get("type") == "agent_progress":
+                attempts.append(raw["step"])
+                await asyncio.Event().wait()
+            await super().session_update(session_id=session_id, update=update, **meta)
+
+    conn = BlockedProgress()
+    adapter, request = await make_adapter(tmp_path, monkeypatch, ProgressKernel, conn, max_events=1)
+    monkeypatch.setattr(adapter, "_SESSION_UPDATE_TIMEOUT_SECONDS", 0.02)
+    try:
+        response = await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
+        assert response.stopReason == "end_turn"
+        assert response.field_meta["completed"] is True
+        assert attempts == [1]
+        assert [event.update.content.text for event in conn.updates
+                if event.update.session_update == "agent_message_chunk"] == ["answer"]
+    finally:
         await adapter.aclose()
 
 

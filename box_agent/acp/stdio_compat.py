@@ -48,6 +48,7 @@ class StdioTransport:
         self._reader = reader
         self._writer = writer
         self._send_lock = asyncio.Lock()
+        self._write_needs_drain = False
         self._closed = False
         self._on_disconnect = on_disconnect
 
@@ -69,8 +70,13 @@ class StdioTransport:
                     if isinstance(transport, _StdoutTransport):
                         await transport.write_frame(frame)
                     else:
+                        # A timed-out sender may have left buffered bytes.
+                        if self._write_needs_drain:
+                            await self._writer.drain()
                         self._writer.write(frame)
+                        self._write_needs_drain = True
                         await self._writer.drain()
+                        self._write_needs_drain = False
                 except Exception:
                     self._disconnect()
                     raise
@@ -160,7 +166,7 @@ class _WritePipeProtocol(asyncio.BaseProtocol):
 
     async def _drain_helper(self) -> None:
         if self._paused and self._drain_waiter is not None:
-            await self._drain_waiter
+            await asyncio.shield(self._drain_waiter)
 
 
 def _start_stdin_feeder(loop: asyncio.AbstractEventLoop, reader: asyncio.StreamReader) -> None:

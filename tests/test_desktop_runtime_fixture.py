@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import sys
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 import pytest
 
@@ -15,6 +16,113 @@ from tests.acp_host.probe import (
     AcpHostProbe, RpcError, collect_session_updates, message_text_from_updates,
 )
 from acp_eval.transport import _send
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["notification", "posix_pipe", "windows_pipe"])
+async def test_desktop_progress_timeout_preserves_the_turn_and_peer_session(fault):
+    if fault == "posix_pipe" and os.name == "nt":
+        pytest.skip("POSIX stdout writer")
+    workspace = Path(__file__).resolve().parents[1] / "workspace"
+    workspace.mkdir(exist_ok=True)
+    with TemporaryDirectory(prefix="desktop-progress-", dir=workspace) as directory:
+        root = Path(directory)
+        timing_log = root / "box-agent-stdout-write-timing.log"
+        env = {
+            "BOX_AGENT_DESKTOP_TEST_ROOT": str(root),
+            "BOX_AGENT_HOME": str(root / "profile"),
+            "BOX_AGENT_DESKTOP_TEST_UPDATE_TIMEOUT": "1.5",
+            "BOX_AGENT_LOG_FORMAT": "json",
+            "PYTHONUTF8": "1",
+        }
+        if fault == "windows_pipe":
+            env["BOX_AGENT_DESKTOP_TEST_WINDOWS_STDOUT"] = "1"
+            env["BOX_AGENT_ACP_STDIO_TIMING"] = json.dumps({
+                "traceId": str(uuid4()),
+                "writeLogPath": str(timing_log),
+            })
+        probe = AcpHostProbe(command=[sys.executable, "-m", "tests.desktop_runtime_fixture"],
+                             cwd=root, env=env, timeout_s=10)
+        await probe.start()
+        process = probe._proc
+        responses, updates = {}, []
+
+        async def send_prompt(request_id, session, mode):
+            await _send(process, probe._protocol, {
+                "jsonrpc": "2.0", "id": request_id, "method": "session/prompt",
+                "params": {"sessionId": session, "prompt": [{"type": "text", "text": f"fixture:{mode}"}]},
+            })
+
+        async def wait_for_marker(name):
+            while not (root / name).exists():
+                assert process.returncode is None
+                await asyncio.sleep(0.01)
+
+        async def read_results():
+            while len(responses) < 2:
+                eof, frame = await probe._reader.read_frame(deadline=None)
+                assert not eof and not probe._protocol.parse_errors
+                if frame is None:
+                    continue
+                if frame.get("method") == "session/update":
+                    updates.append(frame["params"])
+                elif frame.get("id") in (900, 901):
+                    responses[frame["id"]] = frame
+
+        try:
+            await probe.initialize()
+            first = await probe.session_new(cwd=str(root / "profile/workspaces/first"))
+            peer = await probe.session_new(cwd=str(root / "profile/workspaces/peer"))
+            await send_prompt(900, first, "progress_wait" if fault == "notification" else "progress_pipe")
+            marker = "progress-send-started" if fault == "notification" else "progress-send-cancelled"
+            await asyncio.wait_for(wait_for_marker(marker), 5)
+            if fault == "posix_pipe":
+                assert (root / "stdout-paused").exists()
+            await send_prompt(901, peer, "normal")
+            await asyncio.wait_for(read_results(), 8)
+            if fault == "notification":
+                assert list(responses) == [901, 900]
+            assert responses[901]["result"]["stopReason"] == "end_turn"
+            assert "error" not in responses[900], responses[900]
+            result = responses[900]["result"]
+            assert result["stopReason"] == "end_turn"
+            assert result["_meta"]["completed"] is True
+            assert result["_meta"]["usage"]["totalTokens"] == 36
+            first_updates = [item["update"] for item in updates if item["sessionId"] == first]
+            assert "PROGRESS_FIXTURE_COMPLETED" in message_text_from_updates(first_updates)
+            tool_ids = {item["toolCallId"] for item in first_updates if item["sessionUpdate"] == "tool_call"}
+            assert any(
+                item["sessionUpdate"] == "tool_call_update" and item.get("toolCallId") in tool_ids
+                and item.get("status") == "completed"
+                for item in first_updates
+            )
+            records = [json.loads(line) for line in (root / "results.jsonl").read_text().splitlines()]
+            first_run = next(record for record in records if record["session_id"] == first)
+            assert first_run["status"] == "completed"
+            assert [execution["tool"] for execution in first_run["executions"]] == ["fixture_count"]
+            lifecycle = [json.loads(line) for line in (root / "lifecycle.jsonl").read_text().splitlines()]
+            assert sum(item["event"] == "progress_send_started" for item in lifecycle) == 1
+            log = [json.loads(line) for line in probe.stderr_text.splitlines() if line.startswith("{")]
+            timeouts = [item for item in log if item.get("event") == "session/update_timeout"]
+            assert len(timeouts) == 1
+            assert timeouts[0]["payload_type"] == "turn_usage" and timeouts[0]["best_effort"] is True
+            assert (await probe.session_prompt(first, "fixture:progress_normal"))["stopReason"] == "end_turn"
+            assert any(
+                isinstance(item.get("rawOutput"), dict) and item["rawOutput"].get("type") == "turn_usage"
+                for item in collect_session_updates(probe.drain_notifications())
+            )
+        finally:
+            drain = asyncio.create_task(process.stdout.read())
+            try:
+                await probe.stop()
+            finally:
+                await asyncio.wait_for(drain, 3)
+        if fault == "windows_pipe":
+            timings = [json.loads(line.removeprefix("ACP_STDOUT_TIMING "))
+                       for line in timing_log.read_text().splitlines()]
+            assert any(item["event"] == "wait_cancelled" and item["waitAt"] == "write_completion"
+                       and item["threadStartedAfterMs"] is not None and item["writeReturnedAfterMs"] is None
+                       for item in timings)
 
 
 @pytest.mark.asyncio

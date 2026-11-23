@@ -67,6 +67,45 @@ def test_windows_stdout_stays_pinned_and_propagates_broken_pipe(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_posix_stdout_drains_an_existing_frame_before_a_second_send():
+    protocol = stdio_compat._WritePipeProtocol()
+    writes = []
+
+    class PausingTransport(asyncio.WriteTransport):
+        closed = False
+
+        def write(self, data):
+            writes.append(data)
+            if len(writes) == 1:
+                protocol.pause_writing()
+
+        def is_closing(self):
+            return self.closed
+
+        def close(self):
+            self.closed = True
+
+    writer = asyncio.StreamWriter(PausingTransport(), protocol, None, asyncio.get_running_loop())
+    transport = stdio_compat.StdioTransport(asyncio.StreamReader(), writer)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(transport.send({"id": 1}), 0.01)
+
+    second = asyncio.create_task(transport.send({"id": 2}))
+    try:
+        await asyncio.sleep(0)
+        assert not second.done()
+        assert writes == [b'{"id":1}\n']
+        protocol.resume_writing()
+        await asyncio.wait_for(second, 1)
+        assert writes == [b'{"id":1}\n', b'{"id":2}\n']
+    finally:
+        protocol.resume_writing()
+        await asyncio.gather(second, return_exceptions=True)
+        await transport.close()
+        writer.close()
+
+
+@pytest.mark.asyncio
 async def test_windows_stdout_backpressure_keeps_reads_available_and_preserves_frame_order(monkeypatch):
     entered, release = Event(), Event()
 
