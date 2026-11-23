@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "box_agent_version": "1.0.0",
-  "generated_at": "2026-11-09T14:21:41Z",
+  "generated_at": "2026-11-23T10:37:04Z",
   "skills": [
     {
       "name": "browser-use",
@@ -54,6 +54,26 @@
     {
       "name": "pptx",
       "path": "pptx/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-design-doctor",
+      "path": "presentation-design/skills/sn-ppt-design-doctor/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-design-entry",
+      "path": "presentation-design/skills/sn-ppt-design-entry/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-design-story",
+      "path": "presentation-design/skills/sn-ppt-design-story/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-design-tools",
+      "path": "presentation-design/skills/sn-ppt-design-tools/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-dsl",
+      "path": "presentation-design/skills/sn-ppt-dsl/SKILL.md"
     },
     {
       "name": "sn-ppt-dazzle",

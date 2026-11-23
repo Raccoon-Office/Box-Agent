@@ -1,4 +1,5 @@
 recursive-include box_agent/skills *
+prune box_agent/skills/presentation-design/skills/sn-ppt-dsl/node_modules
 global-exclude *.pyc *.pyo
 global-exclude .DS_Store
 include box_agent/skills/README.md

@@ -1,0 +1,16 @@
+{
+  "name": "sn-ppt-dsl-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "将 SML XML 坐标页面编译为本地可编辑 PPTX",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "dependencies": {
+    "@icon-park/svg": "1.4.2",
+    "jszip": "3.10.1",
+    "pptxgenjs": "4.0.1",
+    "sharp": "0.34.5"
+  }
+}

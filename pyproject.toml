@@ -95,6 +95,7 @@ box_agent = ["skills/**/*", "config/*", "trace_viewer/*", "mcp_servers/native/*.
 
 [tool.setuptools.exclude-package-data]
 box_agent = [
+    "skills/presentation-design/skills/sn-ppt-dsl/node_modules/**/*",
     "skills/**/*.pyc",
     "skills/**/*.pyo",
     "skills/**/__pycache__/*",

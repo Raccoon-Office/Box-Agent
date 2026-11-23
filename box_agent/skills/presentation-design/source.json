@@ -1,0 +1,15 @@
+{
+  "version": "0.6.2",
+  "release_manifest_sha256": "0ed8be54ac68108ea3fb3a20de6b0c15572abc6ae3ea42d0ce4d83c7107664e2",
+  "skill_names": {
+    "sn-ppt-entry": "sn-ppt-design-entry",
+    "sn-ppt-story": "sn-ppt-design-story",
+    "sn-ppt-tools": "sn-ppt-design-tools",
+    "sn-ppt-doctor": "sn-ppt-design-doctor"
+  },
+  "omitted": [
+    "node_modules (installed from the pinned lock at build time)",
+    "runtime.local.json",
+    "runtime.local.original.json"
+  ]
+}

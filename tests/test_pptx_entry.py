@@ -104,8 +104,8 @@ async def test_one_public_presentation_entry_and_exact_hidden_backend_reads(load
     data = catalog.raw_output or json.loads(catalog.content)
     names = {skill["name"] for skill in data["skills"]}
     assert "pptx" in names
-    assert not names.intersection({"ppt-fast", "ppt-router", "sn-ppt-entry", "sn-ppt-standard", "sn-ppt-dazzle"})
-    for name in ("pptx", "ppt-fast", "sn-ppt-entry", "sn-ppt-standard", "sn-ppt-dazzle"):
+    assert not names.intersection({"ppt-fast", "ppt-router", "sn-ppt-entry", "sn-ppt-standard", "sn-ppt-dazzle", "sn-ppt-design-entry", "sn-ppt-design-story", "sn-ppt-design-tools", "sn-ppt-design-doctor", "sn-ppt-dsl"})
+    for name in ("pptx", "ppt-fast", "sn-ppt-entry", "sn-ppt-standard", "sn-ppt-dazzle", "sn-ppt-design-entry", "sn-ppt-design-story", "sn-ppt-design-tools", "sn-ppt-design-doctor", "sn-ppt-dsl"):
         skill = loader.get_skill(name)
         assert skill is not None
         assert skill.allow_override is False
@@ -130,3 +130,26 @@ def test_fast_name_keeps_the_original_tool_exposure_and_trusted_resource_path(lo
     assert fast.skill_path.parent.name == "pptx"  # Preserve exporter safety/path bindings.
     assert (fast.skill_path.parent / "scripts" / "html_to_editable_pptx.js").is_file()
     assert SKILL_TOOL_HINTS["ppt-fast"] == {"append_file", "query_jsonl", "report_execution_result"}
+
+
+def test_design_pptx_and_html_have_distinct_destinations(loader):
+    entry = loader.get_skill("pptx").content
+    destinations = {line.split("|")[1].strip(): line.split("|")[2].strip()
+                    for line in entry.splitlines() if line.startswith(("| `fast`", "| `design`"))}
+    assert len(destinations) == 3
+    assert "ppt-fast" in next(value for key, value in destinations.items() if "`fast`" in key)
+    assert "sn-ppt-design-entry" in next(value for key, value in destinations.items() if "新建 PPT/PPTX" in key)
+    assert 'skill_name="sn-ppt-entry"' in next(value for key, value in destinations.items() if "HTML" in key)
+    design = loader.get_skill("sn-ppt-design-entry").content
+    assert all(f'get_skill(skill_name="{name}")' in design for name in ("sn-ppt-design-story", "sn-ppt-dsl"))
+    assert "outline_confirmation" in design and "最终 PPTX" in design
+
+@pytest.mark.asyncio
+async def test_design_outline_card_uses_the_existing_client_contract(loader):
+    design = loader.get_skill("sn-ppt-design-entry").content.split("## 客户端大纲确认", 1)[1]
+    payload = json.loads(re.search(r"```json\s*(.*?)\s*```", design, re.S).group(1))
+    result = await RequestUserDecisionTool().invoke(payload)
+    assert result.success, result.error
+    assert payload["decision_kind"] == "outline_confirmation"
+    assert [choice["id"] for choice in payload["options"]] == ["approve", "revise"]
+    assert result.raw_output["autoSubmit"]["effectiveSeconds"] == 60

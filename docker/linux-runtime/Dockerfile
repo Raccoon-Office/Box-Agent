@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG TARGETARCH
+FROM node:22.23.4-bookworm-slim AS ppt-node
 FROM quay.io/pypa/manylinux_2_28_x86_64:latest AS base-amd64
 FROM quay.io/pypa/manylinux_2_28_aarch64:latest AS base-arm64
 FROM base-${TARGETARCH} AS build
@@ -9,6 +10,10 @@ ARG TARGETARCH
 ARG BOX_AGENT_VERSION
 
 WORKDIR /workspace
+
+COPY --from=ppt-node /usr/local/bin/node /usr/local/bin/node
+COPY --from=ppt-node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 
 COPY . /workspace
 

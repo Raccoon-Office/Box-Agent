@@ -107,8 +107,20 @@ def copy_runtime_resources(project_root: Path, runtime_dir: Path) -> None:
             raise RuntimeError(f"Runtime resource is missing: {required}")
 
 
-# ── Platform detection ───────────────────────────────────────
+def install_ppt_design_dependencies(runtime_dir: Path, plat: str, arch: str) -> None:
+    """Install the locked renderer and native image library for the target once."""
+    module = runtime_dir / "skills/presentation-design/skills/sn-ppt-dsl"
+    npm = shutil.which("npm")
+    if not npm:
+        raise RuntimeError("Building the PPT design renderer requires npm on the build host")
+    subprocess.run(
+        [npm, "ci", "--omit=dev", "--include=optional", "--ignore-scripts", "--no-bin-links",
+         "--no-audit", "--no-fund", "--os=" + plat, "--cpu=" + arch],
+        check=True, cwd=module,
+    )
 
+
+# ── Platform detection ───────────────────────────────────────
 
 ARCH_ALIASES = {
     "x86_64": "x64",
@@ -800,6 +812,7 @@ def build_runtime(
             shutil.copy2(item, dest)
 
     copy_runtime_resources(project_root, runtime_dir)
+    install_ppt_design_dependencies(runtime_dir, plat, arch)
 
     # Ensure entry is executable
     entry_bin = bin_dir / "box-agent-acp"

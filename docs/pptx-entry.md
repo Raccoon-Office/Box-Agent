@@ -5,10 +5,13 @@
 | 用户模式 | 内部 Skill | 默认交付 |
 |---|---|---|
 | 快速模式 | `ppt-fast` | 沿用原主题、版式和编辑流程；请求 PPTX 时导出文件 |
-| 设计模式：静态 | `sn-ppt-entry` → `sn-ppt-story` → `sn-ppt-standard` | 静态 HTML 和 PPTX |
+| 设计模式：新建 PPTX | `sn-ppt-design-entry` → `sn-ppt-design-story` → `sn-ppt-dsl` | 0.6.2 XML 页面、原生 PPTX、成品回渲看图 |
+| 设计模式：明确需要静态 HTML 或继续旧网页任务 | `sn-ppt-entry` → `sn-ppt-story` → `sn-ppt-standard` | 静态 HTML 和 PPTX |
 | 设计模式：动态 | `sn-ppt-entry` → `sn-ppt-story` → `sn-ppt-dazzle` | 带动效的 HTML，不是原生 PowerPoint 动画 |
 
-Tools 和 Doctor 为设计模式提供共用工具和检查。Standard 自带静态页面与 PPTX exporter，
+新建 PowerPoint 任务采用 0.6.2。冻结来源位于 `presentation-design/source.json`；设计参考、字体和完整脚本位于同目录的 `skills/`。桌面运行时在构建时按 npm 锁文件安装依赖。工具和 Doctor 在各自套件内使用。
+
+以下 HTML 交付规则适用于明确要求网页或继续既有网页项目的任务。Standard 自带静态页面与 PPTX exporter，
 保留源代码模块结构及字体许可。
 设计模式的 PPTX 是文件导出，不宣传或承诺编辑能力。
 静态字段为 `static_html` / `standard` / `static_postprocess`；默认要求 HTML 和 PPTX
@@ -147,3 +150,8 @@ uv run pytest -q tests/test_pptx_entry.py tests/test_presentation_suite_bundle.p
 macOS 包使用 `publish:electron-mac-unsigned`；`:test` 会编入测试服务地址。用户在新包内
 登录正式环境后，客户端自动同步 Box-Agent 登录态。源测试、包内协议探针、真实模型
 生成和视觉质量分别验收，不能互相替代。
+
+
+### 源码运行设计模式
+
+客户端运行时在构建时按锁文件安装导出依赖。从源码或 Python wheel 启动 Box-Agent 时，在实际安装目录的 `box_agent/skills/presentation-design/skills/sn-ppt-dsl` 下先执行一次 `npm ci --omit=dev --include=optional --ignore-scripts --no-bin-links`。写页、导出和看图时直接使用已安装的依赖。

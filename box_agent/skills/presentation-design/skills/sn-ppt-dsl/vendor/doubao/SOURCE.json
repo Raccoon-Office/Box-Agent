@@ -1,0 +1,222 @@
+{
+  "repository": "https://github.com/ahang1598/doubao-workbuddy-qwenwork-skills",
+  "revision": "ee9ee7c7e7f24a57351863259be4f51b0db274a1",
+  "subdirectory": "doubao/skills/ppt",
+  "files": [
+    {
+      "path": "scripts/xml_lint.py",
+      "sha256": "d2a98de0e2d5e4bebcc724c515ac2a578b95e42e7a99af11068c42f257fac669",
+      "bytes": 228639
+    },
+    {
+      "path": "scripts/sxsd_validator.py",
+      "sha256": "cf75b86fac04700848e9556ad9cee26a51461b0eb7ef45d9e550cadc229add85",
+      "bytes": 39643
+    },
+    {
+      "path": "scripts/embed_svg_validator.py",
+      "sha256": "e0c665c3b5bcbc75bb8e9d98f10ff976ddc2b3abba974a948d46050016f41c6b",
+      "bytes": 47108
+    },
+    {
+      "path": "scripts/color_contrast_check.py",
+      "sha256": "bf726983eb6effda6a666099a3e69661022ea073df366c0b5cf400128268b5a7",
+      "bytes": 33584
+    },
+    {
+      "path": "references/xml/slides_xml_schema_definition.xml",
+      "sha256": "7347130469e184cf56f71664c178d4abaafb15494293d633aea422226740b8b4",
+      "bytes": 213452
+    },
+    {
+      "path": "references/xml/iconpark-index.json",
+      "sha256": "5d79500c5a227dace15b40dc6de92e18d02eab1cc9491c7eda46f28a96c033dc",
+      "bytes": 746862
+    },
+    {
+      "path": "references/xml/slides_chart_demo.xml",
+      "sha256": "d8e4d03857ba84f0ff6d0464b0b88cb52991f640fc8e22ea1ebe1add75a0d5d3",
+      "bytes": 70858
+    },
+    {
+      "path": "references/xml/xml-schema-quick-ref.md",
+      "sha256": "0208c56e51f7f22126425db135c59c6cf124971e58017154f3f96487c587e160",
+      "bytes": 33672
+    },
+    {
+      "path": "references/style/slide-taxonomy.md",
+      "sha256": "97690de9cc8cf066db84c7a2ac6752cb886db2cc635604b1233ad0d5db2626b1",
+      "bytes": 13178
+    },
+    {
+      "path": "references/workflow/validation-xml.md",
+      "sha256": "7aea76531e38908e8c40340a59bf71313e65a0a23e40b375ff2241899cb99275",
+      "bytes": 17044
+    },
+    {
+      "path": "references/style/strategy-and-analysis.md",
+      "sha256": "123011387284c8ccc7618580eb1bd76957b6ec733c2a74c25714a0f766e695c6",
+      "bytes": 8666
+    },
+    {
+      "path": "references/style/business-pitch.md",
+      "sha256": "2deb18bb33e98b11c0658f4f8e7839076459666f62436820fb45dab4e11fb68d",
+      "bytes": 12272
+    },
+    {
+      "path": "references/style/business-review.md",
+      "sha256": "4221cad04b2db37d577398427913602680916e0b818f2fd2983b94431792bc2f",
+      "bytes": 19939
+    },
+    {
+      "path": "references/style/academic-research.md",
+      "sha256": "042c2d34fb7fa131becb8c88b7ffb851c36858ac69074425b5e6d84e3b2c7667",
+      "bytes": 18963
+    },
+    {
+      "path": "references/style/learning-and-training.md",
+      "sha256": "20e7d05423f9090036b32f8af2b2c23ea8903520bfc56edb083ee36f24bc307b",
+      "bytes": 20990
+    },
+    {
+      "path": "references/style/technical-presentation.md",
+      "sha256": "fdd1804681a740b3feb9b37895a5ed713ebf2f0e66bba9322463145b5c0e48d0",
+      "bytes": 15700
+    },
+    {
+      "path": "references/style/brand-storytelling.md",
+      "sha256": "cc15eadf6d7cc058a18e3dde04c72a55074b283754979347653d4e0ae7be9f08",
+      "bytes": 34820
+    },
+    {
+      "path": "references/style/fallback.md",
+      "sha256": "1136ceffca4bf2896d36d3b9a3d37dac0536ea27d8db026d5232b697758633d6",
+      "bytes": 8837
+    },
+    {
+      "path": "scripts/gen_svg_charts.py",
+      "sha256": "cf064a8021bbcdc7558351c64474ce3fde5286b2242bc83d93d0470e786879bf",
+      "bytes": 52483
+    },
+    {
+      "path": "scripts/iconpark_tool.py",
+      "sha256": "39061ef88e55549762aac4fc3b337f5a60cc8114c111299c9436d88eb6184431",
+      "bytes": 12364
+    },
+    {
+      "path": "references/xml/iconpark.md",
+      "sha256": "1340a1f4dfc848bed60e6d170480cbbde063afaddde960f750dada4b8a1daaaf",
+      "bytes": 2143
+    },
+    {
+      "path": "scripts/svg_lib/_baseline.py",
+      "sha256": "c9a7096d85ed7bbf4a7e821e0547ba58a2d2cad83df2dbd7472a85cdfcc1a9cc",
+      "bytes": 51533
+    },
+    {
+      "path": "scripts/svg_lib/_boxplot_skin.py",
+      "sha256": "37d3b18cfaf3479771ff49031ed6b54a93ab7355e2f6d016979854ecc26da390",
+      "bytes": 22206
+    },
+    {
+      "path": "scripts/svg_lib/_common.py",
+      "sha256": "cb23b4266da55e482dfff38615fdabe1ea08f4a96eff2838cc5759f43f8d2328",
+      "bytes": 46960
+    },
+    {
+      "path": "scripts/svg_lib/charts/__init__.py",
+      "sha256": "f8523e159578e76458a4cc8abec9f8c50f0e524fd71da1a144da260e978fdc37",
+      "bytes": 850
+    },
+    {
+      "path": "scripts/svg_lib/charts/_shared.py",
+      "sha256": "f85dc8492570c4255f0b38640e6a2855cc4aedbdc7b2b00caa47582f746bfe04",
+      "bytes": 8768
+    },
+    {
+      "path": "scripts/svg_lib/charts/boxplot.py",
+      "sha256": "a1566a12e21536d396d04e23d9009c208b5a5d248c39d01fe48298d48070fc14",
+      "bytes": 27236
+    },
+    {
+      "path": "scripts/svg_lib/charts/calheat.py",
+      "sha256": "4f51c210dc7602dd0e0d2041197bd49ec3438792a85c7e5c469f82820838ecf2",
+      "bytes": 45950
+    },
+    {
+      "path": "scripts/svg_lib/charts/candle.py",
+      "sha256": "e0f24c3b85273f7748a20b00d3754ccab4c2789bd8561c031a495e42f5a201d9",
+      "bytes": 39364
+    },
+    {
+      "path": "scripts/svg_lib/charts/event_timeline.py",
+      "sha256": "bdc09f5ce12a1122465aaec7cdb08c6b54723b206f6e6d4ef37aafdc3d1ebe40",
+      "bytes": 68478
+    },
+    {
+      "path": "scripts/svg_lib/charts/funnel.py",
+      "sha256": "af5bc9c7af083ecf2b7f7c35276e2ff247440b46f4c4080aeed87c3317fdf5a4",
+      "bytes": 55724
+    },
+    {
+      "path": "scripts/svg_lib/charts/gantt.py",
+      "sha256": "8b9c3cc72e06602687d5a19b32a69032e0f29bc5c225d1496d5ccd3ec9177be5",
+      "bytes": 53398
+    },
+    {
+      "path": "scripts/svg_lib/charts/marimekko.py",
+      "sha256": "1a3a2d6766882f690819d3a610e89d5e1bd33894a16f220a1078c22b369784d1",
+      "bytes": 27047
+    },
+    {
+      "path": "scripts/svg_lib/charts/matrix_heat.py",
+      "sha256": "5f1e278a3497428a718d18a7ce0e29fe0c414adf562d7c1971fcd26f0d8a9b01",
+      "bytes": 53064
+    },
+    {
+      "path": "scripts/svg_lib/charts/nested_donut.py",
+      "sha256": "0818bc4f3d9b078a3ca60c0eb23a57be0ffaee95fd7cc7c550db9bea1463b7b0",
+      "bytes": 62178
+    },
+    {
+      "path": "scripts/svg_lib/charts/percent_grid.py",
+      "sha256": "e54aa0bebf7460b0be57b5a2dbe25f63c01309849039379be684503f51411191",
+      "bytes": 39589
+    },
+    {
+      "path": "scripts/svg_lib/charts/pyramid.py",
+      "sha256": "76ed81835e535abc662a0a22d23b0177ad4ad8a9319fe89561ac2bea9f825505",
+      "bytes": 43404
+    },
+    {
+      "path": "scripts/svg_lib/charts/quadrant.py",
+      "sha256": "35717028a80f9f2fb324d113dddad0c3d1221ba9829f12e66557feda61719304",
+      "bytes": 78374
+    },
+    {
+      "path": "scripts/svg_lib/charts/ridge.py",
+      "sha256": "0a8b0369aa1eb637fddc7767a134ec5ebbb2faf88860b93ab2435876499bddc2",
+      "bytes": 29542
+    },
+    {
+      "path": "scripts/svg_lib/charts/sankey.py",
+      "sha256": "bbe99f42ffc6e1603ae79c82d160b691e096a2f174d7a3edd5e3fc78b576d250",
+      "bytes": 49912
+    },
+    {
+      "path": "scripts/svg_lib/charts/violin.py",
+      "sha256": "15d00a0e996c10af0e73ea9532805a188da55364ee506faad37ccf726e2022fb",
+      "bytes": 37491
+    },
+    {
+      "path": "scripts/svg_lib/charts/waterfall.py",
+      "sha256": "d33224be0be7d5bb7ada72d78d88dc1c6dfc54e8e95fa56a6b70b3a8958102e4",
+      "bytes": 53397
+    },
+    {
+      "path": "scripts/svg_lib/svg_palettes.py",
+      "sha256": "6405e7c9027ed51a81acc19fc3e3195ded213b850c8696f274254f002c4cfa4c",
+      "bytes": 55573
+    }
+  ]
+}
