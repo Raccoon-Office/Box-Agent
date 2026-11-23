@@ -10,9 +10,10 @@ from contextvars import ContextVar
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any
 
-from .events import AgentEvent
+from .events import AgentEvent, ContentEvent, DoneEvent, InjectedMessageEvent, StepStart, ToolCallStart
 from .hooks import HookBus, HookManager, HookRegistration, LegacyHookAdapter, HookConfigError
 from .dsml_fallback import DsmlToolCallRecoveryHook
+from .injections import InjectionKind
 from .kernel.loop import AgentLoopKernel
 from .kernel.ports import KernelServices
 from .plugins.defaults import (
@@ -23,6 +24,8 @@ from .plugins.defaults import (
 )
 from .plugins.host import PluginActivation, PluginCleanupError, PluginHost
 from .plugins.hooks import HookOwner, HookProviderPort
+from .session_log import run_session_io, run_session_write
+from .tools.chat_references import retain_scratch_chat_references
 
 if TYPE_CHECKING:
     from .tools.engine.call_contracts import ToolRunContext
@@ -473,6 +476,26 @@ async def run_agent_loop_with_default_services(
     activation: PluginActivation | None = None
     events: AsyncIterator[AgentEvent] | None = None
     primary_error: BaseException | None = None
+    workspace = run_arguments.get("workspace_dir")
+    session_log = run_arguments.get("session_log")
+    visible_text: list[str] = []
+    text_continuation = False
+
+    async def retain_visible_scratch_references() -> None:
+        if not workspace or not visible_text:
+            return
+
+        def retain() -> None:
+            content = "".join(visible_text)
+            # Cancellation while waiting for the log lock leaves the text for cleanup.
+            visible_text.clear()
+            retain_scratch_chat_references(workspace, content, session_log)
+
+        if session_log is None:
+            await run_session_io(retain)
+        else:
+            await run_session_write(session_log, retain)
+
     try:
         if host is not None:
             activation = await host.activate()
@@ -516,6 +539,22 @@ async def run_agent_loop_with_default_services(
         )
         events = kernel.run()
         async for event in events:
+            if workspace:
+                if isinstance(event, ContentEvent) and not event._header and event.content:
+                    visible_text.append(event.content)
+                    text_continuation = False
+                elif isinstance(event, ToolCallStart) or (
+                    isinstance(event, StepStart) and not text_continuation
+                ):
+                    # Record earlier links before tools can delete or replace their files.
+                    await retain_visible_scratch_references()
+                elif isinstance(event, InjectedMessageEvent) and event.kind not in {
+                    InjectionKind.BUDGET.value, InjectionKind.NO_PROGRESS.value,
+                }:
+                    text_continuation = event.kind == InjectionKind.TEXT_CONTINUATION.value
+                elif isinstance(event, DoneEvent):
+                    visible_text.extend(("\n", event.final_content))
+                    await retain_visible_scratch_references()
             yield event
     except GeneratorExit:
         raise
@@ -525,6 +564,10 @@ async def run_agent_loop_with_default_services(
     finally:
         cleanup_errors: list[BaseException] = []
         try:
+            try:
+                await retain_visible_scratch_references()
+            except BaseException as error:
+                cleanup_errors.append(error)
             if events is not None:
                 try:
                     await events.aclose()

@@ -7,17 +7,117 @@ import asyncio
 import threading
 import shlex
 import sys
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
 from acp import text_block, update_agent_message
 from acp.schema import AllowedOutcome, RequestPermissionResponse
 
+from box_agent import session_log as session_log_module
 from box_agent.acp import BoxACPAgent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.session_log import SessionLog, default_session_root
+from box_agent.tools import chat_references
 from box_agent.tools.bash_tool import BashTool
 from box_agent.schema import FunctionCall, StreamEvent, ToolCall
 from tests.test_acp import DummyConn, DoneLLM
+
+
+@pytest.mark.asyncio
+async def test_acp_scratch_reference_and_concurrent_goal_survive_log_reopen(tmp_path, monkeypatch):
+    class PreviewLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if any("Show the scratch preview" in str(msg.content) for msg in messages if msg.role == "user"):
+                yield StreamEvent(type="text", delta=f"![Preview]({preview.as_uri()})")
+                yield StreamEvent(type="finish", finish_reason="stop")
+            else:
+                async for event in super().generate_stream(messages, tools, **kwargs):
+                    yield event
+
+    agent = BoxACPAgent(DummyConn(), Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            workspace_dir=str(tmp_path), max_steps=1, goal_autopilot_enabled=False,
+            enable_memory=False, enable_memory_extraction=False, memory_maintainer_enabled=False,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    ), PreviewLLM(), [], "system")
+    session_id = "scratch-preview-concurrent-goal"
+    session = await agent.new_session(**acp_params(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"session_mode": "general", "session_id": session_id},
+    )))
+    other = await agent.new_session(**acp_params(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"session_mode": "general", "session_id": "independent-session"},
+    )))
+    scratch = await agent._sessions[session.sessionId].skill_scratch_dir.ensure()
+    preview = scratch / "preview.png"
+    preview.write_bytes(b"preview")
+    disposable = scratch / "disposable.txt"
+    disposable.touch()
+
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    scan_threads = set()
+    writing_reference = asyncio.Event()
+    release_reference = threading.Event()
+    writing_goal = threading.Event()
+    encode = session_log_module._encode_record
+    scan = chat_references.local_dependencies
+
+    def observe_scan(path, root):
+        if path == preview:
+            scan_threads.add(threading.get_ident())
+        return scan(path, root)
+
+    def hold_reference_write(record):
+        event_type = record.get("type")
+        if event_type == "chat/reference":
+            # append() has assigned a sequence number. A competing writer at
+            # this point could use the same number before the record is stored.
+            loop.call_soon_threadsafe(writing_reference.set)
+            assert threading.get_ident() != loop_thread, "Reference write ran on the ACP event loop"
+            assert release_reference.wait(10)
+        elif event_type == "goal/change":
+            writing_goal.set()
+        return encode(record)
+
+    monkeypatch.setattr(chat_references, "local_dependencies", observe_scan)
+    monkeypatch.setattr(session_log_module, "_encode_record", hold_reference_write)
+    turn = asyncio.create_task(agent.prompt(**acp_params(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Show the scratch preview"}],
+    ))))
+    goal = None
+    objective = "Keep this goal through a log reopen"
+    try:
+        await asyncio.wait_for(writing_reference.wait(), 5)
+        assert scan_threads and loop_thread not in scan_threads
+        goal = asyncio.create_task(agent.ext_method("goal", {
+            "sessionId": session.sessionId, "action": "set", "objective": objective,
+        }))
+        response = await asyncio.wait_for(agent.prompt(**acp_params(SimpleNamespace(
+            sessionId=other.sessionId, prompt=[{"text": "hello"}],
+        ))), 5)
+        assert response.stopReason == "end_turn"
+        assert not turn.done()
+        assert not writing_goal.is_set()
+        release_reference.set()
+        assert (await asyncio.wait_for(turn, 5)).stopReason == "end_turn"
+        assert (await asyncio.wait_for(goal, 5))["ok"]
+    finally:
+        release_reference.set()
+        await asyncio.gather(turn, *((goal,) if goal is not None else ()), return_exceptions=True)
+        await agent.aclose()
+
+    assert preview.read_bytes() == b"preview"
+    assert not disposable.exists()
+    with closing(SessionLog.open(default_session_root(), session_id=session_id, cwd=tmp_path)) as reopened:
+        references = list(reopened.events_of_type("chat/reference"))
+        goals = list(reopened.events_of_type("goal/change"))
+        assert len(references) == len(goals) == 1
+        assert references[0]["data"]["paths"] == [str(preview)]
+        assert goals[0]["data"]["goal"]["objective"] == objective
+        assert references[0]["seq"] < goals[0]["seq"]
 
 
 @pytest.mark.asyncio
