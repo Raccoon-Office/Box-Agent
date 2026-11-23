@@ -1346,6 +1346,10 @@ class BoxACPAgent:
     # them, one stuck update must not freeze the agent loop forever.
     _SESSION_UPDATE_TIMEOUT_SECONDS: float = 15.0
     _SESSION_PROGRESS_TIMEOUT_SECONDS: float = 1.0
+    # After a best-effort progress send times out, skip display-only progress
+    # for this long, then probe again so one host hiccup does not silence the
+    # rest of a long run.
+    _SESSION_PROGRESS_RETRY_SECONDS: float = 10.0
 
     def __init__(
         self,
@@ -5356,13 +5360,21 @@ class BoxACPAgent:
                 payload["current"] = current
             return payload
 
-        progress_delivery_available = True
+        progress_suspended_until: float | None = None
 
         async def _send_progress(update: Any) -> None:
-            nonlocal progress_delivery_available
-            if progress_delivery_available:
-                # Bound the work of a slow progress consumer for this run.
-                progress_delivery_available = await self._send(session_id, update, best_effort=True)
+            # Bound the work of a slow progress consumer. A timeout suspends
+            # display-only progress for a cooldown, then the next update probes
+            # the host again instead of staying silent for the whole run.
+            nonlocal progress_suspended_until
+            loop = asyncio.get_running_loop()
+            if progress_suspended_until is not None:
+                if loop.time() < progress_suspended_until:
+                    return
+                progress_suspended_until = None
+                log.info("session/progress_resumed", session_id=session_id)
+            if not await self._send(session_id, update, best_effort=True):
+                progress_suspended_until = loop.time() + self._SESSION_PROGRESS_RETRY_SECONDS
 
         async def _send_turn_usage(current: dict[str, Any] | None = None) -> None:
             payload = _turn_usage_payload(current)
@@ -6183,6 +6195,19 @@ class BoxACPAgent:
             if best_effort:
                 return False
             raise TimeoutError(f"ACP session update timed out after {timeout:g}s") from exc
+        except Exception as exc:
+            if not best_effort:
+                raise
+            # Display-only updates must never end the run: a broken pipe or a
+            # serialization error surfaces on the next required update instead.
+            log.warn(
+                "session/update_failed",
+                session_id=session_id,
+                update_type=getattr(update, "session_update", type(update).__name__),
+                error=f"{type(exc).__name__}: {exc}",
+                best_effort=True,
+            )
+            return False
         return True
 
     async def _request_skillhub_search(
