@@ -26,7 +26,12 @@ from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
 from .output_capture import CapturedOutput, OutputCapture, bound_output_text
 from .python_environment import probe_python
-from .skill_scratch import SKILL_SCRATCH_ENV, SessionSkillScratch, try_prepare_scratch
+from .skill_scratch import (
+    SKILL_SCRATCH_ENV,
+    SessionSkillScratch,
+    SkillScratchUnavailable,
+    try_prepare_scratch,
+)
 
 from box_agent.user_paths import state_path
 
@@ -2022,9 +2027,13 @@ Output formats:
                           "Do not use or install alternate runtimes or ask the user to switch environments.",
                 )
         if self._skill_scratch_dir is not None:
-            # Scratch is optional for Python code: an unavailable directory is
-            # logged, and the kernel keeps the planned path in its env.
-            await try_prepare_scratch(self._skill_scratch_dir)
+            # Scratch is optional for Python code: an access error is logged and
+            # the kernel keeps the planned path in its env. A path rejected by a
+            # safety check (or not yet validated) is never handed to the kernel.
+            try:
+                await try_prepare_scratch(self._skill_scratch_dir)
+            except SkillScratchUnavailable as exc:
+                return ToolResult(success=False, error=str(exc), raw_output={"code": exc.code})
             self.update_runtime_env({SKILL_SCRATCH_ENV: str(self._skill_scratch_dir.path)})
         if candidate is not None:
             selected_env = SandboxEnvironment(runtime_env=self.runtime_env, python_path=candidate)

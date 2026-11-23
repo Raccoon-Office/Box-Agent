@@ -352,3 +352,135 @@ def test_location_hints_flag_onedrive_and_protected_folders(tmp_path, monkeypatc
     assert skill_scratch._location_hints(profile / "Documents" / "proj") == ["user_documents"]
     assert skill_scratch._location_hints(profile / "OneDrive" / "proj") == ["onedrive"]
     assert skill_scratch._location_hints(tmp_path / "elsewhere") == []
+
+
+def _link_scratch_root_outside(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    try:
+        (workspace / SKILL_SCRATCH_DIR_NAME).symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available")
+    return workspace, outside
+
+
+@pytest.mark.asyncio
+async def test_bash_never_receives_a_scratch_path_rejected_by_safety_checks(tmp_path):
+    from box_agent.tools.bash_tool import BashTool
+
+    workspace, outside = _link_scratch_root_outside(tmp_path)
+    scratch = SessionSkillScratch(workspace)
+    tool = BashTool(workspace_dir=str(workspace), non_interactive=True, skill_scratch_dir=scratch)
+    result = await tool.execute(
+        command='mkdir -p "$BOX_AGENT_SCRATCH_DIR" && echo escaped > "$BOX_AGENT_SCRATCH_DIR/f"',
+    )
+    assert not result.success
+    assert result.raw_output["code"] == "SKILL_SCRATCH_UNAVAILABLE"
+    assert list(outside.iterdir()) == []  # nothing was written through the link
+
+
+@pytest.mark.asyncio
+async def test_python_sandbox_never_receives_a_scratch_path_rejected_by_safety_checks(tmp_path, monkeypatch):
+    from box_agent.tools.jupyter_tool import JupyterSandboxTool
+
+    workspace, outside = _link_scratch_root_outside(tmp_path)
+    scratch = SessionSkillScratch(workspace)
+    tool = JupyterSandboxTool(workspace_dir=str(workspace), skill_scratch_dir=scratch)
+    monkeypatch.setattr(tool, "_get_sandbox_env", lambda: pytest.fail("kernel initialization was reached"))
+    result = await tool.execute("print('check')")
+    assert not result.success
+    assert result.raw_output["code"] == "SKILL_SCRATCH_UNAVAILABLE"
+    assert skill_scratch.SKILL_SCRATCH_ENV not in tool.runtime_env
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_scratch_timeout_is_not_treated_as_a_validated_path(tmp_path, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(skill_scratch, "prepare_skill_scratch_dir",
+                        lambda *a, **k: release.wait(3) and pytest.fail("released"))
+    monkeypatch.setattr(skill_scratch, "_PREPARE_TIMEOUT_SECONDS", 0.02)
+    try:
+        with pytest.raises(SkillScratchUnavailable) as caught:
+            await skill_scratch.try_prepare_scratch(SessionSkillScratch(tmp_path))
+        assert caught.value.path_validated is False
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_wait_is_bounded_and_does_not_overlap(tmp_path, monkeypatch, caplog):
+    import logging
+
+    scratch = SessionSkillScratch(tmp_path)
+    await scratch.ensure()
+    release = threading.Event()
+    calls = []
+    real_cleanup = skill_scratch.cleanup_skill_scratch_dir
+
+    def stuck_cleanup(prepared):
+        calls.append(1)
+        release.wait(3)
+        return real_cleanup(prepared)
+
+    monkeypatch.setattr(skill_scratch, "cleanup_skill_scratch_dir", stuck_cleanup)
+    monkeypatch.setattr(skill_scratch, "_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    caplog.set_level(logging.WARNING, logger="box_agent.tools.skill_scratch")
+    try:
+        # A stuck file system returns control instead of holding the turn open.
+        assert await asyncio.wait_for(skill_scratch.acleanup_skill_scratch_dir(scratch), 1) == []
+        assert any("cleanup_timeout" in r.getMessage() for r in caplog.records)
+        # The next turn does not start a second cleanup on top of the stuck one.
+        assert await asyncio.wait_for(skill_scratch.acleanup_skill_scratch_dir(scratch), 1) == []
+        assert calls == [1]
+        assert any("cleanup_skipped" in r.getMessage() for r in caplog.records)
+    finally:
+        release.set()
+    for _ in range(100):
+        if scratch._cleanup.done():
+            break
+        await asyncio.sleep(0.01)
+    disposable = scratch.path / "later.txt"
+    disposable.write_text("x")
+    assert await skill_scratch.acleanup_skill_scratch_dir(scratch) == [str(disposable)]
+
+
+@pytest.mark.asyncio
+async def test_stuck_cleanup_does_not_starve_other_sessions_preparation(tmp_path, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(skill_scratch, "cleanup_skill_scratch_dir", lambda prepared: release.wait(5) and [])
+    monkeypatch.setattr(skill_scratch, "_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    stuck = []
+    try:
+        for index in range(8):  # more than any small fixed pool
+            scratch = SessionSkillScratch(tmp_path / f"stuck-{index}")
+            (tmp_path / f"stuck-{index}").mkdir()
+            await scratch.ensure()
+            await skill_scratch.acleanup_skill_scratch_dir(scratch)
+            stuck.append(scratch)
+        fresh = SessionSkillScratch(tmp_path)
+        assert (await asyncio.wait_for(fresh.ensure(), 2)).is_dir()
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_hanging_diagnosis_does_not_hold_preparation(tmp_path, monkeypatch, caplog):
+    import logging
+
+    release = threading.Event()
+
+    def deny(*args, **kwargs):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(skill_scratch, "prepare_skill_scratch_dir", deny)
+    monkeypatch.setattr(skill_scratch, "_diagnose_failure", lambda *a: release.wait(3) and {})
+    monkeypatch.setattr(skill_scratch, "_DIAGNOSE_TIMEOUT_SECONDS", 0.02)
+    caplog.set_level(logging.WARNING, logger="box_agent.tools.skill_scratch")
+    try:
+        assert await asyncio.wait_for(skill_scratch.try_prepare_scratch(SessionSkillScratch(tmp_path)), 1) is False
+        assert any("diagnostics='unavailable'" in r.getMessage() for r in caplog.records)
+    finally:
+        release.set()

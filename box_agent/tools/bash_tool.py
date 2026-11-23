@@ -38,7 +38,12 @@ from .pptx_safety import (
 from .runtime import bundled_win_bash, managed_python_shell_command
 from .shell_inspection import inspect_shell_command
 from .owned_file_cleanup import OwnedFileCleanup
-from .skill_scratch import SKILL_SCRATCH_ENV, SessionSkillScratch, try_prepare_scratch
+from .skill_scratch import (
+    SKILL_SCRATCH_ENV,
+    SessionSkillScratch,
+    SkillScratchUnavailable,
+    try_prepare_scratch,
+)
 from .safety import (
     backup_file,
     builtin_skill_command_write_error,
@@ -1641,10 +1646,17 @@ Examples:
         lifetime: str = BASH_LIFETIME_TURN,
         temporary_files: list[str] | None = None,
     ) -> ToolResult:
-        # Scratch is optional for a shell command: an unavailable directory is
-        # logged and the command still runs.
+        # Scratch is optional for a shell command: an access error is logged
+        # and the command still runs. A path rejected by a safety check (or
+        # not yet validated) is never handed to the command.
         if self._skill_scratch_dir is not None:
-            await try_prepare_scratch(self._skill_scratch_dir)
+            try:
+                await try_prepare_scratch(self._skill_scratch_dir)
+            except SkillScratchUnavailable as exc:
+                return BashOutputResult(
+                    success=False, error=str(exc), stdout="", stderr=str(exc), exit_code=-1,
+                    raw_output={"code": exc.code},
+                )
         return await self._execute_command(
             command, timeout=timeout, run_in_background=run_in_background,
             lifetime=lifetime, temporary_files=temporary_files,
