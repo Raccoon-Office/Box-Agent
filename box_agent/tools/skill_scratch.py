@@ -2,16 +2,65 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import shutil
 import stat
+import threading
+from collections.abc import Callable
+from contextvars import copy_context
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
+from uuid import uuid4
 
 from ..artifact_publication import ChatReferenceScanError, retained_chat_file_in
 
 
 SKILL_SCRATCH_DIR_NAME = ".box-agent-scratch"
+SKILL_SCRATCH_ENV = "BOX_AGENT_SCRATCH_DIR"
+_PREPARE_TIMEOUT_SECONDS = 5.0
+_CLEANUP_TIMEOUT_SECONDS = 10.0
+_DIAGNOSE_TIMEOUT_SECONDS = 2.0
+_T = TypeVar("_T")
+
+
+def _settle(future: asyncio.Future, result: object, error: BaseException | None) -> None:
+    if future.done():  # the waiter timed out or was cancelled
+        return
+    if error is not None:
+        future.set_exception(error)
+    else:
+        future.set_result(result)
+
+
+async def _run_scratch_io(operation: Callable[..., _T], /, *args, **kwargs) -> _T:
+    """Run optional scratch file I/O on its own daemon thread.
+
+    A shared pool would let a hung cleanup starve preparation, and pool
+    workers are joined at interpreter exit. A daemon thread per operation
+    keeps a stuck Windows file call from blocking other sessions or shutdown;
+    callers bound the wait with their own timeouts.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[_T] = loop.create_future()
+    context = copy_context()
+
+    def worker() -> None:
+        result: object = None
+        error: BaseException | None = None
+        try:
+            result = context.run(operation, *args, **kwargs)
+        except BaseException as exc:  # delivered to the awaiting task
+            error = exc
+        try:
+            loop.call_soon_threadsafe(_settle, future, result, error)
+        except RuntimeError:  # event loop already closed
+            pass
+
+    threading.Thread(target=worker, name="skill-scratch-io", daemon=True).start()
+    return await future
 
 
 @dataclass(frozen=True)
@@ -19,6 +68,185 @@ class SkillScratchDirectory:
     path: Path
     device: int
     inode: int
+
+
+class SkillScratchUnavailable(RuntimeError):
+    code = "SKILL_SCRATCH_UNAVAILABLE"
+
+    def __init__(self, path: Path, reason: str, *, path_validated: bool = False):
+        super().__init__(f"{self.code}: {path}: {reason}")
+        # True only when every existing component was checked to be a real
+        # directory inside the workspace, so a command may still be given it.
+        self.path_validated = path_validated
+
+
+_log = logging.getLogger(__name__)
+
+# Windows folders that Defender "Controlled folder access" protects by default.
+_PROTECTED_USER_FOLDERS = ("Documents", "Desktop", "Pictures", "Videos", "Music", "Favorites")
+
+
+def _describe_path(path: Path) -> str:
+    """One-word state of a path for diagnostics; never raises."""
+    try:
+        stats = path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        return f"unreadable({type(exc).__name__}:{getattr(exc, 'winerror', None) or exc.errno})"
+    kind = "link" if stat.S_ISLNK(stats.st_mode) else "dir" if stat.S_ISDIR(stats.st_mode) else "file"
+    attributes = getattr(stats, "st_file_attributes", None)
+    return kind if attributes is None else f"{kind}(attrs=0x{attributes:x})"
+
+
+def _location_hints(workspace: Path) -> list[str]:
+    """Name likely Windows causes of access-denied for this workspace location."""
+    hints: list[str] = []
+    try:
+        absolute = _absolute_without_resolving(workspace)
+        text = os.path.normcase(str(absolute))
+        for variable in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+            root = os.environ.get(variable)
+            if root and text.startswith(os.path.normcase(root)):
+                hints.append("onedrive")
+                break
+        profile = os.environ.get("USERPROFILE") or str(Path.home())
+        for folder in _PROTECTED_USER_FOLDERS:
+            if text.startswith(os.path.normcase(os.path.join(profile, folder))):
+                hints.append(f"user_{folder.lower()}")
+        if absolute.anchor.startswith("\\\\"):
+            hints.append("network_share")
+    except Exception:  # Diagnostics must never fail preparation handling.
+        pass
+    return hints
+
+
+def _diagnose_failure(workspace: Path, planned: Path, error: BaseException) -> dict[str, object]:
+    """Collect what is needed to tell ACL, Defender, delete-pending and lock cases apart."""
+    fields: dict[str, object] = {
+        "error_type": type(error).__name__,
+        "winerror": getattr(error, "winerror", None),
+        "errno": getattr(error, "errno", None),
+        "error": str(error),
+        "failed_path": getattr(error, "filename", None),
+        "workspace": str(workspace),
+        "planned_path": str(planned),
+        "os": os.name,
+    }
+    try:
+        fields["workspace_state"] = _describe_path(workspace)
+        fields["scratch_root_state"] = _describe_path(workspace / SKILL_SCRATCH_DIR_NAME)
+        fields["planned_state"] = _describe_path(planned)
+        fields["hints"] = ",".join(_location_hints(workspace)) or "none"
+    except Exception:
+        pass
+    return fields
+
+
+def _format_fields(fields: dict[str, object]) -> str:
+    return " ".join(f"{key}={value!r}" for key, value in fields.items())
+
+
+class SessionSkillScratch:
+    """Prepare one session-owned directory on first use by a tool."""
+
+    def __init__(self, workspace: Path):
+        self._workspace = workspace
+        self._path = workspace / SKILL_SCRATCH_DIR_NAME / uuid4().hex
+        self.prepared: SkillScratchDirectory | None = None
+        self._preparing: asyncio.Task[SkillScratchDirectory | SkillScratchUnavailable] | None = None
+        self._cleanup: asyncio.Future[list[str]] | None = None
+        # Log each distinct failure once per session, then recovery once.
+        self._logged_failure: tuple[object, ...] | None = None
+
+    @property
+    def path(self) -> Path:
+        return self.prepared.path if self.prepared is not None else self._path
+
+    async def ensure(self) -> Path:
+        if self.prepared is not None:
+            return self.prepared.path
+        task = self._preparing
+        if task is None or task.done():
+            task = self._preparing = asyncio.create_task(self._prepare())
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), _PREPARE_TIMEOUT_SECONDS)
+        # Python 3.10's asyncio.TimeoutError is not the builtin TimeoutError.
+        except asyncio.TimeoutError:
+            self._log_failure(("timeout",), {
+                "error_type": "Timeout", "timeout_seconds": _PREPARE_TIMEOUT_SECONDS,
+                "workspace": str(self._workspace), "planned_path": str(self._path),
+                "hints": ",".join(_location_hints(self._workspace)) or "none",
+            })
+            # Unknown state: preparation has not validated the path yet.
+            raise SkillScratchUnavailable(self._path, "timed out preparing the directory") from None
+        if isinstance(result, SkillScratchUnavailable):
+            raise result
+        return result.path
+
+    def _log_failure(self, key: tuple[object, ...], fields: dict[str, object]) -> None:
+        if key == self._logged_failure:
+            return
+        self._logged_failure = key
+        _log.warning("skill_scratch/unavailable %s", _format_fields(fields))
+
+    async def _prepare(self) -> SkillScratchDirectory | SkillScratchUnavailable:
+        # A cancelled or timed-out tool can leave the OS call running. Keep it
+        # shared so retries cannot start duplicate preparation while it runs.
+        try:
+            directory = await _run_scratch_io(
+                prepare_skill_scratch_dir, self._workspace, scratch_root_dir=self._path,
+            )
+        except Exception as exc:
+            try:
+                fields = await asyncio.wait_for(
+                    _run_scratch_io(_diagnose_failure, self._workspace, self._path, exc),
+                    _DIAGNOSE_TIMEOUT_SECONDS,
+                )
+            except Exception:  # including a diagnosis that hangs on the same file system
+                fields = {"error_type": type(exc).__name__, "error": str(exc),
+                          "workspace": str(self._workspace), "planned_path": str(self._path),
+                          "diagnostics": "unavailable"}
+            # prepare_skill_scratch_dir raises RuntimeError for its safety checks
+            # (links, reparse points, non-directories, workspace escape). Only a
+            # plain OS error leaves the checked components trustworthy.
+            path_validated = isinstance(exc, OSError)
+            fields["path_validated"] = path_validated
+            self._log_failure(
+                (type(exc).__name__, getattr(exc, "winerror", None), getattr(exc, "errno", None),
+                 getattr(exc, "filename", None)),
+                fields,
+            )
+            return SkillScratchUnavailable(
+                self._path, str(exc) or type(exc).__name__, path_validated=path_validated,
+            )
+        if self._logged_failure is not None:
+            _log.info("skill_scratch/recovered path=%r", str(directory.path))
+            self._logged_failure = None
+        self.prepared = directory
+        return directory
+
+
+async def try_prepare_scratch(scratch: SessionSkillScratch) -> bool:
+    """Prepare scratch for a general-purpose tool without making it a hard dependency.
+
+    After a plain OS error (for example access denied) Bash and Python still
+    run: the env var keeps pointing at the planned session path (never unset,
+    so ``$VAR/x`` cannot expand to ``/x``), a command that writes there fails
+    on its own, and nothing extra is added to the result. The failure is
+    logged with diagnostics by ``SessionSkillScratch``.
+
+    Raises ``SkillScratchUnavailable`` when the path was rejected by a safety
+    check or its state is unknown (timeout): handing it to a command could
+    follow a link out of the workspace, so the tool must fail instead.
+    """
+    try:
+        await scratch.ensure()
+    except SkillScratchUnavailable as exc:
+        if not exc.path_validated:
+            raise
+        return False
+    return True
 
 
 def _absolute_without_resolving(path: Path) -> Path:
@@ -87,9 +315,16 @@ def prepare_skill_scratch_dir(
     )
 
 
-def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
+def _prepared_scratch(scratch: SkillScratchDirectory | SessionSkillScratch) -> SkillScratchDirectory | None:
+    return scratch.prepared if isinstance(scratch, SessionSkillScratch) else scratch
+
+
+def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> list[str]:
     """Remove all entries from a reserved scratch root without following links."""
-    scratch_dir = scratch.path
+    prepared = _prepared_scratch(scratch)
+    if prepared is None:
+        return []
+    scratch_dir = prepared.path
     try:
         stats = scratch_dir.lstat()
     except FileNotFoundError:
@@ -97,8 +332,8 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
     if (
         stat.S_ISLNK(stats.st_mode)
         or not stat.S_ISDIR(stats.st_mode)
-        or stats.st_dev != scratch.device
-        or stats.st_ino != scratch.inode
+        or stats.st_dev != prepared.device
+        or stats.st_ino != prepared.inode
     ):
         raise RuntimeError(f"Skill scratch root must be a real directory: {scratch_dir}")
 
@@ -117,3 +352,37 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
             entry.unlink()
         removed.append(str(entry))
     return removed
+
+
+async def acleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> list[str]:
+    """Clean scratch off the event loop, waiting at most ``_CLEANUP_TIMEOUT_SECONDS``.
+
+    Leftover files are harmless and are retried on the next cleanup, so a
+    stuck file system must never hold a turn or session close open.
+    """
+    prepared = _prepared_scratch(scratch)
+    if prepared is None:
+        return []
+    session = scratch if isinstance(scratch, SessionSkillScratch) else None
+    if session is not None and session._cleanup is not None and not session._cleanup.done():
+        _log.warning("skill_scratch/cleanup_skipped reason='previous cleanup still running' path=%r",
+                     str(prepared.path))
+        return []
+    task = asyncio.ensure_future(_run_scratch_io(cleanup_skill_scratch_dir, prepared))
+    if session is not None:
+        session._cleanup = task
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), _CLEANUP_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        _log.warning("skill_scratch/cleanup_timeout timeout_seconds=%s path=%r",
+                     _CLEANUP_TIMEOUT_SECONDS, str(prepared.path))
+        # Retrieve a late failure so it is not reported as never retrieved.
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+        return []
+
+
+async def close_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> None:
+    try:
+        await acleanup_skill_scratch_dir(scratch)
+    except Exception:
+        logging.getLogger(__name__).warning("Could not clean session scratch directory", exc_info=True)

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .tools.permissions import GrantStore, PermissionEngine
     from .tools.runtime import SkillRuntimeContext
     from .tools.skill_preload import SkillPreloadAttribution
-    from .tools.skill_scratch import SkillScratchDirectory
+    from .tools.skill_scratch import SessionSkillScratch, SkillScratchDirectory
 
 
 @dataclass
@@ -49,7 +49,7 @@ class AgentSession:
     session_llm: SessionBoundLLM | None = None
     summary_llm: SessionBoundLLM | None = None
     cancelled: bool = False
-    skill_scratch_dir: SkillScratchDirectory | None = None
+    skill_scratch_dir: SessionSkillScratch | SkillScratchDirectory | None = None
     permission_engine: PermissionEngine | None = None
     grant_store: GrantStore | None = None
     memory_extractor: Any | None = None

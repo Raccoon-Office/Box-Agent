@@ -21,6 +21,7 @@ from .base import EventEmittingTool, ToolResult, check_tool_cancellation
 from .file.read_tool import ReadTool
 from .image_inspection_tool import ImageInspectionTool
 from .runtime_components import runtime_component_required
+from .skill_scratch import SessionSkillScratch, SkillScratchUnavailable
 from .video_transcription import TranscriptionError, VolcAsrConfig, transcribe_pcm
 
 
@@ -121,7 +122,8 @@ class ReadVideoTool(EventEmittingTool):
         self, llm: Any = None, *, workspace_dir: str = ".", allow_full_access: bool = True,
         permission_engine: Any = None, relative_root_dir: str | None = None,
         proxy_llm_resolver: Callable[[], Any | None] | None = None,
-        runtime_env: Mapping[str, str] | None = None, scratch_dir: Path | None = None,
+        runtime_env: Mapping[str, str] | None = None,
+        scratch_dir: Path | SessionSkillScratch | None = None,
     ) -> None:
         super().__init__()
         self.llm = llm
@@ -284,6 +286,8 @@ class ReadVideoTool(EventEmittingTool):
                               image_content=vision.image_content,
                               image_source=vision.image_source,
                               image_context_eligible=vision.image_context_eligible)
+        except SkillScratchUnavailable as exc:
+            return ToolResult(success=False, error=str(exc), raw_output={"code": exc.code})
         except VideoReadError as exc:
             if exc.component_id:
                 return runtime_component_required(exc.component_id, code=exc.code, message=str(exc))
@@ -330,7 +334,10 @@ class ReadVideoTool(EventEmittingTool):
     async def _prepare(
         self, ffmpeg: str, source: Path, metadata: dict, start: float, end: float, count: int,
     ) -> _PreparedVideo:
-        directory = TemporaryDirectory(prefix="read-video-", dir=self._scratch_dir)
+        scratch_dir = self._scratch_dir
+        if isinstance(scratch_dir, SessionSkillScratch):
+            scratch_dir = await scratch_dir.ensure()
+        directory = TemporaryDirectory(prefix="read-video-", dir=scratch_dir)
         prepared = _PreparedVideo(directory, [], None)
         try:
             for i in range(count):

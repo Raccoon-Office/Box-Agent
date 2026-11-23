@@ -536,8 +536,8 @@ async def test_acp_uses_saved_code_type_when_host_omits_session_mode(tmp_path, m
     bash_tool = state.agent.tools["bash"]
     assert Path(bash_tool.workspace_dir) == workspace.resolve()
     assert "BOX_AGENT_OUTPUT_DIR" not in bash_tool._subprocess_env
-    scratch_dir = Path(bash_tool._subprocess_env["BOX_AGENT_SCRATCH_DIR"])
-    assert scratch_dir.is_dir()
+    scratch_dir = state.skill_scratch_dir.path
+    assert not scratch_dir.parent.exists()
     assert scratch_dir.parent == workspace / ".box-agent-scratch"
     assert "Software Engineering Mode (code_agent)" in state.agent.system_prompt
     assert "Project Workspace Mode" in state.agent.system_prompt
@@ -5840,8 +5840,8 @@ async def test_acp_deprecated_artifact_mode_is_ignored(tmp_path, capsys):
     bash_tool = state.agent.tools["bash"]
     assert Path(bash_tool.workspace_dir) == tmp_path.resolve()
     assert "BOX_AGENT_OUTPUT_DIR" not in bash_tool._subprocess_env
-    scratch_dir = Path(bash_tool._subprocess_env["BOX_AGENT_SCRATCH_DIR"])
-    assert scratch_dir.is_dir()
+    scratch_dir = state.skill_scratch_dir.path
+    assert not scratch_dir.parent.exists()
     assert scratch_dir.parent == tmp_path / ".box-agent-scratch"
     assert "不要默认创建或使用 `output/`" in state.agent.system_prompt
     assert "{SANDBOX_INFO}" not in state.agent.system_prompt
@@ -5894,9 +5894,9 @@ async def test_acp_turn_cleanup_preserves_running_session_scratch(
     )
     try:
         await asyncio.wait_for(second_started.wait(), timeout=5)
-        first_file = first_state.skill_scratch_dir.path / "first-session.txt"
+        first_file = (await first_state.skill_scratch_dir.ensure()) / "first-session.txt"
         first_file.write_text("remove", encoding="utf-8")
-        second_file = second_state.skill_scratch_dir.path / "second-session.txt"
+        second_file = (await second_state.skill_scratch_dir.ensure()) / "second-session.txt"
         second_file.write_text("keep", encoding="utf-8")
 
         await agent.prompt(
@@ -8657,8 +8657,7 @@ async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(
     assert bash_env["BOX_AGENT_NPX"] == str(npx_path)
     scratch_dir = state.skill_scratch_dir.path
     assert scratch_dir.parent == workspace / ".box-agent-scratch"
-    assert bash_env["BOX_AGENT_SCRATCH_DIR"] == str(scratch_dir)
-    assert execute_code_env["BOX_AGENT_SCRATCH_DIR"] == str(scratch_dir)
+    assert not scratch_dir.parent.exists()
     assert bash_env["BOX_AGENT_WORKSPACE_DIR"] == str(workspace.resolve())
     assert "BOX_AGENT_WORKSPACE_DIR" not in execute_code_env
     assert bash_env["NODE_PATH"].split(os.pathsep)[-1] == str(node_modules)

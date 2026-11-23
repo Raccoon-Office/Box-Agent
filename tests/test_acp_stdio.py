@@ -87,7 +87,8 @@ async def test_posix_stdout_drains_an_existing_frame_before_a_second_send():
 
     writer = asyncio.StreamWriter(PausingTransport(), protocol, None, asyncio.get_running_loop())
     transport = stdio_compat.StdioTransport(asyncio.StreamReader(), writer)
-    with pytest.raises(TimeoutError):
+    # Python 3.10 raises asyncio.TimeoutError, which is not the builtin until 3.11.
+    with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(transport.send({"id": 1}), 0.01)
 
     second = asyncio.create_task(transport.send({"id": 2}))
