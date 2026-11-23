@@ -2,16 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import shutil
 import stat
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import TypeVar
+from uuid import uuid4
 
 from ..artifact_publication import ChatReferenceScanError, retained_chat_file_in
 
 
 SKILL_SCRATCH_DIR_NAME = ".box-agent-scratch"
+SKILL_SCRATCH_ENV = "BOX_AGENT_SCRATCH_DIR"
+_PREPARE_TIMEOUT_SECONDS = 5.0
+# Optional scratch I/O must not occupy the workers that serve ACP or session logs.
+_scratch_io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="skill-scratch")
+_T = TypeVar("_T")
+
+
+async def _run_scratch_io(operation: Callable[..., _T], /, *args, **kwargs) -> _T:
+    return await asyncio.get_running_loop().run_in_executor(
+        _scratch_io_pool, copy_context().run, partial(operation, *args, **kwargs),
+    )
 
 
 @dataclass(frozen=True)
@@ -19,6 +38,53 @@ class SkillScratchDirectory:
     path: Path
     device: int
     inode: int
+
+
+class SkillScratchUnavailable(RuntimeError):
+    code = "SKILL_SCRATCH_UNAVAILABLE"
+
+    def __init__(self, path: Path, reason: str):
+        super().__init__(f"{self.code}: {path}: {reason}")
+
+
+class SessionSkillScratch:
+    """Prepare one session-owned directory on first use by a tool."""
+
+    def __init__(self, workspace: Path):
+        self._workspace = workspace
+        self._path = workspace / SKILL_SCRATCH_DIR_NAME / uuid4().hex
+        self.prepared: SkillScratchDirectory | None = None
+        self._preparing: asyncio.Task[SkillScratchDirectory | str] | None = None
+
+    @property
+    def path(self) -> Path:
+        return self.prepared.path if self.prepared is not None else self._path
+
+    async def ensure(self) -> Path:
+        if self.prepared is not None:
+            return self.prepared.path
+        task = self._preparing
+        if task is None or task.done():
+            task = self._preparing = asyncio.create_task(self._prepare())
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), _PREPARE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            raise SkillScratchUnavailable(self._path, "timed out preparing the directory") from None
+        if isinstance(result, str):
+            raise SkillScratchUnavailable(self._path, result)
+        return result.path
+
+    async def _prepare(self) -> SkillScratchDirectory | str:
+        # A cancelled or timed-out tool can leave the OS call running. Keep it
+        # shared so retries cannot start duplicate preparation while it runs.
+        try:
+            directory = await _run_scratch_io(
+                prepare_skill_scratch_dir, self._workspace, scratch_root_dir=self._path,
+            )
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        self.prepared = directory
+        return directory
 
 
 def _absolute_without_resolving(path: Path) -> Path:
@@ -87,9 +153,16 @@ def prepare_skill_scratch_dir(
     )
 
 
-def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
+def _prepared_scratch(scratch: SkillScratchDirectory | SessionSkillScratch) -> SkillScratchDirectory | None:
+    return scratch.prepared if isinstance(scratch, SessionSkillScratch) else scratch
+
+
+def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> list[str]:
     """Remove all entries from a reserved scratch root without following links."""
-    scratch_dir = scratch.path
+    prepared = _prepared_scratch(scratch)
+    if prepared is None:
+        return []
+    scratch_dir = prepared.path
     try:
         stats = scratch_dir.lstat()
     except FileNotFoundError:
@@ -97,8 +170,8 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
     if (
         stat.S_ISLNK(stats.st_mode)
         or not stat.S_ISDIR(stats.st_mode)
-        or stats.st_dev != scratch.device
-        or stats.st_ino != scratch.inode
+        or stats.st_dev != prepared.device
+        or stats.st_ino != prepared.inode
     ):
         raise RuntimeError(f"Skill scratch root must be a real directory: {scratch_dir}")
 
@@ -117,3 +190,17 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory) -> list[str]:
             entry.unlink()
         removed.append(str(entry))
     return removed
+
+
+async def acleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> list[str]:
+    prepared = _prepared_scratch(scratch)
+    if prepared is None:
+        return []
+    return await _run_scratch_io(cleanup_skill_scratch_dir, prepared)
+
+
+async def close_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> None:
+    try:
+        await acleanup_skill_scratch_dir(scratch)
+    except Exception:
+        logging.getLogger(__name__).warning("Could not clean session scratch directory", exc_info=True)

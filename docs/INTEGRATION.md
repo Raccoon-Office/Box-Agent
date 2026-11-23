@@ -240,6 +240,9 @@ Agent 将历史整理放到工作线程，并在整理和发送时检查取消�
 `data.code="SESSION_STORAGE_UNAVAILABLE"`，并提供 `operation`（`open`、`restore`、
 `prompt` 或 `workspace`）和 `reason`（`access_denied` 或 `io_error`）。
 
+会话临时目录由依赖它的工具在调用时准备。准备失败时，该工具返回
+`SKILL_SCRATCH_UNAVAILABLE`，模型可以根据工具结果继续，ACP 连接继续处理会话请求。
+
 宿主可在同一聊天下用独立的 `desktop-recovery-<UUID>` 创建运行会话，并用
 `session_continuation` 传入可读的聊天文字。已在 `sessions` 中的会话继续使用原目录和写锁。
 新建的独立恢复会话使用 `recovered-sessions`。若 `operation` 是 `prompt`，本轮可能已执行部分操作，宿主应

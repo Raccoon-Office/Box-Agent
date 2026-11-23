@@ -108,7 +108,7 @@ from box_agent.tools.skill_execution_env import (
     bind_user_source_text,
     build_skill_execution_env,
 )
-from box_agent.tools.skill_scratch import cleanup_skill_scratch_dir
+from box_agent.tools.skill_scratch import acleanup_skill_scratch_dir
 from box_agent.trace_viewer import launch_trace_viewer
 from box_agent.utils import calculate_display_width
 from box_agent.project_context import (
@@ -2456,7 +2456,7 @@ async def run_agent(
                     _save_cli_goal()
                     if agent_session.skill_scratch_dir is not None:
                         try:
-                            cleanup_skill_scratch_dir(agent_session.skill_scratch_dir)
+                            await acleanup_skill_scratch_dir(agent_session.skill_scratch_dir)
                         except Exception as cleanup_error:
                             print(
                                 f"{Colors.YELLOW}⚠️  Failed to clean Skill scratch: "
@@ -2826,7 +2826,7 @@ async def run_agent(
                         _save_cli_goal()
                         if agent_session.skill_scratch_dir is not None:
                             try:
-                                cleanup_skill_scratch_dir(agent_session.skill_scratch_dir)
+                                await acleanup_skill_scratch_dir(agent_session.skill_scratch_dir)
                             except Exception as cleanup_error:
                                 print(
                                     f"{Colors.YELLOW}⚠️  Failed to clean Skill scratch: "

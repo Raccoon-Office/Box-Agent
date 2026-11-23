@@ -399,6 +399,8 @@ async def test_execute_code_runs_with_runtime_env_python(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from box_agent.tools.skill_scratch import SessionSkillScratch
+
     _clear_python_runtime_env(monkeypatch)
     monkeypatch.setattr(jupyter_tool, "SANDBOX_BASE_DIR", tmp_path / "sandbox")
     monkeypatch.setattr(jupyter_tool, "RUNTIME_PACKAGES_DIR", tmp_path / "runtime-packages")
@@ -406,15 +408,23 @@ async def test_execute_code_runs_with_runtime_env_python(
     await JupyterSandboxTool.shutdown_all()
     JupyterSandboxTool._sandbox_env = None
     JupyterSandboxTool._sandbox_env_key = None
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    scratch = SessionSkillScratch(workspace)
     tool = JupyterSandboxTool(
-        workspace_dir=str(tmp_path / "workspace"),
+        workspace_dir=str(workspace),
         runtime_env={"BOX_AGENT_SANDBOX_PYTHON": sys.executable},
+        skill_scratch_dir=scratch,
     )
 
     try:
+        assert not scratch.path.parent.exists()
         # Verify interpreter execution, not shared-runner startup latency.
         result = await tool.execute(
-            "print('external-python-ok')", session_id="runtime-env", timeout=120,
+            "import os\nfrom pathlib import Path\n"
+            'Path(os.environ["BOX_AGENT_SCRATCH_DIR"], "check.txt").write_text("scratch-ok")\n'
+            "print('external-python-ok')",
+            session_id="runtime-env", timeout=120,
         )
     finally:
         await JupyterSandboxTool.shutdown_all()
@@ -423,6 +433,25 @@ async def test_execute_code_runs_with_runtime_env_python(
 
     assert result.success is True
     assert "external-python-ok" in result.content
+    assert (scratch.path / "check.txt").read_text() == "scratch-ok"
+
+
+@pytest.mark.asyncio
+async def test_execute_code_reports_scratch_denial_without_starting_a_kernel(tmp_path, monkeypatch):
+    from box_agent.tools import skill_scratch
+
+    def deny(*args, **kwargs):
+        raise PermissionError("scratch refused")
+
+    monkeypatch.setattr(skill_scratch, "prepare_skill_scratch_dir", deny)
+    scratch = skill_scratch.SessionSkillScratch(tmp_path)
+    tool = JupyterSandboxTool(workspace_dir=str(tmp_path), skill_scratch_dir=scratch)
+    monkeypatch.setattr(tool, "_get_sandbox_env", lambda: pytest.fail("kernel initialization was reached"))
+    result = await tool.execute("print('check')")
+    assert not result.success
+    assert result.raw_output["code"] == "SKILL_SCRATCH_UNAVAILABLE"
+    assert "scratch refused" in result.error
+    assert not scratch.path.exists()
 
 
 def test_frozen_without_host_python_keeps_in_process_fallback(

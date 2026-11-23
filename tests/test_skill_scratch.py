@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
 
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
 from box_agent.artifact_publication import metadata_path, retain_chat_file
+from box_agent.tools import skill_scratch
 from box_agent.tools.setup import add_workspace_tools
 from box_agent.tools.skill_scratch import (
     SKILL_SCRATCH_DIR_NAME,
+    SessionSkillScratch,
+    SkillScratchUnavailable,
     cleanup_skill_scratch_dir,
+    close_skill_scratch_dir,
     prepare_skill_scratch_dir,
 )
 
@@ -18,7 +24,8 @@ from box_agent.tools.skill_scratch import (
     ("first_owner", "second_owner"),
     [(None, None), (None, "acp-session"), ("acp-session", None)],
 )
-def test_workspace_tool_cleanup_preserves_other_sessions_scratch(
+@pytest.mark.asyncio
+async def test_workspace_tool_cleanup_preserves_other_sessions_scratch(
     tmp_path: Path, first_owner: str | None, second_owner: str | None
 ) -> None:
     config = Config(
@@ -33,9 +40,12 @@ def test_workspace_tool_cleanup_preserves_other_sessions_scratch(
     second = add_workspace_tools(
         [], config, tmp_path, process_owner_id=second_owner
     )
-    first_file = first.path / "first-session.txt"
+    assert not (tmp_path / SKILL_SCRATCH_DIR_NAME).exists()
+    assert cleanup_skill_scratch_dir(first) == []
+    assert not (tmp_path / SKILL_SCRATCH_DIR_NAME).exists()
+    first_file = (await first.ensure()) / "first-session.txt"
     first_file.write_text("remove", encoding="utf-8")
-    second_file = second.path / "second-session.txt"
+    second_file = (await second.ensure()) / "second-session.txt"
     second_file.write_text("keep", encoding="utf-8")
 
     cleanup_skill_scratch_dir(first)
@@ -44,6 +54,66 @@ def test_workspace_tool_cleanup_preserves_other_sessions_scratch(
     assert second_file.read_text(encoding="utf-8") == "keep"
     bash_tool = next(tool for tool in first_tools if tool.name == "bash")
     assert Path(bash_tool.workspace_dir) == tmp_path.resolve()
+
+
+@pytest.mark.asyncio
+async def test_scratch_retries_after_a_failed_preparation(tmp_path, monkeypatch):
+    scratch = SessionSkillScratch(tmp_path)
+
+    def deny(*args, **kwargs):
+        raise PermissionError("scratch refused")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(skill_scratch, "prepare_skill_scratch_dir", deny)
+        with pytest.raises(SkillScratchUnavailable, match="scratch refused"):
+            await scratch.ensure()
+    assert not scratch.path.exists()
+    assert (await scratch.ensure()).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_scratch_timeouts_share_one_preparation(tmp_path, monkeypatch):
+    scratch = SessionSkillScratch(tmp_path)
+    prepare = skill_scratch.prepare_skill_scratch_dir
+    release = threading.Event()
+    attempts = []
+
+    def delayed_prepare(*args, **kwargs):
+        attempts.append(1)
+        assert release.wait(3), "test did not release scratch preparation"
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(skill_scratch, "prepare_skill_scratch_dir", delayed_prepare)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(skill_scratch, "_PREPARE_TIMEOUT_SECONDS", 0.02)
+            for _ in range(2):
+                with pytest.raises(SkillScratchUnavailable, match="timed out"):
+                    await scratch.ensure()
+        assert not scratch.path.exists()
+        assert cleanup_skill_scratch_dir(scratch) == []
+    finally:
+        release.set()
+    assert (await asyncio.wait_for(scratch.ensure(), 2)).is_dir()
+    assert attempts == [1]
+
+
+@pytest.mark.asyncio
+async def test_scratch_cleanup_error_does_not_fail_session_close(tmp_path, monkeypatch, caplog):
+    scratch = SessionSkillScratch(tmp_path)
+    disposable = (await scratch.ensure()) / "cleanup.txt"
+    disposable.write_text("keep if denied")
+    unlink = Path.unlink
+
+    def deny_scratch_unlink(path, *args, **kwargs):
+        if path == disposable:
+            raise PermissionError("cleanup refused")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_scratch_unlink)
+    await close_skill_scratch_dir(scratch)
+    assert disposable.exists()
+    assert "cleanup refused" in caplog.text
 
 
 def test_prepare_and_cleanup_skill_scratch_dir(tmp_path: Path) -> None:
@@ -214,6 +284,7 @@ async def test_qa_scratch_outputs_are_reclaimed_without_removing_retained_qa(
     tools = []
     scratch = add_workspace_tools(tools, config, tmp_path)
     bash = next(tool for tool in tools if tool.name == "bash")
+    assert not scratch.path.exists()
     retained = tmp_path / "qa" / "visual" / "existing.png"
     retained.parent.mkdir(parents=True)
     retained.write_bytes(b"retained preview")

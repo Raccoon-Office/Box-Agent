@@ -17,6 +17,7 @@ import pytest
 from box_agent.schema import LLMResponse
 from box_agent.tools.base import ToolInvocationContext, bind_tool_cancellation
 from box_agent.tools.setup import add_workspace_tools
+from box_agent.tools.skill_scratch import SessionSkillScratch
 from box_agent.tools import video_tool as module
 from box_agent.tools.video_tool import ReadVideoTool, VideoReadError, _executable, _run_process
 
@@ -81,6 +82,34 @@ async def test_video_uses_native_images_with_actual_timestamps_and_explicit_audi
     assert "do not" in str(result.image_content).lower()
     assert media.source.read_bytes() == b"video input"
     assert set(tmp_path.iterdir()) == {media.source}
+
+
+async def test_video_prepares_its_scratch_only_for_extraction(tmp_path, media):
+    scratch = SessionSkillScratch(tmp_path)
+    tool = make_tool(tmp_path, scratch_dir=scratch)
+    assert not scratch.path.parent.exists()
+    result = await tool.invoke({"path": "clip.mp4", "instruction": "Describe the video"})
+    assert result.success, result.error
+    frame_outputs = [Path(args[-1]) for args in media.calls if args[0] == "ffmpeg"]
+    assert frame_outputs and all(path.is_relative_to(scratch.path) for path in frame_outputs)
+
+
+async def test_video_reports_scratch_denial_before_extraction(tmp_path, media, monkeypatch):
+    from box_agent.tools import skill_scratch
+
+    def deny(*args, **kwargs):
+        raise PermissionError("scratch refused")
+
+    monkeypatch.setattr(skill_scratch, "prepare_skill_scratch_dir", deny)
+    scratch = SessionSkillScratch(tmp_path)
+    result = await make_tool(tmp_path, scratch_dir=scratch).invoke(
+        {"path": "clip.mp4", "instruction": "Describe the video"}
+    )
+    assert not result.success
+    assert result.raw_output["code"] == "SKILL_SCRATCH_UNAVAILABLE"
+    assert "scratch refused" in result.error
+    assert not scratch.path.exists()
+    assert [args[0] for args in media.calls] == ["ffprobe"]
 
 
 async def test_video_frames_reach_next_model_request_and_survive_session_restore(tmp_path, media):

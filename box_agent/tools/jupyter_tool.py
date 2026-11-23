@@ -26,6 +26,7 @@ from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
 from .output_capture import CapturedOutput, OutputCapture, bound_output_text
 from .python_environment import probe_python
+from .skill_scratch import SKILL_SCRATCH_ENV, SessionSkillScratch, SkillScratchUnavailable
 
 from box_agent.user_paths import state_path
 
@@ -1600,6 +1601,7 @@ class JupyterSandboxTool(Tool):
         workspace_dir: str | None = None,
         runtime_env: Mapping[str, str] | None = None,
         process_owner_id: str | None = None,
+        skill_scratch_dir: SessionSkillScratch | None = None,
     ):
         """Initialize sandbox tool.
 
@@ -1612,6 +1614,7 @@ class JupyterSandboxTool(Tool):
         self.workspace_dir = workspace_dir
         self.runtime_env = dict(runtime_env or {})
         self.runtime_env.pop("BOX_AGENT_OUTPUT_DIR", None)
+        self._skill_scratch_dir = skill_scratch_dir
         self.process_owner_id = (process_owner_id or "").strip()
         self._session_id: Optional[str] = None
         self._requires_subprocess = False
@@ -1624,6 +1627,7 @@ class JupyterSandboxTool(Tool):
             workspace_dir=self.workspace_dir,
             runtime_env=self.runtime_env,
             process_owner_id=f"{self.process_owner_id or '__default__'}:{child_id}",
+            skill_scratch_dir=self._skill_scratch_dir,
         )
         child._requires_subprocess = True
         if self.runtime_preparer is not None:
@@ -1981,6 +1985,7 @@ Output formats:
         )
         previous_env = getattr(previous, "sandbox_env", None)
         selected_env = previous_env if getattr(previous_env, "_explicit_python", False) else None
+        candidate = None
         if python_path is not None:
             candidate = Path(python_path).expanduser()
             if not candidate.is_absolute() or not candidate.is_file():
@@ -1995,12 +2000,8 @@ Output formats:
                     error="PYTHON_ENVIRONMENT_CHANGED: a managed Python path change requires "
                           "a new session_id; existing variables remain in the old kernel.",
                 )
-            selected_env = SandboxEnvironment(
-                runtime_env=self.runtime_env, python_path=candidate,
-            )
-
         # Default execution checks host state; the model chooses when to prepare or retry.
-        if selected_env is None and self.runtime_preparer is not None:
+        if candidate is None and selected_env is None and self.runtime_preparer is not None:
             try:
                 await asyncio.wait_for(self.runtime_preparer(), timeout=_SANDBOX_PREPARE_TIMEOUT_SECONDS)
                 if SandboxEnvironment._resolve_python_override(self.runtime_env) is None:
@@ -2020,6 +2021,14 @@ Output formats:
                           "If preparation fails, use returned logs to retry or report the cause. "
                           "Do not use or install alternate runtimes or ask the user to switch environments.",
                 )
+        if self._skill_scratch_dir is not None:
+            try:
+                scratch_dir = await self._skill_scratch_dir.ensure()
+            except SkillScratchUnavailable as exc:
+                return ToolResult(success=False, error=str(exc), raw_output={"code": exc.code})
+            self.update_runtime_env({SKILL_SCRATCH_ENV: str(scratch_dir)})
+        if candidate is not None:
+            selected_env = SandboxEnvironment(runtime_env=self.runtime_env, python_path=candidate)
         env = selected_env or self._get_sandbox_env()
         try:
             await asyncio.wait_for(
