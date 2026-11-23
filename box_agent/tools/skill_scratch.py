@@ -25,6 +25,7 @@ _PREPARE_TIMEOUT_SECONDS = 5.0
 # Optional scratch I/O must not occupy the workers that serve ACP or session logs.
 _scratch_io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="skill-scratch")
 _T = TypeVar("_T")
+_R = TypeVar("_R")
 
 
 async def _run_scratch_io(operation: Callable[..., _T], /, *args, **kwargs) -> _T:
@@ -68,7 +69,8 @@ class SessionSkillScratch:
             task = self._preparing = asyncio.create_task(self._prepare())
         try:
             result = await asyncio.wait_for(asyncio.shield(task), _PREPARE_TIMEOUT_SECONDS)
-        except TimeoutError:
+        # Python 3.10's asyncio.TimeoutError is not the builtin TimeoutError.
+        except asyncio.TimeoutError:
             raise SkillScratchUnavailable(self._path, "timed out preparing the directory") from None
         if isinstance(result, str):
             raise SkillScratchUnavailable(self._path, result)
@@ -85,6 +87,34 @@ class SessionSkillScratch:
             return str(exc) or type(exc).__name__
         self.prepared = directory
         return directory
+
+
+async def ensure_scratch_or_warning(scratch: SessionSkillScratch) -> SkillScratchUnavailable | None:
+    """Prepare scratch for a general-purpose tool without making it a hard dependency.
+
+    Bash and Python still run when scratch is unavailable. The env var keeps
+    pointing at the planned session path (never unset, so ``$VAR/x`` cannot
+    expand to ``/x``), and the caller attaches the returned warning.
+    """
+    try:
+        await scratch.ensure()
+    except SkillScratchUnavailable as exc:
+        return exc
+    return None
+
+
+def attach_scratch_warning(result: _R, warning: SkillScratchUnavailable | None) -> _R:
+    if warning is None:
+        return result
+    note = (
+        f"[{warning.code}] {warning}. The command still ran; ${SKILL_SCRATCH_ENV} may not exist "
+        "for this call, so avoid writing temporary files there and retry later if one is required."
+    )
+    result.content = f"{result.content}\n\n{note}" if result.content else note
+    raw = result.raw_output
+    if raw is None or isinstance(raw, dict):
+        result.raw_output = {**(raw or {}), "scratch_warning": {"code": warning.code, "message": str(warning)}}
+    return result
 
 
 def _absolute_without_resolving(path: Path) -> Path:

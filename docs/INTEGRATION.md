@@ -240,8 +240,10 @@ Agent 将历史整理放到工作线程，并在整理和发送时检查取消�
 `data.code="SESSION_STORAGE_UNAVAILABLE"`，并提供 `operation`（`open`、`restore`、
 `prompt` 或 `workspace`）和 `reason`（`access_denied` 或 `io_error`）。
 
-会话临时目录由依赖它的工具在调用时准备。准备失败时，该工具返回
-`SKILL_SCRATCH_UNAVAILABLE`，模型可以根据工具结果继续，ACP 连接继续处理会话请求。
+会话临时目录由依赖它的工具在调用时准备。准备失败时，Bash 和 Python 沙箱仍执行本次命令，
+`BOX_AGENT_SCRATCH_DIR` 保持指向计划路径，结果附带 `raw_output.scratch_warning.code =
+"SKILL_SCRATCH_UNAVAILABLE"` 警告；视频读取必须使用临时目录，会返回
+`SKILL_SCRATCH_UNAVAILABLE` 工具错误。模型可以根据工具结果继续，ACP 连接继续处理会话请求。
 
 宿主可在同一聊天下用独立的 `desktop-recovery-<UUID>` 创建运行会话，并用
 `session_continuation` 传入可读的聊天文字。已在 `sessions` 中的会话继续使用原目录和写锁。

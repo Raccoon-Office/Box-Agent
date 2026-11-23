@@ -26,7 +26,12 @@ from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
 from .output_capture import CapturedOutput, OutputCapture, bound_output_text
 from .python_environment import probe_python
-from .skill_scratch import SKILL_SCRATCH_ENV, SessionSkillScratch, SkillScratchUnavailable
+from .skill_scratch import (
+    SKILL_SCRATCH_ENV,
+    SessionSkillScratch,
+    attach_scratch_warning,
+    ensure_scratch_or_warning,
+)
 
 from box_agent.user_paths import state_path
 
@@ -2021,12 +2026,27 @@ Output formats:
                           "If preparation fails, use returned logs to retry or report the cause. "
                           "Do not use or install alternate runtimes or ask the user to switch environments.",
                 )
+        scratch_warning = None
         if self._skill_scratch_dir is not None:
-            try:
-                scratch_dir = await self._skill_scratch_dir.ensure()
-            except SkillScratchUnavailable as exc:
-                return ToolResult(success=False, error=str(exc), raw_output={"code": exc.code})
-            self.update_runtime_env({SKILL_SCRATCH_ENV: str(scratch_dir)})
+            # Scratch is optional for Python code: keep the planned path in the
+            # kernel env and report unavailability as a warning on the result.
+            scratch_warning = await ensure_scratch_or_warning(self._skill_scratch_dir)
+            self.update_runtime_env({SKILL_SCRATCH_ENV: str(self._skill_scratch_dir.path)})
+            if scratch_warning is not None:
+                return attach_scratch_warning(
+                    await self._execute_with_env(code, session_id, timeout, selected_env, candidate),
+                    scratch_warning,
+                )
+        return await self._execute_with_env(code, session_id, timeout, selected_env, candidate)
+
+    async def _execute_with_env(
+        self,
+        code: str,
+        session_id: Optional[str],
+        timeout: int,
+        selected_env: Any,
+        candidate: Path | None,
+    ) -> ToolResult:
         if candidate is not None:
             selected_env = SandboxEnvironment(runtime_env=self.runtime_env, python_path=candidate)
         env = selected_env or self._get_sandbox_env()
