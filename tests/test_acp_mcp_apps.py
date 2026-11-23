@@ -528,6 +528,7 @@ async def test_history_recovers_snapshot_and_resources_without_running_tools(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('error_data', ['uri', None, {}])
 @pytest.mark.parametrize('missing_code,missing_message', [
     (None, None),
     (-32002, 'Resource not found'),
@@ -536,7 +537,7 @@ async def test_history_recovers_snapshot_and_resources_without_running_tools(tmp
     (-32602, 'リソースが見つかりません'),
 ])
 async def test_history_restores_old_resource_or_current_ui_without_rewriting_snapshot(
-    tmp_path, monkeypatch, missing_code, missing_message,
+    tmp_path, monkeypatch, missing_code, missing_message, error_data,
 ):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         original = await host.ext_method('mcp/apps/snapshot', request(session_id))
@@ -550,7 +551,8 @@ async def test_history_restores_old_resource_or_current_ui_without_rewriting_sna
         async def read(uri):
             seen.append(uri)
             if missing_code is not None and uri == original['resourceUri']:
-                raise McpError(types.ErrorData(code=missing_code, message=missing_message, data={'uri': uri}))
+                raise McpError(types.ErrorData(code=missing_code, message=missing_message,
+                                              data={'uri': uri} if error_data == 'uri' else error_data))
             return types.ReadResourceResult.model_validate({
                 'resolvedResourceUri': 'ui://untrusted/override.html',
                 'contents': [{'uri': uri, 'mimeType': 'text/html;profile=mcp-app',
@@ -572,7 +574,7 @@ async def test_history_restores_old_resource_or_current_ui_without_rewriting_sna
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['auth', 'timeout', 'invalid', 'empty', 'http401', 'http403', 'http404',
                                      'invalid_parameters', 'forbidden_uri', 'both_missing'])
-async def test_history_resource_fallback_is_only_for_a_definite_missing_entry(tmp_path, monkeypatch, caplog, failure):
+async def test_history_resource_fallback_preserves_other_failures(tmp_path, monkeypatch, caplog, failure):
     import httpx
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         tool = next(t for t in backend.tools if t.remote_name == 'list_flights')
@@ -620,8 +622,38 @@ async def test_history_resource_fallback_is_only_for_a_definite_missing_entry(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('resource_case', ['unchanged_ui', 'non_entry', 'tool_removed', 'no_ui', 'both_invalid'])
+async def test_bare_invalid_params_only_retries_a_changed_historical_ui(tmp_path, monkeypatch, resource_case):
+    async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
+        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
+        tool = next(t for t in backend.tools if t.remote_name == 'list_flights')
+        current_uri = 'ui://flight-fixture/v2.html'
+        if resource_case != 'unchanged_ui':
+            tool.mcp_ui_resource_uri = current_uri
+        if resource_case == 'tool_removed':
+            backend.tools.remove(tool)
+        elif resource_case == 'no_ui':
+            tool.mcp_ui_resource_uri = None
+        mcp_loader._replace_server_catalog(backend)
+        uri = 'flight://details/missing' if resource_case == 'non_entry' else snapshot['resourceUri']
+        seen = []
+        async def read(resource_uri):
+            seen.append(resource_uri)
+            raise McpError(types.ErrorData(code=-32602, message='未知卡片资源'))
+        monkeypatch.setattr(backend.session, 'read_resource', read)
+        with pytest.raises(RequestError, match='MCP_APP_UNAVAILABLE'):
+            await host.ext_method('mcp/apps/resource', request(session_id, uri=uri))
+        assert seen == [uri] + ([current_uri] if resource_case == 'both_invalid' else [])
+        assert len(calls(record)) == 1
+        assert len(llm.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('missing_code', [-32002, -32602])
 @pytest.mark.parametrize('change', ['connection', 'history', 'server'])
-async def test_history_fallback_rechecks_request_connection_before_reading_new_page(tmp_path, monkeypatch, change):
+async def test_history_fallback_rechecks_request_connection_before_reading_new_page(
+    tmp_path, monkeypatch, change, missing_code,
+):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):
         tool = next(t for t in backend.tools if t.remote_name == 'list_flights')
         tool.mcp_ui_resource_uri = 'ui://flight-fixture/v2.html'
@@ -635,7 +667,7 @@ async def test_history_fallback_rechecks_request_connection_before_reading_new_p
                 backend.server_identity = 'other-server'
             else:
                 host._sessions[session_id].agent.session_log.append('surface/reset', {})
-            raise McpError(types.ErrorData(code=-32002, message='Resource not found'))
+            raise McpError(types.ErrorData(code=missing_code, message='未知卡片资源'))
         monkeypatch.setattr(backend.session, 'read_resource', read)
         expected = {'connection': 'APP_BINDING_EXPIRED', 'history': 'MCP_APP_SNAPSHOT_UNAVAILABLE',
                     'server': 'APP_SERVER_CHANGED'}[change]

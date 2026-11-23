@@ -293,8 +293,14 @@ class McpAppsACP:
 
                 try:
                     result = await read(uri)
-                except McpAppError as exc:
-                    if not initial_ui or exc.code != "APP_RESOURCE_NOT_FOUND":
+                except (McpAppError, McpError) as exc:
+                    # Newer servers may report a missing URI as bare Invalid Params.
+                    # Only retry a saved entry against this tool's changed UI below;
+                    # do not reclassify arbitrary resource parameter errors as missing.
+                    missing = isinstance(exc, McpAppError) and exc.code == "APP_RESOURCE_NOT_FOUND"
+                    bare_invalid_uri = (isinstance(exc, McpError) and exc.error.code == -32602
+                                        and exc.error.data in (None, {}))
+                    if not initial_ui or not (missing or bare_invalid_uri):
                         raise
                     self._resolve(params)
                     try:
