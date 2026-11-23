@@ -1678,13 +1678,19 @@ async def _run_agent_loop_impl(
                 if hook_mgr.hooks:
                     await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
                     await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
+                # Preserve legacy text while exposing a stable identity to hosts.
+                input_image_blocked = msg.partition(":")[0] == "INPUT_IMAGE_NOT_ADOPTED"
+                error_details = ({"stage": "request_projection", "totalLimitTokens": token_limit,
+                                  "estimatedInputTokens": projected_input_tokens(projection)}
+                                 if projection_budget_blocked else {})
+                if input_image_blocked:
+                    error_details["reason"] = msg
                 yield ErrorEvent(
                     message=msg, is_fatal=True,
-                    error_code="CONTEXT_INPUT_BUDGET_EXCEEDED" if projection_budget_blocked else None,
+                    error_code=("INPUT_IMAGE_NOT_ADOPTED" if input_image_blocked else
+                                "CONTEXT_INPUT_BUDGET_EXCEEDED" if projection_budget_blocked else None),
                     error_category="context_length" if projection_budget_blocked else None,
-                    error_details={"stage": "request_projection", "totalLimitTokens": token_limit,
-                                   "estimatedInputTokens": projected_input_tokens(projection)}
-                                  if projection_budget_blocked else None,
+                    error_details=error_details or None,
                 )
                 yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                 return

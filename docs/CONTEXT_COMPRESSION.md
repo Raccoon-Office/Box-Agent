@@ -26,6 +26,8 @@ keeps the previous binding, original history and submitted user message with
 its attachments. The target model receives the request only after it passes
 this check.
 
+When required images cannot be adopted for an ordinary request, `ErrorEvent.error_code` is `INPUT_IMAGE_NOT_ADOPTED` (ACP `errorCode`). The original `INPUT_IMAGE_NOT_ADOPTED:required_image_unavailable_or_over_budget` message and `error_details.reason` remain available for diagnostics. Hosts should translate the code at display time and support older text-only records. Model-switch failures retain `MODEL_SWITCH_CONTEXT_PREPARATION_FAILED`.
+
 The same preflight applies when `session/resume`, `session/load`, or repeated
 `session/new` rebinds an existing live session with a smaller model (for example,
 while changing its execution profile). Restore keeps the accepted model and
