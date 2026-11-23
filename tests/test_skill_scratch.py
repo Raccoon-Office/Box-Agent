@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import os
 import threading
+import zlib
+from contextlib import closing
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
-from box_agent.artifact_publication import metadata_path, retain_chat_file
+from box_agent.artifact_publication import metadata_path, retain_chat_file, write_metadata
+from box_agent.session_log import SessionLog, SessionLogDurabilityError
 from box_agent.tools import skill_scratch
+from box_agent.tools.chat_references import ChatReferences, retain_scratch_chat_references
 from box_agent.tools.setup import add_workspace_tools
 from box_agent.tools.skill_scratch import (
     SKILL_SCRATCH_DIR_NAME,
@@ -162,7 +169,7 @@ def test_scratch_cleanup_preserves_images_already_referenced_by_chat(tmp_path: P
     folder.mkdir()
     image = folder / "shown.png"
     image.write_bytes(b"shown QA")
-    retain_chat_file(image)
+    ChatReferences(tmp_path).retain_text(f"![Preview]({image.as_uri()})")
     disposable = scratch.path / "unshown.png"
     disposable.write_bytes(b"temporary QA")
 
@@ -172,6 +179,518 @@ def test_scratch_cleanup_preserves_images_already_referenced_by_chat(tmp_path: P
     assert not disposable.exists()
     assert image.read_bytes() == b"shown QA"
     assert metadata_path(image).exists()
+
+
+def test_scratch_cleanup_preserves_nested_preview_symlink_referenced_by_chat(tmp_path):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    target = tmp_path / "rendered.png"
+    target.write_bytes(b"preview")
+    preview = scratch.path / "bundle" / "preview.png"
+    preview.parent.mkdir()
+    try:
+        preview.symlink_to(target)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks are unavailable in this environment: {error}")
+
+    retain_scratch_chat_references(tmp_path, f"![Preview]({preview.as_uri()})")
+    cleanup_skill_scratch_dir(scratch)
+
+    assert preview.is_symlink()
+    assert preview.read_bytes() == b"preview"
+
+
+def test_scratch_retention_keeps_other_previews_when_archive_decoding_fails(tmp_path, monkeypatch):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    document = scratch.path / "bundle" / "preview.docx"
+    document.parent.mkdir()
+    with ZipFile(document, "w") as archive:
+        archive.writestr("_rels/.rels", "<Relationships/>")
+    image = scratch.path / "preview.png"
+    image.write_bytes(b"preview")
+    disposable = scratch.path / "unshown.txt"
+    disposable.touch()
+
+    def fail_decompression(*args, **kwargs):
+        raise zlib.error("corrupt compressed relationship")
+
+    monkeypatch.setattr(ZipFile, "read", fail_decompression)
+    retain_scratch_chat_references(
+        tmp_path, f"[Document]({document.as_uri()}) [Image]({image.as_uri()})",
+    )
+    cleanup_skill_scratch_dir(scratch)
+
+    assert document.is_file()
+    assert image.read_bytes() == b"preview"
+    assert not disposable.exists()
+
+
+def test_invalid_top_level_preview_retains_its_session_scratch(tmp_path):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "preview.docx"
+    with ZipFile(preview, "w") as archive:
+        archive.writestr("_rels/.rels", "<incomplete")
+    disposable = scratch.path / "disposable.txt"
+    disposable.touch()
+
+    log = SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)
+    try:
+        retain_scratch_chat_references(tmp_path, f"[Preview]({preview.as_uri()})", log)
+        cleanup_skill_scratch_dir(scratch)
+        assert preview.is_file()
+        # Unknown dependencies fail closed: this session's scratch is kept whole.
+        assert disposable.exists()
+        references = ChatReferences(tmp_path, session_log=log)
+        preview.unlink()
+        references.deleted(frozenset({preview, scratch.path}))
+        later = scratch.path / "later.txt"
+        later.touch()
+        cleanup_skill_scratch_dir(scratch)
+        # The directory still exists, so its retention outlives the deleted
+        # preview: later scratch files of this session are kept too.
+        assert later.exists()
+        assert disposable.exists()
+        assert scratch.path in ChatReferences(tmp_path, session_log=log).paths
+    finally:
+        log.close()
+
+
+def test_preview_html_base_does_not_retain_the_session_scratch_root(tmp_path):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "preview.html"
+    preview.write_text('<base href="./"><img src="chart.png">', encoding="utf-8")
+    chart = scratch.path / "chart.png"
+    chart.write_bytes(b"chart")
+    disposable = scratch.path / "disposable.txt"
+    disposable.touch()
+
+    with closing(SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)) as log:
+        retain_scratch_chat_references(tmp_path, f"[Preview]({preview.as_uri()})", log)
+        cleanup_skill_scratch_dir(scratch)
+
+        assert preview.is_file()
+        assert chart.read_bytes() == b"chart"
+        assert not disposable.exists()
+        assert scratch.path not in ChatReferences(tmp_path, session_log=log).paths
+
+
+def test_invalid_top_level_preview_keeps_its_declared_scratch_dependency(tmp_path):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "preview.docx"
+    with ZipFile(preview, "w") as archive:
+        archive.writestr("_rels/.rels", "<incomplete")
+    chart = scratch.path / "chart.png"
+    chart.write_bytes(b"chart")
+    write_metadata(preview, {"dependencies": ["chart.png"]}, tmp_path)
+    disposable = scratch.path / "disposable.txt"
+    disposable.touch()
+
+    retain_scratch_chat_references(tmp_path, f"[Preview]({preview.as_uri()})")
+    cleanup_skill_scratch_dir(scratch)
+
+    assert preview.is_file()
+    assert chart.read_bytes() == b"chart"
+    # The failed scan also keeps undeclared neighbours of this session.
+    assert disposable.exists()
+
+
+@pytest.mark.parametrize("failure", ["scan-limit", "unreadable", "closure-limit"])
+def test_failed_top_level_preview_scan_keeps_its_sibling_dependency(tmp_path, monkeypatch, failure):
+    from box_agent.tools import chat_references
+
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    other = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "other-session",
+    )
+    other_disposable = other.path / "disposable.txt"
+    other_disposable.touch()
+    stylesheet = scratch.path / "styles.css"
+    stylesheet.write_text("body {}", encoding="utf-8")
+    preview = scratch.path / "preview.html"
+    links = '<link rel="stylesheet" href="styles.css">'
+    if failure == "closure-limit":
+        for index in range(2050):
+            (scratch.path / f"asset{index}.png").write_bytes(b"asset")
+        links += "".join(f'<img src="asset{index}.png">' for index in range(2050))
+    preview.write_text(links, encoding="utf-8")
+    if failure == "scan-limit":
+        monkeypatch.setattr(chat_references, "_FULL_PARSE_LIMIT", 0)
+        monkeypatch.setattr(chat_references, "_STREAMED_SCAN_LIMIT", 8)
+    elif failure == "unreadable":
+        scan = chat_references.local_dependencies
+
+        def unreadable(path, root):
+            if path == preview:
+                raise PermissionError(errno.EACCES, "preview cannot be scanned", path)
+            return scan(path, root)
+
+        monkeypatch.setattr(chat_references, "local_dependencies", unreadable)
+
+    retain_scratch_chat_references(tmp_path, f"[Preview]({preview.as_uri()})")
+    cleanup_skill_scratch_dir(scratch)
+    cleanup_skill_scratch_dir(other)
+
+    assert preview.is_file()
+    assert stylesheet.read_text(encoding="utf-8") == "body {}"
+    # Fail-closed retention stays inside this session's scratch directory.
+    assert not other_disposable.exists()
+
+
+def test_large_preview_keeps_entity_encoded_dependencies(tmp_path, monkeypatch):
+    from box_agent.tools import chat_references
+
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    assets = scratch.path / "a&b"
+    assets.mkdir()
+    names = ("x&y.css", "small&1x.png", "large&2x.png", "chart&base.png")
+    for name in names:
+        target = scratch.path / name if name == "x&y.css" else assets / name
+        target.write_bytes(name.encode())
+    preview = scratch.path / "preview.html"
+    preview.write_text(
+        '<base href="a&amp;b/"><link rel="stylesheet" href="../x&amp;y.css">'
+        '<img srcset="small&amp;1x.png 1x, large&#38;2x.png 2x" src="chart&amp;base.png">',
+        encoding="utf-8",
+    )
+    disposable = scratch.path / "disposable.txt"
+    disposable.touch()
+    whole = chat_references.local_dependencies(preview, tmp_path)
+    monkeypatch.setattr(chat_references, "_FULL_PARSE_LIMIT", 0)
+    monkeypatch.setattr(chat_references, "_STREAMED_SCAN_CHUNK", 9)
+    monkeypatch.setattr(chat_references, "_STREAMED_SCAN_OVERLAP", 48)
+    assert chat_references.local_dependencies(preview, tmp_path) == whole
+
+    retain_scratch_chat_references(tmp_path, f"[Preview]({preview.as_uri()})")
+    cleanup_skill_scratch_dir(scratch)
+
+    assert preview.is_file()
+    assert (scratch.path / "x&y.css").read_bytes() == b"x&y.css"
+    for name in names[1:]:
+        assert (assets / name).read_bytes() == name.encode()
+    assert not disposable.exists()
+
+
+def test_scratch_cleanup_preserves_preview_after_temporary_permission_error(tmp_path, monkeypatch):
+    from box_agent import artifact_publication
+
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "bundle" / "preview.png"
+    preview.parent.mkdir()
+    preview.write_bytes(b"preview")
+    disposable = scratch.path / "disposable.txt"
+    disposable.write_text("temporary", encoding="utf-8")
+
+    def fail_cache_write(*args, **kwargs):
+        raise PermissionError("retention cache is read-only")
+
+    monkeypatch.setattr(artifact_publication, "write_metadata", fail_cache_write)
+    retain_scratch_chat_references(tmp_path, f"![Preview]({preview.as_uri()})")
+    stat_path = Path.stat
+    path_exists = Path.exists
+
+    def fail_preview_stat(path, *args, **kwargs):
+        if path == preview:
+            raise PermissionError(errno.EACCES, "preview cannot be inspected", path)
+        return stat_path(path, *args, **kwargs)
+
+    def hide_inaccessible_preview(path, *args, **kwargs):
+        return path != preview and path_exists(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        # Python 3.14's exists() hides the permission error reported by stat().
+        patch.setattr(Path, "stat", fail_preview_stat)
+        patch.setattr(Path, "exists", hide_inaccessible_preview)
+        assert cleanup_skill_scratch_dir(scratch) == [str(disposable)]
+
+    cleanup_skill_scratch_dir(scratch)
+    assert preview.read_bytes() == b"preview"
+
+
+def test_scratch_cleanup_removes_replacement_after_explicit_reference_deletion(tmp_path):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "preview.png"
+    preview.write_bytes(b"preview")
+    references = ChatReferences(tmp_path)
+    references.retain(preview)
+
+    preview.unlink()
+    references.deleted(frozenset({preview}))
+    preview.write_bytes(b"disposable replacement")
+    cleanup_skill_scratch_dir(scratch)
+
+    assert not preview.exists()
+
+
+def test_reload_does_not_retain_replacement_of_deleted_preview_symlink(tmp_path):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    original = tmp_path / "original.png"
+    original.touch()
+    preview = scratch.path / "preview.png"
+    try:
+        preview.symlink_to(original)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks are unavailable in this environment: {error}")
+    link = f"[Preview]({preview.as_uri()})"
+
+    log = SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)
+    try:
+        log.append("user/message", {"content": link})
+        retain_scratch_chat_references(tmp_path, link, log)
+        references = ChatReferences(tmp_path, session_log=log)
+        preview.unlink()
+        references.deleted(frozenset({preview}))
+        replacement = scratch.path / "replacement.png"
+        replacement.touch()
+        preview.symlink_to(replacement)
+
+        ChatReferences(tmp_path, session_log=log)
+        cleanup_skill_scratch_dir(scratch)
+
+        assert not preview.is_symlink()
+        assert not replacement.exists()
+        assert original.is_file()
+    finally:
+        log.close()
+
+
+def test_scratch_cleanup_preserves_streamed_previews_when_session_log_append_fails(
+    tmp_path, monkeypatch,
+):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "preview.png"
+    preview.write_bytes(b"preview")
+    other = scratch.path / "other.png"
+    other.write_bytes(b"other")
+    disposable = scratch.path / "disposable.png"
+    disposable.write_bytes(b"disposable")
+    log = SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)
+
+    def fail_reference_append(*args, **kwargs):
+        raise SessionLogDurabilityError("could not write reference")
+
+    try:
+        monkeypatch.setattr(log, "append", fail_reference_append)
+        with pytest.raises(SessionLogDurabilityError, match="could not write reference"):
+            retain_scratch_chat_references(
+                tmp_path, f"![Preview]({preview.as_uri()}) ![Other]({other.as_uri()})", log,
+            )
+    finally:
+        log.close()
+    cleanup_skill_scratch_dir(scratch)
+
+    assert preview.read_bytes() == b"preview"
+    assert other.read_bytes() == b"other"
+    assert not disposable.exists()
+
+
+@pytest.mark.parametrize("via_symlink", [False, True], ids=["direct", "symlink"])
+def test_scratch_retention_preserves_a_direct_preview_during_a_transient_stat_failure(
+    tmp_path, monkeypatch, via_symlink,
+):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "preview.png"
+    preview.write_bytes(b"preview")
+    inaccessible = scratch.path / "unavailable.png"
+    inaccessible.write_bytes(b"temporarily unavailable")
+    linked = inaccessible
+    if via_symlink:
+        linked = tmp_path / "preview-link.png"
+        try:
+            linked.symlink_to(inaccessible)
+        except (NotImplementedError, OSError) as error:
+            pytest.skip(f"symlinks are unavailable in this environment: {error}")
+    disposable = scratch.path / "disposable.txt"
+    disposable.touch()
+    stat_path = os.stat
+
+    def fail_stat(path, *args, **kwargs):
+        if path == linked:
+            raise PermissionError("path cannot be inspected")
+        return stat_path(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "stat", fail_stat)
+        retain_scratch_chat_references(
+            tmp_path,
+            f"[Missing]({(scratch.path / 'missing.png').as_uri()}) [Other]({linked.as_uri()}) "
+            f"![Preview]({preview.as_uri()})",
+        )
+    cleanup_skill_scratch_dir(scratch)
+
+    assert preview.read_bytes() == b"preview"
+    assert inaccessible.read_bytes() == b"temporarily unavailable"
+    assert not disposable.exists()
+
+
+def test_workspace_report_keeps_its_scratch_dependency(tmp_path):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    stylesheet = scratch.path / "report.css"
+    stylesheet.write_text("body {}", encoding="utf-8")
+    report = tmp_path / "report.html"
+    report.write_text(f'<link rel="stylesheet" href="{stylesheet.as_uri()}">', encoding="utf-8")
+    unrelated = tmp_path / "unrelated.html"
+    unrelated.write_text("<p>Standalone</p>", encoding="utf-8")
+    disposable = scratch.path / "disposable.txt"
+    disposable.touch()
+
+    log = SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)
+    try:
+        retain_scratch_chat_references(
+            tmp_path, f"[Report]({report.as_uri()}) [Other]({unrelated.as_uri()})", log,
+        )
+        cleanup_skill_scratch_dir(scratch)
+
+        assert stylesheet.read_text(encoding="utf-8") == "body {}"
+        assert not disposable.exists()
+        recorded = list(log.events_of_type("chat/reference"))
+        assert [event["data"]["paths"] for event in recorded] == [sorted(map(str, (report, stylesheet)))]
+    finally:
+        log.close()
+
+
+def test_workspace_report_with_damaged_attachment_does_not_retain_workspace_root(tmp_path):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    stylesheet = scratch.path / "report.css"
+    stylesheet.write_text("body {}", encoding="utf-8")
+    appendix = tmp_path / "appendix.docx"
+    with ZipFile(appendix, "w") as archive:
+        archive.writestr("_rels/.rels", "<incomplete")
+    report = tmp_path / "report.html"
+    report.write_text(
+        f'<link rel="stylesheet" href="{stylesheet.as_uri()}"><a href="appendix.docx">Appendix</a>',
+        encoding="utf-8",
+    )
+    disposable = scratch.path / "disposable.txt"
+    disposable.touch()
+
+    with closing(SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)) as log:
+        retain_scratch_chat_references(tmp_path, f"[Report]({report.as_uri()})", log)
+        cleanup_skill_scratch_dir(scratch)
+
+        assert stylesheet.read_text(encoding="utf-8") == "body {}"
+        assert not disposable.exists()
+        assert tmp_path not in ChatReferences(tmp_path, session_log=log).paths
+
+
+@pytest.mark.parametrize(
+    ("operation", "suppress_error"),
+    [("exists", False), ("resolve", False), ("exists", True)],
+    ids=["exists-error", "resolve-error", "exists-hides-error"],
+)
+def test_scratch_reference_replay_keeps_preview_when_inspection_temporarily_fails(
+    tmp_path, monkeypatch, operation, suppress_error,
+):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "preview.png"
+    preview.write_bytes(b"preview")
+    other = scratch.path / "other.png"
+    other.write_bytes(b"other")
+    inspect = getattr(Path, operation)
+
+    def fail_inspection(path, *args, **kwargs):
+        if path == preview:
+            if suppress_error:
+                return False
+            raise PermissionError("preview cannot be inspected")
+        return inspect(path, *args, **kwargs)
+
+    with closing(SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)) as log:
+        log.append(
+            "chat/reference", {"root": str(preview), "paths": [str(preview), str(other)]},
+            ignorable=True,
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, operation, fail_inspection)
+            restored = ChatReferences(tmp_path, session_log=log)
+
+        assert {preview, other} <= restored.paths
+        cleanup_skill_scratch_dir(scratch)
+        assert preview.read_bytes() == b"preview"
+        assert other.read_bytes() == b"other"
+
+
+@pytest.mark.parametrize("operation", ["resolve", "stat", "exists"])
+def test_scratch_retention_preserves_preview_with_unstatable_dependency(
+    tmp_path, monkeypatch, operation,
+):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    dependency = scratch.path / "styles.css"
+    dependency.write_text("body {}", encoding="utf-8")
+    disposable = scratch.path / "disposable.txt"
+    disposable.write_text("temporary", encoding="utf-8")
+    preview = scratch.path / "preview.html"
+    html = f'<link rel="stylesheet" href="{dependency.as_uri()}">'
+    preview.write_text(html, encoding="utf-8")
+    inspect_path = getattr(Path, operation)
+
+    def fail_dependency(path, *args, **kwargs):
+        if path == dependency:
+            raise PermissionError("dependency cannot be inspected")
+        return inspect_path(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, operation, fail_dependency)
+        retain_scratch_chat_references(tmp_path, f"[Preview]({preview.as_uri()})")
+    cleanup_skill_scratch_dir(scratch)
+
+    assert preview.read_text(encoding="utf-8") == html
+    assert dependency.read_text(encoding="utf-8") == "body {}"
+    assert not disposable.exists()
+
+
+def test_scratch_retention_reads_reference_facts_without_copying_session_history(
+    tmp_path, monkeypatch,
+):
+    scratch = prepare_skill_scratch_dir(
+        tmp_path, scratch_root_dir=tmp_path / SKILL_SCRATCH_DIR_NAME / "session",
+    )
+    preview = scratch.path / "preview.png"
+    preview.write_bytes(b"preview")
+    log = SessionLog.create(tmp_path / "sessions", session_id="preview", cwd=tmp_path)
+    try:
+        log.append("user/message", {"content": "Show the preview"})
+        link = f"[Preview]({preview.as_uri()})"
+        ChatReferences(tmp_path, session_log=log).retain_text(link)
+
+        def reject_full_history(_log):
+            pytest.fail("Retaining a preview must not copy the complete session history")
+
+        monkeypatch.setattr(SessionLog, "events", property(reject_full_history))
+        retain_scratch_chat_references(tmp_path, link, log)
+        assert len(list(log.events_of_type("chat/reference"))) == 1
+    finally:
+        log.close()
 
 
 def test_scratch_cleanup_preserves_directories_with_incomplete_retention_checks(tmp_path, monkeypatch):

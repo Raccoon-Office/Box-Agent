@@ -41,19 +41,24 @@ async def test_cleanup_block_preserves_file_and_provides_actionable_scratch_guid
     assert result.permission_request is None
 
 
-@pytest.mark.parametrize("relative", ["qa/.check.txt.artifact.json", "qa/.artifact-delivery.json"])
+@pytest.mark.parametrize("relative", [
+    "qa/.check.txt.artifact.json",
+    "qa/.artifact-delivery.json",
+    ".box-agent/session-state.json",
+    ".box-agent-scratch/session/.check.txt.artifact.json",
+])
 def test_protocol_metadata_never_gets_recursive_retention_sidecars(tmp_path, relative):
     from types import SimpleNamespace
 
     path = tmp_path / relative
-    path.parent.mkdir()
+    path.parent.mkdir(parents=True)
     data = '{"type":"intermediate_asset"}'
     path.write_text(data, encoding="utf-8")
     guard = ChatReferences(tmp_path)
     guard.retain(path)
     guard.retain_text(f"[Workflow metadata]({relative})")
     guard.retain_output({"type": "artifact", "path": str(path)})
-    retain_chat_file(path)
+    retain_chat_file(path, tmp_path)
     assert guard.paths == set()
     assert not metadata_path(path).exists()
     assert path.read_text(encoding="utf-8") == data
@@ -755,3 +760,62 @@ async def test_live_engine_only_confirms_an_explicit_human_deletion(tmp_path, ap
     results = [event for event in events if isinstance(event, ToolCallResult)]
     assert results[-1].success is approve
     assert path.exists() is not approve
+
+
+@pytest.mark.parametrize("chunk", [7, 64, 4096], ids=["tiny-chunks", "small-chunks", "single-chunk"])
+def test_chunked_dependency_scan_matches_the_whole_document_parse(tmp_path, monkeypatch, chunk):
+    from box_agent.tools import chat_references
+
+    html = tmp_path / "page.html"
+    html.write_text(
+        '<!-- <img src="commented.png"> -->'
+        '<img src="chart.png" srcset="small.png 1x, large.png 2x">'
+        '<link rel="stylesheet" href="styles.css"><div style="background:url(bg.png)"></div>'
+        '<script>import("./module.js")</script><svg><use xlink:href="icons.svg#a"/></svg>'
+        '<a data-href="ignored.png" href=report.pdf>report</a>',
+        encoding="utf-8",
+    )
+    markdown = tmp_path / "notes.md"
+    markdown.write_text("See ![chart](chart.png) and [ref].\n\n[ref]: appendix.md\n", encoding="utf-8")
+
+    whole = {path: chat_references.local_dependencies(path, tmp_path) for path in (html, markdown)}
+    monkeypatch.setattr(chat_references, "_FULL_PARSE_LIMIT", 0)
+    monkeypatch.setattr(chat_references, "_STREAMED_SCAN_CHUNK", chunk)
+    monkeypatch.setattr(chat_references, "_STREAMED_SCAN_OVERLAP", 32)
+    streamed = {path: chat_references.local_dependencies(path, tmp_path) for path in (html, markdown)}
+
+    # The chunked scan may also follow links in comments; it never drops one.
+    assert whole[html] <= streamed[html]
+    assert streamed[html] - whole[html] == {tmp_path / "commented.png"}
+    assert {tmp_path / name for name in (
+        "chart.png", "small.png", "large.png", "styles.css", "bg.png", "module.js", "icons.svg", "report.pdf",
+    )} <= streamed[html]
+    assert tmp_path / "ignored.png" not in streamed[html]
+    assert streamed[markdown] == whole[markdown] == {tmp_path / "chart.png", tmp_path / "appendix.md"}
+
+
+def test_chunked_dependency_scan_applies_html_base(tmp_path, monkeypatch):
+    from box_agent.tools import chat_references
+
+    html = tmp_path / "page.html"
+    html.write_text('<base href="assets/"><img src="chart.png">', encoding="utf-8")
+    whole = chat_references.local_dependencies(html, tmp_path)
+    monkeypatch.setattr(chat_references, "_FULL_PARSE_LIMIT", 0)
+    monkeypatch.setattr(chat_references, "_STREAMED_SCAN_CHUNK", 5)
+    monkeypatch.setattr(chat_references, "_STREAMED_SCAN_OVERLAP", 32)
+
+    streamed = chat_references.local_dependencies(html, tmp_path)
+    assert streamed == whole
+    assert tmp_path / "assets" / "chart.png" in streamed
+
+
+def test_dependency_scan_still_rejects_documents_past_the_chunked_limit(tmp_path, monkeypatch):
+    from box_agent.tools import chat_references
+
+    html = tmp_path / "page.html"
+    html.write_text('<img src="chart.png">' + "x" * 64, encoding="utf-8")
+    monkeypatch.setattr(chat_references, "_FULL_PARSE_LIMIT", 0)
+    monkeypatch.setattr(chat_references, "_STREAMED_SCAN_LIMIT", 32)
+
+    with pytest.raises(ValueError, match="CHAT_REFERENCE_DEPENDENCIES_TOO_LARGE"):
+        chat_references.local_dependencies(html, tmp_path)

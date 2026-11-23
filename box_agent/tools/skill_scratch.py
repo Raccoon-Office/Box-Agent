@@ -10,10 +10,11 @@ import stat
 import threading
 from collections.abc import Callable
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from ..artifact_publication import ChatReferenceScanError, retained_chat_file_in
 
@@ -68,6 +69,30 @@ class SkillScratchDirectory:
     path: Path
     device: int
     inode: int
+    _protected_references: set[Path] = field(default_factory=set, init=False, repr=False, compare=False)
+
+
+_active_scratch_dirs: WeakValueDictionary[Path, SkillScratchDirectory] = WeakValueDictionary()
+
+
+def _scratch_owner(path: Path) -> SkillScratchDirectory | None:
+    for parent in (path, *path.parents):
+        scratch = _active_scratch_dirs.get(parent)
+        if scratch is not None:
+            return scratch
+    return None
+
+
+def protect_scratch_reference(path: Path) -> None:
+    """Preserve a chat path during scratch cleanup."""
+    if (scratch := _scratch_owner(path)) is not None:
+        scratch._protected_references.add(path)
+
+
+def release_scratch_reference(path: Path) -> None:
+    """Release a scratch path after a confirmed chat-reference deletion."""
+    if (scratch := _scratch_owner(path)) is not None:
+        scratch._protected_references.discard(path)
 
 
 class SkillScratchUnavailable(RuntimeError):
@@ -308,11 +333,13 @@ def prepare_skill_scratch_dir(
     stats = _prepare_real_directory_chain(workspace_root, relative_path)
     if os.name != "nt":
         scratch_dir.chmod(0o700)
-    return SkillScratchDirectory(
+    scratch = SkillScratchDirectory(
         path=scratch_dir,
         device=stats.st_dev,
         inode=stats.st_ino,
     )
+    _active_scratch_dirs[scratch_dir] = scratch
+    return scratch
 
 
 def _prepared_scratch(scratch: SkillScratchDirectory | SessionSkillScratch) -> SkillScratchDirectory | None:
@@ -320,7 +347,7 @@ def _prepared_scratch(scratch: SkillScratchDirectory | SessionSkillScratch) -> S
 
 
 def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> list[str]:
-    """Remove all entries from a reserved scratch root without following links."""
+    """Remove disposable entries from the reserved scratch root."""
     prepared = _prepared_scratch(scratch)
     if prepared is None:
         return []
@@ -337,8 +364,24 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScrat
     ):
         raise RuntimeError(f"Skill scratch root must be a real directory: {scratch_dir}")
 
+    references = prepared._protected_references
+    for path in tuple(references):
+        try:
+            path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            references.discard(path)
+        except OSError:
+            # An inaccessible preview must stay protected for later cleanups.
+            continue
+    # Other sessions can add references from their session I/O workers.
+    protected = references.copy()
+    if scratch_dir in protected:
+        return []
+    protected_entries = {path.relative_to(scratch_dir).parts[0] for path in protected}
     removed: list[str] = []
     for entry in scratch_dir.iterdir():
+        if entry.name in protected_entries:
+            continue
         try:
             retained = retained_chat_file_in(entry)
         except ChatReferenceScanError:
