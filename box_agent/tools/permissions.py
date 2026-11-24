@@ -25,12 +25,15 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from box_agent.session_log import SessionLog
 from box_agent.user_paths import state_path
 from box_agent.resource_paths import bundled_resource_dir
 from .safety import builtin_skill_write_error
@@ -44,6 +47,21 @@ log = logging.getLogger(__name__)
 FILESYSTEM_READ = "filesystem.read"
 FILESYSTEM_WRITE = "filesystem.write"
 MEMORY_OPENCLAW_IMPORT = "memory.openclaw_import"
+_SESSION_LOG_DIR_NAME = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
+_active_session_log_dir: ContextVar[Path | None] = ContextVar(
+    "active_session_log_dir", default=None,
+)
+
+
+@contextmanager
+def bind_session_log_permissions(session_log: SessionLog | None) -> Iterator[None]:
+    """Scope the read exception to the current tool invocation's session."""
+    directory = session_log.resolved_directory if isinstance(session_log, SessionLog) else None
+    token = _active_session_log_dir.set(directory)
+    try:
+        yield
+    finally:
+        _active_session_log_dir.reset(token)
 
 
 class CapabilityPolicy(BaseModel):
@@ -198,6 +216,13 @@ class PermissionEngine:
             if raw and Path(raw).is_absolute():
                 product_roots.append(Path(raw))
         self._product_dirs = self._resolve_product_dirs(product_roots)
+        session_log_roots: list[Path] = []
+        for name in ("sessions", "recovered-sessions"):
+            try:
+                session_log_roots.append(state_path(name, home_dir=self._home_dir).resolve())
+            except (OSError, RuntimeError, ValueError):
+                continue
+        self._session_log_roots = tuple(session_log_roots)
 
         # Built-in Skill write protection takes precedence over product
         # directory grants, using the canonical root and requested target.
@@ -303,8 +328,21 @@ class PermissionEngine:
             if error := builtin_skill_write_error(resolved, self._builtin_skills_dir):
                 return PermissionDecision(allowed=False, reason=error)
 
-        if tool_name == "bash" and self._is_bash_product_path(path):
+        session_directory = _active_session_log_dir.get()
+        if (
+            operation == "read" and tool_name != "bash" and session_directory is not None
+            and resolved.is_relative_to(session_directory)
+        ):
             return PermissionDecision(allowed=True)
+
+        session_data = self._is_session_log_path(resolved, session_directory)
+        if tool_name == "bash" and not session_data:
+            lexical = Path(os.path.abspath(path.expanduser()))
+            if (
+                not self._is_session_log_path(lexical, session_directory)
+                and self._is_bash_product_path(path)
+            ):
+                return PermissionDecision(allowed=True)
 
         # Directory-level grants take precedence over scope checks. These are
         # recorded by the negotiator after the user approves a permission
@@ -320,7 +358,9 @@ class PermissionEngine:
             if self._grant_store.has_grant("filesystem", "user_home"):
                 scope = "user_home"
 
-        if self._path_allowed_by_scope(resolved, scope, operation, tool_name):
+        if self._path_allowed_by_scope(
+            resolved, scope, operation, tool_name, implicit_access=not session_data,
+        ):
             return PermissionDecision(allowed=True)
 
         escalation = self._compute_escalation(resolved, scope, requested_path=path)
@@ -399,20 +439,36 @@ class PermissionEngine:
     def _is_under_home(self, resolved: Path) -> bool:
         return self._is_inside(resolved, self._home_dir)
 
+    def _is_session_log_path(self, path: Path, directory: Path | None) -> bool:
+        roots = self._session_log_roots
+        if directory is not None:
+            if path.is_relative_to(directory):
+                return True
+            roots = (*roots, directory.parent)
+        for root in roots:
+            if path.is_relative_to(root):
+                parts = path.relative_to(root).parts
+                # Canonical logs use a SHA-256 directory key. The sessions
+                # tree can also hold standalone tool-result directories.
+                if not parts or _SESSION_LOG_DIR_NAME.fullmatch(parts[0]):
+                    return True
+        return False
+
     def _path_allowed_by_scope(
-        self, resolved: Path, scope: str, operation: str, tool_name: str | None = None
+        self, resolved: Path, scope: str, operation: str, tool_name: str | None = None,
+        *, implicit_access: bool = True,
     ) -> bool:
         # workspace_dir is always allowed regardless of scope
         if self._is_inside(resolved, self._workspace_dir):
             return True
 
-        if any(self._is_inside(resolved, root) for root in self._product_dirs):
+        if implicit_access and any(self._is_inside(resolved, root) for root in self._product_dirs):
             return True
 
         # Packaged built-in skills are executable product resources rather
         # than user data. Bash may read them, but never write them.
         if (
-            operation == "read"
+            implicit_access and operation == "read"
             and self._builtin_skills_dir is not None
             and self._is_inside(resolved, self._builtin_skills_dir)
         ):
@@ -420,7 +476,7 @@ class PermissionEngine:
 
         # Box-Agent scratch files are allowed under OS temp roots without
         # granting broad access to arbitrary pytest/user temp directories.
-        if resolved.name.startswith("box_agent_"):
+        if implicit_access and resolved.name.startswith("box_agent_"):
             for temp_dir in (Path("/tmp"), Path("/var/tmp")):
                 try:
                     if self._is_inside(resolved, temp_dir.resolve()):
@@ -433,7 +489,7 @@ class PermissionEngine:
         # without requiring broad user-home access. Bash command paths stay
         # gated so absolute binaries like /bin/echo do not bypass negotiation.
         # Writes remain blocked.
-        if operation == "read" and tool_name != "bash":
+        if implicit_access and operation == "read" and tool_name != "bash":
             for app_dir in self._app_read_dirs:
                 if self._is_inside(resolved, app_dir):
                     return True

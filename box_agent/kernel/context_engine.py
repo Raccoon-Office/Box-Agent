@@ -10,6 +10,7 @@ import math
 import re
 from collections import Counter
 from collections.abc import Awaitable
+from pathlib import Path, PurePath
 from typing import Any, Callable, Final
 
 from ..cache_fingerprint import sha256_fingerprint
@@ -202,6 +203,21 @@ def _summary_message_text(msg: Message) -> str:
             + "\n</tool_calls>"
         )
     return "\n".join(sections)
+
+
+def _session_log_hint(session_log: SessionLog | None, tools: dict[str, Tool] | None) -> str:
+    """Render the log locator shared by the compacted history and its budget."""
+    path = getattr(session_log, "path", None)
+    if not isinstance(path, PurePath):
+        return ""
+    if not path.is_absolute():
+        path = Path(path).absolute()
+    reader = ("prefer query_jsonl over reading the whole file" if tools and "query_jsonl" in tools
+              else "use paginated read_file to read the log")
+    return (
+        "\n\nIf you need specific details from before compaction (exact code snippets, error messages, "
+        f"tool output, or content you generated), query the full session log at: {path} (JSONL; {reader})."
+    )
 
 
 class _SummaryInputBudgetExceeded(RuntimeError):
@@ -936,8 +952,11 @@ async def _maybe_summarize(
         )
 
     # A small model may need less than the standard recent-round allowance.
+    log_hint = _session_log_hint(session_log, tools)
+    count_tokens = context_text_counter(llm)
+    hint_tokens = count_tokens(log_hint) if log_hint else 0
     prefix_tokens = _fallback_context_estimate(messages[:1], budget_tools, llm=llm)
-    recent_limit = max(1, min(_RECENT_GROUP_TOKEN_LIMIT, token_limit - prefix_tokens - 512))
+    recent_limit = max(1, min(_RECENT_GROUP_TOKEN_LIMIT, token_limit - prefix_tokens - 512 - hint_tokens))
     try:
         retained_messages, retained_indices = _select_recent_messages(messages, llm=llm, token_limit=recent_limit)
     except InvalidToolHistory as exc:
@@ -947,7 +966,6 @@ async def _maybe_summarize(
         )
     retained_messages = _bound_retained_messages(retained_messages, llm=llm, token_limit=recent_limit)
     earlier_user_texts = _collect_earlier_user_texts(messages, retained_indices)
-    count_tokens = context_text_counter(llm)
     earlier_user_message = (_earlier_user_message(earlier_user_texts, count_tokens)
                             if earlier_user_texts else None)
     # Provider usage describes the pre-compaction request.  Retaining it would
@@ -1091,7 +1109,7 @@ async def _maybe_summarize(
             Message(
                 role="user",
                 source="runtime",
-                content=f"{_SUMMARY_MESSAGE_PREFIX}{summary_text}{truncation_note}{_SUMMARY_MESSAGE_SUFFIX}",
+                content=f"{_SUMMARY_MESSAGE_PREFIX}{summary_text}{truncation_note}{log_hint}{_SUMMARY_MESSAGE_SUFFIX}",
             ),
             *retained_messages,
         ]

@@ -62,8 +62,10 @@ from .context_engine import (
     _fallback_context_estimate,
     _is_real_user_message,
     _is_summary_marker,
+    _session_log_hint,
     _validate_transient_followup_result,
     capture_request_usage,
+    context_text_counter,
     reported_input_tokens,
     request_input_tokens,
 )
@@ -2213,6 +2215,9 @@ async def _run_agent_loop_impl(
                             if context_engine is not None else request_local_input_tokens
                         )
                         fixed_tokens = _fallback_context_estimate(messages[:1], budget_tools_by_name, llm=llm)
+                        log_hint = _session_log_hint(session_log, tools)
+                        if log_hint:
+                            fixed_tokens += context_text_counter(llm)(log_hint)
                         history_tokens = request_input_tokens(messages, budget_tools_by_name, llm=llm,
                                                              calibration=calibration)
                         request_reserve = max(extra_tokens + transient_tokens, projected_tokens - history_tokens)
