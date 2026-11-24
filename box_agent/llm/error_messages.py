@@ -89,7 +89,8 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "context_length",
         ("context_length_exceeded", "context length", "maximum context",
-         "too long", "reduce the length", "input prompt token len"),
+         "context window", "prompt is too long", "prompt too long", "input is too long",
+         "input too long", "messages are too long", "input prompt token len"),
         "当前对话内容过长，超出所选模型可处理的上限。"
         "请新建会话，或精简历史消息、附件和本次输入后重试。",
     ),
@@ -159,6 +160,27 @@ _RAW_FALLBACK_LIMIT = 300
 # floor we always fall back to.
 _GENERIC_FALLBACK = "模型调用失败，请稍后重试。"
 
+_TOKEN_NUMBER = r"[0-9][0-9,]{0,14}"
+_CONTEXT_TOKEN_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    rf"prompt is too long:\s*(?P<actual>{_TOKEN_NUMBER})\s+tokens\s*>\s*(?P<limit>{_TOKEN_NUMBER})\s+maximum",
+    rf"maximum context length is\s+(?P<limit>{_TOKEN_NUMBER})\s+tokens[.\s]+"
+    rf"however,?\s+your messages resulted in\s+(?P<actual>{_TOKEN_NUMBER})\s+tokens",
+    rf"maximum context length is\s+(?P<limit>{_TOKEN_NUMBER})\s+tokens[.\s]+"
+    rf"however,?\s+you requested\s+{_TOKEN_NUMBER}\s+tokens\s*\((?P<actual>{_TOKEN_NUMBER})\s+in the messages",
+    rf"input prompt token len\s+(?P<actual>{_TOKEN_NUMBER})\s*\+\s*max_new_tokens\s+{_TOKEN_NUMBER}"
+    rf"\s*>\s*(?P<limit>{_TOKEN_NUMBER})",
+))
+
+
+def _context_length_counts(haystack: str) -> tuple[int, int] | None:
+    for pattern in _CONTEXT_TOKEN_PATTERNS:
+        if match := pattern.search(haystack):
+            actual = int(match["actual"].replace(",", ""))
+            limit = int(match["limit"].replace(",", ""))
+            if actual > 0 and limit > 0:
+                return actual, limit
+    return None
+
 
 def classify_llm_error(exc: BaseException) -> FriendlyError:
     """Return a :class:`FriendlyError` for ``exc``.
@@ -190,7 +212,10 @@ def classify_llm_error(exc: BaseException) -> FriendlyError:
         haystack = ""
 
     try:
-        if _safe_http_status_code(root) == 413:
+        if (_safe_http_status_code(root) == 413 and _context_length_counts(haystack) is None
+                and not any(token in haystack for token in (
+                    "context_length_exceeded", "prompt is too long", "prompt too long",
+                ))):
             return FriendlyError(message="本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。",
                                  category="request_body_too_large")
         # Recognized business codes are more specific than generic prose.
@@ -311,7 +336,7 @@ def structured_llm_error(
     except Exception:
         retryable = False
 
-    return {
+    details = {
         "source": "llm_provider",
         "category": friendly.category,
         "reason": reason,
@@ -324,6 +349,11 @@ def structured_llm_error(
         "retryable": retryable,
         "requestId": request_id,
     }
+    if friendly.category == "context_length":
+        counts = _context_length_counts(_build_haystack(root))
+        if counts is not None:
+            details["actualInputTokens"], details["contextWindowTokens"] = counts
+    return details
 
 
 def _normalize_error_code(value: object) -> int | str | None:

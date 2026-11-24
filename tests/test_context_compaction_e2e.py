@@ -129,7 +129,7 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("history_chars", [100_000, 45_000], ids=["history-overflow", "summary-instruction-overflow"])
-async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(tmp_path, history_chars):
+async def test_agent_trims_an_over_budget_summary_and_resumes(tmp_path, history_chars):
     llm = CompactionE2ELLM()
     token_limit = 16_000
     agent = Agent(
@@ -160,12 +160,13 @@ async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(t
     events = [event async for event in agent.run_events()]
 
     compaction = next(event for event in events if isinstance(event, SummarizationEvent))
-    assert compaction.mode == "fallback"
-    assert compaction.summary_calls == 0
-    assert llm.summary_messages == []
-    assert "Deterministic history fallback" in str(llm.normal_messages)
+    assert compaction.mode == "summary"
+    assert compaction.summary_calls == 1 and compaction.summary_retries == 1
+    assert compaction.head_truncated
+    assert llm.summary_messages[1].content == "[earlier conversation truncated for compaction retry]"
+    assert "NOT covered by this summary" in str(llm.normal_messages)
     assert latest_user in llm.normal_messages
-    assert _fallback_context_estimate(llm.normal_messages, {}) <= token_limit
+    assert _fallback_context_estimate(llm.normal_messages, {}, llm=llm) <= token_limit
     assert not [event.message for event in events if isinstance(event, ErrorEvent)]
     assert agent.messages[-1].content == "E2E resumed answer"
     done = next(event for event in events if isinstance(event, DoneEvent))
@@ -207,14 +208,12 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
 
         compaction = next(event for event in events if isinstance(event, SummarizationEvent))
         summary_requests = [request for request in requests if request["model"] == "summary-model"]
-        if summary_tokens <= summary_limit:
-            assert compaction.mode == "summary" and compaction.summary_calls == 1
-            assert len(summary_requests) == 1
-            assert summary_requests[0]["messages"][-1]["content"] == _SUMMARY_REQUEST
-            assert summary_requests[0].get("max_tokens", summary_requests[0].get("max_completion_tokens")) == 8_192
-        else:
-            assert compaction.mode == "fallback" and compaction.summary_calls == 0
-            assert summary_requests == []
+        assert compaction.mode == "summary" and compaction.summary_calls == 1
+        assert compaction.summary_retries == int(summary_tokens > summary_limit)
+        assert compaction.head_truncated == (summary_tokens > summary_limit)
+        assert len(summary_requests) == 1
+        assert summary_requests[0]["messages"][-1]["content"] == _SUMMARY_REQUEST
+        assert summary_requests[0].get("max_tokens", summary_requests[0].get("max_completion_tokens")) == 8_192
         main_requests = [request for request in requests if request["model"] == llm.model]
         assert len(main_requests) == 1
         assert compaction.estimated_after <= main_limit

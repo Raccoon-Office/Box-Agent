@@ -2,7 +2,7 @@
 import pytest
 
 from box_agent.kernel.context_engine import (
-    _maybe_summarize, _bound_text_middle, _SUMMARY_MESSAGE_PREFIX,
+    _maybe_summarize, _bound_text_middle, _earlier_user_message, _SUMMARY_MESSAGE_PREFIX,
     _SUMMARY_MESSAGE_SUFFIX, request_input_tokens,
 )
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
@@ -39,7 +39,8 @@ def fixture():
         summary = Message(role='user', source='runtime', content=(
             _SUMMARY_MESSAGE_PREFIX + _bound_text_middle(llm.summary, summary_limit, label='summary')
             + _SUMMARY_MESSAGE_SUFFIX))
-        return request_input_tokens(project([system, summary, user, call, result]), {}, llm=llm)
+        earlier = _earlier_user_message([history[1].content], llm.estimate_text_tokens)
+        return request_input_tokens(project([system, earlier, summary, user, call, result]), {}, llm=llm)
 
     return llm, history, project, estimate, (system, user, call, result, descriptor)
 
@@ -64,7 +65,8 @@ async def test_fitting_compaction_keeps_the_existing_summary_length():
     result = await _maybe_summarize(llm, history, estimate(2000) + 1, 0, False, force=True,
                                   summary_input_token_limit=100000, compacted_history_projector=project)
     assert result.mode == 'summary'
-    assert result.messages[1].content == (
+    summary = next(message for message in result.messages if str(message.content).startswith(_SUMMARY_MESSAGE_PREFIX))
+    assert summary.content == (
         _SUMMARY_MESSAGE_PREFIX + _bound_text_middle(llm.summary, 2000, label='summary') + _SUMMARY_MESSAGE_SUFFIX)
 
 

@@ -504,3 +504,28 @@ def test_hosted_auth_errors_keep_canonical_message():
         assert classify_llm_error(exc).message == str(exc)
         assert humanize_llm_error(exc) == str(exc)
         assert "API 密钥" not in humanize_llm_error(exc)
+
+
+@pytest.mark.parametrize(("message", "status", "expected"), [
+    ("prompt is too long: 210,000 tokens > 200,000 maximum", 413, (210_000, 200_000)),
+    ("This model's maximum context length is 128000 tokens. However, your messages resulted in 130500 tokens.", 400,
+     (130_500, 128_000)),
+    ("This model's maximum context length is 128000 tokens. However, you requested 130500 tokens "
+     "(125000 in the messages, 5500 in the completion).", 400, (125_000, 128_000)),
+    ("the input prompt token len 243000 + max_new_tokens 63999 > 262144No fallback model", 400, (243_000, 262_144)),
+])
+def test_context_error_reports_actual_input_and_window_without_counting_requested_output(message, status, expected):
+    error = _FakeAPIError("bad request", status_code=status, body={"error": {"message": message}})
+    details = structured_llm_error(RetryExhaustedError(error, attempts=1))
+    assert details["category"] == "context_length"
+    assert (details["actualInputTokens"], details["contextWindowTokens"]) == expected
+
+
+@pytest.mark.parametrize(("message", "status", "category"), [
+    ("request body exceeds maximum size", 413, "request_body_too_large"),
+    ("tool schema description too long", 400, "unknown"),
+])
+def test_non_context_request_size_errors_do_not_imply_overflow(message, status, category):
+    details = structured_llm_error(_FakeAPIError(message, status_code=status))
+    assert details["category"] == category
+    assert "actualInputTokens" not in details

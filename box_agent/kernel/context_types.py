@@ -12,6 +12,31 @@ if TYPE_CHECKING:
     from .context_engine import ContextTokenCalibration
 
 
+@dataclass(slots=True)
+class ContextCompactionState:
+    """Track compaction health across turns of one live session."""
+
+    step: int = 0
+    last_compaction_step: int | None = None
+    rapid_refills: int = 0
+    consecutive_failures: int = 0
+
+    @property
+    def refilled_rapidly(self) -> bool:
+        return self.last_compaction_step is not None and self.step - self.last_compaction_step <= 3
+
+    def record(self, mode: str, *, applied: bool) -> bool:
+        if applied:
+            self.rapid_refills = self.rapid_refills + 1 if self.refilled_rapidly else 0
+            self.last_compaction_step = self.step
+        if mode == "summary":
+            self.consecutive_failures = 0
+        elif mode in {"fallback", "blocked"}:
+            self.consecutive_failures += 1
+            return self.consecutive_failures == 3
+        return False
+
+
 @dataclass(frozen=True, slots=True)
 class InitialContextTransition:
     """Commit a new context limit only after its first request fits."""
@@ -73,6 +98,9 @@ class CompactionOutcome:
     trigger_source: str = "none"
     protected_messages: int = 0
     still_over_limit: bool | None = None
+    summary_retries: int = 0
+    head_truncated: bool = False
+    error_code: str | None = None
 
     def __post_init__(self) -> None:
         blocked = self.mode == "blocked"

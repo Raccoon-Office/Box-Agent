@@ -247,6 +247,8 @@ class SummarizationEvent:
     error: str | None = None
     error_type: str | None = None
     trigger_source: str = "none"
+    summary_retries: int = 0
+    head_truncated: bool = False
 
 
 # ── Errors & completion ─────────────────────────────────────────

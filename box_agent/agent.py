@@ -46,7 +46,7 @@ from .llm import LLMClient
 from .logger import AgentLogger
 from .project_context import WORKSPACE_STATEMENT_PREFIX
 from .kernel.context_engine import ContextTokenCalibration
-from .kernel.context_types import InitialContextTransition
+from .kernel.context_types import ContextCompactionState, InitialContextTransition
 from .kernel.ports import KernelServices
 from .injections import InjectionManager
 from .runtime import run_agent_loop
@@ -528,6 +528,7 @@ class Agent:
         self.context_resource_dedup_enabled = context_resource_dedup_enabled
         self.context_resource_ledger = ContextResourceLedger()
         self._context_token_calibration = ContextTokenCalibration()
+        self._context_compaction_state = ContextCompactionState()
         self.activated_mcp_tools: OrderedDict[str, ActivatedMCPTool] = OrderedDict()
         self.activated_local_tools: OrderedDict[str, Tool] = OrderedDict()
         self.local_tool_exposure = LocalToolExposurePolicy(
@@ -1483,7 +1484,8 @@ class Agent:
                                                 llm=effective_options.llm,
                                                 thinking_enabled=self.thinking_enabled,
                                                 initial_context_transition=transition,
-                                                token_calibration=self._context_token_calibration),
+                                                token_calibration=self._context_token_calibration,
+                                                compaction_state=self._context_compaction_state),
             current_turn_text=effective_options.current_turn_text,
             context_resource_ledger=self.context_resource_ledger,
             context_resource_dedup_enabled=self.context_resource_dedup_enabled,

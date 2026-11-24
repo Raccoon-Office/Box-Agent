@@ -15,7 +15,7 @@ from .kernel.context_engine import (
     context_text_counter,
     request_input_tokens, skill_reference_budget_chars,
 )
-from .kernel.context_types import InitialContextTransition
+from .kernel.context_types import ContextCompactionState, InitialContextTransition
 from .schema import Message
 from .session_log import run_on_session_loop, run_session_write
 from .llm.capabilities import bound_context_token_limit
@@ -100,6 +100,7 @@ class DefaultContextEngine:
     ] = effective_system_prompt, image_context=None, llm=None, thinking_enabled=False,
         initial_context_transition: InitialContextTransition | None = None,
         token_calibration: ContextTokenCalibration | None = None,
+        compaction_state: ContextCompactionState | None = None,
     ) -> None:
         self._system_prompt_projector = system_prompt_projector
         self.image_context = image_context
@@ -107,6 +108,7 @@ class DefaultContextEngine:
         self.thinking_enabled = thinking_enabled
         self.initial_context_transition = initial_context_transition
         self.token_calibration = token_calibration if token_calibration is not None else ContextTokenCalibration()
+        self.compaction_state = compaction_state if compaction_state is not None else ContextCompactionState()
         self._memory_lookup = None
         self._input_guard: ModelInputGuard | None = None
         self.references: SkillReferenceContext | None = None

@@ -382,11 +382,12 @@ async def test_larger_run_budget_is_clamped_to_model_before_compacting_and_sendi
         )]
     compaction = next(event for event in events if isinstance(event, SummarizationEvent))
     assert compaction.token_limit == derive_context_token_limit(20_000, 1_000)
-    assert compaction.mode == "fallback" and compaction.summary_calls == 0
-    assert len(requests) == 1
-    sent = [Message(role=message["role"], content=message["content"]) for message in requests[0]["messages"]]
+    assert compaction.mode == "summary" and compaction.summary_calls == 1
+    assert compaction.head_truncated and compaction.summary_retries == 1
+    assert len(requests) == 2
+    sent = [Message(role=message["role"], content=message["content"]) for message in requests[-1]["messages"]]
     assert _fallback_context_estimate(sent, None, llm=llm) <= compaction.token_limit
-    assert requests[0]["messages"][-1]["content"] == "continue"
+    assert requests[-1]["messages"][-1]["content"] == "continue"
     assert not [event for event in events if isinstance(event, ErrorEvent)]
 
 
