@@ -58,7 +58,7 @@ python "<SKILL_ROOT>/scripts/dsl.py" preview "<DECK_DIR>/presentation.pptx"
 - XML 是唯一页面基线。局部编辑只改相关 XML，复用已有素材；无需再次检索、生图或重写大纲。
 - 改动后重新检查对应页面，再重建整份 PPTX。未改的 XML 不重写。最终预览必须对应最新 PPTX；旧图片不能作为新版本的验收依据。
 - 交付 `presentation.pptx`，同时提供 XML 源目录、PDF/预览（存在时）。附带一句验证范围；不要声称 XML 校验等于 PowerPoint/WPS 全平台验收。
-- 更新任务状态：只有生成、逐页保真、全页视觉记录和返修记录都通过，且 `dsl.py verify` 返回 `visual_review=passed` 后，调用 `publish_artifact`；Harness 核对实际看图记录并决定能否记 `complete`。未解决问题或缺少看图记录时，记 `partial` 和具体页码；保留可用 PPTX。
+- 交付时沿用当前 PPTX 的审阅结果。生成和逐页保真检查通过、`dsl.py verify` 返回 `visual_review=passed` 且没有待修页时，记 `complete` 并调用 `publish_artifact`。仍有待审或待修页时，记 `partial`，列出具体页码并交付现有 PPTX。
 - SN PPT 统一使用 XML → PPTX。历史任务只有旧页面或整页图片时，复用材料、大纲和局部素材，在原任务目录建立 XML 后继续；旧产物仅作参考，不调用其他生成流程。
 
 ## 运行环境

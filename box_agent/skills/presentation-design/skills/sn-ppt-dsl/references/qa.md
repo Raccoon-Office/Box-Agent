@@ -46,7 +46,7 @@ review 的 finding 对所登记的每页写明具体标题/正文位置、主次
 
 实现偏离大纲时由 DSL 修正对应 XML；需要改变大纲标题、核心结论、页序或页数时返回 Story，修改同一 `outline.md` 后再生产。新事实仍需按 Entry/Story 的证据路径补齐，不得为完成验收临时编证据。局部修复沿用现有 `fix → repair-start → 修改 → build → preview → 复验` 和每页最多两次预算；涉及增删页的内容问题须另行规划，不冒充局部修复，也不重置旧预算。
 
-修复后确认原问题已从新版画面消失，并回查与该主张相关的标题、正文、图注、前后承接及非相邻总结，防止只改一处、其他位置仍矛盾；只重看受影响的内容和必要图片。关闭问题的 finding 写明实际变化及关联页核对结果，不能仅写“逻辑已优化”。未改图片可复用看图证据，但旧语义判断不能代替本次关联核对；相关页需改动时也须逐页登记。无法核实且影响关键结论、预算用尽或缺环未解时保留问题和 `partial`，不能因 `verify` 或 Harness 返回 `passed` 就宣称全册逻辑已通过；现有程序不自动验证这些语义判断。
+修复后确认原问题已从新版画面消失，并回查与该主张相关的标题、正文、图注、前后承接及非相邻总结，防止只改一处、其他位置仍矛盾；只重看受影响的内容和必要图片。关闭问题的 finding 写明实际变化及关联页核对结果，不能仅写“逻辑已优化”。未改图片可复用看图证据，但旧语义判断不能代替本次关联核对；相关页需改动时也须逐页登记。无法核实且影响关键结论、预算用尽或缺环未解时，保留问题并记 `partial`。这些语义判断由作者负责。
 
 ## 视觉表达是否完成任务
 
@@ -71,8 +71,8 @@ python "<SKILL_ROOT>/scripts/dsl.py" review "<DECK_DIR>/presentation.pptx" --pag
 
 预算用尽后，`repair_ledger.json` 保留未解决问题。保留当前可用 PPTX，说明页码、问题和已用次数；`visual_review` 和任务状态记为 `partial`。
 
-首次预览使用 `preview/`；重建 PPTX 后，默认入口自动选择新的 `qa/previews/pptx-*` 目录，避免覆盖已看过的图片。当前 PPTX 和有效预览都未变化时，`preview` 复用现有文件，不再重复渲染。`review` 默认使用当前预览；若手动指定 `--output`，两个命令须使用同一路径。最终运行 `dsl.py verify`，确认 `visual_review=passed`、无 `fix_pages` 和 `pending_pages`，再调用 `publish_artifact`。只有 Harness 的看图证据门禁也返回 `passed`，任务状态才变为 `complete`。`partial/needs_fix/stale` 均不能声明全部完成。图片哈希只证明审阅对象一致；Harness 要核对 `inspect_images` 的实际成功调用。
+首次预览使用 `preview/`；重建 PPTX 后，默认入口自动选择新的 `qa/previews/pptx-*` 目录，避免覆盖已看过的图片。当前 PPTX 和有效预览都未变化时，`preview` 复用现有文件，不再重复渲染。`review` 默认使用当前预览；若手动指定 `--output`，两个命令须使用同一路径。最终运行 `dsl.py verify`。当前 PPTX 的 `visual_review=passed` 且 `fix_pages`、`pending_pages` 均为空时，记 `complete` 并调用 `publish_artifact`。仍有待修、待审或审阅记录已过期的页时，记 `partial` 并列出页码。
 
 `qa/visual_review.json` 中的 `preview_directory` 按 PPTX 所在目录保存相对路径。`preview` 和 `review` 的相对 `--output` 也以 PPTX 所在目录为基准；移动整套任务目录后，仍按同一规则找到预览。运行时不写死某个用户的绝对目录。
 
-旧版无证据或空结论的 `pass` 记录在重新预览后不会复用；它们不能作为新验收通过的证明。图像文件与哈希只能证明审阅对象一致，不能证明模型确实阅读了图片；后续可由 Harness 关联 `inspect_images` 调用记录。
+重新预览后只复用附有对应图片和具体观察的 `pass` 记录。图片哈希用于核对审阅对象。

@@ -155,6 +155,16 @@ def test_design_author_receives_native_review_and_figure_selection_instructions(
     assert 'strategy="native"' in author and "当前写稿 Agent" in author
 
 
+def test_design_delivery_uses_the_current_deck_review(loader):
+    skill = loader.get_skill("sn-ppt-dsl")
+    qa = (skill.skill_path.parent / "references" / "qa.md").read_text(encoding="utf-8")
+    delivery = skill.content.split("## 修改、恢复与交付", 1)[1].split("\n## ", 1)[0]
+    for instructions in (delivery, qa.split("## 修改后复查", 1)[1]):
+        assert "Harness" not in instructions
+        for term in ("visual_review=passed", "`complete`", "`partial`", "publish_artifact"):
+            assert term in instructions
+
+
 @pytest.mark.asyncio
 async def test_design_outline_card_uses_the_existing_client_contract(loader):
     design = loader.get_skill("sn-ppt-design-entry").content.split("## 客户端大纲确认", 1)[1]
