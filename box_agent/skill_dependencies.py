@@ -37,6 +37,9 @@ def resolve_required_skills(loader: Any, names: tuple[str, ...] | list[str]) -> 
         if getattr(skill, "broken", False):
             raise SkillDependencyError("SKILL_BROKEN", f"Required Skill '{name}' is malformed and cannot be loaded.",
                                        {"skill": name, "reason": skill.broken_reason})
+        error = getattr(loader, "dependency_errors", {}).get(name)
+        if error is not None:
+            raise error
         visiting.append(name)
         for dependency in sorted(set(skill.required_skills or [])):
             visit(dependency)
