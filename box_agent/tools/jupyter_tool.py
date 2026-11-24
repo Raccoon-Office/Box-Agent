@@ -120,7 +120,8 @@ async def _start_sandbox_kernel(
     async_start = getattr(kernel_manager, "_async_start_kernel", None)
     start_kwargs: dict[str, Any] = {"env": dict(env)} if env is not None else {}
     if sys.platform == "win32":
-        # Jupyter keeps its own interrupt event and parent-lifetime handle.
+        # Give the kernel its own hidden console so its console control events
+        # never reach ACP. Jupyter interrupts through its own Win32 event.
         start_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
         if callable(async_start):
@@ -1629,10 +1630,6 @@ class JupyterSandboxTool(Tool):
         # Optional ACP host binding. CLI and older hosts retain their existing behavior.
         self.runtime_preparer: Callable[[], Awaitable[None]] | None = None
 
-    def require_external_kernel(self) -> None:
-        """Prevent Python tool code from executing inside the owning process."""
-        self._requires_subprocess = True
-
     def fork_for_child(self, child_id: str) -> "JupyterSandboxTool":
         """Reuse runtime settings while isolating a trusted child's kernels."""
         child = JupyterSandboxTool(
@@ -1641,7 +1638,7 @@ class JupyterSandboxTool(Tool):
             process_owner_id=f"{self.process_owner_id or '__default__'}:{child_id}",
             skill_scratch_dir=self._skill_scratch_dir,
         )
-        child.require_external_kernel()
+        child._requires_subprocess = True
         if self.runtime_preparer is not None:
             prepare_runtime = self.runtime_preparer
 
@@ -1769,7 +1766,7 @@ class JupyterSandboxTool(Tool):
         if IS_FROZEN:
             if self._requires_subprocess:
                 raise RuntimeError(
-                    "ISOLATED_KERNEL_UNAVAILABLE: isolated Python execution requires "
+                    "ISOLATED_KERNEL_UNAVAILABLE: child Python execution requires "
                     "a standalone runtime Python (BOX_AGENT_SANDBOX_PYTHON)."
                 )
             return InProcessKernelSession(session_id, workspace)

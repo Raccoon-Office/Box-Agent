@@ -102,12 +102,9 @@ class FixtureLLM:
             for message in messages if message.role == "user")
         has_results = any(message.role == "tool" for message in messages)
         mode = scenario.get()
-        if mode in {"shell_exit", "frozen_python"}:
+        if mode == "shell_exit":
             if not has_results:
-                if mode == "shell_exit":
-                    invocation = call("bash", {"command": "exit 23"}, 0)
-                else:
-                    invocation = call("execute_code", {"code": "print(f'ACP_PYTHON_RESULT={6 * 7}')"}, 0)
+                invocation = call("bash", {"command": "exit 23"}, 0)
                 yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[invocation])
             else:
                 result = next(message for message in messages if message.role == "tool")
@@ -270,11 +267,6 @@ def install_fixture(acp, root):
 
     stdio_compat._WritePipeProtocol = WriteProtocol
     if os.environ.get("BOX_AGENT_DESKTOP_TEST_WINDOWS_STDOUT") == "1":
-        if os.name != "nt":
-            # This fixture exercises Windows stdout on a POSIX pipe with real EOF.
-            from unittest.mock import Mock
-            stdio_compat._WindowsReadThread = Mock
-
         async def windows_streams(*, on_eof=None):
             return await stdio_compat._windows_stdio_streams(asyncio.get_running_loop(), on_eof)
 
@@ -322,10 +314,15 @@ def install_fixture(acp, root):
             return self._llm
 
         async def ext_method(self, method, params):
-            if method == "fixture_console_attached" and os.name == "nt":
+            if method == "fixture_console_interrupt" and os.name == "nt":
+                # Broadcast to every process on this console, as a tool would.
                 import ctypes
-                pid = ctypes.c_ulong()
-                return {"attached": bool(ctypes.windll.kernel32.GetConsoleProcessList(ctypes.byref(pid), 1))}
+                import signal
+                kernel = ctypes.windll.kernel32
+                sent = [bool(kernel.GenerateConsoleCtrlEvent(event, 0))
+                        for event in (signal.CTRL_C_EVENT, signal.CTRL_BREAK_EVENT)]
+                await asyncio.sleep(1)  # Console handlers run on their own thread.
+                return {"sent": sent}
             if method == "fixture_host_request":
                 return await self._conn.ext_method(params["method"], params["params"])
             if method == "fixture_rpc_state":
@@ -433,9 +430,6 @@ def main():
     os.environ["BOX_AGENT_SESSION_TRACE_ENABLED"] = "0"
     import box_agent.acp as acp
 
-    if os.environ.get("BOX_AGENT_DESKTOP_TEST_FROZEN_PYTHON") == "1":
-        from box_agent.tools import jupyter_tool
-        jupyter_tool.IS_FROZEN = True
     install_fixture(acp, root)
     config = Config(
         # Protocol fixtures include complete large snapshots plus supplements.

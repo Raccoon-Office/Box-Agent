@@ -3,7 +3,6 @@
 import asyncio
 import io
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 from types import SimpleNamespace
@@ -13,36 +12,22 @@ import pytest
 from box_agent.acp import stdio_compat
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("platform,managed,detached", [
-    ("win32", True, True), ("win32", True, False),
-    ("win32", False, True), ("darwin", True, True),
+@pytest.mark.parametrize("platform,stdin,ignored", [
+    ("win32", io.BytesIO(), True),
+    ("win32", None, True),
+    ("win32", SimpleNamespace(isatty=lambda: True), False),
+    ("darwin", io.BytesIO(), False),
 ])
-async def test_only_windows_desktop_owns_console_shutdown(monkeypatch, platform, managed, detached):
-    import ctypes
+def test_only_pipe_hosted_windows_acp_ignores_console_interrupts(monkeypatch, platform, stdin, ignored):
     from unittest.mock import Mock
     import box_agent.acp as acp
 
-    class ReachedConfig(Exception):
-        pass
-
-    console = Mock(return_value=detached)
     signals = SimpleNamespace(SIGINT=2, SIGBREAK=21, SIG_IGN=1, signal=Mock())
     monkeypatch.setattr(acp, "signal", signals)
-    monkeypatch.setattr(acp, "sys", SimpleNamespace(platform=platform))
-    monkeypatch.setenv("BOX_AGENT_ACP_HOST_MANAGED", "1" if managed else "0")
-    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=SimpleNamespace(FreeConsole=console)), raising=False)
-    monkeypatch.setattr(ctypes, "WinError", lambda: OSError("test detach failure"), raising=False)
-    monkeypatch.setattr(acp.Config, "load", Mock(side_effect=ReachedConfig))
-    with pytest.raises(ReachedConfig):
-        await acp.run_acp_server()
-    assert console.call_count == int(platform == "win32" and managed)
-    if platform == "win32":
-        assert "BOX_AGENT_ACP_HOST_MANAGED" not in os.environ
-    if platform == "win32" and managed and not detached:
-        assert [call.args for call in signals.signal.call_args_list] == [(2, 1), (21, 1)]
-    else:
-        signals.signal.assert_not_called()
+    monkeypatch.setattr(acp, "sys", SimpleNamespace(platform=platform, stdin=stdin))
+    assert acp._ignore_windows_console_interrupts() is ignored
+    expected = [(2, 1), (21, 1)] if ignored else []
+    assert [call.args for call in signals.signal.call_args_list] == expected
 
 
 @pytest.mark.asyncio
@@ -457,8 +442,6 @@ async def test_timing_file_failure_leaves_stdout_order_and_stderr_intact(
 @pytest.mark.asyncio
 async def test_windows_stdin_feeder_bounds_allocation_before_async_parsing(monkeypatch):
     monkeypatch.setattr(stdio_compat, "_READ_LIMIT", 1024)
-    from unittest.mock import Mock
-    monkeypatch.setattr(stdio_compat, "_WindowsReadThread", Mock)
     calls = []
 
     class Input(io.BytesIO):
@@ -467,59 +450,14 @@ async def test_windows_stdin_feeder_bounds_allocation_before_async_parsing(monke
             return super().readline(size)
 
     source = Input(b"x" * 4096)
+    monkeypatch.setattr(stdio_compat.sys, "stdin", SimpleNamespace(buffer=source))
     reader = stdio_compat._StdioStreamReader()
-    stdio_compat._start_stdin_feeder(asyncio.get_running_loop(), reader, source)
+    stdio_compat._start_stdin_feeder(asyncio.get_running_loop(), reader)
     with pytest.raises(ValueError, match="limit"):
         await asyncio.wait_for(reader.readline(), 2)
     assert await asyncio.wait_for(reader.readline(), 2) == b""
     assert calls == [1025]
-    assert source.closed
-
-
-def test_windows_stdin_worker_releases_native_handle_without_another_loop_tick(monkeypatch):
-    from unittest.mock import Mock
-
-    released = Event()
-    native_thread = Mock()
-    native_thread.close.side_effect = released.set
-    monkeypatch.setattr(stdio_compat, "_WindowsReadThread", lambda: native_thread)
-    loop = asyncio.new_event_loop()
-    try:
-        stdio_compat._start_stdin_feeder(loop, Mock(), io.BytesIO())
-        assert released.wait(2), "the worker must release its handle before the loop closes"
-        native_thread.close.assert_called_once()
-    finally:
-        loop.close()
-
-
-@pytest.mark.asyncio
-async def test_windows_stdio_close_retires_partial_read_while_host_pipe_is_open(monkeypatch):
-    read_fd, write_fd = os.pipe()
-    if os.name != "nt":
-        # The host keeps the real pipe open. Supply only the Win32 read wakeup.
-        class ReadThread:
-            def cancel_read(self):
-                os.write(write_fd, b"\n")
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(stdio_compat, "_WindowsReadThread", ReadThread)
-
-    with os.fdopen(read_fd, "rb") as host_input, os.fdopen(write_fd, "wb", buffering=0) as host:
-        monkeypatch.setattr(stdio_compat.sys, "stdin", host_input)
-        reader, writer = await stdio_compat._windows_stdio_streams(asyncio.get_running_loop())
-        transport = stdio_compat.StdioTransport(reader, writer)
-        try:
-            host.write(b'{"id":1}\n{"partial":')
-            assert await asyncio.wait_for(transport.receive(), 2) == {"id": 1}
-            await asyncio.wait_for(transport.close(), 1)
-            assert reader.at_eof()
-            assert not host_input.closed
-            assert not host.closed
-            await transport.close()
-        finally:
-            writer.close()
+    assert source.tell() == 1025
 
 
 @pytest.mark.asyncio
@@ -560,16 +498,13 @@ async def test_cancelling_stdin_read_does_not_report_host_eof():
 async def test_windows_stdio_feeder_uses_eof_notification(monkeypatch):
     closed = asyncio.Event()
 
-    def feed(loop, reader, source):
-        source.close()
+    def feed(loop, reader):
         reader.feed_data(b"frame\n")
         reader.feed_eof()
 
     monkeypatch.setattr(stdio_compat, "_start_stdin_feeder", feed)
     monkeypatch.setattr(stdio_compat.platform, "system", lambda: "Windows")
-    with open(os.devnull, "rb") as stdin:
-        monkeypatch.setattr(stdio_compat.sys, "stdin", stdin)
-        reader, writer = await stdio_compat.stdio_streams_largebuf(on_eof=closed.set)
+    reader, writer = await stdio_compat.stdio_streams_largebuf(on_eof=closed.set)
     try:
         assert await reader.readline() == b"frame\n"
         assert not closed.is_set()

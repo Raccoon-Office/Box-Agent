@@ -1365,10 +1365,8 @@ class BoxACPAgent:
         skill_task: asyncio.Task | None = None,
         *,
         lite_llm: LLMClient | None = None,
-        windows_host_managed: bool = False,
     ):
         self._conn = conn
-        self._windows_host_managed = windows_host_managed
         self._plugin_runtime = create_application_runtime()
         self._config = config
         self._llm = llm
@@ -2433,7 +2431,6 @@ class BoxACPAgent:
             from box_agent.tools.connector_discovery import (
                 ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
             )
-            from box_agent.tools.jupyter_tool import JupyterSandboxTool
 
             configured_tool_version = self._config.agent.tool_interface_version
             discovery_mode = resolve_discovery_mode(
@@ -2529,6 +2526,8 @@ class BoxACPAgent:
             session_skill_loader = state.skill_loader
             tools = list(agent.tools.values())
             if runtime_environment_tool is not None:
+                from box_agent.tools.jupyter_tool import JupyterSandboxTool
+
                 def _apply_runtime_environment(values: dict[str, str]) -> dict[str, str] | None:
                     shell = None
                     for runtime_tool in agent.tools.values():
@@ -2552,8 +2551,6 @@ class BoxACPAgent:
                         runtime_environment_tool.runtime_env.update(runtime_tool.runtime_env)
                         runtime_tool.runtime_preparer = runtime_environment_tool.ensure_python
             for tool in tools:
-                if self._windows_host_managed and isinstance(tool, JupyterSandboxTool):
-                    tool.require_external_kernel()
                 # Keep Bash ownership across a rebind while other process-backed
                 # tools (notably Python kernels) remain handle-scoped.
                 if isinstance(tool, (BashTool, BashOutputTool, BashKillTool)):
@@ -6667,23 +6664,31 @@ async def _close_acp_connection(
             await asyncio.gather(closing, return_exceptions=True)
 
 
+def _ignore_windows_console_interrupts() -> bool:
+    """Keep console control events from stopping a pipe-hosted Windows ACP.
+
+    Windows delivers Ctrl+C / Ctrl+Break to every process attached to a console,
+    and asyncio cannot route them to the shutdown event there, so one tool's
+    interrupt would cancel every session in this process. A host that drives
+    ACP over pipes stops it by closing stdin or terminating the process tree;
+    an interactive console keeps its keyboard interrupt.
+    """
+    if sys.platform != "win32":
+        return False
+    stdin = sys.stdin
+    try:
+        if stdin is not None and stdin.isatty():
+            return False
+    except (OSError, ValueError):
+        pass
+    for console_signal in (signal.SIGINT, signal.SIGBREAK):
+        signal.signal(console_signal, signal.SIG_IGN)
+    return True
+
+
 async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
-    windows_host_managed = (
-        sys.platform == "win32" and os.environ.pop("BOX_AGENT_ACP_HOST_MANAGED", None) == "1"
-    )
-    if windows_host_managed:
-        # The desktop supplies three pipes and owns this process via its Job.
-        # Detach before starting any tools so their console events cannot reach ACP.
-        import ctypes
-
-        if not ctypes.windll.kernel32.FreeConsole():
-            # Keep serving on the host pipes even if the console cannot detach.
-            # This process has no interactive Ctrl+C contract with the desktop.
-            logging.getLogger(__name__).warning("Could not detach desktop ACP console: %s", ctypes.WinError())
-            for console_signal in (signal.SIGINT, signal.SIGBREAK):
-                signal.signal(console_signal, signal.SIG_IGN)
-
+    _ignore_windows_console_interrupts()
     config = config or Config.load()
     from ..desktop_memory.launch import desktop_launch_agent
 
@@ -6729,7 +6734,6 @@ async def run_acp_server(config: Config | None = None) -> None:
 
     shutdown_event = asyncio.Event()
     connection: AgentSideConnection | None = None
-    stdio_transport: StdioTransport | None = None
     server_adapter: BoxACPAgent | None = None
     llm = lite_llm = None
     mcp_task = skill_task = None
@@ -6830,24 +6834,22 @@ async def run_acp_server(config: Config | None = None) -> None:
         # Restore real stdout for ACP transport, then re-guard sys.stdout
         sys.stdout = _real_stdout
         reader, writer = await stdio_streams_largebuf(on_eof=shutdown_event.set)
-        stdio_transport = StdioTransport(reader, writer, on_disconnect=shutdown_event.set)
-        sys.stdout = sys.stderr
 
         from box_agent.hooks import load_hooks
         _hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
 
+        sys.stdout = sys.stderr
         def create_adapter(conn):
             nonlocal server_adapter
             server_adapter = BoxACPAgent(
                 conn, config, llm, base_tools, system_prompt,
                 memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader,
                 mcp_task=mcp_task, skill_task=skill_task, lite_llm=lite_llm,
-                windows_host_managed=windows_host_managed,
             )
             return server_adapter
 
         connection = AgentSideConnection(
-            create_adapter, stdio_transport,
+            create_adapter, StdioTransport(reader, writer, on_disconnect=shutdown_event.set),
             # SDK 0.12.1 gates session/resume behind this flag. The other
             # gated lifecycle methods have no handler on BoxACPAgent.
             use_unstable_protocol=True,
@@ -6898,8 +6900,6 @@ async def run_acp_server(config: Config | None = None) -> None:
                         shutdown.push_async_callback(stop_background_task, task)
                 if connection is not None:
                     shutdown.push_async_callback(_close_acp_connection, connection, writer)
-                elif stdio_transport is not None:
-                    shutdown.push_async_callback(stdio_transport.close)
                 if server_adapter is not None:
                     # Settle owned runs while the SDK sender is still live:
                     # prompt cancellation can emit final protocol updates.
