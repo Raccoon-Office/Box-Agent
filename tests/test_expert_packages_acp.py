@@ -1,8 +1,11 @@
 """Downloaded/full expert profiles share the existing ACP lifecycle."""
 import asyncio
 import copy
+import hashlib
+import io
 import json
 import socket
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -111,6 +114,71 @@ async def test_two_chats_share_package_but_not_workspace_or_expert_context(host,
     one, two = host._sessions[first.sessionId], host._sessions[second.sessionId]
     assert one is not two and one.agent.workspace_dir != two.agent.workspace_dir
     assert one.expert_context.skill_directories == two.expert_context.skill_directories
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expert", "team"])
+@pytest.mark.parametrize("required,include_lock,installed", [
+    (False, False, False), (False, True, False), (False, True, True),
+    (True, True, False), (True, True, True),
+])
+async def test_market_binding_requirement_survives_download_and_restore(
+    host, tmp_path, monkeypatch, kind, required, include_lock, installed,
+):
+    with zipfile.ZipFile(io.BytesIO(archive_bytes(kind))) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    manifest = json.loads(files[".box-agent-plugin/plugin.json"])
+    manifest["skills"].append({"key": "market", "source": "HUB", "skillId": "market-id"})
+    for agent in manifest["agents"]:
+        agent["skillBindings"].append({"key": "market", "required": required})
+    files[".box-agent-plugin/plugin.json"] = json.dumps(manifest).encode()
+    if include_lock:
+        files["dependencies.lock.json"] = json.dumps({"skills": [
+            {"key": "market", "skillId": "market-id", "slug": "market-method"},
+        ]}).encode()
+    files["files.json"] = json.dumps([
+        {"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        for name, data in files.items() if name != "files.json"
+    ]).encode()
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    body = stream.getvalue()
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+
+    async def prepare(meta):
+        return await packages.prepare_expert_meta(meta, transport=transport)
+
+    monkeypatch.setattr(acp_module, "prepare_expert_meta", prepare)
+    if installed:
+        root = tmp_path / "installed"
+        directory = root / "market-method"
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text("---\nname: market-method\ndescription: Market method\n---\nMARKET_OK")
+        (directory / ".skill-installation.json").write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
+        host._base_tools[:], host._skill_loader = create_skill_tools(sources=[(root, "user")])
+    key = "expert" if kind == "expert" else "expert_team"
+    params = {"cwd": str(tmp_path / "workspace"), key: reference(body)}
+    if required and not installed:
+        with pytest.raises(RequestError) as error:
+            await host.new_session(**params)
+        assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+        assert error.value.data["dependencies"][0]["name"] == "market-method"
+        assert not host._sessions
+        return
+    response = await host.new_session(**params)
+    for restore in (None, host.load_session, host.resume_session):
+        if restore is not None:
+            await restore(session_id=response.sessionId, **params)
+        state = host._sessions[response.sessionId]
+        profiles = ([state.expert_context.expert] if kind == "expert" else
+                    [state.expert_context.team.leader, *state.expert_context.team.members])
+        for profile in profiles:
+            assert ("market-method" in profile.default_skills) is required
+            assert ("market-method" in profile.optional_skills) is (include_lock and not required)
+        if installed:
+            assert (await state.agent.tools["get_skill"].execute("market-method")).success
 
 
 @pytest.mark.asyncio
@@ -421,8 +489,9 @@ async def test_cold_legacy_restore_cannot_enable_cli_discovery_from_new_metadata
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
 @pytest.mark.parametrize("team_key", ["expert_team", "expertTeam"])
-async def test_missing_required_team_member_is_rejected_without_replacing_live_session(
-    host, tmp_path, entry, team_key,
+@pytest.mark.parametrize("failure", ["missing-member", "missing-title", "missing-member-id"])
+async def test_invalid_required_team_workstream_is_rejected_without_replacing_live_session(
+    host, tmp_path, entry, team_key, failure,
 ):
     team = {
         "id": "custom-review-team", "name": "Custom review team", "executionMode": "orchestrated",
@@ -437,17 +506,25 @@ async def test_missing_required_team_member_is_rejected_without_replacing_live_s
     cwd = str(tmp_path / "workspace")
     first = await host.new_session(cwd=cwd, session_id="stable-team", **{team_key: team})
     original = host._sessions[first.sessionId]
+    before = original.agent.session_log.path.read_bytes()
     incomplete = copy.deepcopy(team)
-    incomplete["members"].pop()
+    if failure == "missing-member":
+        incomplete["members"].pop()
+    else:
+        field = "title" if failure == "missing-title" else "memberId"
+        incomplete["orchestration"]["workstreams"][-1].pop(field)
     call = getattr(host, entry)
     params = {"cwd": cwd, "session_id": "stable-team" if entry == "new_session" else first.sessionId}
     with pytest.raises(RequestError) as error:
         await call(**params, **{team_key: incomplete})
     assert error.value.code == -32602
-    assert error.value.data["code"] == "EXPERT_TEAM_INVALID_MEMBER_REFERENCE"
+    expected_code = ("EXPERT_TEAM_INVALID_MEMBER_REFERENCE" if failure == "missing-member"
+                     else "EXPERT_TEAM_INVALID_WORKSTREAM")
+    assert error.value.data["code"] == expected_code
     assert error.value.data["teamId"] == "custom-review-team"
-    assert error.value.data["missingMemberIds"] == ["reviewer"]
+    assert error.value.data["missingMemberIds"] == (["reviewer"] if failure == "missing-member" else [])
     assert host._sessions[first.sessionId] is original
+    assert original.agent.session_log.path.read_bytes() == before
     assert len(host._sessions) == 1
     continued = await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "continue"}])
     assert continued.stopReason == "end_turn"
@@ -456,6 +533,45 @@ async def test_missing_required_team_member_is_rejected_without_replacing_live_s
     current = host._sessions[first.sessionId]
     assert current is not original
     assert [member.id for member in current.expert_context.team.members] == ["writer", "reviewer"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_required_workstream_keeps_acp_connection_usable(host, tmp_path):
+    from acp.agent.connection import AgentSideConnection
+    from acp.client.connection import ClientSideConnection
+    from box_agent.acp.stdio_compat import StdioTransport
+
+    local, remote = socket.socketpair()
+    client_reader, client_writer = await asyncio.open_connection(sock=local)
+    agent_reader, agent_writer = await asyncio.open_connection(sock=remote)
+    server = AgentSideConnection(host, StdioTransport(agent_reader, agent_writer))
+    client = ClientSideConnection(Connection(), StdioTransport(client_reader, client_writer))
+    try:
+        await asyncio.wait_for(client.initialize(protocol_version=1), 10)
+        cwd = str(tmp_path / "workspace")
+        first = await client.new_session(cwd=cwd, session_id="wire-team")
+        original = host._sessions[first.sessionId]
+        with pytest.raises(RequestError) as error:
+            await asyncio.wait_for(client.new_session(cwd=cwd, session_id="wire-team", expert_team={
+                "id": "team", "name": "Team", "leader": {"id": "lead", "name": "Lead"},
+                "orchestration": {"workstreams": [{"memberId": "lead", "required": True}]},
+            }), 10)
+        assert error.value.code == -32602
+        assert error.value.data["code"] == "EXPERT_TEAM_INVALID_WORKSTREAM"
+        assert host._sessions[first.sessionId] is original
+        second = await asyncio.wait_for(client.new_session(cwd=cwd, session_id="other-team"), 10)
+        for session_id in (first.sessionId, second.sessionId):
+            response = await asyncio.wait_for(client.prompt(
+                session_id=session_id, prompt=[{"type": "text", "text": "continue"}],
+            ), 10)
+            assert response.stopReason == "end_turn"
+    finally:
+        await client.close()
+        await server.close()
+        client_writer.close()
+        agent_writer.close()
+        await asyncio.gather(client_writer.wait_closed(), agent_writer.wait_closed())
+
 
 @pytest.mark.asyncio
 async def test_incomplete_team_cannot_create_a_new_session(host, tmp_path):
