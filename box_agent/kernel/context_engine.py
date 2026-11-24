@@ -9,6 +9,7 @@ import logging
 import math
 import re
 from collections import Counter
+from collections.abc import Awaitable
 from typing import Any, Callable, Final
 
 from ..cache_fingerprint import sha256_fingerprint
@@ -871,7 +872,7 @@ async def _maybe_summarize(
     before_summary: Callable[[int], None] | None = None,
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None,
     request_headroom_tokens: int | None = None,
-    compacted_history_projector: Callable[[list[Message]], list[Message]] | None = None,
+    compacted_history_projector: Callable[[list[Message]], list[Message] | Awaitable[list[Message]]] | None = None,
     compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None,
     calibration: ContextTokenCalibration | None = None,
 ) -> CompactionOutcome:
@@ -1025,7 +1026,7 @@ async def _maybe_summarize(
         label="summary",
     )
 
-    def build_compacted_messages(summary_text: str) -> list[Message]:
+    async def build_compacted_messages(summary_text: str) -> list[Message]:
         rebuilt = [
             messages[0],
             *([earlier_user_message] if earlier_user_message is not None else []),
@@ -1039,10 +1040,11 @@ async def _maybe_summarize(
         if runtime_state is not None:
             rebuilt.append(runtime_state)
         if compacted_history_projector is not None:
-            rebuilt = compacted_history_projector(rebuilt)
+            projected = compacted_history_projector(rebuilt)
+            rebuilt = await projected if inspect.isawaitable(projected) else projected
         return rebuilt
 
-    new_messages = build_compacted_messages(bounded_summary)
+    new_messages = await build_compacted_messages(bounded_summary)
     # Use the same request estimator as Context.prepare_request.  With the
     # pre-compaction usage metadata cleared above this deliberately falls back
     # to measuring the rebuilt messages and offered tool schemas.
@@ -1059,7 +1061,7 @@ async def _maybe_summarize(
             summary_limit,
             label="summary",
         )
-        new_messages = build_compacted_messages(bounded_summary)
+        new_messages = await build_compacted_messages(bounded_summary)
         estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
     # A 2,000-character summary is a preferred floor, not a reason to abort a
     # task whose protected history and restored resources can otherwise fit.
@@ -1071,14 +1073,14 @@ async def _maybe_summarize(
         if len(bounded_summary) <= summary_limit:
             continue
         bounded_summary = _bound_text_middle(summary, summary_limit, label="summary")
-        new_messages = build_compacted_messages(bounded_summary)
+        new_messages = await build_compacted_messages(bounded_summary)
         estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
     if estimated_after > token_limit and earlier_user_message is not None:
         # Small windows may have less room than the Earlier User Messages cap.
         # The full originals remain in durable metadata for later compactions.
         available = max(0, count_tokens(earlier_user_message.content) - (estimated_after - token_limit))
         earlier_user_message = _earlier_user_message(earlier_user_texts, count_tokens, token_limit=available)
-        new_messages = build_compacted_messages(bounded_summary)
+        new_messages = await build_compacted_messages(bounded_summary)
         estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
     if estimated_after > token_limit:
         mode = "blocked"
@@ -1124,6 +1126,7 @@ def _is_compaction_metadata(msg: Message) -> bool:
     if msg.role != "user" or not isinstance(msg.content, str):
         return False
     if msg.source == "runtime" and (msg.earlier_user_messages is not None
+                                    or msg.skill_compaction_ranges is not None
                                     or msg.content.startswith(_EARLIER_USER_MARKER)):
         return True
     return msg.content.startswith(

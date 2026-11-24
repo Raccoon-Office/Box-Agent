@@ -1180,9 +1180,15 @@ async def _run_agent_loop_impl(
         if initial_context_transition is not None:
             summary_projector = getattr(context_engine, "preview_summary", summary_projector)
 
-        def project_compacted_history(history):
+        async def project_compacted_history(history):
             if getattr(tool_exposure_manager, "stable_prefix", False):
                 history = tool_exposure_manager.restore_compacted_descriptions(history)
+            aproject = getattr(context_engine, "acompact_history", None)
+            if callable(aproject):
+                parameters = inspect.signature(aproject).parameters
+                if "token_limit" in parameters:
+                    return await aproject(messages, history, token_limit=history_token_limit)
+                return await aproject(messages, history)
             project = getattr(context_engine, "compact_history", None)
             if callable(project):
                 history = project(messages, history)

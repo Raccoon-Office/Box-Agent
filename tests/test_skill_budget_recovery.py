@@ -98,7 +98,7 @@ async def test_skill_read_uses_guarded_history_and_reserves_late_followup(runtim
         Message(role="system", content=place_memory_block(
             "BASE", "--- MEMORY START ---\n" + preload + "\n--- MEMORY END ---", reserve=True,
         )),
-        Message(role="user", content="X" * 259000),
+        Message(role="user", content="X" * 93500),
     ]
     request = engine.prepare_request(history, prepared_tools=prepared_tools, token_limit=90000)
 
@@ -187,7 +187,7 @@ def test_consecutive_skill_pages_charge_schemas_images_overlays_and_pending_enve
     transient = Message(role="user", content=[{
         "type":"input_image", "media_type":"image/png", "data":"aGVsbG8=", "width":1, "height":1,
     }])
-    engine.prepare_request(history, prepared_tools=prepare_tools([tool]), token_limit=7000, output_tokens=64000,
+    engine.prepare_request(history, prepared_tools=prepare_tools([tool]), token_limit=9500, output_tokens=64000,
         extra_messages=(extra,), transient_message=transient, transient_tokens=2500)
     calls = [ToolCall(id=f"read-{index}", type="function", function=FunctionCall(
         name="get_skill", arguments={"skill_name":"demo", "offset":index * 20})) for index in range(3)]
@@ -201,7 +201,7 @@ def test_consecutive_skill_pages_charge_schemas_images_overlays_and_pending_enve
     assert page.raw_output["skill_reference"]["has_more"]
     actual = _fallback_context_estimate([*history, extra, transient, Message(role="user", content=followup)], {tool.name:tool})
     declared_reserve = 2500 - _fallback_context_estimate([transient], {})
-    assert actual + declared_reserve + 1024 <= 7000
+    assert actual + declared_reserve + 1024 <= 9500
 
 
 class Provider:
@@ -263,7 +263,7 @@ def crowded_history(runtime, *, prior_read=False, summary_fits=False):
 
 
 @pytest.mark.asyncio
-async def test_loop_compacts_once_and_reprojects_without_trusting_old_read_facts(runtime, monkeypatch):
+async def test_loop_compacts_once_and_reuses_restored_skill_text(runtime, monkeypatch):
     from box_agent.kernel import context_engine
 
     # Force the summary-only instruction over budget independently of the
@@ -292,18 +292,17 @@ async def test_loop_compacts_once_and_reprojects_without_trusting_old_read_facts
         skill_engine=runtime, token_limit=limit, max_steps=1, hooks=[hook])]
     assert len(provider.requests) == 1
     assert projections[0].blocked_reason
-    assert projections[-1].references and not projections[-1].blocked_reason
+    assert not projections[-1].references and not projections[-1].blocked_reason
     assert not failed_commits
-    assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
-    # Adding the summary instruction would exceed the safe input budget;
-    # the bounded fallback must recover without sending that request.
-    assert provider.summary_calls == 0
+    compaction, = [event for event in events if isinstance(event, SummarizationEvent)]
+    # The oversized first candidate is trimmed before the sole summary call.
+    assert compaction.head_truncated and provider.summary_calls == 1
     assert len([event for event in events if isinstance(event, StepStart)]) == 1 and hook.steps == [1]
     assert not any(isinstance(event, ErrorEvent) for event in events)
     assert "EXACT_METHOD_BODY" in str(provider.requests[0])
     assert not any(message.tool_call_id == "old-read" for message in provider.requests[0])
     assert _fallback_context_estimate(provider.requests[0], {tool.name:tool}) + 1024 <= limit
-    assert runtime.turn_deliveries["demo"]["complete"]
+    assert not runtime.turn_deliveries  # The restored body is not another invocation.
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from contextlib import nullcontext
 from datetime import date
+import inspect
 import logging
 from time import perf_counter
 from typing import Any, Callable
@@ -210,17 +211,40 @@ class DefaultContextEngine:
     def tool_reader(self):
         return self._read_reference if self.references is not None else None
 
-    def compact_history(self, original: list[Message], compacted: list[Message]) -> list[Message]:
+    def compact_history(
+        self, original: list[Message], compacted: list[Message], *, token_limit: int | None = None,
+    ) -> list[Message]:
         """Apply resource retention only after the existing compaction decision."""
         if self.references is not None:
             definitions = self.prepared_tools.definitions if self.prepared_tools is not None else ()
-            budget = skill_reference_budget_chars(compacted, definitions, self._token_limit,
-                                                 self._output_tokens, llm=self.llm)
-            compacted = self.references.compact_history(original, compacted, budget_chars=budget)
+            limit = self._token_limit if token_limit is None else min(self._token_limit, token_limit)
+
+            def budget(messages: list[Message]) -> int:
+                return skill_reference_budget_chars(messages, definitions, limit, llm=self.llm) // 4
+
+            compacted = self.references.compact_history(
+                original, compacted, budget_tokens=budget, count_text_tokens=context_text_counter(self.llm),
+            )
         latest_date = _latest_current_date(original)
         if latest_date is not None and _latest_current_date(compacted) != latest_date:
             return [*compacted, latest_date]
         return compacted
+
+    async def acompact_history(
+        self, original: list[Message], compacted: list[Message], *, token_limit: int | None = None,
+    ) -> list[Message]:
+        """Keep source reads bounded and off the event loop on the compaction path."""
+        runtime = self.references.runtime if self.references is not None else None
+        validate = getattr(runtime, "avalidate_references", None)
+        names = self.references.source_names(original) if self.references is not None else ()
+        validation = None
+        if names and callable(validate):
+            kwargs = {"allow_stale": False} if "allow_stale" in inspect.signature(validate).parameters else {}
+            validation = await validate(names, **kwargs)
+        with runtime.reference_scope(validation) if validation is not None else nullcontext():
+            if token_limit is not None and getattr(self.compact_history, "__func__", None) is DefaultContextEngine.compact_history:
+                return self.compact_history(original, compacted, token_limit=token_limit)
+            return self.compact_history(original, compacted)
 
     def compaction_source(self, messages: list[Message]) -> list[Message]:
         """Keep method bodies out of both generated and deterministic summaries."""
@@ -382,6 +406,7 @@ class DefaultContextEngine:
                 can_page=self._can_page,
                 defer_delivery=True,
                 count_text_tokens=context_text_counter(self.llm),
+                project_system=False,
                 budget_chars=skill_reference_budget_chars(
                     full_request, prepared_tools.definitions,
                     token_limit - self._transient_reserve_tokens, output_tokens, llm=self.llm,

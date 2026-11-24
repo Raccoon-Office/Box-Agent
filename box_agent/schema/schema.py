@@ -146,6 +146,9 @@ class Message(BaseModel):
     # Original user texts carried across compaction boundaries by the Session Log.
     # Only the bounded rendering in content is sent to the model.
     earlier_user_messages: list[str] | None = None
+    # Verified source identity and line/text spans in an [Invoked Skills]
+    # runtime message. Persist for coverage checks after Session Log replay.
+    skill_compaction_ranges: tuple[dict[str, Any], ...] | None = None
     # Request-only multimodal overlays may carry raw image bytes to a provider
     # without persisting them in durable traces. Excluded from serialization so
     # this remains an internal observability directive.

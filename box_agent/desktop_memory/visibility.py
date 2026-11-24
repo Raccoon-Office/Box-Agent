@@ -174,7 +174,7 @@ class DesktopInputGuard(CoreVisibilityGuard):
         # Connector recovery already projects the visible snapshot into content;
         # its per-turn persistence metadata is never sent to the provider.
         serialized = [message.model_dump(exclude_none=True,
-                                         exclude={"host_connector_status", "earlier_user_messages"})
+                                         exclude={"host_connector_status", "earlier_user_messages", "skill_compaction_ranges"})
                       for message in messages]
         for message, data in zip(messages, serialized):
             if isinstance(message.content, list):
