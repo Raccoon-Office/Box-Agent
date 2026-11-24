@@ -8,6 +8,7 @@ change the host's profile.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,75 @@ def _profiles(meta: Mapping[str, Any], context: ExpertSessionContext):
     )
     for profile, raw in zip(context.team.members, raw_members):
         yield profile, raw, raw.get("packageSnapshot", team.get("packageSnapshot"))
+
+
+def expert_market_skill_bindings(
+    raw_meta: Mapping[str, Any], context: ExpertSessionContext, *, required_only: bool = False,
+) -> dict[str, frozenset[str]]:
+    """Keep selected market identities on the session loader, including optional Skills."""
+    identities: dict[str, set[str]] = {}
+    for profile, raw, _ in _profiles(raw_meta, context):
+        names = {*getattr(profile, "required_skills", ()), *profile.default_skills}
+        if not required_only:
+            names.update(getattr(profile, "optional_skills", ()))
+        declared = raw.get("skillBindings")
+        for binding in declared if isinstance(declared, list) else ():
+            if (not isinstance(binding, dict) or binding.get("source") != "MARKET"
+                    or not isinstance(binding.get("slug"), str) or binding["slug"] not in names):
+                continue
+            skill_id = binding.get("skillId")
+            # An invalid optional identity is unavailable, never a same-name fallback.
+            identities.setdefault(binding["slug"], set()).add(skill_id if isinstance(skill_id, str) else "")
+    return {name: frozenset(values) for name, values in identities.items()}
+
+
+def resolve_optional_market_conflicts(
+    raw_meta: Mapping[str, Any], context: ExpertSessionContext,
+) -> ExpertSessionContext:
+    """Omit optional bindings that conflict with one required market identity.
+
+    Readers address one session-wide Skill by name. Keep the required identity
+    and report the omitted optional contract rather than substituting its body.
+    Required/required and optional/optional conflicts remain fail-closed.
+    """
+    required = expert_market_skill_bindings(raw_meta, context, required_only=True)
+    replacements = {}
+    unavailable = list(context.unavailable_optional_skills)
+    for profile, raw, _ in _profiles(raw_meta, context):
+        optional = set(profile.optional_skills) - {*getattr(profile, "required_skills", ()), *profile.default_skills}
+        conflicts = {}
+        declared = raw.get("skillBindings")
+        for binding in declared if isinstance(declared, list) else ():
+            if not isinstance(binding, dict) or binding.get("source") != "MARKET":
+                continue
+            name = binding.get("slug")
+            if not isinstance(name, str) or name not in optional:
+                continue
+            identities = required.get(name, ())
+            required_id = next(iter(identities)) if len(identities) == 1 else None
+            if required_id and binding.get("skillId") != required_id:
+                conflicts[name] = {
+                    "expertId": profile.id, "expertName": profile.name, "name": name,
+                    "skillId": binding["skillId"] if isinstance(binding.get("skillId"), str) else "",
+                    "requiredSkillId": required_id,
+                    "reason": (
+                        "Optional binding conflicts with the required market identity. "
+                        "Do not substitute the same-name Skill for this optional binding."
+                    ),
+                }
+        if conflicts:
+            replacements[id(profile)] = replace(
+                profile, optional_skills=[name for name in profile.optional_skills if name not in conflicts],
+            )
+            unavailable.extend(conflicts.values())
+    if not replacements:
+        return context
+    team = context.team
+    if team is not None:
+        team = replace(team, leader=replacements.get(id(team.leader), team.leader),
+                       members=[replacements.get(id(member), member) for member in team.members])
+    return replace(context, expert=replacements.get(id(context.expert), context.expert), team=team,
+                   unavailable_optional_skills=unavailable)
 
 
 def _tool_names(tools: Mapping[str, Any] | Iterable[Any]) -> set[str]:
@@ -148,14 +218,14 @@ def validate_expert_dependencies(
                     disabled = skill_loader.get_skill(name, include_disabled=True) if skill_loader is not None else None
                     failure = ("disabled", "The selected Skill is not enabled for this session.") if disabled is not None else (
                         "missing", "The selected Skill is not available in the cloud runtime.")
+                elif source == "MARKET" and not is_installed_market_skill(selected, binding.get("skillId")):
+                    failure = "unavailable", "The selected Skill has no matching market installation identity."
                 elif selected.broken:
                     failure = "broken", "The selected Skill cannot be loaded."
                 elif source == "BUILTIN" and selected.source != "builtin":
                     failure = "conflict", "A same-name Skill from another source cannot satisfy the builtin binding."
                 elif source == "BUNDLED":
                     failure = _bundled_binding(name, binding, snapshot, expert_context, skill_loader, selected)
-                elif source == "MARKET" and not is_installed_market_skill(selected, binding.get("skillId")):
-                    failure = "unavailable", "The selected Skill has no matching market installation identity."
                 if failure is None and selected is not None:
                     try:
                         for dependency in resolve_required_skills(skill_loader, [name]):

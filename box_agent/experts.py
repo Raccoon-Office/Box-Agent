@@ -722,6 +722,7 @@ class ExpertSessionContext:
     skill_directories: list[Path] = field(default_factory=list)
     skill_bindings_by_directory: dict[Path, frozenset[str]] = field(default_factory=dict)
     skill_bindings_by_path: dict[Path, str] = field(default_factory=dict)
+    unavailable_optional_skills: list[dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def from_meta(cls, raw_meta: Any) -> "ExpertSessionContext | None":
@@ -792,6 +793,12 @@ class ExpertSessionContext:
             sections.append(self.expert.render_prompt())
         if self.team:
             sections.append(self.team.render_prompt())
+        if self.unavailable_optional_skills:
+            sections.append("## Unavailable optional expert skills\n" + "\n".join(
+                f"- {item['expertName']} (`{item['expertId']}`): `{item['name']}` "
+                f"(skillId `{item['skillId'] or '<invalid>'}`; required skillId `{item['requiredSkillId']}`). "
+                + item["reason"] for item in self.unavailable_optional_skills
+            ))
         return "\n\n".join(sections)
 
     def to_metadata(self) -> dict[str, object]:
@@ -800,6 +807,8 @@ class ExpertSessionContext:
             meta["expert"] = self.expert.to_metadata()
         if self.team:
             meta["expert_team"] = self.team.to_metadata()
+        if self.unavailable_optional_skills:
+            meta["unavailable_optional_skills"] = self.unavailable_optional_skills
         return meta
 
     def skill_query(self) -> str:
