@@ -2,7 +2,7 @@
 
 **交付目标**　用户在云会话中把任务交给一台已授权的在线桌面。桌面创建本地 Box-Agent 子会话，在本地历史标记「云端委派」，向云端返回接单、等待和最终结果。用户可以在原桌面补充信息，也可以在有权访问父会话的端上批准一次受限文件操作。
 
-**从哪里开始**　桌面实现见 raccoon-lab MR !1276（`feat/device-subagent-cloud` → `feat/cloud-computer`），Box-Agent 实现见 PR #291（`feat/device-subagent-main` → `main`）。联调使用两份评审单的最新提交。文中桌面路径相对 `raccoon-lab/apps/office-desktop/`。
+**从哪里开始**　桌面实现见 raccoon-lab MR !1276（`feat/device-subagent-cloud` → `feat/cloud-computer`），Box-Agent 实现见 PR #291（`feat/device-subagent-main` → `main`）。本轮 session 操作需使用包含相同协议修订的两份源码和独立 mock。文中桌面路径相对 `raccoon-lab/apps/office-desktop/`。
 
 ## 1. 已有实现与接手事项
 
@@ -17,19 +17,19 @@
 
 ## 2. 从注册到上报
 
-桌面在已认证的 WS 连接上发送 JSON-RPC 2.0，生产使用 `wss://`。同账号下的另一台设备即使同名，也不能接管仍被占用的设备名。以下示例使用虚构主机名 `PC-A`，实际由 `resolveDeviceRouterId()` 从 `os.hostname()` 取得。客户端只上报当前可执行的操作；`list` 和 `subagent.wait` 交给 2c。
+桌面在已认证的 WS 连接上发送 JSON-RPC 2.0，生产使用 `wss://`。同账号下的另一台设备即使同名，也不能接管仍被占用的设备名。以下示例使用虚构主机名 `PC-A`，实际由 `resolveDeviceRouterId()` 从 `os.hostname()` 取得。注册报文在 capabilities 中列出能力组。跨端工具中只有 `list` 由 2c 生成结果，其他业务结果由桌面生成。
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"_device/register","params":{"version":1,"deviceId":"PC-A","capabilities":["artifact.upload","session.list","session.read","subagent.start","subagent.send","subagent.get","subagent.cancel"]}}
+{"jsonrpc":"2.0","id":1,"method":"_device/register","params":{"version":1,"deviceId":"PC-A","capabilities":["session.history","session.execute","artifact.upload"]}}
 ```
 
 ```json
 {"jsonrpc":"2.0","id":1,"result":{"registered":true}}
 ```
 
-上例为已接入文件服务的桌面。注册时由 `deviceRpcPeer.ts` 根据 driver 实际实现生成清单，只有配置了 `uploadArtifact` 才包含 `artifact.upload`。每次重连先等本次注册回执，再投递 journal 中未确认的事件。
+上例为已接入文件服务的桌面。注册时由桌面按 driver 实际可执行的能力生成完整快照：同时支持列举和读取授权历史才报 `session.history`；支持接单、续发、查轮次、等待、取消和上报才报 `session.execute`；接入上传服务才报 `artifact.upload`。三个组独立。每次重连先等本次注册回执，再投递 journal 中未确认的事件。
 
-1. **解析请求**。2c 转发 `_device/request`。`params.sessionId` 是云父会话，`params.parentTurnId` 是派发父轮，`params.deviceId` 必须指向本机。以 `operation` 选择实现；`session.list/read` 返回授权范围内的历史，`start/send/get/cancel` 操作子会话。线上的方法保留前导下划线。
+1. **解析请求**。2c 转发 `_device/request`。`params.sessionId` 是云父会话，`params.parentTurnId` 是派发父轮，`params.deviceId` 必须指向本机。按 `params.operation` 精确分派。`session.list`、`session.read` 返回授权历史；`session.start`、`session.send` 发起子轮；`session.get_turn`、`session.wait`、`session.cancel` 作用于明确指定的轮次。线上的方法保留前导下划线。
 2. **分配目标**。`start` 创建本地子会话 ID 和逻辑子轮 ID；`send` 复用已授权的会话，分配新子轮。有在途任务返回 `SESSION_BUSY`。将请求和回执写入按账号、设备隔离的 journal 后再接单。相同 `operationId`、相同请求重投时返回相同结果，写入失败时留给原请求重试。
 3. **运行本地 ACP**。原生宿主在 `initialize.params._meta` 声明 `{"deviceDelegationReceiver":{"version":1}}`。用 `createExternalSession` 建立或复用实际 ACP 会话，透传下面的委派元数据。`remote-device-01` 是桌面对外 ID，`acp-child-01` 是本地 ACP ID。普通用户在本地自行发起的会话沿用原有路径。
 4. **上报状态**。每个逻辑子轮独立分配递增 `seq`，从 1 起，初始接单尚未产生事件。`_device/event` 是带 ID 的请求；收到 `recorded:true` 后删除本地相应待投递项。`get` 返回本机快照；`cancel` 的 `accepted` 只是接收取消请求，最终以子轮事件为准。
@@ -37,7 +37,7 @@
 例如，桌面收到的 start 请求、返回的接单结果和发给本地 ACP 的首轮请求如下。`operationId` 贯穿接单和事件；查询、取消用接单返回的 `deviceId/sessionId/turnId`。
 
 ```json
-{"jsonrpc":"2.0","id":11,"method":"_device/request","params":{"version":1,"sessionId":"cloud-1","parentTurnId":"c1","deviceId":"PC-A","operation":"subagent.start","operationId":"start-01","args":{"instruction":"生成 report.txt；缺少项目编号时先询问"}}}
+{"jsonrpc":"2.0","id":11,"method":"_device/request","params":{"version":1,"sessionId":"cloud-1","parentTurnId":"c1","deviceId":"PC-A","operation":"session.start","operationId":"start-01","args":{"instruction":"生成 report.txt；缺少项目编号时先询问"}}}
 ```
 
 ```json
@@ -46,6 +46,31 @@
 
 ```json
 {"jsonrpc":"2.0","id":31,"method":"session/prompt","params":{"sessionId":"acp-child-01","prompt":[{"type":"text","text":"生成 report.txt；缺少项目编号时先询问"}],"_meta":{"turn_id":"t1","deviceDelegation":{"parentSessionId":"cloud-1","operationId":"start-01","parentTurnId":"c1"}}}}
+```
+
+### 客户端响应设备请求
+
+- **桌面路由和执行宿主**（`deviceRpcPeer.ts`、`deviceSubagentHost.ts`）：按[协议映射表](DEVICE_DELEGATION_BACKEND_HANDOFF_CN.md#本轮-acp-报文差异)切换五个执行操作的分派、接单去重和取消处理。同机与跨端共用分派入口。新增桌面侧 `session.wait` 处理。每次只接收本机的一组 targets；校验设备一致、父会话归属及子轮身份，失败时拒绝整组。get 与 wait 复用同一个本机快照读取路径，返回 `source:"device"`。
+- **ACP 错误回传**。桌面 RPC 适配层保留 JSON-RPC 错误的 `code/message/data`。已经收到并处理过的指令继续按本机实际结果回包。2c 在桌面收件前确认离线或在转发后失去回执时，分别报告该次投递的状态。
+- **wait 的生命周期**：对 journal 的已提交状态检查就绪，订阅变化时防止检查与订阅之间漏事件（例如先订阅再复查）。终态、等待输入或审批立即返回；业务超时前再读一次完整快照。断线、宿主关闭、超时或响应后释放订阅和定时器，只结束等待。恢复连接时重新注册并补投未确认事件。
+- **异常验收**：模拟客户端仍在线但从不回包、接单后回包丢失、上传中断和 Stop 遇到离线。核对父 loop 能收到工具错误、同一 operationId 只执行一次、子轮终态始终基于桌面证据。再跑同机断开 2c 的用例。报文及截止规则见[ACP 投递错误与发起端截止时间](DEVICE_DELEGATION_BACKEND_HANDOFF_CN.md#acp-投递错误与发起端截止时间)。
+
+### 同机会话协作
+
+同机 A 操作 B 的路径为：A 通过 ACP 反向发出 `_device/request` → 桌面主进程校验来源、设备和目标归属 → 复用设备执行宿主。启动和续发由 BoxAgentManager 在 B 的 ACP 会话中投递，取消定位到 B 的目标子轮。授权历史查询直接复用桌面会话库。桌面将 `_device/event` 投给来源 A，由其 Harness 处理状态与结果。本地开发时设置 `RACCOON_DEVICE_LOCAL_DELEGATION=1` 并使用已登录的桌面账号。独立 mock 仓的 `node examples/box-desktop-smoke.mjs --local` 用两个真实 ACP 进程验证设备发现、派发、等待、读取结果及父子 Session Log；该用例无需启动 backend。
+
+同机沿用同一份模型工具参数。本地宿主处理 A 的 `device_list` 时可直接提供本机设备及其实际能力，无需连接 2c。选定本机后传清洗后的真实 `deviceId`；若同时展示远端设备，由宿主标识哪一项是当前设备。模型调用 `session_send` 的示例：
+
+```json
+{"deviceId":"PC-A","sessionId":"remote-device-01","instruction":"沿用上一轮的口径再算一次"}
+```
+
+桌面路由使用当前登录账号及设备绑定核对目标；同机与跨端均沿用桌面对外的子会话 ID。ACP 反向请求外层 `params.sessionId` 属于 A，`params.args.sessionId` 指向 B，桌面负责映射 B 的实际 ACP 会话。查轮次、等待和取消使用接单回执中的真实设备、子会话和子轮 ID。查询能力与执行授权分别校验；同机也只开放当前授权范围。验收时断开 2c，验证同机接单、等待和事件回执仍可完成；指定其他设备时不得误投本机。
+
+**父轮自动续跑。** 桌面按 `_device/turn started` 的 `sessionId,turnId` 登记续跑轮。上一轮仍在归档时，新轮也可能立即发出 `session.send`。两轮须分别归属，旧轮收尾只能清理自己的状态。接到同一 turnId 的 `finished` 后，通过桌面既有的终态事件发布结果。订阅方按续跑自己的 `promptId` 接收，错过通知时可在当前会话的内存缓存中通过 `getPromptOutcome` 查询最近的终态。成功、暂停和模型报告的失败按普通 PromptResponse 解析，取消使用 `result.stopReason:"cancelled"`，请求异常使用 `params.error`。
+
+```json
+{"jsonrpc":"2.0","method":"_device/turn","params":{"version":1,"sessionId":"parent-A","turnId":"device-wake-01","phase":"finished","result":{"stopReason":"end_turn","_meta":{"usage":{"totalTokens":120}}}}}
 ```
 
 ## 3. 子轮等答复，与子轮等授权
@@ -94,7 +119,7 @@
 | WS 临时断开，桌面进程仍在 | 正在运行的子任务可继续。本地保存事件，重连注册成功后按序重投。握手/回执超时有界；不要因为某次请求超时就合成子任务失败 |
 | 桌面进程重启 | 从 journal 恢复接单和待投递事件。`running` 且 `deliveryStatus:"pending"` 的子轮继续交付已登记的产物。其他仍活跃的子轮登记为 `failed`，避免重跑可能已有副作用的工具。切账号时先退役旧 driver，账号与设备隔离 journal，存在 Office 身份时也纳入隔离键 |
 | 本地执行或上传期间 | 本地 ACP prompt 使用 BoxAgentManager 已有的防空闲挂起机制；文件上传通过 `withPowerSaveBlocker('device-upload', …)` 覆盖传输期。并发上传应在最后一项结束后释放，失败路径也要释放。在打包客户端验收操作系统的实际休眠行为 |
-| 用户点击云端 Stop | 云端以点击时的父轮 ID 发 `_device/cancel_turn`。桌面收到的取消是 `subagent.cancel`，只操作指定设备、会话和子轮。若正处于异步准备阶段，也须挡住随后发送的 ACP prompt |
+| 用户点击云端 Stop | 云端以点击时的父轮 ID 发 `_device/cancel_turn`。桌面收到的取消是 `session.cancel`，只操作指定设备、会话和子轮。若正处于异步准备阶段，也须挡住随后发送的 ACP prompt |
 | 产物和历史 | 文件上报使用 `result.artifactRefs`，跨端取件及云端引用见后文“设备产物按需交付”。首轮本机委派在 Session Log 的 `source` 为 `runtime`，人工补答为 `user`，云父轮自动续跑为 `runtime`。读取或回放时保留这些来源 |
 
 ## 5. 联调与验收
@@ -120,7 +145,7 @@
 | `DEVICE_TEST_MOCK` | 含 `server.mjs` 的独立 mock 根目录。默认查找桌面工作树的同级目录 `device-delegation-mock` |
 | `DEVICE_TEST_ROOT` | 本次独用的短路径空目录，保存 journal、聊天库、两侧 Session Log 和 `evidence.json` |
 
-读取 `evidence.json` 时，检查 `passed`、`ownedProcessesCleanedUp` 以及 `sourceEvidence` 中父子两项的 `result._meta.replayed`。本次源码联调覆盖八项基础操作、丢回执重投、跨端审批、取消和双端回放，记录了 9 次子轮执行及 26 条父会话事件回执。次数用于定位这次记录；验收依据是断言和回放内容。整链使用确定性模型和实际 ACP 进程，桌面的原生续跑写入另由 `tests/device/device-subagent.test.mjs` 验证。
+读取 `evidence.json` 时，检查 `passed`、`ownedProcessesCleanedUp` 以及 `sourceEvidence` 中父子两项的 `result._meta.replayed`。改造前的源码联调覆盖八项基础操作、丢回执重投、跨端审批、取消和双端回放，记录了 9 次子轮执行及 26 条父会话事件回执。次数用于定位这次记录；验收依据是断言和回放内容。整链使用确定性模型和实际 ACP 进程，桌面的原生续跑写入另由 `tests/device/device-subagent.test.mjs` 验证。
 
 需要验证真实模型审批时，在同一目录运行 `node scripts/test/device-approval-live.mjs allow`，复用上述 Box、Python 和 mock 路径。此入口读取已配置的模型认证并产生模型调用，默认模型为 `sn-deepseek-v4-1-flash-1017-p`。最近一次整链为确定性用例，打包客户端、真实模型和生产 2c 的验收记录应分别留存。
 
@@ -130,15 +155,15 @@
 
 | 时点 | 请求或回执 | 接收方的动作 |
 | --- | --- | --- |
-| 委派时只需摘要 | `subagent.start/send` 省略 `args.artifactDelivery` | 桌面回传摘要和已登记文件的 `result.artifactRefs`。每项含 `deviceId, artifactId, name`，可以在源桌面保留原件 |
-| 委派时已知需要云端文件 | `subagent.start/send` 增加 `args.artifactDelivery:"cloud"` | 桌面上传该子轮发布的交付文件。传输时返回 `status:"running", deliveryStatus:"pending"`，所有文件服务回执就绪后才报 `succeeded`。没有可交付文件或上传失败时以 `failed` 交付具体错误 |
-| 事后需要一个文件 | 父 Agent 的 `device_artifact_upload` 或经身份验证的客户端取件请求，使用下方同一条 `_device/request` | 2c 校验账号、父会话和子轮归属。已有云端引用时立即返回，否则路由至源桌面。文件尚在本地且源桌面离线时回 `DEVICE_OFFLINE`，上线后可重试 |
-| 云端确认收件 | 文件服务完成导入后提供 `file_uri` | 桌面把它作为 `cloudFileRef` 随取件回执和 `_device/event` 上报。2c 更新缓存，云 Box-Agent 更新 Session Log。get、wait 可看到新增引用。已经消费过的完成结果不会再唤醒父轮 |
+| 委派时只需摘要 | `session.start` 或 `session.send` 省略 `args.artifactDelivery` | 桌面回传摘要和已登记文件的 `result.artifactRefs`。每项含 `deviceId, artifactId, name`，可以在源桌面保留原件 |
+| 委派时已知需要云端文件 | `session.start` 或 `session.send` 增加 `args.artifactDelivery:"cloud"` | 桌面上传该子轮发布的交付文件。传输时返回 `status:"running", deliveryStatus:"pending"`，所有文件服务回执就绪后才报 `succeeded`。没有可交付文件或上传失败时以 `failed` 交付具体错误 |
+| 事后需要一个文件 | 父 Agent 的 `device_artifact_upload` 或经身份验证的客户端取件请求，使用下方同一条 `_device/request` | 2c 校验账号、父会话和子轮归属。新取件 RPC 转源桌面；写入前已离线则回 `DEVICE_OFFLINE`。调用方已收到云端引用时可以直接访问文件 |
+| 云端确认收件 | 文件服务完成导入后提供 `file_uri` | 桌面把它作为 `cloudFileRef` 随取件回执和 `_device/event` 上报。2c 可靠转交事件，云 Box-Agent 更新 Session Log。get、wait 可看到新增引用。已经消费过的完成结果不会再唤醒父轮 |
 
 例如，需要桌面生成的报告直接进入云工作区时，2c 发给桌面以下报文。`workspaceId` 由 2c 写在外层，`artifactDelivery` 位于 `args` 中。
 
 ```json
-{"jsonrpc":"2.0","id":16,"method":"_device/request","params":{"version":1,"sessionId":"cloud-parent","parentTurnId":"c1","deviceId":"OfficePC","operation":"subagent.start","operationId":"start-report","workspaceId":"cloud-work-42","args":{"instruction":"生成并发布 report.csv","artifactDelivery":"cloud"}}}
+{"jsonrpc":"2.0","id":16,"method":"_device/request","params":{"version":1,"sessionId":"cloud-parent","parentTurnId":"c1","deviceId":"OfficePC","operation":"session.start","operationId":"start-report","workspaceId":"cloud-work-42","args":{"instruction":"生成并发布 report.csv","artifactDelivery":"cloud"}}}
 ```
 
 事后取件时，外层 `sessionId` 为云父会话，`args.sessionId` 和 `args.turnId` 为本地委派子轮。下例假定该子轮已经上报这个取件 ID。调用方从原清单原样取值，桌面沿用派发时绑定的云工作区。

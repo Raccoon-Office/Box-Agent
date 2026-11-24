@@ -135,6 +135,10 @@ async def _exercise_legacy_host(root):
             assert "fixture_count" in requests[0]["tools"]
             assert all(request["tools"] == requests[0]["tools"] for request in requests)
             assert all(not name.startswith("device") for name in requests[0]["tools"])
+            assert set(requests[0]["tools"]).isdisjoint({
+                "session_list", "session_read", "session_start", "session_send",
+                "session_get_turn", "session_wait", "session_cancel",
+            })
             assert any("legacy ACP context marker" in str(message["content"]) for message in requests[0]["messages"])
             trace.setdefault("new_sessions", []).append({
                 "result": {key: value for key, value in new_session.items() if key != "sessionId"},

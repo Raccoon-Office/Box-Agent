@@ -3225,11 +3225,19 @@ class BoxACPAgent:
                             if turn.startswith("device-wake-recovery-") else
                             "Review the device delegation updates and continue the existing task as needed."
                         )
-                        await self._submit_prompt(
+                        response = await self._submit_prompt(
                             session_id, [text_block(instruction)], {"turnId": turn}, wake_turn=turn,
                         )
-                    finally:
-                        await self._notify_device_turn(session_id, turn, "finished")
+                    except asyncio.CancelledError:
+                        await self._notify_device_turn(session_id, turn, "finished", result={"stopReason": "cancelled"})
+                        raise
+                    except Exception as exc:
+                        error = exc if isinstance(exc, RequestError) else RequestError.internal_error()
+                        await self._notify_device_turn(session_id, turn, "finished", error=error.to_error_obj())
+                        raise
+                    await self._notify_device_turn(session_id, turn, "finished", result=response.model_dump(
+                        mode="json", by_alias=True, exclude_none=True, exclude_unset=True,
+                    ))
             except Exception as exc:
                 log.error("device/wake_failed", session_id=session_id, error=str(exc))
             finally:
@@ -3237,13 +3245,15 @@ class BoxACPAgent:
 
         state.device_wake_task = asyncio.create_task(run(), name=f"device-wake:{session_id}")
 
-    async def _notify_device_turn(self, session_id: str, turn: str, phase: str) -> None:
+    async def _notify_device_turn(
+        self, session_id: str, turn: str, phase: str, **outcome: dict[str, Any],
+    ) -> None:
         notify = getattr(self._conn, "ext_notification", None)
         if notify is None:
             return
         try:
             await asyncio.wait_for(notify("device/turn", {
-                "version": 1, "sessionId": session_id, "turnId": turn, "phase": phase,
+                "version": 1, "sessionId": session_id, "turnId": turn, "phase": phase, **outcome,
             }), timeout=self._SESSION_UPDATE_TIMEOUT_SECONDS)
         except Exception as exc:
             log.warn("device/turn_notification_failed", session_id=session_id, error=str(exc))

@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from hashlib import sha256
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+from acp import RequestError
 
 from box_agent.device_artifacts import artifact_refs, delivered_update, project_artifacts
 from box_agent.injections import InjectionKind, MessageInjection
@@ -20,8 +23,19 @@ from box_agent.tools.request_user_decision_tool import decision_response_fields
 if TYPE_CHECKING:
     from box_agent.session_log import SessionLog
 
-OPERATIONS = ("list", "session.list", "session.read", "subagent.start",
-              "subagent.send", "subagent.get", "subagent.wait", "subagent.cancel")
+TOOL_NAMES = {
+    "list": "device_list",
+    "session.list": "session_list",
+    "session.read": "session_read",
+    "session.start": "session_start",
+    "session.send": "session_send",
+    "session.get_turn": "session_get_turn",
+    "session.wait": "session_wait",
+    "session.cancel": "session_cancel",
+    "artifact.upload": "device_artifact_upload",
+}
+OPERATIONS = tuple(operation for operation in TOOL_NAMES if operation != "artifact.upload")
+CAPABILITY_GROUPS = {"session.history", "session.execute", "artifact.upload"}
 
 TERMINAL = {"succeeded", "failed", "cancelled", "interrupted"}
 READY = TERMINAL | {"waiting_approval", "waiting_input"}
@@ -248,6 +262,25 @@ _DEFINITE_CANCEL_REJECTIONS = _DEFINITE_REJECTIONS | {
 }
 
 
+def _delivery_problem(error: Any, device_id: str) -> dict[str, str] | None:
+    data = error.get("data") if isinstance(error, dict) else getattr(error, "data", None)
+    reason = error.get("message") if isinstance(error, dict) else str(error)
+    if (not isinstance(data, dict) or data.get("deviceId") != device_id
+            or (reason, data.get("delivery")) not in (
+                ("DEVICE_OFFLINE", "not_sent"), ("DEVICE_DELIVERY_UNKNOWN", "unknown"),
+            )):
+        return None
+    return {"deviceId": device_id, "reason": reason, "delivery": data["delivery"]}
+
+
+def _error_details(error: Any) -> Any:
+    if isinstance(error, RequestError):
+        return error.to_error_obj()
+    if isinstance(error, Exception):
+        return {"code": error.code, "message": str(error), "data": getattr(error, "data", None)}
+    return error
+
+
 def _is_definite_rejection(error: Any, codes: set[str] = _DEFINITE_REJECTIONS) -> bool:
     if isinstance(error, dict):
         return str(error.get("code")) in codes or _is_definite_rejection(error.get("message"), codes)
@@ -274,6 +307,7 @@ class DeviceDelegations:
         self._turn_operations: dict[tuple[str, ...], str] = {}
         self.stopped_turns: set[str] = set()
         self.pending: set[asyncio.Task] = set()
+        self.wait_requests: dict[str, set[asyncio.Task]] = {}
         self.closed = False
         self.stop_cancels: set[str] = set()
         self.cancel_slots = asyncio.Semaphore(CANCEL_RETRY_CONCURRENCY)
@@ -512,17 +546,22 @@ class DeviceDelegations:
 
         task.add_done_callback(finished)
 
-    async def _request(self, payload: dict[str, Any], *, wait_seconds: float = 0) -> dict[str, Any]:
+    async def _request(
+        self, payload: dict[str, Any], *, extra_timeout: float = 0, deadline: float | None = None,
+    ) -> dict[str, Any]:
         if self.closed:
             raise RuntimeError("device delegations are closed")
+        timeout = (RPC_TIMEOUT_SECONDS + extra_timeout if deadline is None
+                   else deadline - asyncio.get_running_loop().time())
         try:
             return await asyncio.wait_for(
-                self.request("device/request", payload), timeout=RPC_TIMEOUT_SECONDS + wait_seconds,
+                self.request("device/request", payload), timeout=timeout,
             )
-        except asyncio.TimeoutError as exc:
-            if str(exc):
-                raise
-            raise TimeoutError("device request timed out") from exc
+        except (asyncio.TimeoutError, ConnectionError) as exc:
+            data = {"delivery": "unknown"}
+            if "deviceId" in payload:
+                data["deviceId"] = payload["deviceId"]
+            raise RequestError(-32008, "DEVICE_DELIVERY_UNKNOWN", data) from exc
 
     def _needs_stop_cancel(self, op: str) -> bool:
         record = self.operations[op]
@@ -582,6 +621,7 @@ class DeviceDelegations:
             raise ValueError("identical device request already in flight for this parent turn")
         record = next((deepcopy(item) for item in matching
                        if item["status"] == "unknown_delivery"), None)
+        is_retry = record is not None
         if record is None:
             record = {"operationId": uuid4().hex, "deviceId": device_id,
                       "parentTurnId": turn, "instruction": instruction,
@@ -595,15 +635,17 @@ class DeviceDelegations:
             result = await self._request({
                 "version": 1, "sessionId": self.session_id, "deviceId": device_id,
                 "parentTurnId": record["parentTurnId"],
-                "operation": "subagent.send" if session_id is not None else "subagent.start",
+                "operation": "session.send" if session_id is not None else "session.start",
                 "operationId": op, "args": args})
         except (Exception, asyncio.CancelledError) as exc:
-            self._settle_start_failure(op, exc)
+            self._settle_start_failure(op, exc, is_retry=is_retry)
             raise
         if isinstance(result, dict) and ("error" in result or result.get("accepted") is False):
             error = result.get("error", result)
-            self._settle_start_failure(op, error, rejected=result.get("accepted") is False)
-            raise ValueError(str(error))
+            self._settle_start_failure(
+                op, error, is_retry=is_retry, rejected=result.get("accepted") is False,
+            )
+            return {"error": error}
         if (
             not isinstance(result, dict)
             or result.get("deviceId") != device_id
@@ -612,7 +654,7 @@ class DeviceDelegations:
             or not all(isinstance(result.get(k), str) and result[k]
                        for k in ("sessionId", "turnId"))
         ):
-            self._settle_start_failure(op, "invalid device start receipt")
+            self._settle_start_failure(op, "invalid device start receipt", is_retry=is_retry)
             raise ValueError("invalid device start receipt")
         # Events can arrive before the start receipt. Preserve their state.
         record = deepcopy(self.operations[op])
@@ -626,10 +668,18 @@ class DeviceDelegations:
         self.retry_stopped_cancellation(op)
         return {**result, "operationId": op}
 
-    def _settle_start_failure(self, op: str, error: Any, *, rejected: bool = False) -> None:
+    def _settle_start_failure(
+        self, op: str, error: Any, *, is_retry: bool, rejected: bool = False,
+    ) -> None:
         record = self.operations[op]
         if record["status"] == "requesting" and "turnId" not in record:
-            status = "rejected" if rejected or _is_definite_rejection(error) else "unknown_delivery"
+            delivery = _delivery_problem(error, record["deviceId"])
+            if delivery:
+                rejected = delivery["delivery"] == "not_sent"
+            else:
+                rejected = rejected or _is_definite_rejection(error)
+            # A refusal for this attempt cannot rule out an earlier acceptance.
+            status = "rejected" if rejected and not is_retry else "unknown_delivery"
             self.save({**record, "status": status})
 
     async def cancel(self, operation_id: str, *, explicit: bool = False) -> dict[str, Any]:
@@ -647,7 +697,7 @@ class DeviceDelegations:
         self.save(record)
         result = await self._request({
             "version": 1, "sessionId": self.session_id,
-            "deviceId": record["deviceId"], "operation": "subagent.cancel",
+            "deviceId": record["deviceId"], "operation": "session.cancel",
             "operationId": cancel_id,
             "args": {"sessionId": record["sessionId"], "turnId": record["turnId"]},
         })
@@ -659,37 +709,26 @@ class DeviceDelegations:
         return result
 
     async def query(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if operation == "session.wait":
+            return await self._wait(arguments["targets"], arguments.get("timeoutMs", 30000))
         args = deepcopy(arguments)
         device_id = args.pop("deviceId", None)
-        if operation == "subagent.wait":
-            targets = args["targets"]
-            if len({turn_identity(target) for target in targets}) != len(targets):
-                raise ValueError("duplicate device wait target")
         payload = {"version": 1, "sessionId": self.session_id,
                    "operation": operation, "operationId": uuid4().hex, "args": args}
         if device_id is not None:
             payload["deviceId"] = device_id
-        wait_seconds = args.get("timeoutMs", 30000) / 1000 if operation == "subagent.wait" else 0
+        extra_timeout = 0
         if operation == "artifact.upload":
             op = self._operation_for(arguments)
             record = self.operations.get(op, {})
             if not record:
                 raise ValueError("child turn is not owned by this parent session")
-            wait_seconds = 120
-        result = await self._request(payload, wait_seconds=wait_seconds)
+            extra_timeout = 120
+        result = await self._request(payload, extra_timeout=extra_timeout)
         if not isinstance(result, dict):
             raise ValueError("invalid device response")
         if "error" in result and not result.get("status"):
-            error = result["error"]
-            code = error.get("code") if isinstance(error, dict) else error
-            if (operation == "subagent.wait" and "states" in result
-                    and code in ("TIMED_OUT", "TIMEOUT", "WAIT_TIMEOUT", "REQUEST_TIMEOUT")):
-                snapshot = self._wait_result(
-                    {"timedOut": True, "results": [], "states": result["states"]}, args["targets"],
-                )
-                if not snapshot["timedOut"]:
-                    return snapshot
-            return {"error": result["error"]} if operation in {"subagent.get", "subagent.wait"} else result
+            return {"error": result["error"]}
         if operation == "artifact.upload":
             refs = artifact_refs({"artifactRefs": [result]}, device_id)
             ref = refs[0]
@@ -700,18 +739,117 @@ class DeviceDelegations:
                 raise ValueError("invalid artifact upload receipt")
             return {**arguments, **ref}
         collection = {"list": "devices", "session.list": "sessions",
-                      "session.read": "messages", "subagent.wait": "results"}.get(operation)
+                      "session.read": "messages"}.get(operation)
         if collection and not isinstance(result.get(collection), list):
             raise ValueError("invalid device response collection")
         if operation == "session.read" and result.get("sessionId") != args["sessionId"]:
             raise ValueError("device history response identity mismatch")
-        if operation == "subagent.get" and turn_identity(result) != turn_identity(arguments):
-            raise ValueError("device result identity mismatch")
-        if operation == "subagent.wait":
-            return self._wait_result(result, args["targets"])
-        if operation == "subagent.get":
+        if operation == "session.get_turn":
+            if turn_identity(result) != turn_identity(arguments):
+                raise ValueError("device result identity mismatch")
+            if result.get("source") != "device":
+                raise ValueError("device turn snapshot must come from the device")
             return self._snapshot(result, include_result=True)
+        if operation == "list":
+            devices = []
+            for device in result["devices"]:
+                if not isinstance(device, dict):
+                    raise ValueError("invalid device discovery entry")
+                capabilities = device.get("capabilities", [])
+                if not isinstance(capabilities, list):
+                    raise ValueError("invalid device capabilities")
+                groups = [group for group in capabilities if isinstance(group, str) and group in CAPABILITY_GROUPS]
+                devices.append({**device, "capabilities": groups})
+            return {**result, "devices": devices}
         return result
+
+    async def _wait(self, targets: list[dict[str, str]], timeout_ms: int) -> dict[str, Any]:
+        clock = asyncio.get_running_loop().time
+        business_deadline = clock() + timeout_ms / 1000
+        deadline = business_deadline + RPC_TIMEOUT_SECONDS
+        turn = self.turn_id()
+        if self.closed or not turn or turn in self.stopped_turns:
+            raise RuntimeError("device wait cancelled")
+        identities = {turn_identity(target) for target in targets}
+        if len(identities) != len(targets):
+            raise ValueError("duplicate device wait target")
+        groups: dict[str, list[dict[str, str]]] = {}
+        if not identities <= self._turn_operations.keys():
+            raise ValueError("device wait target is not owned by this parent session")
+        for target in targets:
+            groups.setdefault(target["deviceId"], []).append(target)
+
+        async def wait_group(device_id: str, group: list[dict[str, str]]) -> dict[str, Any]:
+            remaining_ms = max(0, math.ceil((business_deadline - clock()) * 1000))
+            result = await self._request({
+                "version": 1, "sessionId": self.session_id, "operation": "session.wait",
+                "operationId": uuid4().hex, "deviceId": device_id,
+                "args": {"targets": group, "timeoutMs": min(timeout_ms, remaining_ms)},
+            }, deadline=deadline)
+            if isinstance(result, dict) and "error" in result:
+                return {"error": result["error"]}
+            return self._wait_result(result, group)
+
+        tasks = {asyncio.create_task(wait_group(device_id, group)): device_id
+                 for device_id, group in groups.items()}
+        active = self.wait_requests.setdefault(turn, set())
+        active.update(tasks)
+        for task in tasks:
+            self._track(task)
+        pending = set(tasks)
+        ready: list[dict[str, Any]] = []
+        states: list[dict[str, Any]] = []
+        unavailable: list[dict[str, str]] = []
+        errors: list[Any] = []
+        try:
+            while pending and not ready:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                if self.closed or turn in self.stopped_turns:
+                    raise RuntimeError("device wait cancelled")
+                for task, device_id in tasks.items():
+                    if task not in done:
+                        continue
+                    try:
+                        response = task.result()
+                        if "error" not in response:
+                            ready.extend(response["results"])
+                            states.extend(response.get("states", []))
+                            continue
+                        error = response["error"]
+                    except RequestError as exc:
+                        error = exc
+                    problem = _delivery_problem(error, device_id)
+                    if not problem:
+                        if isinstance(error, Exception):
+                            raise error
+                        return {"error": error}
+                    errors.append(error)
+                    unavailable.append(problem)
+            if ready:
+                merged = {"timedOut": False, "results": ready}
+            elif states:
+                merged = {"timedOut": True, "results": [], "states": states}
+            else:
+                error = errors[0]
+                if len(errors) == 1 and isinstance(error, Exception):
+                    raise error
+                return {"error": [_error_details(item) for item in errors] if len(errors) > 1 else errors[0],
+                        **({"unavailable": unavailable} if unavailable else {})}
+            if unavailable:
+                merged["unavailable"] = unavailable
+            order = {turn_identity(target): i for i, target in enumerate(targets)}
+            merged["results"].sort(key=lambda item: order[turn_identity(item)])
+            if "states" in merged:
+                merged["states"].sort(key=lambda item: order[turn_identity(item)])
+            return merged
+        finally:
+            active.difference_update(tasks)
+            if not active:
+                self.wait_requests.pop(turn, None)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _snapshot(self, item: dict, *, include_result: bool, include_ready_result: bool = False) -> dict:
         record = self.operations.get(self._operation_for(item), {})
@@ -719,8 +857,11 @@ class DeviceDelegations:
         return current_snapshot(item, include_result=include_result, include_ready_result=include_ready_result)
 
     def _wait_result(self, result: dict[str, Any], targets: list[dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ValueError("invalid device wait result")
         timed_out = result.get("timedOut")
-        if type(timed_out) is not bool or bool(result["results"]) == timed_out:
+        results = result.get("results")
+        if type(timed_out) is not bool or not isinstance(results, list) or bool(results) == timed_out:
             raise ValueError("invalid device wait result")
         expected = {turn_identity(target) for target in targets}
 
@@ -734,16 +875,22 @@ class DeviceDelegations:
                 if (not all(isinstance(value, str) for value in identity)
                         or identity not in expected or identity in seen):
                     raise ValueError("unexpected device wait target")
+                if item.get("source") != "device":
+                    raise ValueError("device turn snapshot must come from the device")
                 snapshot = self._snapshot(item, include_result=ready, include_ready_result=timed_out)
                 if ready and snapshot["status"] not in READY:
                     raise ValueError("device wait returned a non-ready result")
+                if snapshot["status"] in READY:
+                    complete = snapshot["status"] in TERMINAL
+                    if snapshot.get("complete") is not complete or not snapshot.get("seq"):
+                        raise ValueError("device wait returned an incomplete ready result")
                 snapshots.append(snapshot)
                 seen.add(identity)
             if timed_out and not ready and seen != expected:
                 raise ValueError("device wait timeout missing target snapshots")
             return snapshots
 
-        response = {"timedOut": timed_out, "results": checked(result["results"], ready=True)}
+        response = {"timedOut": timed_out, "results": checked(results, ready=True)}
         if timed_out or "states" in result:
             response["states"] = checked(result.get("states"), ready=False)
         if timed_out:
@@ -809,6 +956,8 @@ class DeviceDelegations:
         if turn not in self.stopped_turns:
             self._record("device/stop", {"parentTurnId": turn})
             self.stopped_turns.add(turn)
+        for task in self.wait_requests.get(turn, ()):
+            task.cancel()
         for op, record in self.operations.items():
             if record["parentTurnId"] == turn:
                 self.retry_stopped_cancellation(op)
@@ -912,13 +1061,13 @@ class DeviceDelegations:
 class DeviceTool(Tool):
     def __init__(self, delegations: DeviceDelegations, action: str) -> None:
         self.delegations = delegations
-        self.operation = action if "." in action or action == "list" else "subagent." + action
+        self.operation = action
         if self.operation not in OPERATIONS and not (delegations.artifact_upload and self.operation == "artifact.upload"):
             raise ValueError("unsupported device operation")
 
     @property
     def name(self) -> str:
-        return "device_" + self.operation.replace(".", "_")
+        return TOOL_NAMES[self.operation]
 
     @property
     def description(self) -> str:
@@ -937,35 +1086,37 @@ class DeviceTool(Tool):
             ),
             "session.list": "List authorized device session history with cursor pagination.",
             "session.read": "Read one page of authorized device session messages; follow nextCursor for remaining history.",
-            "subagent.start": (
+            "session.start": (
                 "Start a task on a device and return acceptance immediately. First use device_list to discover "
                 "the target. Copy its deviceId exactly and check that it is online, allows execution, and "
-                "advertises subagent.start. If multiple devices qualify and the user has not identified a "
+                "advertises session.execute. If multiple devices qualify and the user has not identified a "
                 "target, ask which device to use. Completion arrives separately."
             ),
-            "subagent.send": (
+            "session.send": (
                 "Append genuinely new work to an authorized existing device session in its original directory. "
                 "Copy deviceId and sessionId from the previous accepted start/send receipt. Do not pass turnId. "
                 "If a ready result already has the final summary, report it directly. A routine send or history "
                 "lookup is unnecessary. Busy sessions return SESSION_BUSY."
             ),
-            "subagent.get": (
+            "session.get_turn": (
                 "Read the current state and result of one exact device turn. Use the deviceId, sessionId and turnId "
-                "from start/send. Offline snapshots include source and observedAt. " + approval_guidance
+                "from start/send. The source device answers or the tool reports a delivery error. " + approval_guidance
             ),
-            "subagent.wait": (
+            "session.wait": (
                 "Wait for any target to be terminal, waiting_approval, or waiting_input. Ready states return immediately, "
                 "including repeat waits for the same pending approval or input. If timedOut, results is empty and states "
-                "contains the latest snapshots. Waiting does not cancel tasks or decide user approval. "
+                "contains snapshots observed by the devices. Unavailable devices may be listed separately. "
+                "Waiting does not cancel tasks or decide user approval. "
                 + approval_guidance
             ),
             "artifact.upload": "Upload one published child artifact when the cloud needs its bytes. Use its exact turn and artifactId. Returns the cloud file URI.",
-            "subagent.cancel": "Request cancellation by deviceId, sessionId and turnId. Acceptance does not confirm cancellation.",
+            "session.cancel": "Request cancellation by deviceId, sessionId and turnId. Acceptance does not confirm cancellation.",
         }[self.operation]
 
     @property
     def parameters(self) -> dict[str, Any]:
         text = {"type": "string", "minLength": 1}
+        instruction = {**text, "maxLength": 4096, "pattern": r"\S"}
         discovered_device = {**text, "description": "Exact registered deviceId from device_list."}
         identity = {
             "deviceId": {**text, "description": "Exact deviceId returned by start/send."},
@@ -977,26 +1128,26 @@ class DeviceTool(Tool):
             "list": paging,
             "session.list": {"deviceId": discovered_device, **paging},
             "session.read": {"deviceId": discovered_device, "sessionId": text, **paging},
-            "subagent.start": {"deviceId": discovered_device, "instruction": text},
-            "subagent.send": {
+            "session.start": {"deviceId": discovered_device, "instruction": instruction},
+            "session.send": {
                 "deviceId": {**text, "description": "Device ID from the previous accepted start/send receipt."},
                 "sessionId": {**text, "description": (
                     "Local child session ID from the previous accepted start/send receipt. "
                     "Use the session ID and omit the previous turnId."
                 )},
-                "instruction": {**text, "description": "New work to append to this existing session."},
+                "instruction": {**instruction, "description": "New work to append to this existing session."},
             },
             "artifact.upload": {**identity, "artifactId": text},
-            "subagent.get": identity,
-            "subagent.cancel": identity,
-            "subagent.wait": {
+            "session.get_turn": identity,
+            "session.cancel": identity,
+            "session.wait": {
                 "targets": {"type": "array", "minItems": 1, "maxItems": 32,
                             "items": {"type": "object", "properties": identity,
                                       "required": list(IDENTITY_FIELDS), "additionalProperties": False}},
                 "timeoutMs": {"type": "integer", "minimum": 0, "maximum": 60000,
                               "description": "Maximum wait in milliseconds. Use 0 to check immediately."}},
         }[self.operation]
-        if self.delegations.artifact_upload and self.operation in {"subagent.start", "subagent.send"}:
+        if self.delegations.artifact_upload and self.operation in {"session.start", "session.send"}:
             fields["artifactDelivery"] = {"type": "string", "enum": ["cloud"], "description": (
                 "Require cloud copies of the produced files before reporting success. "
                 "Use only on devices advertising artifact.upload. Omit when a summary or local output suffices.")}
@@ -1004,37 +1155,40 @@ class DeviceTool(Tool):
             "artifact.upload": [*IDENTITY_FIELDS, "artifactId"],
             "list": [], "session.list": ["deviceId"],
             "session.read": ["deviceId", "sessionId"],
-            "subagent.start": ["deviceId", "instruction"],
-            "subagent.send": ["deviceId", "sessionId", "instruction"],
-            "subagent.get": list(IDENTITY_FIELDS), "subagent.cancel": list(IDENTITY_FIELDS),
-            "subagent.wait": ["targets"],
+            "session.start": ["deviceId", "instruction"],
+            "session.send": ["deviceId", "sessionId", "instruction"],
+            "session.get_turn": list(IDENTITY_FIELDS), "session.cancel": list(IDENTITY_FIELDS),
+            "session.wait": ["targets"],
         }[self.operation]
         return {"type": "object", "properties": fields, "required": required, "additionalProperties": False}
 
     async def execute(self, **arguments: Any) -> ToolResult:
         try:
-            if self.operation in {"subagent.start", "subagent.send"}:
+            if self.operation in {"session.start", "session.send"}:
                 result = await self.delegations.start(
                     arguments["deviceId"], arguments["instruction"],
                     session_id=arguments.get("sessionId"), artifact_delivery=arguments.get("artifactDelivery"))
-            elif self.operation == "subagent.cancel":
+            elif self.operation == "session.cancel":
                 result = await self.delegations.cancel_target(arguments)
             else:
-                if self.operation == "subagent.wait":
+                if self.operation == "session.wait":
                     arguments.setdefault("timeoutMs", 30000)
                 result = await self.delegations.query(self.operation, arguments)
             if "error" in result and not result.get("status"):
                 return ToolResult(success=False, error=json.dumps(result["error"]), raw_output=result)
             result = {key: value for key, value in result.items() if key != "operationId"}
-            if self.operation == "subagent.wait":
+            if self.operation == "session.wait":
                 result["results"] = [
                     {key: value for key, value in item.items() if key != "operationId"}
                     for item in result["results"]
                 ]
             content = json.dumps(result, ensure_ascii=False)
-            if self.operation in {"subagent.get", "subagent.wait"}:
+            if self.operation in {"session.get_turn", "session.wait"}:
                 self.delegations.offer(content, result)
             return ToolResult(success=True, content=content, raw_output=result)
         except Exception as exc:
             code = getattr(exc, "code", None)
-            return ToolResult(success=False, error=str(exc), raw_output={"code": code} if code is not None else None)
+            if code is not None:
+                error = _error_details(exc)
+                return ToolResult(success=False, error=json.dumps(error, ensure_ascii=False), raw_output=error)
+            return ToolResult(success=False, error=str(exc))

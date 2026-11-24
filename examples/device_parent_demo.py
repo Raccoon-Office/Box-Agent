@@ -14,6 +14,7 @@ from acp.agent.connection import AgentSideConnection
 from box_agent.acp import BoxACPAgent
 from box_agent.acp.stdio_compat import StdioTransport, stdio_streams_largebuf
 from box_agent.config import Config, AgentConfig, ToolsConfig, LLMConfig
+from box_agent.device_delegation import TOOL_NAMES
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 
 
@@ -99,12 +100,17 @@ class DeterministicLLM:
             yield StreamEvent(type="finish", finish_reason="stop")
             return
         if args and "operation" in args:
-            name = "device_" + args["operation"].replace(".", "_")
+            operation = args["operation"]
+            name = TOOL_NAMES.get(operation) if isinstance(operation, str) else None
+            if not any(tool.name == name for tool in tools or ()):
+                yield StreamEvent(type="text", delta="Unknown or unavailable device operation.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
             arguments = dict(args.get("args", {}))
             if "deviceId" in args:
                 arguments["deviceId"] = args["deviceId"]
         elif args and "deviceId" in args:
-            name = "device_subagent_start"
+            name = "session_start"
             arguments = {"deviceId": args["deviceId"], "instruction": args["instruction"]}
         else:
             if asks_for_code:
@@ -161,7 +167,7 @@ class DeterministicLLM:
                 device_id = device.get("deviceId")
                 if (device_id and device.get("online") is True
                         and device.get("authorization", {}).get("execute") is True
-                        and "subagent.start" in device.get("capabilities", ())
+                        and "session.execute" in device.get("capabilities", ())
                         and args.get("deviceName", device_id) == device_id):
                     eligible_devices.add(device_id)
             cursor = page.get("nextCursor")
@@ -173,7 +179,7 @@ class DeterministicLLM:
             return self._tool_call("device_list", {"cursor": cursor})
         if len(eligible_devices) == 1:
             device_id, = eligible_devices
-            return self._tool_call("device_subagent_start", {
+            return self._tool_call("session_start", {
                 "deviceId": device_id, "instruction": args["instruction"],
                 **({"artifactDelivery": args["artifactDelivery"]} if "artifactDelivery" in args else {}),
             })
