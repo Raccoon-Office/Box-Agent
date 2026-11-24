@@ -222,11 +222,13 @@ def _optional_market_expert(*, default_skills=()):
                        "skillBindings": [{"slug": "market-method", "source": "MARKET", "skillId": "market-id"}]}}
 
 
-def _mixed_market_team(*, required_role="leader", optional_identity="other-id"):
+def _mixed_market_team(*, required_role="leader", optional_identity="other-id", dependent_skill=None):
     required = _optional_market_expert(default_skills=["market-method"])["expert"]
     required.update(id="required-expert", name="Required expert", optionalSkills=[])
     optional = _optional_market_expert()["expert"]
     optional.update(id="optional-expert", name="Optional expert")
+    if dependent_skill is not None:
+        optional["defaultSkills"] = [dependent_skill]
     optional["skillBindings"][0]["skillId"] = optional_identity
     leader, member = (required, optional) if required_role == "leader" else (optional, required)
     return {"expert_team": {"id": "mixed-market-team", "name": "Mixed market team",
@@ -425,6 +427,53 @@ async def test_transitively_required_market_identity_failure_keeps_live_session(
     assert (await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "continue"}])).stopReason == "end_turn"
     marker.write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
     await getattr(host, method)(cwd=cwd, session_id=ident, **meta)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("required_role", ["leader", "member"])
+@pytest.mark.parametrize("indirect", [False, True])
+async def test_omitted_market_binding_cannot_be_satisfied_by_another_members_identity(
+    host, tmp_path, method, required_role, indirect,
+):
+    _installed_market_method(host, tmp_path, identity="market-id",
+                             required_by="intermediate" if indirect else "member-root")
+    if indirect:
+        root = tmp_path / "user-skills/member-root"
+        root.mkdir()
+        (root / "SKILL.md").write_text(
+            "---\nname: member-root\ndescription: Root method\n"
+            "required_skills: [intermediate]\n---\nRead the intermediate method.\n",
+        )
+    cwd = str(tmp_path / "workspace")
+    first = await host.new_session(cwd=cwd, session_id="transitive-market-chat")
+    original = host._sessions[first.sessionId]
+    before = original.agent.session_log.path.read_bytes()
+    selected = _mixed_market_team(required_role=required_role, dependent_skill="member-root")
+    requested = copy.deepcopy(selected)
+    ident = "transitive-market-chat" if method == "new_session" else first.sessionId
+    with pytest.raises(RequestError) as error:
+        await getattr(host, method)(cwd=cwd, session_id=ident, **selected)
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert len(error.value.data["dependencies"]) == 1
+    failure = error.value.data["dependencies"][0]
+    assert failure["expertId"] == "optional-expert"
+    assert failure["name"] == "member-root"
+    assert failure["dependencyName"] == "market-method"
+    assert failure["state"] == "unavailable" and "identity" in failure["reason"]
+    assert "skillId" not in failure  # Do not label the root with the dependency's ID.
+    assert selected == requested
+    assert host._sessions[first.sessionId] is original
+    assert original.agent.session_log.path.read_bytes() == before
+    assert (await host.prompt(session_id=first.sessionId,
+                              prompt=[{"type": "text", "text": "continue"}])).stopReason == "end_turn"
+    # Fix the member's binding; the same lifecycle request must now succeed.
+    selected = _mixed_market_team(required_role=required_role, optional_identity="market-id",
+                                  dependent_skill="member-root")
+    await getattr(host, method)(cwd=cwd, session_id=ident, **selected)
+    current = host._sessions[first.sessionId]
+    assert (await _read_session_skill(current, "member-root")).success
+    assert (await _read_session_skill(current, "market-method")).success
 
 
 @pytest.mark.asyncio
@@ -951,7 +1000,7 @@ async def test_utility_expert_cannot_require_registered_tool(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dependency", ["bash", "read_file", "research-synthesis", "pkulaw", "market-method", "market-conflict"])
+@pytest.mark.parametrize("dependency", ["bash", "read_file", "research-synthesis", "pkulaw", "market-method", "market-conflict", "market-transitive"])
 async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usable(
     host, tmp_path, monkeypatch, dependency,
 ):
@@ -959,7 +1008,10 @@ async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usab
     from acp.client.connection import ClientSideConnection
     from box_agent.acp.stdio_compat import StdioTransport
 
-    if dependency == "market-conflict":
+    if dependency == "market-transitive":
+        _installed_market_method(host, tmp_path, identity="market-id", required_by="member-root")
+        selected = _mixed_market_team(dependent_skill="member-root")
+    elif dependency == "market-conflict":
         marker = _installed_market_method(host, tmp_path)
         selected = _mixed_market_team()
     elif dependency == "market-method":
@@ -997,7 +1049,9 @@ async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usab
             ), 10)
             assert response.stopReason == "end_turn"
 
-        if dependency in {"market-method", "market-conflict"}:
+        if dependency == "market-transitive":
+            selected = _mixed_market_team(optional_identity="market-id", dependent_skill="member-root")
+        elif dependency in {"market-method", "market-conflict"}:
             marker.write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
         elif dependency == "research-synthesis":
             selected["execution_profile"] = "standard"
@@ -1015,7 +1069,7 @@ async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usab
                 session_id=retried.sessionId, prompt=[{"type": "text", "text": "请核对材料。"}],
             ), 10)
             assert response.stopReason == "end_turn"
-            skill_name = "market-method" if dependency == "market-conflict" else dependency
+            skill_name = {"market-conflict": "market-method", "market-transitive": "member-root"}.get(dependency, dependency)
             assert (await _read_session_skill(current, skill_name)).success
     finally:
         await client.close()
