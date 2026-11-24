@@ -67,36 +67,29 @@ def _ensure_win() -> None:
 
 
 def _install_runtime_extras() -> None:
-    """Install build extras into the interpreter running this script."""
-    requirement = f"{PROJECT_ROOT}[runtime]"
-    pip_cmd = [
-        sys.executable, "-m", "pip", "install", "--quiet", requirement,
-    ]
+    """Install the project's locked runtime and freezer in the build interpreter."""
+    pip = [sys.executable, "-m", "pip", "install", "--quiet"]
     uv_bin = shutil.which("uv")
     if uv_bin:
-        uv_cmd = [
-            uv_bin,
-            "pip",
-            "install",
-            "--python",
-            sys.executable,
-            "--quiet",
-            requirement,
-        ]
-        result = subprocess.run(uv_cmd, cwd=str(PROJECT_ROOT))
-        if result.returncode == 0:
-            return
-        print(
-            "uv failed to install runtime extras; retrying with pip...",
-            file=sys.stderr,
-        )
+        uv = [uv_bin]
+    else:
+        subprocess.run([*pip, "uv"], check=True)
+        uv = [sys.executable, "-m", "uv"]
 
-    result = subprocess.run(pip_cmd, cwd=str(PROJECT_ROOT))
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Failed to install runtime extras into "
-            f"{sys.executable} (exit code {result.returncode})"
+    with tempfile.TemporaryDirectory(prefix="box-agent-build-constraints-") as folder:
+        constraints = Path(folder) / "constraints.txt"
+        subprocess.run(
+            [*uv, "export", "--frozen", "--extra", "runtime", "--group", "dev",
+             "--no-emit-project", "--no-hashes", "--output-file", str(constraints)],
+            cwd=PROJECT_ROOT, check=True, stdout=subprocess.DEVNULL,
         )
+        packages = ["--constraint", str(constraints), f"{PROJECT_ROOT}[runtime]", "pyinstaller"]
+        result = subprocess.run(
+            [*uv, "pip", "install", "--python", sys.executable, "--quiet", *packages], cwd=PROJECT_ROOT
+        )
+        if result.returncode:
+            print("Retrying the locked Windows build dependencies with pip...", file=sys.stderr)
+            subprocess.run([*pip, *packages], cwd=PROJECT_ROOT, check=True)
 
 
 def _load_build_dependencies() -> None:

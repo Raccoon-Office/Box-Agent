@@ -43,6 +43,37 @@ def resource_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return project
 
 
+@pytest.mark.parametrize("has_uv, use_pip_fallback", [(True, False), (False, True)])
+def test_windows_installers_use_locked_versions_for_the_runtime_and_freezer(
+    monkeypatch, has_uv, use_pip_fallback
+):
+    installs = []
+    bootstraps = []
+    monkeypatch.setattr(build_win_runtime.shutil, "which", lambda name: "uv" if has_uv else None)
+
+    def run(command, **kwargs):
+        if command[-1] == "uv":
+            bootstraps.append(command)
+        elif "export" in command:
+            assert "--frozen" in command and "--no-emit-project" in command
+            assert kwargs["cwd"] == build_win_runtime.PROJECT_ROOT
+            Path(command[command.index("--output-file") + 1]).write_text("package==1.0")
+        else:
+            constraints = Path(command[command.index("--constraint") + 1])
+            assert constraints.read_text() == "package==1.0"
+            assert f"{build_win_runtime.PROJECT_ROOT}[runtime]" in command and "pyinstaller" in command
+            installs.append(constraints)
+            if use_pip_fallback and "--python" in command:
+                return CompletedProcess(command, 1)
+        return CompletedProcess(command, 0)
+
+    monkeypatch.setattr(build_win_runtime.subprocess, "run", run)
+    build_win_runtime._install_runtime_extras()
+    assert len(bootstraps) == (0 if has_uv else 1)
+    assert len(installs) == (2 if use_pip_fallback else 1)
+    assert len(set(installs)) == 1
+
+
 def test_windows_builder_uses_shared_pyinstaller_contract() -> None:
     hidden = build_win_runtime._windows_pyinstaller_hidden_imports()
     collect = build_win_runtime._windows_pyinstaller_collect_args()

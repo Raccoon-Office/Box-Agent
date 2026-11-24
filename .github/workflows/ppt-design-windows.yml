@@ -29,8 +29,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Install PyInstaller
-        run: python -m pip install pyinstaller
       - name: Build and install a clean runtime
         run: >-
           python scripts/build_win_runtime.py --version ci-clean --no-tar

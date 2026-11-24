@@ -109,7 +109,8 @@ Windows 专用脚本 `scripts/build_win_runtime.py` 默认构建精简 ACP；
 `--bundled-python-sandbox`。跨模式、清单缺失或模式无法确定时会在任何构建修改前
 报错；需要切换模式时去掉 `--exe-only`，执行一次完整构建，建议使用独立输出目录。
 
-Windows 构建机需要可从 PATH 调用的 Node.js 22～24 和 npm。完整构建和增量更新都会按锁文件把
+Windows 构建脚本按 `uv.lock` 安装 Python 依赖与 PyInstaller。构建机只有 Python 和 pip 时，脚本会先安装 uv。
+构建机还需要可从 PATH 调用的 Node.js 22～24 和 npm。完整构建和增量更新都会按锁文件把
 Windows x64 的 PPT 导出依赖装进 Skill 目录，客户端可离线导出。
 
 #### 从源码构建
