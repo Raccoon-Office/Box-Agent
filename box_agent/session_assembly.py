@@ -19,7 +19,7 @@ from .composition import (
 )
 from .env_context import EnvContext, build_env_context_prompt
 from .experts import ExpertSessionContext
-from .execution_profile import FAST_OPTIONAL_SKILLS
+from .execution_profile import blocked_skills_for_profile
 from .tools.permissions import CapabilityPolicy
 from .skill_paths import managed_builtin_skills_dir
 from .tools.bash_tool import BashTool
@@ -307,9 +307,8 @@ async def prepare_tools(resources: SessionResources) -> None:
                 skill_access_filter=host.skill_access_filter,
                 **({"skill_filter": host.skill_catalog_filter}
                    if isinstance(tool, ListSkillsTool) else {}),
-                blocked_skill_names=(
-                    frozenset(getattr(tool, "blocked_skill_names", ()))
-                    | (FAST_OPTIONAL_SKILLS if resources.state.get("execution_profile") == "fast" else frozenset())
+                blocked_skill_names=blocked_skills_for_profile(
+                    resources.state.get("execution_profile"), getattr(tool, "blocked_skill_names", ()),
                 ),
                 explicitly_allowed_skill_names=resources.state.setdefault("explicitly_allowed_skill_names", set()),
             )
@@ -488,9 +487,9 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
             session_skill_loader,
             include_disabled=False,
             skill_filter=resources.context.host.skill_catalog_filter,
-            blocked_skill_names=(
-                frozenset(getattr(agent.tools.get("get_skill"), "blocked_skill_names", ()))
-                | (FAST_OPTIONAL_SKILLS if resources.state.get("execution_profile") == "fast" else frozenset())
+            blocked_skill_names=blocked_skills_for_profile(
+                resources.state.get("execution_profile"),
+                getattr(agent.tools.get("get_skill"), "blocked_skill_names", ()),
             ),
             explicitly_allowed_skill_names=resources.state.setdefault("explicitly_allowed_skill_names", set()),
         )

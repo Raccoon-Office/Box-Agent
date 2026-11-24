@@ -25,25 +25,28 @@ class ExpertDependencyError(ValueError):
         self.dependencies = dependencies
 
 
-def _names(value: Any) -> list[str]:
-    values = value.splitlines() if isinstance(value, str) else value
-    if not isinstance(values, (list, tuple)):
-        return []
-    return list(dict.fromkeys(item.strip() for item in values if isinstance(item, str) and item.strip()))
-
-
-def _profiles(meta: Mapping[str, Any]):
-    expert = meta.get("expert")
-    if isinstance(expert, dict) and isinstance(expert.get("name"), str) and expert["name"].strip():
-        yield expert, expert.get("packageSnapshot"), True
-    team = meta.get("expert_team") or meta.get("expertTeam")
-    if not isinstance(team, dict) or not isinstance(team.get("name"), str) or not team["name"].strip():
+def _profiles(meta: Mapping[str, Any], context: ExpertSessionContext):
+    """Pair assembled profiles with host resource bindings, without reselecting Skills."""
+    if context.expert is not None:
+        raw = meta.get("expert")
+        raw = raw if isinstance(raw, dict) else {}
+        yield context.expert, raw, raw.get("packageSnapshot")
+    if context.team is None:
         return
-    members = team.get("members")
-    members = members if isinstance(members, list) else []
-    for member in [team.get("leader"), *members]:
-        if isinstance(member, dict) and isinstance(member.get("name"), str) and member["name"].strip():
-            yield member, member.get("packageSnapshot", team.get("packageSnapshot")), False
+    team = meta.get("expert_team") or meta.get("expertTeam")
+    team = team if isinstance(team, dict) else {}
+    if context.team.leader is not None:
+        raw = team.get("leader")
+        raw = raw if isinstance(raw, dict) else {}
+        yield context.team.leader, raw, raw.get("packageSnapshot", team.get("packageSnapshot"))
+    # The context already owns normalization and member limits. Match only the
+    # surviving raw objects in source order to retain each member's resource identity.
+    raw_members = (
+        member for member in team.get("members", [])
+        if isinstance(member, dict) and isinstance(member.get("name"), str) and member["name"].strip()
+    )
+    for profile, raw in zip(context.team.members, raw_members):
+        yield profile, raw, raw.get("packageSnapshot", team.get("packageSnapshot"))
 
 
 def _tool_names(tools: Mapping[str, Any] | Iterable[Any]) -> set[str]:
@@ -112,11 +115,9 @@ def validate_expert_dependencies(
         return
     failures: list[dict[str, Any]] = []
     available_tools = _tool_names(tools)
-    for profile, snapshot, has_required in _profiles(raw_meta):
-        names = _names(profile.get("defaultSkills") or profile.get("default_skills"))
-        if has_required:
-            names = list(dict.fromkeys([*_names(profile.get("requiredSkills") or profile.get("required_skills")), *names]))
-        declared = profile.get("skillBindings")
+    for profile, raw, snapshot in _profiles(raw_meta, expert_context):
+        names = dict.fromkeys([*getattr(profile, "required_skills", ()), *profile.default_skills])
+        declared = raw.get("skillBindings")
         declared = declared if isinstance(declared, list) else []
         for name in names:
             bindings = [binding for binding in declared if isinstance(binding, dict) and binding.get("slug") == name]
@@ -172,8 +173,8 @@ def validate_expert_dependencies(
             if failure is not None:
                 state, reason = failure
                 item = {
-                    "expertId": profile.get("id") or profile["name"],
-                    "expertName": profile["name"], "name": name,
+                    "expertId": profile.id,
+                    "expertName": profile.name, "name": name,
                     "source": source, "required": True, "state": state, "reason": reason,
                 }
                 if isinstance(binding.get("skillId"), str):

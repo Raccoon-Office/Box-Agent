@@ -495,6 +495,92 @@ async def test_cancelled_partial_stream_is_removed_before_retry(profile_home):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["open", "write", "close"])
+@pytest.mark.parametrize("cancel", [False, True], ids=["complete", "cancel"])
+async def test_slow_archive_io_keeps_loop_responsive_and_owns_stream_until_cleanup(
+    profile_home, monkeypatch, phase, cancel,
+):
+    body = archive_bytes()
+    entered, release = threading.Event(), threading.Event()
+    closed = threading.Event()
+    main_thread = threading.get_ident()
+    io_threads = []
+    original_open = Path.open
+
+    def wait_for_release():
+        io_threads.append(threading.get_ident())
+        entered.set()
+        assert release.wait(3), "Archive I/O blocked the event loop"
+
+    class Stream:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def write(self, chunk):
+            if phase == "write":
+                wait_for_release()
+            assert not self.wrapped.closed
+            return self.wrapped.write(chunk)
+
+        def close(self):
+            if phase == "close":
+                wait_for_release()
+            self.wrapped.close()
+            closed.set()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    def open_archive(path, *args, **kwargs):
+        opened = original_open(path, *args, **kwargs)
+        if path.name != "package.zip" or args != ("xb",):
+            return opened
+        wrapped = Stream(opened)
+        if phase == "open":
+            wait_for_release()
+        return wrapped
+
+    monkeypatch.setattr(Path, "open", open_archive)
+    task = asyncio.create_task(packages.prepare_expert_meta(
+        {"expert": reference(body)}, transport=transport_for(body),
+    ))
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 2), 3)
+        # This coroutine must advance while the disk worker is still blocked.
+        assert not task.done()
+        assert io_threads and main_thread not in io_threads
+        assert not closed.is_set()
+        if cancel:
+            for _ in range(3):
+                task.cancel()
+                await asyncio.sleep(0)
+                assert not task.done()
+            assert list((profile_home / "experts/packages").glob(".preparing-*"))
+            assert not closed.is_set()
+        release.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3)
+            assert not (profile_home / "experts/packages" / hashlib.sha256(body).hexdigest()).exists()
+        else:
+            result = await asyncio.wait_for(task, 3)
+            assert result["expert"]["id"] == "catalog-id"
+        assert closed.is_set()
+        assert_no_staging(profile_home)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    # Closing and removing the cancelled writer must release the shared cache lock.
+    monkeypatch.setattr(Path, "open", original_open)
+    assert (await asyncio.wait_for(packages.prepare_expert_meta(
+        {"expert": reference(body)}, transport=transport_for(body),
+    ), 3))["expert"]["id"] == "catalog-id"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_count", [1, 2, 3])
 async def test_cancelled_disk_worker_finishes_before_staging_is_removed(profile_home, monkeypatch, cancel_count):
     body = archive_bytes()

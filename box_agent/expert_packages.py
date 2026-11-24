@@ -247,13 +247,25 @@ async def _download(ticket: dict[str, Any], destination: Path,
                     if response.status_code != 200:
                         raise _invalid("Expert package download failed; request a fresh ticket for the same digest",
                                        "EXPERT_PACKAGE_DOWNLOAD_FAILED")
-                    with destination.open("xb") as stream:
+                    stream = None
+
+                    def open_archive():
+                        nonlocal stream
+                        # Retain ownership if cancellation arrives while open blocks.
+                        stream = destination.open("xb")
+
+                    try:
+                        await _disk_call(open_archive)
                         async for chunk in response.aiter_bytes():
                             size += len(chunk)
                             if size > ticket["size"]:
                                 raise _invalid("Expert package exceeds its declared size", "EXPERT_PACKAGE_HASH_MISMATCH")
                             digest.update(chunk)
-                            stream.write(chunk)
+                            await _disk_call(stream.write, chunk)
+                    finally:
+                        if stream is not None:
+                            # A cancelled write has finished before close/cleanup.
+                            await _disk_call(stream.close)
                     if size != ticket["size"] or digest.hexdigest() != ticket["digest"]:
                         raise _invalid("Expert package SHA256 or size does not match its ticket", "EXPERT_PACKAGE_HASH_MISMATCH")
                     return
