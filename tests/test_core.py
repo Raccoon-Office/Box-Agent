@@ -6697,10 +6697,11 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
     assert skip_next is False
     assert outcome.mode == "fallback"
     assert outcome.error == "network"
-    assert [m.role for m in new_msgs] == ["system", "user", "user"]
-    assert "Deterministic history fallback" in str(new_msgs[1].content)
+    assert [m.role for m in new_msgs] == ["system", "user", "user", "assistant", "tool", "user"]
+    assert new_msgs[1].earlier_user_messages == ["old request"]
+    assert "Deterministic history fallback" in str(new_msgs[2].content)
     assert new_msgs[-1] is msgs[-1]
-    assert "fallback stopped: 1 source messages remain" in str(new_msgs[1].content)
+    assert "fallback stopped: 1 source messages remain" in str(new_msgs[2].content)
     assert sum(len(str(m.content)) for m in new_msgs) < sum(len(str(m.content)) for m in msgs)
 
 
@@ -6717,7 +6718,9 @@ async def test_maybe_summarize_inserts_summary_marker():
         Message(role="assistant", content="x" * 5000),
     ]
     llm = _FakeSummaryLLM("brief")
-    new_msgs, _, _ = await _maybe_summarize(llm, msgs, token_limit=10, api_total_tokens=0, skip_check=False)
+    new_msgs, _, _ = await _maybe_summarize(
+        llm, msgs, token_limit=5_000, api_total_tokens=0, skip_check=False, force=True,
+    )
     assert new_msgs is not None
     assert new_msgs[1].role == "user"
     assert new_msgs[1].content.startswith(_SUMMARY_MARKER)
@@ -6865,7 +6868,7 @@ async def test_maybe_summarize_large_history_uses_one_original_prefix_call():
         )
     llm = _FakeSummaryLLM("one-shot summary")
     outcome = await _maybe_summarize(
-        llm, msgs, token_limit=1_000, api_total_tokens=0, skip_check=False
+        llm, msgs, token_limit=20_000, api_total_tokens=0, skip_check=False
     )
 
     assert outcome.messages is not None
@@ -6996,8 +6999,8 @@ async def test_maybe_summarize_bounds_newest_group_over_recent_budget():
 async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_exact():
     from box_agent.core import (
         _maybe_summarize,
-        _message_chars,
-        _RECENT_MESSAGE_CHAR_LIMIT,
+        _fallback_context_estimate,
+        _RECENT_GROUP_TOKEN_LIMIT,
         _SUMMARY_MESSAGE_PREFIX,
         _SUMMARY_MESSAGE_SUFFIX,
         _SUMMARY_OUTPUT_CHAR_LIMIT,
@@ -7056,9 +7059,7 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
     retained_tools = [message for message in outcome.messages if message.role == "tool"]
     assert retained_assistant.tool_calls == calls
     assert [message.tool_call_id for message in retained_tools] == [call.id for call in calls]
-    assert sum(_message_chars(message) for message in outcome.messages[2:]) <= (
-        _RECENT_MESSAGE_CHAR_LIMIT
-    )
+    assert _fallback_context_estimate(outcome.messages[2:], None) <= _RECENT_GROUP_TOKEN_LIMIT
     summary_message = outcome.messages[1]
     assert len(str(summary_message.content)) <= (
         len(_SUMMARY_MESSAGE_PREFIX)

@@ -173,7 +173,8 @@ class DesktopInputGuard(CoreVisibilityGuard):
         # avoids treating Chinese or emoji as chars/4. Never claim exact counts.
         # Connector recovery already projects the visible snapshot into content;
         # its per-turn persistence metadata is never sent to the provider.
-        serialized = [message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+        serialized = [message.model_dump(exclude_none=True,
+                                         exclude={"host_connector_status", "earlier_user_messages"})
                       for message in messages]
         for message, data in zip(messages, serialized):
             if isinstance(message.content, list):

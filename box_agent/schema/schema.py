@@ -143,6 +143,9 @@ class Message(BaseModel):
     # Durable original input and resource associations; only ContextEngine
     # derives the provider view. Older messages have no such record.
     input_facts: dict[str, Any] | None = None
+    # Original user texts carried across compaction boundaries by the Session Log.
+    # Only the bounded rendering in content is sent to the model.
+    earlier_user_messages: list[str] | None = None
     # Request-only multimodal overlays may carry raw image bytes to a provider
     # without persisting them in durable traces. Excluded from serialization so
     # this remains an internal observability directive.

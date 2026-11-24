@@ -33,8 +33,10 @@ TRANSIENT_IMAGE_PIXEL_TOKEN_DIVISOR: Final[int] = 600
 
 _LOCAL_FALLBACK_CHAR_LIMIT = 12_000
 _SUMMARY_OUTPUT_CHAR_LIMIT = 8_000
-_RECENT_MESSAGE_LIMIT = 5
-_RECENT_MESSAGE_CHAR_LIMIT = 20000
+_RECENT_GROUP_LIMIT = 5
+_RECENT_GROUP_TOKEN_LIMIT = 15_000
+_EARLIER_USER_TOKEN_LIMIT = 10_000
+_EARLIER_USER_ITEM_TOKEN_LIMIT = 2_000
 _RUNTIME_STATE_CHAR_LIMIT = 12_000
 # Request serialization/envelope headroom, independent of model output tokens.
 REQUEST_INPUT_HEADROOM_TOKENS = 1_024
@@ -63,6 +65,13 @@ _SUMMARY_MESSAGE_SUFFIX = (
 _LEGACY_SUMMARY_MARKER = "[Assistant Execution Summary]"
 _RUNTIME_STATE_MARKER = "[Post-Compaction Runtime State]"
 _WORKFLOW_CHECKPOINT_MARKER = "[Post-Compaction Workflow Checkpoint]"
+_EARLIER_USER_MARKER = "[Earlier User Messages]"
+_EARLIER_USER_INTRO = (
+    f"{_EARLIER_USER_MARKER}\n\n"
+    "This conversation was compacted. What follows are the user's earlier messages, word for word "
+    "and oldest first. They are a record, not new requests; the latest request appears later in the conversation."
+)
+_EARLIER_USER_MIDDLE = "\n[The middle of this message is left out to save space.]\n"
 _SUMMARY_REQUEST = (
     "Create a detailed continuation summary of the conversation above using "
     "only the existing conversation. Do not call tools or perform new work. "
@@ -236,8 +245,7 @@ def _deterministic_history_fallback(messages: list[Message]) -> str:
         (
             message
             for message in reversed(messages)
-            if message.role == "user" and message.source == "user"
-            and not _is_compaction_metadata(message)
+            if _is_real_user_message(message)
         ),
         None,
     )
@@ -258,7 +266,8 @@ def _deterministic_history_fallback(messages: list[Message]) -> str:
         used += len(prioritized)
 
     remaining_messages = [
-        message for message in messages if message is not latest_user
+        message for message in messages
+        if message is not latest_user and message.earlier_user_messages is None
     ]
     for index, msg in enumerate(remaining_messages):
         text = _summary_message_text(msg).replace("\x00", "")
@@ -456,52 +465,34 @@ def _bound_text_middle(
     return f"{text[:head_chars]}{marker}{tail}"
 
 
-def _bound_retained_messages(messages: list[Message]) -> list[Message]:
+def _bound_retained_messages(
+    messages: list[Message], *, llm: Any = None, token_limit: int = _RECENT_GROUP_TOKEN_LIMIT,
+) -> list[Message]:
     """Keep recent protocol structure while bounding already-summarized bodies."""
 
-    if sum(_message_chars(message) for message in messages) <= _RECENT_MESSAGE_CHAR_LIMIT:
-        return messages
-
     bounded: list[Message] = []
-    for message in messages:
-        if message.role == "user":
-            # User intent is not replaceable by a generated summary.
-            bounded.append(message)
+    for group in tool_message_groups(messages):
+        members = messages[group.start:group.stop]
+        if members[0].role != "assistant" or _fallback_context_estimate(members, None, llm=llm) <= token_limit:
+            bounded.extend(members)
             continue
-        if message.role == "assistant" and message.tool_calls:
-            # Tool-call arguments and IDs are the protocol contract. The summary
-            # already consumed the assistant body and hidden reasoning.
-            bounded.append(
-                message.model_copy(update={"content": "", "thinking": None})
-            )
-            continue
-        if message.role == "tool":
-            bounded.append(
-                message.model_copy(
-                    update={
-                        "content": (
-                            "[Tool result compacted after inclusion in the continuation "
-                            f"summary. Tool: {message.name or 'unknown'}; original model "
-                            f"serialized size: {_message_chars(message):,} characters. "
-                            "The matching "
-                            "tool call above retains its original arguments and identifier.]"
-                        )
-                    }
+        for message in members:
+            size = f"original model serialized size: {_message_chars(message):,} characters."
+            if message.tool_calls:
+                # Tool-call arguments and IDs are the protocol contract.
+                content = ""
+            elif message.role == "tool":
+                content = (
+                    "[Tool result compacted after inclusion in the continuation summary. "
+                    f"Tool: {message.name or 'unknown'}; {size} The matching tool call above "
+                    "retains its original arguments and identifier.]"
                 )
-            )
-            continue
-        bounded.append(
-            message.model_copy(
-                update={
-                    "content": (
-                        "[Assistant content compacted after inclusion in the continuation "
-                        f"summary; original model serialized size: {_message_chars(message):,} "
-                        "characters.]"
-                    ),
-                    "thinking": None,
-                }
-            )
-        )
+            else:
+                content = (
+                    "[Assistant content compacted after inclusion in the continuation "
+                    f"summary; {size}]"
+                )
+            bounded.append(message.model_copy(update={"content": content, "thinking": None}))
     return bounded
 
 
@@ -668,46 +659,102 @@ def _estimate_context_from_latest_response(
     return _fallback_context_estimate(messages, tools, llm=llm), "fallback"
 
 
-def _recent_message_groups(
-    messages: list[Message],
-    start: int,
-) -> list[list[int]]:
-    """Group assistant tool calls with their contiguous tool results."""
-
-    return [
-        list(group) for group in tool_message_groups(messages, start)
-        if not _is_compaction_metadata(messages[group.start])
-    ]
-
-
 def _select_recent_messages(
     messages: list[Message],
     start: int = 1,
+    *,
+    llm: Any = None,
+    token_limit: int = _RECENT_GROUP_TOKEN_LIMIT,
 ) -> tuple[list[Message], set[int]]:
-    """Select recent complete message groups within explicit count/char caps."""
+    """Keep a recent window of complete assistant rounds and intervening input."""
 
-    selected: list[list[int]] = []
-    selected_count = 0
-    selected_chars = 0
-    for group in reversed(_recent_message_groups(messages, start)):
-        group_messages = [messages[index] for index in group]
-        group_chars = sum(_message_chars(message) for message in group_messages)
-        exceeds_count = selected_count + len(group) > _RECENT_MESSAGE_LIMIT
-        exceeds_chars = selected_chars + group_chars > _RECENT_MESSAGE_CHAR_LIMIT
-        if selected and (exceeds_count or exceeds_chars):
+    selected_indices: set[int] = set()
+    rounds = 0
+    selected_tokens = 0
+    groups = list(tool_message_groups(messages, start))
+    for group in reversed(groups):
+        first = messages[group.start]
+        if _is_compaction_metadata(first):
+            continue
+        is_round = first.role == "assistant"
+        if is_round and rounds >= _RECENT_GROUP_LIMIT:
             break
-        # Preserve at least the newest complete protocol group. A single group
-        # may legitimately exceed either retention cap (for example one
-        # assistant call with several parallel tool results); splitting it
-        # would create orphaned tool messages. The post-build estimate will
-        # explicitly block the request if the complete group still cannot fit.
-        selected.append(group)
-        selected_count += len(group)
-        selected_chars += group_chars
+        group_tokens = _fallback_context_estimate(messages[group.start:group.stop], None, llm=llm)
+        if selected_tokens + group_tokens > token_limit:
+            if rounds:
+                break
+            if not is_round:
+                continue
+            # The newest complete assistant round is protected even if large.
+        selected_indices.update(group)
+        rounds += is_round
+        selected_tokens += group_tokens
 
-    selected_indices = {index for group in selected for index in group}
+    latest_user = next((i for i in range(len(messages) - 1, start - 1, -1)
+                        if _is_real_user_message(messages[i])), None)
+    if latest_user is not None:
+        selected_indices.add(latest_user)
     ordered = [messages[index] for index in sorted(selected_indices)]
     return ordered, selected_indices
+
+
+def _original_user_text(message: Message) -> str:
+    if message.input_facts is not None:
+        return "\n".join(block["text"] for block in message.input_facts.get("blocks", ())
+                         if block["type"] == "text")
+    if isinstance(message.content, str):
+        return message.content
+    return "\n".join(block["text"] for block in message.content
+                     if isinstance(block.get("text"), str))
+
+
+def _collect_earlier_user_texts(messages: list[Message], retained: set[int]) -> list[str]:
+    texts: list[str] = []
+    for index, message in enumerate(messages):
+        if message.role == "user" and message.source == "runtime" and message.earlier_user_messages:
+            texts.extend(message.earlier_user_messages)
+        elif index not in retained and _is_real_user_message(message):
+            texts.append(_original_user_text(message))
+    return texts
+
+
+def _bound_earlier_user_text(text: str, count_tokens: Callable[[str], int]) -> str:
+    if count_tokens(text) <= _EARLIER_USER_ITEM_TOKEN_LIMIT:
+        return text
+    low, high = 0, len(text) - 1
+    while low < high:
+        size = (low + high + 1) // 2
+        head, tail = (size + 1) // 2, size // 2
+        if count_tokens(text[:head] + _EARLIER_USER_MIDDLE + text[len(text) - tail:]) <= _EARLIER_USER_ITEM_TOKEN_LIMIT:
+            low = size
+        else:
+            high = size - 1
+    return text[:(low + 1) // 2] + _EARLIER_USER_MIDDLE + text[len(text) - low // 2:]
+
+
+def _earlier_user_message(
+    texts: list[str], count_tokens: Callable[[str], int], *, token_limit: int = _EARLIER_USER_TOKEN_LIMIT,
+) -> Message:
+    def header(omitted: int) -> str:
+        if omitted:
+            return f"{_EARLIER_USER_INTRO}\n\n[{omitted} earlier user messages are left out here; see the summary.]"
+        return _EARLIER_USER_INTRO
+
+    entries: list[str] = []
+    entry_tokens = 0
+    for index in range(len(texts) - 1, -1, -1):
+        entry = f"\n\n{index + 1}. {_bound_earlier_user_text(texts[index], count_tokens)}"
+        tokens = count_tokens(entry)
+        if count_tokens(header(index)) + entry_tokens + tokens > token_limit:
+            break
+        entries.append(entry)
+        entry_tokens += tokens
+
+    content = header(len(texts) - len(entries)) + "".join(reversed(entries))
+    while entries and count_tokens(content) > token_limit:
+        entries.pop()
+        content = header(len(texts) - len(entries)) + "".join(reversed(entries))
+    return Message(role="user", source="runtime", content=content, earlier_user_messages=texts)
 
 
 async def _restore_runtime_state(
@@ -716,8 +763,7 @@ async def _restore_runtime_state(
 ) -> Message | None:
     """Render trusted read-only tool state without executing a tool call."""
 
-    sections: list[str] = []
-    used_chars = len(_RUNTIME_STATE_MARKER) + 2
+    sections: list[tuple[str, str]] = []
     if tools:
         for tool in tools.values():
             try:
@@ -732,23 +778,28 @@ async def _restore_runtime_state(
             if state is not None:
                 label, content = state
                 if content:
-                    section = f"## {label}\n{content}"
-                    remaining = _RUNTIME_STATE_CHAR_LIMIT - used_chars
-                    if remaining <= 0:
-                        break
-                    section = _bound_text_middle(
-                        section,
-                        remaining,
-                        label="runtime state",
-                    )
-                    sections.append(section)
-                    used_chars += len(section) + 2
+                    sections.append((label, content))
     if not sections:
         return None
+    order = {"goal": 0, "plan": 1, "todo": 2}
+    sections.sort(key=lambda section: order.get(section[0].casefold(), len(order)))
+    headers = [f"\n\n## {label}\n" for label, _ in sections]
+    remaining = _RUNTIME_STATE_CHAR_LIMIT - len(_RUNTIME_STATE_MARKER) - sum(map(len, headers))
+    if remaining < 0:
+        return None
+    # Satisfy small sections first and share the leftover equally among large ones.
+    caps = [0] * len(sections)
+    by_size = sorted(range(len(sections)), key=lambda index: len(sections[index][1]))
+    for rank, index in enumerate(by_size):
+        caps[index] = min(len(sections[index][1]), remaining // (len(sections) - rank))
+        remaining -= caps[index]
     return Message(
         role="user",
         source="runtime",
-        content=f"{_RUNTIME_STATE_MARKER}\n\n" + "\n\n".join(sections),
+        content=_RUNTIME_STATE_MARKER + "".join(
+            header + _bound_text_middle(content, cap, label="runtime state")
+            for header, (_, content), cap in zip(headers, sections, caps)
+        ),
     )
 
 
@@ -800,15 +851,8 @@ async def _maybe_summarize(
             trigger_source=trigger_source,
         )
 
-    user_indices = [
-        index
-        for index, message in enumerate(messages)
-        if index > 0
-        and message.role == "user"
-        and message.source == "user"
-        and not _is_compaction_metadata(message)
-    ]
-    if not user_indices or not messages or messages[0].role != "system":
+    if (not messages or messages[0].role != "system"
+            or not any(_is_real_user_message(message) for message in messages[1:])):
         return CompactionOutcome(
             None,
             estimated,
@@ -817,18 +861,21 @@ async def _maybe_summarize(
             trigger_source=trigger_source,
         )
 
-    latest_user_index = user_indices[-1]
+    # A small model may need less than the standard recent-round allowance.
+    prefix_tokens = _fallback_context_estimate(messages[:1], budget_tools, llm=llm)
+    recent_limit = max(1, min(_RECENT_GROUP_TOKEN_LIMIT, token_limit - prefix_tokens - 512))
     try:
-        retained_messages, retained_indices = _select_recent_messages(messages)
+        retained_messages, retained_indices = _select_recent_messages(messages, llm=llm, token_limit=recent_limit)
     except InvalidToolHistory as exc:
         return CompactionOutcome(
             None, estimated, estimated, mode="blocked", error=str(exc),
             trigger_source=trigger_source,
         )
-    if latest_user_index not in retained_indices:
-        retained_indices.add(latest_user_index)
-        retained_messages = [messages[index] for index in sorted(retained_indices)]
-    retained_messages = _bound_retained_messages(retained_messages)
+    retained_messages = _bound_retained_messages(retained_messages, llm=llm, token_limit=recent_limit)
+    earlier_user_texts = _collect_earlier_user_texts(messages, retained_indices)
+    count_tokens = context_text_counter(llm)
+    earlier_user_message = (_earlier_user_message(earlier_user_texts, count_tokens)
+                            if earlier_user_texts else None)
     # Provider usage describes the pre-compaction request.  Retaining it would
     # make the next prepare pass anchor on the old, uncompressed context and
     # reject the freshly compacted request.  Keep the original objects (and
@@ -912,6 +959,7 @@ async def _maybe_summarize(
     def build_compacted_messages(summary_text: str) -> list[Message]:
         rebuilt = [
             messages[0],
+            *([earlier_user_message] if earlier_user_message is not None else []),
             Message(
                 role="user",
                 source="runtime",
@@ -956,6 +1004,13 @@ async def _maybe_summarize(
         bounded_summary = _bound_text_middle(summary, summary_limit, label="summary")
         new_messages = build_compacted_messages(bounded_summary)
         estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
+    if estimated_after > token_limit and earlier_user_message is not None:
+        # Small windows may have less room than the Earlier User Messages cap.
+        # The full originals remain in durable metadata for later compactions.
+        available = max(0, count_tokens(earlier_user_message.content) - (estimated_after - token_limit))
+        earlier_user_message = _earlier_user_message(earlier_user_texts, count_tokens, token_limit=available)
+        new_messages = build_compacted_messages(bounded_summary)
+        estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
     if estimated_after > token_limit:
         mode = "blocked"
     _log.info(
@@ -997,6 +1052,9 @@ def _is_compaction_metadata(msg: Message) -> bool:
 
     if msg.role != "user" or not isinstance(msg.content, str):
         return False
+    if msg.source == "runtime" and (msg.earlier_user_messages is not None
+                                    or msg.content.startswith(_EARLIER_USER_MARKER)):
+        return True
     return msg.content.startswith(
         (
             _SUMMARY_MARKER,
@@ -1005,6 +1063,10 @@ def _is_compaction_metadata(msg: Message) -> bool:
             _WORKFLOW_CHECKPOINT_MARKER,
         )
     )
+
+
+def _is_real_user_message(message: Message) -> bool:
+    return message.role == "user" and message.source == "user" and not _is_compaction_metadata(message)
 
 
 def request_input_tokens(messages: list[Message], tools: Any, *, llm: Any | None = None,

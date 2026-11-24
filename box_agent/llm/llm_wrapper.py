@@ -35,7 +35,7 @@ def _trace_int(value: Any) -> int:
 
 
 def _trace_request_message(message: Message) -> dict[str, Any]:
-    payload = message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+    payload = message.model_dump(exclude_none=True, exclude={"host_connector_status", "earlier_user_messages"})
     if message.role == "user":
         payload["source"] = message.source
     if not message.trace_redact_content or not isinstance(message.content, list):

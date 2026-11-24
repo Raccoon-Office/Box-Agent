@@ -956,8 +956,18 @@ async def test_compaction_replay_failure_does_not_close_turn_with_old_live_surfa
         "durable compacted history" in str(message.content)
         for message in persisted_messages
     )
-    assert all("old-0:" not in str(message.content) for message in persisted_messages)
+    _assert_old_history_is_archived(persisted_messages)
     log.close()
+
+
+def _assert_old_history_is_archived(messages):
+    archive, = [message for message in messages if message.earlier_user_messages is not None]
+    assert archive.role == "user" and archive.source == "runtime"
+    assert archive.content.startswith("[Earlier User Messages]")
+    originals = [f"old-{index}:" + "x" * 200 for index in range(0, 14, 2)]
+    assert archive.earlier_user_messages == originals
+    assert all(message.content not in originals and not str(message.content).startswith("old-1:")
+               for message in messages)
 
 
 @pytest.mark.asyncio
@@ -1001,7 +1011,7 @@ async def test_replay_recovery_preserves_next_user_input_without_restoring_stale
         for messages in (llm.normal_messages, log.replay().messages):
             assert sum(message.content == new_input for message in messages) == 1
             assert any("durable compacted history" in str(message.content) for message in messages)
-            assert all("old-0:" not in str(message.content) for message in messages)
+            _assert_old_history_is_archived(messages)
         if select_skill:
             assert any("EXACT-REVIEW-METHOD" in str(message.content)
                        for message in llm.normal_messages)
@@ -1044,12 +1054,12 @@ async def test_compaction_without_native_replay_keeps_in_memory_surface(tmp_path
     assert any(isinstance(event, SummarizationEvent) for event in events)
     assert any(isinstance(event, DoneEvent) for event in events)
     # The live surface came from the in-memory post-compaction messages: it
-    # carries the summary and drops the old history, without replay().
+    # carries the summary and archived originals without replay().
     assert any(
         "durable compacted history" in str(message.content)
         for message in agent.messages
     )
-    assert all("old-0:" not in str(message.content) for message in agent.messages)
+    _assert_old_history_is_archived(agent.messages)
     # The durable surface is still committed via replace_surface + flush.
     assert any(
         "durable compacted history" in str(message.content)

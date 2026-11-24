@@ -106,7 +106,8 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
     facts = json.loads(llm.judge_messages[-1].content.split(marker, 1)[1])
     assert facts["user_request"] == "latest user request"
 
-    compacted_summary = llm.normal_messages[1]
+    assert llm.normal_messages[1].earlier_user_messages == [old_user.content]
+    compacted_summary = llm.normal_messages[2]
     assert compacted_summary.role == "user"
     assert "Summary:\n1. Primary Request and Intent:" in str(
         compacted_summary.content
@@ -146,10 +147,10 @@ async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(t
         ),
         latest_user,
     ])
-    history_tokens = _fallback_context_estimate(agent.messages, {})
+    history_tokens = _fallback_context_estimate(agent.messages, {}, llm=llm)
     summary_tokens = _fallback_context_estimate([
         *agent.messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
-    ], {})
+    ], {}, llm=llm)
     if history_chars == 45_000:
         assert history_tokens < token_limit
     else:
@@ -173,7 +174,7 @@ async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_window", [100_000, 60_000])
-@pytest.mark.parametrize("history_chars", [150_000, 164_000, 180_000])
+@pytest.mark.parametrize("history_chars", [114_000, 115_500, 180_000])
 async def test_summary_uses_its_own_window_and_output_reservation(summary_window, history_chars):
     from box_agent.config import derive_context_token_limit
     from box_agent.runtime import run_agent_loop
@@ -196,7 +197,7 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
             *history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
         ], {}, llm=summary_llm)
         assert _fallback_context_estimate(history, {}, llm=llm) > main_limit
-        if summary_window == 100_000 and history_chars == 164_000:
+        if summary_window == 100_000 and history_chars == 115_500:
             assert _fallback_context_estimate(history, {}, llm=summary_llm) <= summary_limit < summary_tokens
 
         events = [event async for event in run_agent_loop(

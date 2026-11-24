@@ -60,7 +60,8 @@ from .context_engine import (
     REQUEST_INPUT_HEADROOM_TOKENS,
     _estimate_context_from_latest_response,
     _fallback_context_estimate,
-    _is_compaction_metadata,
+    _is_real_user_message,
+    _is_summary_marker,
     _validate_transient_followup_result,
     capture_request_usage,
     reported_input_tokens,
@@ -316,11 +317,7 @@ def _message_text(content: str | list[dict[str, Any]]) -> str:
 
 def _latest_user_text(messages: list[Message]) -> str:
     for msg in reversed(messages):
-        if (
-            msg.role == "user"
-            and msg.source == "user"
-            and not _is_compaction_metadata(msg)
-        ):
+        if _is_real_user_message(msg):
             return _message_text(msg.content)
     return ""
 
@@ -457,18 +454,7 @@ async def _auto_match_memory_for_latest_prompt(
     new task.  This avoids depending on the model deciding to call
     ``memory_search`` while keeping the memory signal non-authoritative.
     """
-    if current_turn_text is not None:
-        user_text = current_turn_text
-    else:
-        latest_user = next((msg for msg in reversed(messages) if msg.role == "user"), None)
-        if latest_user is None:
-            return None, None
-
-        user_text = (
-            latest_user.content
-            if isinstance(latest_user.content, str)
-            else str(latest_user.content)
-        )
+    user_text = current_turn_text if current_turn_text is not None else _latest_user_text(messages)
     if not user_text.strip():
         return None, None
     try:
@@ -1243,13 +1229,15 @@ async def _run_agent_loop_impl(
                     )
                 )
             if session_log is not None and session_turn is not None:
+                summary_message = next((message for message in new_msgs[1:] if _is_summary_marker(message)),
+                                       new_msgs[1])
                 session_log.append(
                     "compaction/summary",
                     {
                         "turn": session_turn,
                         "step": step + 1,
                         "mode": result.mode,
-                        "message": new_msgs[1].model_dump(
+                        "message": summary_message.model_dump(
                             mode="json",
                             exclude_none=True,
                         ),
