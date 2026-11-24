@@ -197,6 +197,8 @@ def test_windows_build_entry_preserves_selected_profile_and_existing_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bundled: bool, exe_only: bool
 ) -> None:
     runtime_dir = tmp_path / "output" / "box-agent-runtime"
+    check_pdf = Mock()
+    monkeypatch.setattr(build_win_runtime, "_check_bundled_pdf_lookup", check_pdf)
     python_exe = runtime_dir / "runtime" / "python" / "python.exe"
     old_node = runtime_dir / "runtimes" / "node" / "existing.txt"
     if exe_only:
@@ -264,6 +266,7 @@ def test_windows_build_entry_preserves_selected_profile_and_existing_tools(
         else:
             installer.assert_not_called()
     if exe_only and bundled:
+        check_pdf.assert_called_once_with(python_exe)
         assert python_exe.read_bytes() == b"existing python"
         assert old_node.read_bytes() == b"existing node"
     elif not bundled:
@@ -359,6 +362,8 @@ def test_exe_only_rejects_unknown_profiles_before_modifying_the_runtime(
 def test_exe_only_install_preserves_tools_in_a_matching_target(tmp_path, monkeypatch, external):
     runtime_dir = tmp_path / "output" / "box-agent-runtime"
     target_dir = tmp_path / "installed-runtime"
+    check_pdf = Mock()
+    monkeypatch.setattr(build_win_runtime, "_check_bundled_pdf_lookup", check_pdf)
     for root in (runtime_dir, target_dir):
         (root / "bin").mkdir(parents=True)
         (root / "bin" / "box-agent-acp.exe").write_bytes(b"original exe")
@@ -395,10 +400,32 @@ def test_exe_only_install_preserves_tools_in_a_matching_target(tmp_path, monkeyp
     assert manifest["version"] == "0.9.7"
     assert manifest["external_python_sandbox"] is external
     if external:
+        check_pdf.assert_not_called()
         assert not (target_dir / "runtime").exists()
         assert not (target_dir / "runtimes").exists()
     else:
+        assert [call.args[0] for call in check_pdf.call_args_list] == [
+            root / "runtime/python/python.exe" for root in (runtime_dir, target_dir)
+        ]
         assert (target_dir / "runtime" / "PortableGit" / "usr" / "bin" / "bash.exe").read_bytes() == b"existing bash"
+
+
+def test_exe_only_rejects_standalone_python_without_pdf_lookup_before_build(tmp_path, monkeypatch):
+    runtime_dir = tmp_path / "box-agent-runtime"
+    runtime_dir.mkdir()
+    build_win_runtime._write_manifest(runtime_dir, "old", external_python_sandbox=False)
+    manifest = (runtime_dir / "manifest.json").read_bytes()
+    monkeypatch.setattr(build_win_runtime, "_ensure_win", lambda: None)
+    monkeypatch.setattr(build_win_runtime.sys, "argv", [
+        "build_win_runtime.py", "--exe-only", "--bundled-python-sandbox", "--output", str(tmp_path),
+    ])
+    build = Mock()
+    monkeypatch.setattr(build_win_runtime, "_install_runtime_extras", build)
+    with pytest.raises(SystemExit) as error:
+        build_win_runtime.main()
+    assert error.value.code == 2
+    assert (runtime_dir / "manifest.json").read_bytes() == manifest
+    build.assert_not_called()
 
 
 def test_exe_only_failed_renderer_install_keeps_both_existing_copies(tmp_path, monkeypatch):

@@ -157,3 +157,7 @@ macOS 包使用 `publish:electron-mac-unsigned`；`:test` 会编入测试服务�
 客户端运行时在构建时按锁文件安装导出依赖。从源码或 Python wheel 启动 Box-Agent 时，在实际安装目录的 `box_agent/skills/presentation-design/skills/sn-ppt-dsl` 下先执行一次 `npm ci --omit=dev --include=optional --ignore-scripts --no-bin-links`。写页、导出和看图时直接使用已安装的依赖。
 
 PDF 按编号取图使用执行 Skill 脚本的 Python。使用客户端独立 Python 的宿主，应在配置该解释器时安装 `sn-ppt-design-entry/requirements.txt`，并提供 Pillow 以生成带编号的原页预览。若缺少 PyMuPDF，解析结果的 `figure_index_warning` 会说明原因，正文和内嵌图片仍由 pypdf 提取。
+
+Windows 独立包通过 `--bundled-python-sandbox` 安装 PyMuPDF。旧独立包若缺少取图能力，须用这个参数完整重建，增量更新会在替换文件前提示。
+
+验收安装包时运行 `python scripts/verify_ppt_design_runtime.py <安装目录> <版本> --skill-python <客户端的Python路径>`。脚本让指定解释器按编号裁出 PDF 中的图片和图注、导出一页 PPTX，再打开成品检查两者。Windows 独立包会自动选用包内 Python。

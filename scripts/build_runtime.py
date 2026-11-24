@@ -1045,13 +1045,8 @@ def _install_portable_python_win(runtime_dir: Path) -> None:
     _install_sandbox_packages_win(python_exe)
 
 
-# Pre-installed into the bundled Python's site-packages so that the frozen
-# Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
-# etc. without spawning pip at first run. Mirrors
-# Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
-# only if the underlying portable Python already has these wheels. Mirror
-# ``box_agent.tools.jupyter_tool.SANDBOX_DEFAULT_PACKAGES`` + ``ipykernel``.
-_SANDBOX_BUNDLED_PACKAGES = (*SANDBOX_DEFAULT_PACKAGES, "ipykernel")
+# The standalone Windows interpreter runs the kernel and the built-in PDF figure CLI.
+_SANDBOX_BUNDLED_PACKAGES = (*SANDBOX_DEFAULT_PACKAGES, "ipykernel", "pymupdf>=1.24.3,<2")
 
 
 def _install_sandbox_packages_win(python_exe: Path) -> None:

@@ -272,6 +272,20 @@ def _write_manifest(
     (runtime_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
 
 
+def _check_bundled_pdf_lookup(python: Path) -> None:
+    try:
+        subprocess.run(
+            [str(python), "-I", "-c", "import pymupdf\nwith pymupdf.open() as doc:\n"
+             "    doc.new_page().get_image_info(hashes=True, xrefs=True)"],
+            capture_output=True, check=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(
+            f"The retained Python at {python} cannot index PDF figures. "
+            "Run a clean build with --bundled-python-sandbox and without --exe-only."
+        ) from exc
+
+
 def _validate_exe_only_profile(runtime_dir: Path, *, external_python_sandbox: bool) -> None:
     """Reject an in-place rebuild that would mislabel retained runtime files."""
     rebuild_hint = "Run a clean build without --exe-only to create or switch profiles."
@@ -289,6 +303,8 @@ def _validate_exe_only_profile(runtime_dir: Path, *, external_python_sandbox: bo
             f"--exe-only profile mismatch at {runtime_dir}: existing {existing_name}, "
             f"requested {requested_name}. {rebuild_hint}"
         )
+    if not external_python_sandbox:
+        _check_bundled_pdf_lookup(runtime_dir / "runtime" / "python" / "python.exe")
 
 
 def _create_tar(output_dir: Path, runtime_dir: Path, version: str) -> Path:
