@@ -167,6 +167,42 @@ def test_scratch_retries_failed_deletion_without_nesting_quarantines(tmp_path, m
     assert not list(scratch.path.iterdir())
 
 
+def test_restore_scratch_directory_to_an_available_path(tmp_path):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    (isolated / "draft.html").write_text("preview")
+    target = tmp_path / "public"
+
+    skill_scratch._restore_scratch_entry(isolated, target)
+
+    assert (target / "draft.html").read_text() == "preview"
+    assert not isolated.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows rename already refuses an existing directory")
+def test_restore_scratch_directory_preserves_a_new_empty_directory(tmp_path, monkeypatch):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    (isolated / "draft.html").write_text("old preview")
+    target = tmp_path / "public"
+    new_directory = None
+    lstat = Path.lstat
+
+    def create_target_before_move(path):
+        nonlocal new_directory
+        if path == isolated and new_directory is None:
+            target.mkdir()
+            new_directory = target.stat()
+        return lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", create_target_before_move)
+    skill_scratch._restore_scratch_entry(isolated, target)
+
+    assert new_directory is not None and os.path.samestat(new_directory, target.stat())
+    assert list(target.iterdir()) == []
+    assert (isolated / "draft.html").read_text() == "old preview"
+
+
 def test_prepare_skill_scratch_dir_accepts_session_private_root(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

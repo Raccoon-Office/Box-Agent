@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import threading
 from collections.abc import Callable
@@ -395,19 +396,32 @@ class _CleanupLease:
         return not expired
 
 
-def _restore_scratch_entry(isolated: Path, entry: Path) -> None:
-    """Return an unconfirmed claim without overwriting a newly written file."""
-    try:
-        entry.lstat()
-    except FileNotFoundError:
-        pass
+def _rename_directory_no_replace(source: Path, target: Path) -> None:
+    """Use the native exclusive rename when restoring a POSIX directory."""
+    import ctypes
+
+    if sys.platform == "darwin":
+        symbol, at_fdcwd, flags = "renameatx_np", -2, 0x4  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        symbol, at_fdcwd, flags = "renameat2", -100, 1  # RENAME_NOREPLACE
     else:
-        return
+        raise OSError(errno.ENOTSUP, "Exclusive directory rename unavailable", str(target))
+    rename = getattr(ctypes.CDLL(None, use_errno=True), symbol, None)
+    if rename is None:
+        raise OSError(errno.ENOTSUP, "Exclusive directory rename unavailable", str(target))
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    if rename(at_fdcwd, os.fsencode(source), at_fdcwd, os.fsencode(target), flags):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(target))
+
+
+def _restore_scratch_entry(isolated: Path, entry: Path) -> None:
+    """Return an unconfirmed claim without overwriting a newly written entry."""
     try:
-        if os.name == "nt" or stat.S_ISDIR(isolated.lstat().st_mode):
-            # Windows rename refuses existing targets. POSIX directory rename
-            # cannot replace a file or a populated directory.
+        if os.name == "nt":
             isolated.rename(entry)
+        elif stat.S_ISDIR(isolated.lstat().st_mode):
+            _rename_directory_no_replace(isolated, entry)
         else:
             os.link(isolated, entry, follow_symlinks=False)
             isolated.unlink()
