@@ -11,6 +11,7 @@ from time import perf_counter
 from typing import Any, Callable
 
 from .kernel.context_engine import (
+    ContextTokenCalibration,
     context_text_counter,
     request_input_tokens, skill_reference_budget_chars,
 )
@@ -98,12 +99,14 @@ class DefaultContextEngine:
         [str, str | tuple[str, ...]], str,
     ] = effective_system_prompt, image_context=None, llm=None, thinking_enabled=False,
         initial_context_transition: InitialContextTransition | None = None,
+        token_calibration: ContextTokenCalibration | None = None,
     ) -> None:
         self._system_prompt_projector = system_prompt_projector
         self.image_context = image_context
         self.llm = llm
         self.thinking_enabled = thinking_enabled
         self.initial_context_transition = initial_context_transition
+        self.token_calibration = token_calibration if token_calibration is not None else ContextTokenCalibration()
         self._memory_lookup = None
         self._input_guard: ModelInputGuard | None = None
         self.references: SkillReferenceContext | None = None
@@ -262,6 +265,7 @@ class DefaultContextEngine:
         available = skill_reference_budget_chars(
             context_messages, definitions,
             self._token_limit - self._transient_reserve_tokens, self._output_tokens, llm=self.llm,
+            calibration=self.token_calibration,
         )
         return self.references.read(name, **arguments, budget_chars=max(
             0, available - self._request_reference_tokens * 4,
@@ -331,6 +335,7 @@ class DefaultContextEngine:
         available = skill_reference_budget_chars(
             self.project_history([*history, *extra_messages, *request_tail]),
             prepared_tools.definitions, max(0, token_limit - max(0, transient_tokens)), output_tokens, llm=self.llm,
+            calibration=self.token_calibration,
         )
         correction_context = prepare_correction_context(
             self._memory_lookup, prepared_tools.targets,
@@ -365,7 +370,9 @@ class DefaultContextEngine:
         on_committed = None
         on_response = None
         full_request = [*context_messages, *request_tail] if request_tail else context_messages
-        base_input_tokens = (request_input_tokens(full_request, prepared_tools.definitions, llm=self.llm)
+        base_input_tokens = (request_input_tokens(
+            full_request, prepared_tools.definitions, llm=self.llm, calibration=self.token_calibration,
+        )
                              + self._transient_reserve_tokens)
         if self.references is not None:
             projection = self.references.prepare_request(
@@ -376,6 +383,7 @@ class DefaultContextEngine:
                 budget_chars=skill_reference_budget_chars(
                     full_request, prepared_tools.definitions,
                     token_limit - self._transient_reserve_tokens, output_tokens, llm=self.llm,
+                    calibration=self.token_calibration,
                 ),
             )
             context_messages, references = projection.messages, projection.references
@@ -418,7 +426,7 @@ class DefaultContextEngine:
         if getattr(self.references.runtime if self.references else None, "append_only_context", False):
             actual_input_tokens = request_input_tokens(
                 [*context_messages, *request_tail],
-                prepared_tools.definitions, llm=self.llm,
+                prepared_tools.definitions, llm=self.llm, calibration=self.token_calibration,
             ) + self._transient_reserve_tokens
         total_input_tokens = max(base_input_tokens + self._request_reference_tokens, actual_input_tokens)
         if not blocked_reason and total_input_tokens > token_limit:
@@ -436,7 +444,7 @@ class DefaultContextEngine:
             )
             provider_messages = image_projection.messages
             total_input_tokens = max(total_input_tokens, request_input_tokens(
-                provider_messages, prepared_tools.definitions, llm=self.llm,
+                provider_messages, prepared_tools.definitions, llm=self.llm, calibration=self.token_calibration,
             ) + self._transient_reserve_tokens)
             if image_projection.blocked_reason:
                 blocked_reason = image_projection.blocked_reason

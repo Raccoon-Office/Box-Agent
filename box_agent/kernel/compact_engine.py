@@ -23,4 +23,5 @@ class DefaultCompactEngine:
             request_headroom_tokens=inputs.request_headroom_tokens,
             compacted_history_projector=inputs.compacted_history_projector,
             compaction_source_projector=inputs.compaction_source_projector,
+            calibration=inputs.calibration,
         )

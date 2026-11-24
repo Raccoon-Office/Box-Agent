@@ -21,6 +21,7 @@ from .base import LLMClientBase, closing_llm_stream
 from .openai_client import OpenAIClient
 from .reasoning import ReasoningEffort, parse_reasoning_effort, parse_raccoon_thinking_level
 from .think_tag_splitter import split_inline_think, unwrap_think_tags
+from .token_estimator import estimate_text_tokens
 from .token_meter import record_usage
 
 logger = logging.getLogger(__name__)
@@ -262,12 +263,8 @@ class LLMClient:
             await closer()
 
     def estimate_text_tokens(self, text: str) -> int:
-        """Estimate text without assuming the endpoint uses a particular tokenizer.
-
-        Use two UTF-8 bytes per token as a local heuristic. This leaves more
-        margin than the legacy byte/3 rule without charging every byte as a token.
-        """
-        return (len(text.encode("utf-8")) + 1) // 2
+        """Estimate text locally when provider token counts are unavailable."""
+        return estimate_text_tokens(text)
 
     def for_reasoning_effort(self, effort: ReasoningEffort) -> "LLMClient":
         """Isolate session policy while sharing the owned SDK transport."""

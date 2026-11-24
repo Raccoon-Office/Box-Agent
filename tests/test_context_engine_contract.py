@@ -156,7 +156,7 @@ async def test_compaction_recovers_sources_and_user_constraints_in_messages_only
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra_chars", [20_000, 60_000])
+@pytest.mark.parametrize("extra_chars", [20_000, 125_000])
 async def test_summary_checks_complete_projected_input_against_its_own_capacity(extra_chars):
     from types import SimpleNamespace
 
@@ -173,7 +173,7 @@ async def test_summary_checks_complete_projected_input_against_its_own_capacity(
     def project(messages, **kwargs):
         assert kwargs["purpose"] == "summary"
         assert kwargs["llm"].max_output_tokens == 8_192
-        return SimpleNamespace(messages=[*messages, extra], manifest={}, input_tokens=extra_chars // 2,
+        return SimpleNamespace(messages=[*messages, extra], manifest={}, input_tokens=llm.estimate_text_tokens(extra.content),
                                blocked_reason=None)
 
     context = DefaultContextEngine(image_context=SimpleNamespace(
@@ -183,7 +183,7 @@ async def test_summary_checks_complete_projected_input_against_its_own_capacity(
     history = [
         Message(role="system", content="system"),
         Message(role="user", content="old request"),
-        Message(role="assistant", content="x" * 120_000),
+        Message(role="assistant", content="x" * 84_000),
         *(Message(role="assistant", content=f"recent result {index}") for index in range(6)),
         Message(role="user", content="continue"),
     ]

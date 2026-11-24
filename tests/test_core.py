@@ -7207,14 +7207,12 @@ def test_context_pressure_counts_new_schemas_even_when_previous_usage_is_small()
         {"activated": _LargeActivatedTool()},
     )
 
-    assert source == "fallback"
-    assert estimated == _fallback_context_estimate(
-        [Message(role="system", content="sys"), response], {"activated": _LargeActivatedTool()},
-    )
+    assert source == "usage"
+    assert estimated == 110 + _fallback_context_estimate([], {"activated": _LargeActivatedTool()})
     assert estimated > 110
 
 
-def test_context_pressure_without_usage_falls_back_to_characters_over_four():
+def test_context_pressure_without_usage_falls_back_to_local_estimator():
     from box_agent.core import (
         _estimate_context_from_latest_response,
         _fallback_context_estimate,

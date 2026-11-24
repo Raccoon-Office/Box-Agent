@@ -214,7 +214,12 @@ def _context_usage_metadata(message: Message) -> dict[str, Any] | None:
 
 def _restore_context_usage(message: Message, metadata: Any) -> None:
     """Restore optional measured context without changing public usage fields."""
-    if message.role != "assistant" or message.usage is None or not isinstance(metadata, dict):
+    if message.role != "assistant" or message.usage is None:
+        return
+    usage = message.usage
+    # Public token totals do not identify the provider route after replay.
+    usage._request_route_unverified = True
+    if not isinstance(metadata, dict):
         return
     if type(metadata.get("version")) is not int or metadata["version"] != 1:
         return
@@ -238,10 +243,10 @@ def _restore_context_usage(message: Message, metadata: Any) -> None:
             return
     except (TypeError, ValueError, UnicodeError):
         return
-    usage = message.usage
     usage._request_snapshot = RequestUsageSnapshot(
         route=metadata["route"], history=tuple(history), tools=dict(tools), request_only=tuple(request_only),
     )
+    usage._request_route_unverified = False
     # Provider-specific input/cache fields are excluded from public serialization.
     # Restore their aggregate so context_tokens remains identical after replay.
     usage.input_tokens = context_tokens - output_tokens
@@ -1398,6 +1403,7 @@ class SessionLog:
             if message.usage is not None and message.usage._request_snapshot is not None:
                 if latest_snapshot_seen:
                     message.usage._request_snapshot = None
+                    message.usage._request_route_unverified = True
                 latest_snapshot_seen = True
         return SessionProjection(
             messages=messages,

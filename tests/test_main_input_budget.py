@@ -94,7 +94,7 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
                                                 llm_binding=original_binding)
             original = adapter._sessions[created.session_id]
             original.agent.add_user_message("Retain the saved decision.")
-            old_detail = "old investigation detail. " * 14_000
+            old_detail = "old investigation detail. " * 24_000
             original.agent.messages.append(Message(role="assistant", content=old_detail))
             summary_estimate = _fallback_context_estimate([
                 *original.agent.messages, Message(role="user", content=_SUMMARY_REQUEST),
@@ -120,7 +120,7 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
             assert len(main_requests) == 1
             assert any("Summary:" in str(m.get("content")) for m in main_requests[0]["messages"])
             assert not any(m.get("content") == old_detail for m in main_requests[0]["messages"])
-            assert (len(json.dumps(main_requests[0], ensure_ascii=False).encode("utf-8")) + 1) // 2 < target_limit
+            assert llm.estimate_text_tokens(json.dumps(main_requests[0], ensure_ascii=False)) < target_limit
             assert adapter._sessions[created.session_id].agent.token_limit == target_limit == 144_000
         finally:
             await adapter.aclose()
@@ -190,7 +190,7 @@ async def test_provider_usage_guides_next_request_and_charges_changed_tools(chan
 
         async def execute(self):
             if change_schema:
-                self.description = "Extra usage guidance. " * 2_000
+                self.description = "Extra usage guidance. " * 5_000
             return ToolResult(success=True, content="工具返回的结果。\n" * 650)
 
     class Provider:
@@ -238,7 +238,7 @@ async def test_provider_usage_guides_next_request_and_charges_changed_tools(chan
 @pytest.mark.asyncio
 @pytest.mark.parametrize("previous_usage", [False, True])
 async def test_underestimated_unicode_user_input_is_blocked_without_provider_call(previous_usage):
-    original = "龘 " * 10_000
+    original = "龘 " * 17_000
     messages = [Message(role="system", content="system")]
     if previous_usage:
         messages.append(Message(role="assistant", content="old answer",
@@ -291,7 +291,7 @@ def test_measured_request_counts_only_new_occurrences_of_appended_content(change
 
 
 @pytest.mark.parametrize("snapshot_mode", ["missing", "different-route"])
-def test_unmatched_usage_still_checks_the_full_request_with_appended_content(snapshot_mode):
+def test_only_a_route_mismatch_replaces_the_provider_usage_anchor(snapshot_mode):
     llm = SimpleNamespace(
         model="model", provider="openai", api_base="https://budget.invalid/v1",
         estimate_text_tokens=lambda text: (len(text.encode("utf-8")) + 1) // 2,
@@ -305,8 +305,11 @@ def test_unmatched_usage_still_checks_the_full_request_with_appended_content(sna
     messages = [*history, Message(role="assistant", content="answer", usage=usage), overlay]
 
     estimate = request_input_tokens(messages, {}, llm=llm)
-    assert estimate == _fallback_context_estimate(messages, {}, llm=llm)
-    assert estimate > 10_000
+    if snapshot_mode == "different-route":
+        assert estimate == _fallback_context_estimate(messages, {}, llm=llm)
+        assert estimate > 10_000
+    else:
+        assert estimate == 1_010 + _fallback_context_estimate([overlay], {}, llm=llm)
 
 
 @pytest.mark.asyncio
@@ -369,7 +372,7 @@ async def test_larger_run_budget_is_clamped_to_model_before_compacting_and_sendi
     messages = [
         Message(role="system", content="system"),
         Message(role="user", content="old request"),
-        Message(role="assistant", content="龘 " * 10_000),
+        Message(role="assistant", content="龘 " * 20_000),
         *(Message(role="assistant", content=f"recent result {index}") for index in range(6)),
         Message(role="user", content="continue"),
     ]
@@ -381,8 +384,8 @@ async def test_larger_run_budget_is_clamped_to_model_before_compacting_and_sendi
     assert compaction.token_limit == derive_context_token_limit(20_000, 1_000)
     assert compaction.mode == "fallback" and compaction.summary_calls == 0
     assert len(requests) == 1
-    assert sum(len(message["content"].encode("utf-8"))
-               for message in requests[0]["messages"]) <= compaction.token_limit
+    sent = [Message(role=message["role"], content=message["content"]) for message in requests[0]["messages"]]
+    assert _fallback_context_estimate(sent, None, llm=llm) <= compaction.token_limit
     assert requests[0]["messages"][-1]["content"] == "continue"
     assert not [event for event in events if isinstance(event, ErrorEvent)]
 

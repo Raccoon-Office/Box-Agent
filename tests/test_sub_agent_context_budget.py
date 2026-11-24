@@ -73,7 +73,7 @@ class FollowupTool(Tool):
 
     async def execute(self):
         return ToolResult(success=True, content="Ready.", transient_followup_content=[
-            {"type": "text", "text": "T" * 27000},
+            {"type": "text", "text": "T" * 14500},
         ])
 
 
@@ -90,9 +90,9 @@ async def run_child(model, history, tools=None, *, session_log=None, token_limit
     )
 
 
-def child_history(execution_chars=30000):
+def child_history(execution_chars=18000):
     return [
-        Message(role="system", content="S" * 64000),
+        Message(role="system", content="S" * 35000),
         Message(role="user", content="old task"),
         Message(role="assistant", content="X" * execution_chars),
         Message(role="user", content="Check the supplied content and finish."),
@@ -143,7 +143,9 @@ async def test_child_compacts_history_with_the_full_followup_budget():
 
 @pytest.mark.parametrize("persisted", [False, True])
 @pytest.mark.parametrize("system_chars, overlay_chars, fits", [
-    (64000, 30000, True), (64000, 50000, False), (83000, 14000, True),
+    # Both fitting cases require shortening the initial summary. The middle
+    # case exceeds 50k even with only the system and request-only overlay.
+    (35000, 16000, True), (35000, 25000, False), (45000, 7000, True),
 ])
 async def test_child_tightens_budget_after_reprojecting_compacted_history(
     monkeypatch, tmp_path, system_chars, overlay_chars, fits, persisted,
@@ -217,7 +219,7 @@ async def test_cancellation_after_reprojection_stops_before_another_summary(monk
     def prepare(self, messages, **kwargs):
         nonlocal cancelled
         if any(_SUMMARY_MARKER in str(message.content) for message in messages):
-            kwargs["extra_messages"] = (Message(role="user", source="runtime", content="R" * 30000),)
+            kwargs["extra_messages"] = (Message(role="user", source="runtime", content="R" * 16000),)
             cancelled = True
         return original_prepare(self, messages, **kwargs)
 

@@ -537,7 +537,7 @@ def test_routing_reserves_the_inherited_output_limit_when_the_catalog_omits_it()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("same_model", [False, True])
-@pytest.mark.parametrize("reference_repetitions", [100, 5_000])
+@pytest.mark.parametrize("reference_repetitions", [100, 7_000])
 async def test_routed_child_checks_full_input_against_its_selected_model_window(
     reference_repetitions, same_model, monkeypatch,
 ):
@@ -583,7 +583,7 @@ async def test_routed_child_checks_full_input_against_its_selected_model_window(
         events = []
         while not queue.empty():
             events.append(queue.get_nowait().event)
-        if reference_repetitions == 5_000:
+        if reference_repetitions == 7_000:
             assert requests == []
             assert not result.success
             assert result.raw_output["stop_reason"] == "error"

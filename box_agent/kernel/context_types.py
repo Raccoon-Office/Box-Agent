@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..schema import Message
 from ..tools.base import Tool
+
+if TYPE_CHECKING:
+    from .context_engine import ContextTokenCalibration
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +51,7 @@ class CompactionInput:
     compacted_history_projector: Callable[[list[Message]], list[Message]] | None = None
     compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None
     session_log: Any = None
+    calibration: ContextTokenCalibration | None = None
 
 
 @dataclass(frozen=True)

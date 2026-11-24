@@ -93,6 +93,7 @@ class TokenUsage(BaseModel):
     cache_read_input_tokens: int = Field(default=0, exclude=True)
     cache_read_input_tokens_reported: bool = Field(default=False, exclude=True)
     _request_snapshot: RequestUsageSnapshot | None = PrivateAttr(default=None)
+    _request_route_unverified: bool = PrivateAttr(default=False)
 
     def reported_usage(self) -> dict[str, int]:
         """Return provider totals with cache reads when the provider reported them."""

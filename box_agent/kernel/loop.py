@@ -56,11 +56,14 @@ from ..events import (
     ToolCallResult,
 )
 from .context_engine import (
+    ContextTokenCalibration,
     REQUEST_INPUT_HEADROOM_TOKENS,
     _estimate_context_from_latest_response,
+    _fallback_context_estimate,
     _is_compaction_metadata,
     _validate_transient_followup_result,
     capture_request_usage,
+    reported_input_tokens,
     request_input_tokens,
 )
 from .context_types import CompactionInput, CompactionOutcome, InitialContextTransition
@@ -767,6 +770,7 @@ async def _run_agent_loop_impl(
 
         compact_engine = DefaultCompactEngine()
     context_engine = _services.context_engine
+    calibration = getattr(context_engine, "token_calibration", None) or ContextTokenCalibration()
     if context_engine is not None:
         bind_model = getattr(context_engine, "bind_model", None)
         if callable(bind_model):
@@ -1053,6 +1057,7 @@ async def _run_agent_loop_impl(
             for previous in reversed(messages):
                 if previous.usage is not None and previous.usage._request_snapshot is not None:
                     previous.usage._request_snapshot = None
+                    previous.usage._request_route_unverified = True
                     break
         messages.append(message)
         if session_log is not None and session_turn is not None:
@@ -1202,6 +1207,7 @@ async def _run_agent_loop_impl(
             request_headroom_tokens=request_headroom_tokens,
             compacted_history_projector=project_compacted_history,
             compaction_source_projector=getattr(context_engine, "compaction_source", None),
+            calibration=calibration,
         ))
 
     def commit_compaction(result: CompactionOutcome):
@@ -1555,7 +1561,7 @@ async def _run_agent_loop_impl(
             def projected_input_tokens(projection):
                 measured = getattr(projection, "total_input_tokens", None)
                 return measured if measured is not None else request_input_tokens(
-                    projection.messages, budget_tools_by_name, llm=llm,
+                    projection.messages, budget_tools_by_name, llm=llm, calibration=calibration,
                 )
 
             projection = await prepare_request(messages)
@@ -1612,6 +1618,7 @@ async def _run_agent_loop_impl(
                     api_total_tokens=api_total_tokens,
                     api_prompt_tokens=api_prompt_tokens,
                     llm=llm,
+                    calibration=calibration,
                 )
                 request_reserve = max(
                     extra_tokens + transient_tokens,
@@ -1649,7 +1656,7 @@ async def _run_agent_loop_impl(
                         break
                     full_input_tokens = projected_input_tokens(projection)
                     current_history_tokens, _ = _estimate_context_from_latest_response(
-                        messages, budget_tools_by_name, llm=llm,
+                        messages, budget_tools_by_name, llm=llm, calibration=calibration,
                     )
                     # Restored references/images can add input after compaction.
                     # Tighten against that exact projection, never the old usage.
@@ -1777,7 +1784,8 @@ async def _run_agent_loop_impl(
         if window is not None and request_max_output is not None:
             input_tokens = (
                 projected_input_tokens(projection) if context_engine is not None
-                else request_input_tokens(provider_request_messages, budget_tools_by_name, llm=llm)
+                else request_input_tokens(provider_request_messages, budget_tools_by_name, llm=llm,
+                                          calibration=calibration)
             )
             reserve = min(request_max_output, OUTPUT_RESERVE_CAP_TOKENS)
             available_output = max(reserve, window - input_tokens - REQUEST_INPUT_HEADROOM_TOKENS)
@@ -1909,6 +1917,9 @@ async def _run_agent_loop_impl(
             request_only_input_tokens = request_overlay_tokens
             request_usage_snapshot = capture_request_usage(
                 provider_request_messages, len(messages), tool_list, llm,
+            )
+            request_local_input_tokens = _fallback_context_estimate(
+                provider_request_messages, budget_tools_by_name, llm=llm,
             )
             llm_stream = llm.generate_stream(**stream_kwargs)
             async with aclosing(_stream_with_activity(
@@ -2212,6 +2223,7 @@ async def _run_agent_loop_impl(
         if response.usage:
             api_total_tokens = response.usage.total_tokens
             api_prompt_tokens = response.usage.prompt_tokens
+            calibration.record(llm, reported_input_tokens(response.usage), request_local_input_tokens)
             yield TokenUsageEvent(total_tokens=api_total_tokens)
 
         # ── Hook: LLM response ─────────────────────────────
@@ -2272,7 +2284,7 @@ async def _run_agent_loop_impl(
 
         assistant_usage = response.usage
         if (assistant_usage is not None and request_usage_snapshot is not None
-                and assistant_usage.prompt_tokens > 0):
+                and assistant_usage.context_tokens > 0):
             assistant_usage = assistant_usage.model_copy()
             assistant_usage._request_snapshot = request_usage_snapshot
         assistant_msg = Message(
