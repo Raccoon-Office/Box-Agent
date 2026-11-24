@@ -116,6 +116,103 @@ async def test_acp_device_tools_are_session_opt_in_and_events_use_request_receip
     finally:
         await adapter.aclose()
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("barrier", ["encode", "fsync"])
+async def test_acp_device_event_waits_for_worker_checkpoint_and_acknowledges_durable_order(
+    tmp_path, monkeypatch, barrier,
+):
+    import threading
+
+    import box_agent.session_log as session_log
+    from box_agent.acp import BoxACPAgent
+    from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+    from examples.device_parent_demo import DeterministicLLM
+
+    class Connection:
+        async def ext_method(self, *args):
+            pytest.fail("recording progress should not issue another device request")
+
+        async def session_update(self, *args, **kwargs):
+            pass
+
+    loop = asyncio.get_running_loop()
+    worker_blocked = asyncio.Event()
+    release = threading.Event()
+    original_encode = session_log._encode_record
+    original_fsync = session_log._timed_fsync
+    loop_thread = threading.get_ident()
+
+    def pause_worker():
+        loop.call_soon_threadsafe(worker_blocked.set)
+        assert release.wait(10)
+
+    def encode(record):
+        if record.get("type") == "assistant/chunk":
+            assert threading.get_ident() != loop_thread
+            if barrier == "encode":
+                pause_worker()
+        if record.get("type") == "device/state":
+            assert asyncio.get_running_loop() is loop
+        return original_encode(record)
+
+    def fsync(fd):
+        if barrier == "fsync" and threading.get_ident() != loop_thread:
+            pause_worker()
+        original_fsync(fd)
+
+    config = Config(agent=AgentConfig(workspace_dir=str(tmp_path)), tools=ToolsConfig(),
+                    llm=LLMConfig(api_key="test"))
+    adapter = BoxACPAgent(Connection(), config, DeterministicLLM(), [], "test")
+    tasks = []
+    try:
+        session = await adapter.new_session(str(tmp_path), [], device={"version": 1})
+        broker = adapter._sessions[session.session_id].device_delegations
+        log = broker.log
+        bind_wait_targets(broker, target())
+        operation_id = next(iter(broker.operations))
+        next_seq = log.event_count
+        monkeypatch.setattr(session_log, "_encode_record", encode)
+        monkeypatch.setattr(session_log, "_timed_fsync", fsync)
+
+        def checkpoint():
+            log.append("assistant/chunk", {"turn": 1, "step": 1, "kind": "text", "content": "checkpoint"})
+            log.flush()
+
+        worker = asyncio.create_task(session_log.run_session_write(log, checkpoint))
+        tasks.append(worker)
+        await asyncio.wait_for(worker_blocked.wait(), 5)
+        device_event = asyncio.create_task(adapter.ext_method("device/event", {
+            "version": 1, "sessionId": session.session_id, "event": {
+                **target(), "operationId": operation_id, "seq": 1, "status": "running",
+            },
+        }))
+        tasks.append(device_event)
+        await asyncio.sleep(0)
+        assert not device_event.done()
+        assert broker.operations[operation_id]["status"] == "accepted"
+
+        release.set()
+        assert await asyncio.wait_for(device_event, 5) == {"recorded": True}
+        await asyncio.wait_for(worker, 5)
+        assert log._durable_event_count == log.event_count
+        path = log.path
+        log_id = log.header["id"]
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await adapter.aclose()
+
+    reopened = session_log.SessionLog.open(path.parent.parent, session_id=log_id, cwd=tmp_path)
+    try:
+        assert [(event["seq"], event["type"]) for event in reopened.events[-2:]] == [
+            (next_seq, "assistant/chunk"), (next_seq + 1, "device/state"),
+        ]
+        assert reopened.events[-1]["data"]["status"] == "running"
+    finally:
+        reopened.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("selection", ["unique", "named", "ambiguous", "missing"])
 async def test_real_parent_discovers_and_targets_registered_device_name(tmp_path, selection):
@@ -1417,12 +1514,19 @@ async def test_wait_shares_a_hard_deadline_and_reports_silence_as_unknown(monkey
 @pytest.mark.asyncio
 async def test_acp_stop_cancels_all_wait_groups_without_cancelling_other_parent_turns(tmp_path):
     import json
+    import threading
+
     from acp import text_block
     from box_agent.acp import BoxACPAgent
     from box_agent.config import Config, ToolsConfig, LLMConfig, AgentConfig
+    from box_agent.session_log import run_session_write
     from examples.device_parent_demo import DeterministicLLM
 
     entered = asyncio.Event()
+    checkpoint_started = asyncio.Event()
+    release_checkpoint = threading.Event()
+    waits_released = asyncio.Event()
+    loop = asyncio.get_running_loop()
     started = set()
     released = set()
     targets = [target("first"), target("second")]
@@ -1438,6 +1542,8 @@ async def test_acp_stop_cancels_all_wait_groups_without_cancelling_other_parent_
                 await asyncio.Future()
             finally:
                 released.add(device)
+                if released == {"first", "second"}:
+                    waits_released.set()
 
         async def session_update(self, *args, **kwargs):
             pass
@@ -1445,6 +1551,7 @@ async def test_acp_stop_cancels_all_wait_groups_without_cancelling_other_parent_
     config = Config(tools=ToolsConfig(), llm=LLMConfig(api_key="test"),
                     agent=AgentConfig(workspace_dir=str(tmp_path)))
     adapter = BoxACPAgent(Conn(), config, DeterministicLLM(), [], "test")
+    tasks = []
     try:
         session = await adapter.new_session(str(tmp_path), [], device={"version": 1})
         sid = session.session_id
@@ -1452,13 +1559,33 @@ async def test_acp_stop_cancels_all_wait_groups_without_cancelling_other_parent_
         bind_wait_targets(broker, *targets)
         text = json.dumps({"operation": "session.wait", "args": {"targets": targets, "timeoutMs": 60000}})
         prompt = asyncio.create_task(adapter.prompt(sid, [text_block(text)], turnId="waiting"))
+        tasks.append(prompt)
         await asyncio.wait_for(entered.wait(), 5)
-        await adapter.cancel(sid, turnId="waiting")
+
+        def checkpoint():
+            loop.call_soon_threadsafe(checkpoint_started.set)
+            assert release_checkpoint.wait(10)
+
+        tasks.append(asyncio.create_task(run_session_write(broker.log, checkpoint)))
+        await asyncio.wait_for(checkpoint_started.wait(), 5)
+        stop = asyncio.create_task(adapter.ext_method("device/cancel_turn", {"sessionId": sid, "turnId": "waiting"}))
+        tasks.append(stop)
+        await asyncio.wait_for(waits_released.wait(), 5)
+        assert not stop.done()
+        assert "waiting" not in broker.stopped_turns
+        release_checkpoint.set()
+        assert await asyncio.wait_for(stop, 5) == {"accepted": True}
+        assert "waiting" in broker.stopped_turns
         await asyncio.wait_for(prompt, 5)
         assert released == started == {"first", "second"}
         assert {record["status"] for record in broker.operations.values()} == {"accepted"}
         assert all("cancelOperationId" not in record for record in broker.operations.values())
     finally:
+        release_checkpoint.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await adapter.aclose()
 
 
@@ -2310,7 +2437,11 @@ async def test_waiting_input_is_ready_for_get_and_wait_and_clears_when_the_child
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("during_parent_turn", [True, False])
-async def test_waiting_input_reaches_the_model_once_and_does_not_end_the_child(tmp_path, during_parent_turn):
+async def test_waiting_input_reaches_the_model_once_and_does_not_end_the_child(
+    tmp_path, during_parent_turn, monkeypatch,
+):
+    import threading
+
     from acp import text_block
     from box_agent.acp import BoxACPAgent
     from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
@@ -2352,15 +2483,32 @@ async def test_waiting_input_reaches_the_model_once_and_does_not_end_the_child(t
     try:
         session = await adapter.new_session(str(tmp_path), [], session_id="parent", device={"version": 1})
         sid = session.session_id
-        response = await adapter.prompt(sid, [text_block('{"deviceId":"d","instruction":"begin"}')])
         state = adapter._sessions[sid]
+        broker = state.device_delegations
+        log = broker.log
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+        mark_receipts = log.mark_runtime_input_receipts
+
+        def mark_on_worker(message, receipts):
+            assert threading.get_ident() != loop_thread
+            mark_receipts(message, receipts)
+
+        def confirm_on_loop(receipts):
+            assert asyncio.get_running_loop() is loop
+            assert any(event["data"].get("runtimeInputReceipts") == receipts
+                       for event in log.events[:log._durable_event_count] if event["type"] == "assistant/message")
+            broker.confirm_receipts(receipts)
+
+        monkeypatch.setattr(log, "mark_runtime_input_receipts", mark_on_worker)
+        state.inject_queue.on_model_commit = confirm_on_loop
+        response = await adapter.prompt(sid, [text_block('{"deviceId":"d","instruction":"begin"}')])
         if not during_parent_turn:
             assert not seen
             assert await report(start_request, sid, 1, "waiting_input",
                                 inputRequest={"question": "Which project code?"}) == {"recorded": True}
             await asyncio.wait_for(state.device_wake_task, 10)
 
-        broker = state.device_delegations
         assert response.stop_reason == "end_turn"
         assert len(seen) == 1
         assert broker._consumed_seq(target()) == 1

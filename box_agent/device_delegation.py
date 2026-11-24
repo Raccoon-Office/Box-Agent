@@ -17,6 +17,7 @@ from box_agent.device_artifacts import artifact_refs, delivered_update, project_
 from box_agent.injections import InjectionKind, MessageInjection
 from box_agent.schema import Message
 from box_agent.session_history import effective_events
+from box_agent.session_log import session_write_lock
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.request_user_decision_tool import decision_response_fields
 
@@ -293,6 +294,8 @@ def _is_definite_rejection(error: Any, codes: set[str] = _DEFINITE_REJECTIONS) -
 
 
 class DeviceDelegations:
+    """Own device state on the loop. Serialize synchronous log writes with session_write_lock."""
+
     def __init__(
         self, session_id: str,
         request: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
@@ -587,10 +590,12 @@ class DeviceDelegations:
                             result = {"error": exc}
                         if ("error" not in result
                                 and (isinstance(result.get("accepted"), bool) or result.get("status") == "accepted")):
-                            self.save({**self.operations[op], "stopCancelAcknowledged": True})
+                            async with session_write_lock(self.log):
+                                self.save({**self.operations[op], "stopCancelAcknowledged": True})
                             return
                         if _is_definite_rejection(result.get("error"), _DEFINITE_CANCEL_REJECTIONS):
-                            self.save({**self.operations[op], "stopCancelRejected": True})
+                            async with session_write_lock(self.log):
+                                self.save({**self.operations[op], "stopCancelRejected": True})
                             return
                     if self._needs_stop_cancel(op):
                         await asyncio.sleep(delay)
@@ -604,9 +609,11 @@ class DeviceDelegations:
         for op in self.operations:
             self.retry_stopped_cancellation(op)
 
-    async def _start(self, device_id: str, instruction: str, turn: str,
-                     session_id: str | None = None, artifact_delivery: str | None = None) -> dict[str, Any]:
-        if self.closed or not turn or turn in self.stopped_turns:
+    def _prepare_start(
+        self, device_id: str, instruction: str, turn: str,
+        session_id: str | None, artifact_delivery: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        if self.closed or not turn or turn != self.turn_id() or turn in self.stopped_turns:
             raise ValueError("parent turn is not active")
         args = {"instruction": instruction}
         if artifact_delivery:
@@ -631,15 +638,29 @@ class DeviceDelegations:
         op = record["operationId"]
         record["status"] = "requesting"
         self.save(record)
+        return {
+            "version": 1, "sessionId": self.session_id, "deviceId": device_id,
+            "parentTurnId": turn, "operation": "session.send" if session_id is not None else "session.start",
+            "operationId": op, "args": args,
+        }, is_retry
+
+    async def _start(self, device_id: str, instruction: str, turn: str,
+                     session_id: str | None = None, artifact_delivery: str | None = None) -> dict[str, Any]:
+        async with session_write_lock(self.log):
+            payload, is_retry = self._prepare_start(device_id, instruction, turn, session_id, artifact_delivery)
+        op = payload["operationId"]
         try:
-            result = await self._request({
-                "version": 1, "sessionId": self.session_id, "deviceId": device_id,
-                "parentTurnId": record["parentTurnId"],
-                "operation": "session.send" if session_id is not None else "session.start",
-                "operationId": op, "args": args})
+            result = await self._request(payload)
         except (Exception, asyncio.CancelledError) as exc:
-            self._settle_start_failure(op, exc, is_retry=is_retry)
+            async with session_write_lock(self.log):
+                self._settle_start_failure(op, exc, is_retry=is_retry)
             raise
+        async with session_write_lock(self.log):
+            return self._settle_start_receipt(op, result, device_id, session_id, is_retry=is_retry)
+
+    def _settle_start_receipt(
+        self, op: str, result: Any, device_id: str, session_id: str | None, *, is_retry: bool,
+    ) -> dict[str, Any]:
         if isinstance(result, dict) and ("error" in result or result.get("accepted") is False):
             error = result.get("error", result)
             self._settle_start_failure(
@@ -683,18 +704,19 @@ class DeviceDelegations:
             self.save({**record, "status": status})
 
     async def cancel(self, operation_id: str, *, explicit: bool = False) -> dict[str, Any]:
-        if self.closed:
-            raise RuntimeError("device delegations are closed")
-        record = self.operations.get(operation_id)
-        if record is None:
-            raise ValueError("unknown device operation")
-        if record["status"] in TERMINAL and not explicit:
-            return {"status": record["status"]}
-        if "sessionId" not in record:
-            return {"status": "pending_start_receipt"}
-        cancel_id = record.get("cancelOperationId") or uuid4().hex
-        record = {**record, "cancelOperationId": cancel_id, "cancelRequested": True}
-        self.save(record)
+        async with session_write_lock(self.log):
+            if self.closed:
+                raise RuntimeError("device delegations are closed")
+            record = self.operations.get(operation_id)
+            if record is None:
+                raise ValueError("unknown device operation")
+            if record["status"] in TERMINAL and not explicit:
+                return {"status": record["status"]}
+            if "sessionId" not in record:
+                return {"status": "pending_start_receipt"}
+            cancel_id = record.get("cancelOperationId") or uuid4().hex
+            record = {**record, "cancelOperationId": cancel_id, "cancelRequested": True}
+            self.save(record)
         result = await self._request({
             "version": 1, "sessionId": self.session_id,
             "deviceId": record["deviceId"], "operation": "session.cancel",
@@ -804,7 +826,7 @@ class DeviceDelegations:
         try:
             while pending and not ready:
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                if self.closed or turn in self.stopped_turns:
+                if self.closed or turn != self.turn_id() or turn in self.stopped_turns:
                     raise RuntimeError("device wait cancelled")
                 for task, device_id in tasks.items():
                     if task not in done:
@@ -844,7 +866,7 @@ class DeviceDelegations:
             return merged
         finally:
             active.difference_update(tasks)
-            if not active:
+            if not active and self.wait_requests.get(turn) is active:
                 self.wait_requests.pop(turn, None)
             for task in tasks:
                 if not task.done():
@@ -918,9 +940,7 @@ class DeviceDelegations:
         digest = sha256(content.encode()).hexdigest()
         if digest in self.offered:
             return
-        if self.log:
-            self.log.append("device/offered", {"digest": digest, "targets": targets}, ignorable=True)
-            self.log.flush()
+        self._record("device/offered", {"digest": digest, "targets": targets})
         self.offered[digest] = targets
 
     def _offered_sequences(
@@ -950,14 +970,17 @@ class DeviceDelegations:
         for key, seq in receipts.get("device", {}).items():
             self.consumed[key] = max(self.consumed.get(key, 0), seq)
 
+    def interrupt_waits(self, turn: str) -> None:
+        for task in self.wait_requests.pop(turn, ()):
+            task.cancel()
+
     def stop(self, turn: str) -> None:
         if self.closed or not turn:
             return
         if turn not in self.stopped_turns:
             self._record("device/stop", {"parentTurnId": turn})
             self.stopped_turns.add(turn)
-        for task in self.wait_requests.get(turn, ()):
-            task.cancel()
+        self.interrupt_waits(turn)
         for op, record in self.operations.items():
             if record["parentTurnId"] == turn:
                 self.retry_stopped_cancellation(op)
@@ -1184,7 +1207,8 @@ class DeviceTool(Tool):
                 ]
             content = json.dumps(result, ensure_ascii=False)
             if self.operation in {"session.get_turn", "session.wait"}:
-                self.delegations.offer(content, result)
+                async with session_write_lock(self.delegations.log):
+                    self.delegations.offer(content, result)
             return ToolResult(success=True, content=content, raw_output=result)
         except Exception as exc:
             code = getattr(exc, "code", None)
