@@ -1993,12 +1993,18 @@ async def _run_agent_loop_impl(
                 yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                 return
 
+            # A provider refusal takes precedence over local tool recovery.
+            finish_reason = (
+                "content_filter"
+                if finish_event.raw_finish_reason == "content_filter"
+                else finish_event.finish_reason or "stop"
+            )
             # Build LLMResponse equivalent from streamed data
             response = LLMResponse(
                 content=text_content,
                 thinking=thinking_content if thinking_content else None,
-                tool_calls=finish_event.tool_calls,
-                finish_reason=finish_event.finish_reason or "stop",
+                tool_calls=None if finish_reason == "content_filter" else finish_event.tool_calls,
+                finish_reason=finish_reason,
                 usage=finish_event.usage,
                 provider_response_id=finish_event.provider_response_id,
                 truncated_tool_calls=finish_event.truncated_tool_calls,
@@ -2231,7 +2237,7 @@ async def _run_agent_loop_impl(
         # message here, then append only in the branches that keep it.
         invalid_tool_ids = not valid_tool_call_ids(response.tool_calls or ())
         if (callable(on_response_received) and not invalid_tool_ids
-                and response.finish_reason not in {"provider_stale", "length", "max_tokens"}
+                and response.finish_reason not in {"provider_stale", "length", "max_tokens", "content_filter"}
                 and not (response.truncated_tool_calls or response.stream_dropped_mid_tool or response.oversized_tool_calls)
                 and ((response.content or "").strip() or response.tool_calls)):
             on_response_received()
@@ -2253,6 +2259,21 @@ async def _run_agent_loop_impl(
                 else None
             ),
         )
+
+        if response.finish_reason == "content_filter":
+            await run_session_write(session_log, commit_model_response, assistant_msg)
+            msg = "模型输出触发内容安全拦截，本轮未完成。"
+            if hook_mgr.hooks:
+                await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=response.content)
+            yield ErrorEvent(
+                message=msg,
+                is_fatal=True,
+                error_code="content_filter",
+                error_category="content_filter",
+            )
+            yield DoneEvent(stop_reason=StopReason.ERROR, final_content=response.content)
+            return
 
         # Raw image blocks are a one-shot request overlay. Retain them only
         # when an empty provider-stale response will be retried verbatim.

@@ -5102,6 +5102,64 @@ async def test_acp_prompt_exposes_structured_points_insufficient_error(tmp_path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["Partial answer.", ""])
+async def test_acp_prompt_reports_filtered_output_as_incomplete(tmp_path, prefix):
+    class FilteredLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if self.calls:
+                async for event in super().generate_stream(messages, tools, **kwargs):
+                    yield event
+                return
+            self.calls += 1
+            if prefix:
+                yield StreamEvent(type="text", delta=prefix)
+            yield StreamEvent(type="finish", finish_reason="content_filter")
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    llm = FilteredLLM()
+    agent = BoxACPAgent(conn, config, llm, [], "system")
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    )
+    prompt = SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+    response = await agent.prompt(**acp_params(prompt))
+
+    assert llm.calls == 1
+    assert response.stopReason == "refusal"
+    assert response.field_meta["ok"] is False
+    assert response.field_meta["completed"] is False
+    assert response.field_meta["runStatus"] == "error"
+    assert response.field_meta["errorCode"] == "content_filter"
+    assert response.field_meta["errorCategory"] == "content_filter"
+    assert "内容安全" in response.field_meta["error"]
+    assert response.field_meta["messageDisplay"]["finalMessageIds"] == []
+
+    text_chunks = [
+        update.update.content.text
+        for update in conn.updates
+        if update.update.sessionUpdate == "agent_message_chunk"
+    ]
+    assert text_chunks == ([prefix] if prefix else [])
+    session_log = agent._sessions[session.sessionId].agent.session_log
+    assert [
+        msg.content for msg in session_log.replay().messages if msg.role == "assistant"
+    ] == text_chunks
+
+    prompt = SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello again"}])
+    response = await agent.prompt(**acp_params(prompt))
+    assert llm.calls == 2
+    assert response.stopReason == "end_turn"
+    assert response.field_meta["ok"] is True
+    assert response.field_meta["completed"] is True
+    assert "errorCategory" not in response.field_meta
+
+
+@pytest.mark.asyncio
 async def test_acp_completion_check_timeout_keeps_answer_and_reports_failure(tmp_path):
     class TimeoutJudgeLLM(DummyLLM):
         async def generate(self, messages, tools=None, **kwargs):

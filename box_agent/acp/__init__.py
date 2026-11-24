@@ -4019,7 +4019,9 @@ class BoxACPAgent:
             "error": "end_turn",
         }
         acp_stop_reason = _ACP_STOP_REASON_MAP.get(stop_reason, "end_turn")
-        if (
+        if stop_reason == StopReason.ERROR.value and state.last_error_category == "content_filter":
+            acp_stop_reason = "refusal"
+        elif (
             (autopilot.budget_exhausted or autopilot.no_progress_exhausted)
             and state.agent.goal is not None
             and state.agent.goal.status == "active"
@@ -5948,7 +5950,9 @@ class BoxACPAgent:
                                     "error_details": error_details,
                                 },
                             )
-                            await self._send(session_id, update_agent_message(text_block(f"Error: {msg}")))
+                            # The refusal is reported in the terminal metadata.
+                            if error_category != "content_filter":
+                                await self._send(session_id, update_agent_message(text_block(f"Error: {msg}")))
                             # Don't return yet — let the loop consume the subsequent DoneEvent
                             # so the async generator is properly exhausted.
 
