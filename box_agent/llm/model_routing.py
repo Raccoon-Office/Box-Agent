@@ -327,9 +327,10 @@ def select_auto_model(
             )
         if output_tokens is None:
             return context_window * 4 // 5
-        if context_window - output_tokens <= 1:
+        try:
+            return derive_context_token_limit(context_window, output_tokens)
+        except ValueError:
             return 0
-        return derive_context_token_limit(context_window, output_tokens)
 
     known_context_models = [
         model for model in pool if _positive_int(model.get("contextWindow")) is not None

@@ -797,6 +797,7 @@ class OpenAIClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -818,8 +819,10 @@ class OpenAIClient(LLMClientBase):
             Exception: API call failed
         """
 
+        default_max_tokens = self._consume_effective_max_tokens()
         params = self._request_body_params(
-            api_messages, tools, max_tokens=self._consume_effective_max_tokens(),
+            api_messages, tools,
+            max_tokens=default_max_tokens if max_output_tokens is None else max_output_tokens,
             thinking_enabled=thinking_enabled, stream=False,
         )
 
@@ -1132,6 +1135,7 @@ class OpenAIClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -1167,6 +1171,7 @@ class OpenAIClient(LLMClientBase):
                 request_params["api_messages"],
                 request_params["tools"],
                 thinking_enabled=thinking_enabled,
+                **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}),
                 session_id=session_id,
                 turn_id=turn_id,
                 title=title,
@@ -1179,6 +1184,7 @@ class OpenAIClient(LLMClientBase):
                 request_params["api_messages"],
                 request_params["tools"],
                 thinking_enabled=thinking_enabled,
+                **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}),
                 session_id=session_id,
                 turn_id=turn_id,
                 title=title,
@@ -1195,6 +1201,7 @@ class OpenAIClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -1207,9 +1214,10 @@ class OpenAIClient(LLMClientBase):
         """
         request_params = self._prepare_request(messages, tools)
 
+        default_max_tokens = self._consume_effective_max_tokens()
         params = self._request_body_params(
             request_params["api_messages"], request_params["tools"],
-            max_tokens=self._consume_effective_max_tokens(),
+            max_tokens=default_max_tokens if max_output_tokens is None else max_output_tokens,
             thinking_enabled=thinking_enabled, stream=True,
         )
 

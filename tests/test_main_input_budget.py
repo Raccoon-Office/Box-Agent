@@ -13,7 +13,8 @@ from box_agent.acp import BoxACPAgent
 from box_agent.config import derive_context_token_limit
 from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
 from box_agent.kernel.context_engine import (
-    _SUMMARY_REQUEST, _fallback_context_estimate, capture_request_usage, request_input_tokens,
+    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_REQUEST, _fallback_context_estimate,
+    capture_request_usage, request_input_tokens,
 )
 from box_agent.llm import LLMClient, SessionBoundLLM
 from box_agent.retry import RetryConfig
@@ -23,7 +24,7 @@ from box_agent.tools.base import Tool, ToolResult
 
 
 @asynccontextmanager
-async def wire_llm(context_window=20_000):
+async def wire_llm(context_window=20_000, *, max_output_tokens=1_000):
     requests = []
 
     def handle(request):
@@ -50,7 +51,7 @@ async def wire_llm(context_window=20_000):
     llm = LLMClient(
         api_key="test", provider=LLMProvider.OPENAI,
         api_base="https://budget.invalid/v1", model="budget-model",
-        max_output_tokens=1_000, context_window=context_window,
+        max_output_tokens=max_output_tokens, context_window=context_window,
         retry_config=RetryConfig(enabled=False),
     )
     await llm._client.client.close()
@@ -120,7 +121,47 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
             assert any("Summary:" in str(m.get("content")) for m in main_requests[0]["messages"])
             assert not any(m.get("content") == old_detail for m in main_requests[0]["messages"])
             assert (len(json.dumps(main_requests[0], ensure_ascii=False).encode("utf-8")) + 1) // 2 < target_limit
-            assert adapter._sessions[created.session_id].agent.token_limit == target_limit == 90_000
+            assert adapter._sessions[created.session_id].agent.token_limit == target_limit == 144_000
+        finally:
+            await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_window", [None, 80_000])
+async def test_main_request_resizes_openai_output_only_when_the_window_requires_it(context_window):
+    original_messages = [Message(role="system", content="system"), Message(role="user", content="中" * 28_000)]
+    async with wire_llm(context_window=context_window, max_output_tokens=64_000) as (llm, requests):
+        session = SessionBoundLLM(llm)
+        estimated_input = request_input_tokens(original_messages, {}, llm=session)
+        events = [event async for event in run_agent_loop(
+            llm=session, messages=list(original_messages), tools={}, max_steps=1,
+        )]
+        assert not any(isinstance(event, (SummarizationEvent, ErrorEvent)) for event in events)
+        assert len(requests) == 1
+        expected = (64_000 if context_window is None
+                    else context_window - estimated_input - REQUEST_INPUT_HEADROOM_TOKENS)
+        assert requests[0]["max_tokens"] == expected
+
+        await llm.generate([Message(role="user", content="hello")])
+        assert requests[1]["max_tokens"] == llm.max_output_tokens == 64_000
+
+
+@pytest.mark.asyncio
+async def test_acp_binding_can_configure_more_output_than_the_window(tmp_path):
+    from tests.test_agent_session import session_config
+    from tests.test_acp import DummyConn
+
+    async with wire_llm(context_window=180_000, max_output_tokens=64_000) as (llm, requests):
+        adapter = BoxACPAgent(DummyConn(), session_config(tmp_path), llm, [], "system")
+        try:
+            created = await adapter.new_session(str(tmp_path), llm_binding={
+                "source": "builtin", "model": llm.model, "contextWindow": 48_000, "maxTokens": 64_000,
+            })
+            assert adapter._sessions[created.session_id].agent.token_limit == 25_200
+            response = await adapter.prompt(created.session_id, [{"type": "text", "text": "Hello."}])
+            assert response.field_meta["ok"] is True
+            main_request = next(request for request in requests if request.get("stream"))
+            assert 20_000 <= main_request["max_tokens"] < 48_000
         finally:
             await adapter.aclose()
 

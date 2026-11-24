@@ -260,6 +260,16 @@ async def test_stream_dropped_mid_tool_injects_recovery_without_boost():
     assert "None of its tool calls were executed" in injected[0].content
 
 
+async def test_output_cap_retry_keeps_legacy_one_request_boost():
+    llm = _ScriptedLLM([
+        {"finish_reason": "length"},
+        {"text": "Done.", "finish_reason": "stop"},
+    ])
+    events = await _collect(run_agent_loop(llm=llm, messages=_msgs(), tools={}, max_steps=3))
+    assert llm.ephemeral_max_tokens_history == [None, 8192]
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
+
+
 async def test_output_cap_write_truncation_injects_chunk_recovery_without_boost():
     llm = _ScriptedLLM(
         [

@@ -62,6 +62,33 @@ async def _client(limit, captured):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
+async def test_anthropic_request_output_cap_resizes_thinking_and_does_not_leak(stream):
+    captured = []
+    client = await _client(None, captured)
+    client.reasoning_effort = "max"
+    messages = [Message(role="user", content="Continue")]
+    try:
+        if stream:
+            events = [event async for event in client.generate_stream(
+                messages, thinking_enabled=True, max_output_tokens=4_096,
+            )]
+            assert events[-1].type == "finish"
+        else:
+            response = await client.generate(messages, thinking_enabled=True, max_output_tokens=4_096)
+            assert response.content == "seen"
+        await client.generate(messages, thinking_enabled=True)
+    finally:
+        await client.client.close()
+
+    first, second = [payload for _, payload in captured]
+    assert first["max_tokens"] == 4_096
+    assert first["thinking"]["budget_tokens"] == 3_072
+    assert second["max_tokens"] == 16_384
+    assert second["thinking"]["budget_tokens"] == 12_288
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("thinking", [False, True])
 async def test_anthropic_preflight_equals_wire_and_preserves_pixels(stream, thinking):
     captured = []

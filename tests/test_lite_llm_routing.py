@@ -114,7 +114,7 @@ def test_optional_vision_capacity_does_not_abort_text_session_setup(tmp_path, vi
     assert (vision is not None) is available
     if available:
         assert vision.llm.model == "vision"
-        assert vision.llm.max_output_tokens == 16_384
+        assert vision.llm.context_window == vision_context
     assert llm.max_output_tokens == 64_000 and llm.model == "model-text"
     assert any(tool.name == "read_file" for tool in tools)
 
@@ -501,6 +501,13 @@ def test_auto_routing_rejects_output_limits_that_leave_no_input_capacity(output)
         )
 
 
+def test_auto_routing_uses_capped_reserve_for_large_output_cap():
+    candidate = {"model": "small", "tags": [], "abilityLevel": 3,
+                 "contextWindow": 32_000, "maxTokens": 64_000}
+    _, diagnostic = select_auto_model([candidate], task="hello", estimated_input_tokens=10_800)
+    assert diagnostic["input_token_budget"] == 10_800
+
+
 def test_routing_uses_the_actual_auxiliary_output_cap_without_changing_the_pool():
     llm = _DummyLLM("automatic")
     candidate = {"model": "large", "tags": ["summary"], "abilityLevel": 3,
@@ -666,7 +673,7 @@ async def test_acp_session_with_large_context_can_prepare_its_bounded_compaction
             cwd=str(tmp_path), field_meta={"llm_binding": binding},
         )))
         state = agent._sessions[session.sessionId]
-        assert state.agent.token_limit == 810_000
+        assert state.agent.token_limit == 882_000
         assert state.summary_llm.model == "large"
         assert state.summary_llm.max_output_tokens == 8_192
         assert main.last_messages is None
@@ -746,7 +753,7 @@ async def test_conversation_sessions_bind_models_without_mutating_each_other(tmp
         "maxTokens": 16000,
     }
     assert second_state.agent.llm.max_output_tokens == 16000
-    assert first_state.agent.token_limit == 90000
+    assert first_state.agent.token_limit == 144_000
     assert second_state.agent.token_limit == 100800
 
 
@@ -865,7 +872,7 @@ async def test_session_binding_rejects_invalid_max_tokens(tmp_path):
 
     with pytest.raises(
         ValueError,
-        match="llm_binding.maxTokens must be smaller than contextWindow",
+        match="llm_binding.maxTokens leaves no safe input budget for contextWindow",
     ):
         await agent.new_session(
             **acp_params(SimpleNamespace(

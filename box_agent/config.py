@@ -28,6 +28,7 @@ HOSTED_GATEWAY_API_KEY_PLACEHOLDER = "box-agent-auth-json"
 XIAOHUANXIONG_MAX_OUTPUT_TOKENS = 80000
 USER_CONFIGURED_MAX_OUTPUT_TOKENS = 63999
 CONTEXT_INPUT_SAFETY_RATIO = 0.9
+OUTPUT_RESERVE_CAP_TOKENS = 20_000
 
 
 def derive_context_token_limit(context_window: int, max_output_tokens: int) -> int:
@@ -37,11 +38,10 @@ def derive_context_token_limit(context_window: int, max_output_tokens: int) -> i
         raise ValueError("context_window must be positive")
     if max_output_tokens <= 0:
         raise ValueError("max_output_tokens must be positive")
-    if max_output_tokens >= context_window:
-        raise ValueError("max_output_tokens must be smaller than context_window")
-    token_limit = int(
-        (context_window - max_output_tokens) * CONTEXT_INPUT_SAFETY_RATIO
-    )
+    reserve = min(max_output_tokens, OUTPUT_RESERVE_CAP_TOKENS)
+    if reserve >= context_window:
+        raise ValueError("output reserve must be smaller than context_window")
+    token_limit = int((context_window - reserve) * CONTEXT_INPUT_SAFETY_RATIO)
     if token_limit <= 0:
         raise ValueError("model capabilities leave no safe input token budget")
     return token_limit
@@ -104,9 +104,8 @@ class LLMConfig(BaseModel):
     def context_token_limit(self) -> int:
         """Token threshold that triggers context summarization.
 
-        Derived as 90% of the input budget — i.e. 90% of
-        ``context_window - max_output_tokens``. The 10% headroom absorbs
-        token-estimate drift and the summarization request itself.
+        Reserve up to 20,000 output tokens, then use 90% of the remaining
+        window for input. The remaining headroom absorbs token-estimate drift.
         """
         return derive_context_token_limit(self.context_window, self.max_output_tokens)
 

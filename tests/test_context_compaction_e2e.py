@@ -173,7 +173,7 @@ async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_window", [100_000, 60_000])
-@pytest.mark.parametrize("history_chars", [120_000, 164_000, 180_000])
+@pytest.mark.parametrize("history_chars", [150_000, 164_000, 180_000])
 async def test_summary_uses_its_own_window_and_output_reservation(summary_window, history_chars):
     from box_agent.config import derive_context_token_limit
     from box_agent.runtime import run_agent_loop

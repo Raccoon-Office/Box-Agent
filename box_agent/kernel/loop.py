@@ -27,8 +27,8 @@ from urllib.parse import urlsplit
 
 from ..cache_fingerprint import build_cache_fingerprint
 from ..tools.completion_checks import CompletionChecks, CompletionContext
-from ..config import AgentConfig, ToolLimitsConfig
-from ..llm.capabilities import bound_context_token_limit
+from ..config import AgentConfig, OUTPUT_RESERVE_CAP_TOKENS, ToolLimitsConfig
+from ..llm.capabilities import bound_context_token_limit, model_context_window
 from ..context_resources import (
     ContextResourceLedger,
 )
@@ -743,6 +743,14 @@ async def _run_agent_loop_impl(
     """
     llm = _services.llm
     token_limit = bound_context_token_limit(llm, token_limit)
+    # Existing injected LLMs can keep their original streaming signature.
+    try:
+        stream_parameters = inspect.signature(getattr(llm, "generate_stream", None)).parameters
+    except (TypeError, ValueError):
+        stream_parameters = {}
+    request_output_override = "max_output_tokens" in stream_parameters or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in stream_parameters.values()
+    )
     summary_llm = _services.summary_llm
     permission_negotiator = _services.permission_gateway
     memory_lookup = _services.memory_lookup
@@ -1003,6 +1011,7 @@ async def _run_agent_loop_impl(
     # the per-request max_tokens on genuine output-cap truncations. Only
     # after exhausting the retries do we surface a user-visible error.
     truncated_tool_call_retries = 0
+    pending_output_boost: int | None = None
     oversized_tool_argument_retries = 0
     provider_stale_retries = 0
     provider_stale_recoveries = 0
@@ -1761,6 +1770,22 @@ async def _run_agent_loop_impl(
             )
             offered_tools_by_name = {**prepared_tools.targets, **prepared_tools.routed_targets}
 
+        configured_max_output = getattr(llm, "max_output_tokens", None)
+        request_max_output = configured_max_output if type(configured_max_output) is int else None
+        output_override = pending_output_boost
+        window = model_context_window(llm) if request_output_override else None
+        if window is not None and request_max_output is not None:
+            input_tokens = (
+                projected_input_tokens(projection) if context_engine is not None
+                else request_input_tokens(provider_request_messages, budget_tools_by_name, llm=llm)
+            )
+            reserve = min(request_max_output, OUTPUT_RESERVE_CAP_TOKENS)
+            available_output = max(reserve, window - input_tokens - REQUEST_INPUT_HEADROOM_TOKENS)
+            if output_override is not None or available_output < request_max_output:
+                output_override = min(output_override or request_max_output, available_output)
+        if output_override is not None:
+            request_max_output = output_override
+
         if session_log is not None and session_turn is not None:
             request_provider = getattr(llm, "provider", None)
             if not isinstance(request_provider, str):
@@ -1768,9 +1793,6 @@ async def _run_agent_loop_impl(
             request_model = getattr(llm, "model", None)
             if not isinstance(request_model, str):
                 request_model = None
-            request_max_output = getattr(llm, "max_output_tokens", None)
-            if not isinstance(request_max_output, int):
-                request_max_output = None
             request_header = {
                 "turn": session_turn,
                 "step": step + 1,
@@ -1881,6 +1903,9 @@ async def _run_agent_loop_impl(
             }
             if call_kind:
                 stream_kwargs["call_kind"] = call_kind
+            if output_override is not None:
+                stream_kwargs["max_output_tokens"] = output_override
+            pending_output_boost = None
             request_only_input_tokens = request_overlay_tokens
             request_usage_snapshot = capture_request_usage(
                 provider_request_messages, len(messages), tool_list, llm,
@@ -2550,7 +2575,10 @@ async def _run_agent_loop_impl(
                 boost_cap = max(truncated_tool_call_boost_cap, requested_max)
                 boosted = min(boost, boost_cap)
                 if not stream_dropped and hasattr(llm, "set_ephemeral_max_output_tokens"):
-                    llm.set_ephemeral_max_output_tokens(boosted)
+                    if "max_output_tokens" in stream_parameters:
+                        pending_output_boost = boosted
+                    else:
+                        llm.set_ephemeral_max_output_tokens(boosted)
                 _log.warning(
                     "truncation retry %d/%d: stream_dropped=%s has_broken_tool_call=%s "
                     "boosted_max_tokens=%s completion_tokens=%s request_id=%s",
