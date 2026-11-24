@@ -238,6 +238,8 @@ def test_transitive_dependency_identity_and_failure_category_are_structured(tmp_
     assert item["state"] == (child_state if child_state != "cycle" else "unavailable")
     if child_state != "cycle":
         assert item["dependencyName"] == "evidence"
+    else:
+        assert "dependencyName" not in item
 
 
 def test_missing_child_does_not_inherit_parent_market_installation_identity(tmp_path):
@@ -264,3 +266,4 @@ def test_ungranted_child_remains_unavailable_instead_of_uploadable_missing(tmp_p
                                      skill_access_filter=lambda skill: skill.name != "evidence")
     item = error.value.dependencies[0]
     assert item["state"] == "unavailable" and item["dependencyName"] == "evidence"
+    assert "dependencyCode" not in item

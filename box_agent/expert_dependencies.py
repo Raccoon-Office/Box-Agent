@@ -168,6 +168,50 @@ def _bundled_binding(
     return None
 
 
+def _check_required_skill_dependencies(
+    name: str, declared_bindings: list[Any], skill_loader: SkillLoader,
+    skill_access_filter: Callable[[Skill], bool] | None,
+) -> dict[str, str] | None:
+    """Return the first dependency failure, preserving the current profile's bindings."""
+    try:
+        for dependency in resolve_required_skills(skill_loader, [name]):
+            # A binding omitted from optionalSkills may still be required
+            # transitively by this profile.
+            if dependency.name != name and any(
+                not isinstance(candidate.get("skillId"), str)
+                or not is_installed_market_skill(dependency, candidate["skillId"])
+                for candidate in declared_bindings
+                if isinstance(candidate, dict)
+                and candidate.get("source") == "MARKET"
+                and candidate.get("slug") == dependency.name
+            ):
+                return {
+                    "state": "unavailable",
+                    "reason": (f"Required Skill '{dependency.name}' does not match "
+                               "this expert's market installation identity."),
+                    "dependencyName": dependency.name,
+                }
+            if skill_access_filter is not None and not skill_access_filter(dependency):
+                return {
+                    "state": "unavailable",
+                    "reason": f"Required Skill '{dependency.name}' is not enabled for this conversation.",
+                    "dependencyName": dependency.name,
+                }
+            skill_loader.verify_skill_source(dependency)
+    except SkillDependencyError as exc:
+        failure = {
+            "state": {"SKILL_NOT_FOUND": "missing", "SKILL_DISABLED": "disabled",
+                      "SKILL_BROKEN": "broken"}.get(exc.code, "unavailable"),
+            "reason": str(exc),
+            "dependencyCode": exc.code,
+        }
+        dependency_name = exc.details.get("skill")
+        if isinstance(dependency_name, str) and dependency_name:
+            failure["dependencyName"] = dependency_name
+        return failure
+    return None
+
+
 def validate_expert_dependencies(
     raw_meta: Mapping[str, Any], expert_context: ExpertSessionContext | None,
     skill_loader: SkillLoader | None, tools: Mapping[str, Any] | Iterable[Any],
@@ -200,72 +244,54 @@ def validate_expert_dependencies(
             }
             binding = bindings[0] if bindings else {}
             source = binding.get("source")
-            failure: tuple[str, str] | None = None
-            dependency_error: SkillDependencyError | None = None
-            dependency_name: str | None = None
+            failure: dict[str, str] | None = None
             if invalid:
-                failure = "conflict", "The selected dependency has an invalid binding identity."
+                failure = {"state": "conflict", "reason": "The selected dependency has an invalid binding identity."}
             elif len(distinct) > 1:
-                failure = "conflict", "The selected dependency has conflicting bindings."
+                failure = {"state": "conflict", "reason": "The selected dependency has conflicting bindings."}
             elif source == "TOOL":
                 if name not in available_tools:
-                    failure = "unavailable", "The required tool is not enabled in this session."
+                    failure = {"state": "unavailable", "reason": "The required tool is not enabled in this session."}
             elif source not in {None, "BUILTIN", "BUNDLED", "MARKET"}:
-                failure = "unavailable", "The selected dependency source is not supported."
+                failure = {"state": "unavailable", "reason": "The selected dependency source is not supported."}
             else:
                 selected = skill_loader.get_skill(name) if skill_loader is not None else None
                 if selected is None:
                     disabled = skill_loader.get_skill(name, include_disabled=True) if skill_loader is not None else None
-                    failure = ("disabled", "The selected Skill is not enabled for this session.") if disabled is not None else (
-                        "missing", "The selected Skill is not available in the cloud runtime.")
+                    failure = {
+                        "state": "disabled" if disabled is not None else "missing",
+                        "reason": ("The selected Skill is not enabled for this session." if disabled is not None
+                                   else "The selected Skill is not available in the cloud runtime."),
+                    }
                 elif source == "MARKET" and not is_installed_market_skill(selected, binding.get("skillId")):
-                    failure = "unavailable", "The selected Skill has no matching market installation identity."
+                    failure = {
+                        "state": "unavailable",
+                        "reason": "The selected Skill has no matching market installation identity.",
+                    }
                 elif selected.broken:
-                    failure = "broken", "The selected Skill cannot be loaded."
+                    failure = {"state": "broken", "reason": "The selected Skill cannot be loaded."}
                 elif source == "BUILTIN" and selected.source != "builtin":
-                    failure = "conflict", "A same-name Skill from another source cannot satisfy the builtin binding."
+                    failure = {
+                        "state": "conflict",
+                        "reason": "A same-name Skill from another source cannot satisfy the builtin binding.",
+                    }
                 elif source == "BUNDLED":
-                    failure = _bundled_binding(name, binding, snapshot, expert_context, skill_loader, selected)
+                    bundled_failure = _bundled_binding(name, binding, snapshot, expert_context, skill_loader, selected)
+                    if bundled_failure is not None:
+                        state, reason = bundled_failure
+                        failure = {"state": state, "reason": reason}
                 if failure is None and selected is not None:
-                    try:
-                        for dependency in resolve_required_skills(skill_loader, [name]):
-                            # A binding omitted from optionalSkills may still be
-                            # required transitively by this profile, not another's.
-                            if dependency.name != name and any(
-                                not isinstance(candidate.get("skillId"), str)
-                                or not is_installed_market_skill(dependency, candidate["skillId"])
-                                for candidate in declared
-                                if isinstance(candidate, dict)
-                                and candidate.get("source") == "MARKET"
-                                and candidate.get("slug") == dependency.name
-                            ):
-                                failure = "unavailable", f"Required Skill '{dependency.name}' does not match this expert's market installation identity."
-                                dependency_name = dependency.name
-                                break
-                            if skill_access_filter is not None and not skill_access_filter(dependency):
-                                failure = "unavailable", f"Required Skill '{dependency.name}' is not enabled for this conversation."
-                                dependency_name = dependency.name
-                                break
-                            skill_loader.verify_skill_source(dependency)
-                    except SkillDependencyError as exc:
-                        state = {"SKILL_NOT_FOUND": "missing", "SKILL_DISABLED": "disabled",
-                                 "SKILL_BROKEN": "broken"}.get(exc.code, "unavailable")
-                        failure = state, str(exc)
-                        dependency_error = exc
-                        dependency_name = exc.details.get("skill")
+                    failure = _check_required_skill_dependencies(
+                        name, declared, skill_loader, skill_access_filter,
+                    )
             if failure is not None:
-                state, reason = failure
                 item = {
                     "expertId": profile.id,
                     "expertName": profile.name, "name": name,
-                    "source": source, "required": True, "state": state, "reason": reason,
+                    "source": source, "required": True, **failure,
                 }
                 if isinstance(binding.get("skillId"), str):
                     item["skillId"] = binding["skillId"]
-                if isinstance(dependency_name, str) and dependency_name:
-                    item["dependencyName"] = dependency_name
-                if dependency_error is not None:
-                    item["dependencyCode"] = dependency_error.code
                 failures.append(item)
     if failures:
         raise ExpertDependencyError(failures)
