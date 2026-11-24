@@ -272,3 +272,60 @@ def test_installed_market_skill_keeps_complete_host_profile_compatible(tmp_path,
         "members": [dict(profile, id="member", name="Member")],
     }})
     _validate(meta, _loader((tmp_path, "user")))
+
+
+@pytest.mark.parametrize("missing_index", [0, 12])
+def test_team_preflight_checks_only_members_kept_by_session_assembly(missing_index):
+    members = [{"id": f"member-{index}", "name": f"Member {index}"} for index in range(13)]
+    members[missing_index]["defaultSkills"] = ["local-only"]
+    meta = {"expert_team": {"id": "team", "name": "Team", "members": members}}
+    context = ExpertSessionContext.from_meta(meta)
+    assert len(context.team.members) == 12
+    if missing_index == 0:
+        with pytest.raises(ExpertDependencyError) as raised:
+            validate_expert_dependencies(meta, context, None, ())
+        assert raised.value.dependencies[0]["expertId"] == "member-0"
+    else:
+        validate_expert_dependencies(meta, context, None, ())
+
+
+@pytest.mark.parametrize("selection,field,count", [
+    ("expert", "defaultSkills", 12),
+    ("expert", "required_skills", 12),
+    ("expertTeam", "default_skills", 8),
+])
+def test_preflight_uses_session_normalized_skill_selection(selection, field, count):
+    kept = [f"tool-{index}" for index in range(count)]
+    profile = {"id": "custom", "name": "Custom", field: [*kept, "outside-selection"],
+               "skillBindings": [{"slug": name, "source": "TOOL"} for name in kept]}
+    meta = ({"expert": profile} if selection == "expert" else {
+        selection: {"id": "team", "name": "Team", "members": [profile]},
+    })
+    context = ExpertSessionContext.from_meta(meta)
+    assert context.skill_names() == kept
+    validate_expert_dependencies(meta, context, None, kept)
+    with pytest.raises(ExpertDependencyError) as raised:
+        validate_expert_dependencies(meta, context, None, kept[1:])
+    assert [item["name"] for item in raised.value.dependencies] == [kept[0]]
+
+
+@pytest.mark.parametrize("selection", ["expert_team", "expertTeam"])
+def test_invalid_team_entries_do_not_shift_local_package_bindings(tmp_path, selection):
+    meta = _package_expert(tmp_path)
+    member = meta["expert"]
+    member["id"] = " local-member "
+    member["name"] = "Local  member"
+    member["default_skills"] = member.pop("defaultSkills")
+    meta = {selection: {
+        "id": "local-team", "name": "Local team",
+        "members": [None, {}, {"name": "  ", "defaultSkills": ["ignored"]}, member],
+    }}
+    context, loader = _bound(meta)
+    assert context.team.members[0].id == "local-member"
+    validate_expert_dependencies(meta, context, loader, ())
+    member["skillBindings"][0]["key"] = "wrong-key"
+    with pytest.raises(ExpertDependencyError) as raised:
+        validate_expert_dependencies(meta, context, loader, ())
+    assert raised.value.dependencies[0]["state"] == "conflict"
+    assert raised.value.dependencies[0]["expertId"] == "local-member"
+    assert raised.value.dependencies[0]["expertName"] == "Local member"

@@ -261,7 +261,7 @@ async def test_acp_expert_context_is_session_scoped(tmp_path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("globally_disabled", [True, False])
-async def test_acp_expert_explicit_selection_only_overrides_profile_block(
+async def test_expert_profile_conflict_is_rejected_without_changing_ordinary_explicit_selection(
     tmp_path, globally_disabled,
 ) -> None:
     from box_agent.tools.skill_catalog_tool import ListSkillsTool
@@ -307,12 +307,12 @@ async def test_acp_expert_explicit_selection_only_overrides_profile_block(
             },
         },
     ))
-    if globally_disabled:
-        with pytest.raises(RequestError) as error:
-            await agent.new_session(**params)
-        assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
-        await agent.aclose()
-        return
+    with pytest.raises(RequestError) as error:
+        await agent.new_session(**params)
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert not agent._sessions
+    # Ordinary Fast sessions retain the existing per-turn explicit override.
+    params.pop("expert")
     session = await agent.new_session(**params)
 
     state = agent._sessions[session.sessionId]
@@ -544,7 +544,7 @@ def test_expert_package_ignores_global_disable_but_preserves_builtin_protection(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("package_kind", ["expert", "expert_team"])
 @pytest.mark.parametrize("disabled", [False, True])
-async def test_expert_source_ignores_global_disable_but_obeys_fast_profile(tmp_path, package_kind, disabled):
+async def test_expert_source_keeps_local_bindings_but_rejects_fast_profile_conflict(tmp_path, package_kind, disabled):
     user, package = tmp_path / "user", tmp_path / "package"
     user.mkdir()
     package.mkdir()
@@ -581,22 +581,25 @@ async def test_expert_source_ignores_global_disable_but_obeys_fast_profile(tmp_p
         DummyConn(), config, DoneLLM(), [GetSkillTool(loader), ListSkillsTool(loader)],
         f"base system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader,
     )
+    with pytest.raises(RequestError) as error:
+        await agent.new_session(**acp_params(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={**meta, "execution_profile": "fast"},
+        )))
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert not agent._sessions
     session = await agent.new_session(**acp_params(SimpleNamespace(
-        cwd=str(tmp_path), field_meta={**meta, "execution_profile": "fast"},
+        cwd=str(tmp_path), field_meta={**meta, "execution_profile": "standard"},
     )))
     state = agent._sessions[session.sessionId]
-    assert "research-synthesis" not in state.skill_selector.matched_skill_names
     for _ in range(2):
         await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "继续完成任务"}])))
         for name in names[:2]:
             result = await state.agent.tools["get_skill"].execute(name)
-            available = name == "pptx"
-            assert result.success is available
-            if available:
-                assert str(package / name) in result.content
+            assert result.success
+            assert str(package / name) in result.content
             catalog = await state.agent.tools["list_skills"].execute(query=name)
             assert catalog.success
-            assert ('"available": true' in catalog.content) is available
+            assert '"available": true' in catalog.content
         assert (await state.agent.tools["get_skill"].execute("unbound")).success
     normal = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     if disabled:

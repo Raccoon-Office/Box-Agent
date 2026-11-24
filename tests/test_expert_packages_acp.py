@@ -1,6 +1,8 @@
 """Downloaded/full expert profiles share the existing ACP lifecycle."""
+import asyncio
 import copy
 import json
+import socket
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -471,3 +473,630 @@ async def test_incomplete_team_cannot_create_a_new_session(host, tmp_path):
     assert error.value.data["missingMemberIds"] == ["reviewer"]
     assert host._sessions == {}
     assert not list((tmp_path / "profile" / "sessions").rglob("session.jsonl"))
+
+
+def _workspace_tool_package(monkeypatch, kind, tool_name):
+    body = archive_bytes(kind, tool_requests=[tool_name])
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+
+    async def prepare_meta(meta):
+        return await packages.prepare_expert_meta(meta, transport=transport)
+
+    monkeypatch.setattr(acp_module, "prepare_expert_meta", prepare_meta)
+    key = "expert" if kind == "expert" else "expert_team"
+    return {key: reference(body, f"client-{kind}-with-{tool_name}")}
+
+
+def _set_workspace_tool(host, tool_name, enabled):
+    setting = "enable_bash" if tool_name == "bash" else "enable_file_tools"
+    setattr(host._config.tools, setting, enabled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("kind", ["expert", "team"])
+@pytest.mark.parametrize("tool_name", ["bash", "read_file"])
+async def test_downloaded_expert_can_require_enabled_workspace_tool(
+    host, tmp_path, monkeypatch, entry, kind, tool_name,
+):
+    _set_workspace_tool(host, tool_name, True)
+    cwd = str(tmp_path / "workspace")
+    # The normal session proves native registration; do not add the tool to _base_tools.
+    first = await host.new_session(cwd=cwd, session_id="workspace-tool-chat")
+    assert tool_name in host._sessions[first.sessionId].agent.tools
+    assert tool_name not in {tool.name for tool in host._base_tools}
+    selected = _workspace_tool_package(monkeypatch, kind, tool_name)
+    if entry == "new_session":
+        response = await host.new_session(cwd=cwd, session_id="expert-workspace-tool-chat", **selected)
+        target_session_id = response.sessionId
+    else:
+        # Exercise cold restore as well as the live rebind path covered below.
+        original = host._sessions.pop(first.sessionId)
+        session_log = original.agent.session_log
+        await original.aclose()
+        session_log.close()
+        await getattr(host, entry)(cwd=cwd, session_id=first.sessionId, **selected)
+        target_session_id = first.sessionId
+
+    state = host._sessions[target_session_id]
+    assert state.expert_context is not None
+    tool = state.agent.tools[tool_name]
+    if tool_name == "read_file":
+        path = Path(cwd) / "expert-tool-check.txt"
+        path.write_text("EXPERT_WORKSPACE_TOOL_OK", encoding="utf-8")
+        result = await tool.execute(str(path))
+    else:
+        result = await tool.execute("echo EXPERT_WORKSPACE_TOOL_OK", timeout=10)
+    assert result.success, result.error
+    assert "EXPERT_WORKSPACE_TOOL_OK" in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("kind", ["expert", "team"])
+@pytest.mark.parametrize("tool_name", ["bash", "read_file"])
+async def test_disabled_workspace_dependency_preserves_live_session_and_can_retry(
+    host, tmp_path, monkeypatch, entry, kind, tool_name,
+):
+    _set_workspace_tool(host, tool_name, False)
+    cwd = str(tmp_path / "workspace")
+    first = await host.new_session(cwd=cwd, session_id="disabled-tool-chat")
+    original = host._sessions[first.sessionId]
+    assert tool_name not in original.agent.tools
+    selected = _workspace_tool_package(monkeypatch, kind, tool_name)
+    session_id = "disabled-tool-chat" if entry == "new_session" else first.sessionId
+
+    with pytest.raises(RequestError) as error:
+        await getattr(host, entry)(cwd=cwd, session_id=session_id, **selected)
+
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    dependency = next(item for item in error.value.data["dependencies"] if item["name"] == tool_name)
+    assert dependency["source"] == "TOOL"
+    assert dependency["state"] == "unavailable"
+    assert host._sessions[first.sessionId] is original
+    continued = await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "continue"}])
+    assert continued.stopReason == "end_turn"
+
+    _set_workspace_tool(host, tool_name, True)
+    await getattr(host, entry)(cwd=cwd, session_id=session_id, **selected)
+    current = host._sessions[first.sessionId]
+    assert current is not original
+    assert tool_name in current.agent.tools
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expert", "team"])
+@pytest.mark.parametrize("tool_name", [
+    "bash", "read_file", "get_skill", "goal_read", "goal_write", "call_tool",
+])
+async def test_utility_expert_cannot_require_registered_tool(
+    host, tmp_path, monkeypatch, kind, tool_name,
+):
+    host._config.tools.enable_bash = True
+    host._config.tools.enable_file_tools = True
+    cwd = str(tmp_path / "workspace")
+    ordinary = await host.new_session(cwd=cwd, utility=True)
+    assert not host._sessions[ordinary.sessionId].agent.tools
+    selected = _workspace_tool_package(monkeypatch, kind, tool_name)
+
+    with pytest.raises(RequestError) as error:
+        await host.new_session(cwd=cwd, utility=True, **selected)
+
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert any(item["name"] == tool_name and item["source"] == "TOOL"
+               for item in error.value.data["dependencies"])
+    assert ordinary.sessionId in host._sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dependency", ["bash", "read_file", "research-synthesis", "pkulaw"])
+async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usable(
+    host, tmp_path, monkeypatch, dependency,
+):
+    from acp.agent.connection import AgentSideConnection
+    from acp.client.connection import ClientSideConnection
+    from box_agent.acp.stdio_compat import StdioTransport
+
+    if dependency == "research-synthesis":
+        _add_research_skills(host, tmp_path)
+        selected = {"execution_profile": "fast", **_connector_expert_profile("expert", dependency)}
+    elif dependency == "pkulaw":
+        _add_connector_skills(host, tmp_path)
+        monkeypatch.setattr(acp_module, "_connected_connector_ids", lambda ids: frozenset(ids))
+        selected = _connector_expert_profile("expert", dependency)
+    else:
+        selected = _workspace_tool_package(monkeypatch, "expert", dependency)
+
+    local, remote = socket.socketpair()
+    client_reader, client_writer = await asyncio.open_connection(sock=local)
+    agent_reader, agent_writer = await asyncio.open_connection(sock=remote)
+    server = AgentSideConnection(host, StdioTransport(agent_reader, agent_writer))
+    client = ClientSideConnection(Connection(), StdioTransport(client_reader, client_writer))
+    try:
+        await asyncio.wait_for(client.initialize(protocol_version=1), 10)
+        cwd = str(tmp_path / "workspace")
+        first = await asyncio.wait_for(client.new_session(cwd=cwd, session_id="wire-chat"), 10)
+        original = host._sessions[first.sessionId]
+        with pytest.raises(RequestError) as error:
+            await asyncio.wait_for(client.new_session(cwd=cwd, session_id="wire-chat", **selected), 10)
+        assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+        assert host._sessions[first.sessionId] is original
+
+        second = await asyncio.wait_for(client.new_session(cwd=cwd), 10)
+        for session_id in (first.sessionId, second.sessionId):
+            response = await asyncio.wait_for(client.prompt(
+                session_id=session_id, prompt=[{"type": "text", "text": "continue"}],
+            ), 10)
+            assert response.stopReason == "end_turn"
+
+        if dependency == "research-synthesis":
+            selected["execution_profile"] = "standard"
+        elif dependency == "pkulaw":
+            selected["selected_connector_ids"] = ["pkulaw"]
+        else:
+            _set_workspace_tool(host, dependency, True)
+        retried = await asyncio.wait_for(client.new_session(cwd=cwd, session_id="wire-chat", **selected), 10)
+        assert retried.sessionId == first.sessionId
+        current = host._sessions[retried.sessionId]
+        if dependency in {"bash", "read_file"}:
+            assert dependency in current.agent.tools
+        else:
+            response = await asyncio.wait_for(client.prompt(
+                session_id=retried.sessionId, prompt=[{"type": "text", "text": "请核对材料。"}],
+            ), 10)
+            assert response.stopReason == "end_turn"
+            assert (await _read_session_skill(current, dependency)).success
+    finally:
+        await client.close()
+        await server.close()
+        client_writer.close()
+        agent_writer.close()
+        await asyncio.gather(client_writer.wait_closed(), agent_writer.wait_closed())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expert", "team"])
+@pytest.mark.parametrize("version,tool_name", [
+    (1, "goal_read"), (1, "goal_write"),
+    (2, "goal_read"), (2, "goal_write"), (2, "call_tool"),
+])
+async def test_downloaded_expert_can_require_agent_native_tool(
+    host, tmp_path, monkeypatch, kind, version, tool_name,
+):
+    host._config.agent.tool_interface_version = version
+    cwd = str(tmp_path / "workspace")
+    ordinary = await host.new_session(cwd=cwd)
+    assert tool_name in host._sessions[ordinary.sessionId].agent.tools
+    assert tool_name not in {tool.name for tool in host._base_tools}
+    selected = _workspace_tool_package(monkeypatch, kind, tool_name)
+
+    response = await host.new_session(cwd=cwd, **selected)
+
+    state = host._sessions[response.sessionId]
+    assert state.expert_context is not None
+    assert state.agent.tool_interface_version == version
+    tool = state.agent.tools[tool_name]
+    if tool_name == "goal_read":
+        result = await tool.execute()
+        assert result.success and "No current goal" in result.content
+    elif tool_name == "goal_write":
+        result = await tool.execute(action="set", objective="Verify the native expert tool")
+        assert result.success, result.error
+        assert state.agent.goal.objective == "Verify the native expert tool"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expert", "team"])
+async def test_v1_expert_cannot_require_call_tool_and_keeps_original_session(
+    host, tmp_path, monkeypatch, kind,
+):
+    host._config.agent.tool_interface_version = 1
+    cwd = str(tmp_path / "workspace")
+    ordinary = await host.new_session(cwd=cwd, session_id="native-v1-chat")
+    original = host._sessions[ordinary.sessionId]
+    assert "call_tool" not in original.agent.tools
+    selected = _workspace_tool_package(monkeypatch, kind, "call_tool")
+
+    with pytest.raises(RequestError) as error:
+        await host.new_session(cwd=cwd, session_id="native-v1-chat", **selected)
+
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert any(item["name"] == "call_tool" and item["state"] == "unavailable"
+               for item in error.value.data["dependencies"])
+    assert host._sessions[ordinary.sessionId] is original
+    continued = await host.prompt(
+        session_id=ordinary.sessionId, prompt=[{"type": "text", "text": "continue"}],
+    )
+    assert continued.stopReason == "end_turn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("cold", [False, True], ids=["live-rebind", "cold-restore"])
+@pytest.mark.parametrize("saved_version", [1, 2], ids=["saved-v1-config-v2", "saved-v2-config-v1"])
+async def test_expert_call_tool_preflight_uses_saved_interface_version(
+    host, tmp_path, monkeypatch, entry, cold, saved_version,
+):
+    host._config.agent.tool_interface_version = saved_version
+    cwd = str(tmp_path / "workspace")
+    first = await host.new_session(cwd=cwd, session_id="native-interface-chat")
+    original = host._sessions[first.sessionId]
+    assert original.agent.tool_interface_version == saved_version
+    host._config.agent.tool_interface_version = 3 - saved_version
+    selected = _workspace_tool_package(monkeypatch, "team", "call_tool")
+    log_path = original.agent.session_log.path
+    log_before = log_path.read_bytes()
+    if cold:
+        host._sessions.pop(first.sessionId)
+        log = original.agent.session_log
+        await original.aclose()
+        log.close()
+    session_id = "native-interface-chat" if entry == "new_session" else first.sessionId
+    call = getattr(host, entry)
+
+    if saved_version == 1:
+        with pytest.raises(RequestError) as error:
+            await call(cwd=cwd, session_id=session_id, **selected)
+        assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+        log_after = log_path.read_bytes()
+        if cold:
+            # Cold restore can append its existing checkpoint before preflight;
+            # resolving the saved interface must not publish a new contract.
+            contracts_before = [event for event in map(json.loads, log_before.splitlines())
+                                if event.get("type") == "tools/contract"]
+            contracts_after = [event for event in map(json.loads, log_after.splitlines())
+                               if event.get("type") == "tools/contract"]
+            assert contracts_after == contracts_before
+        else:
+            assert log_after == log_before
+        assert any(item["name"] == "call_tool" and item["state"] == "unavailable"
+                   for item in error.value.data["dependencies"])
+        if cold:
+            assert first.sessionId not in host._sessions
+            await call(cwd=cwd, session_id=session_id)
+        else:
+            assert host._sessions[first.sessionId] is original
+        state = host._sessions[first.sessionId]
+        assert state.agent.tool_interface_version == 1
+        assert "call_tool" not in state.agent.tools
+    else:
+        await call(cwd=cwd, session_id=session_id, **selected)
+        state = host._sessions[first.sessionId]
+        assert state is not original
+        assert state.agent.tool_interface_version == 2
+        assert "call_tool" in state.agent.tools
+        assert state.expert_context.team is not None
+
+    continued = await host.prompt(
+        session_id=first.sessionId, prompt=[{"type": "text", "text": "continue"}],
+    )
+    assert continued.stopReason == "end_turn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [1, 2])
+async def test_expert_preflight_matches_final_agent_tool_registry(
+    host, tmp_path, monkeypatch, version,
+):
+    host._config.agent.tool_interface_version = version
+    validate = acp_module.validate_expert_dependencies
+    observed = []
+
+    def observe(raw_meta, context, loader, tools, **kwargs):
+        observed.append(frozenset(tools))
+        return validate(raw_meta, context, loader, tools, **kwargs)
+
+    monkeypatch.setattr(acp_module, "validate_expert_dependencies", observe)
+    response = await host.new_session(**new_params(tmp_path))
+    state = host._sessions[response.sessionId]
+
+    assert observed == [frozenset(state.agent.tools)]
+    assert {"tool_search", "goal_read", "goal_write"} <= observed[0]
+    assert ("call_tool" in observed[0]) is (version == 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("owner", ["workspace", "agent"])
+async def test_added_tool_definition_reaches_expert_preflight_and_registration(
+    host, tmp_path, monkeypatch, entry, owner,
+):
+    import box_agent.agent as agent_module
+    from box_agent.tools import setup as tool_setup
+    from box_agent.tools.base import Tool, ToolResult
+
+    tool_name = f"registered_{owner}_probe"
+    constructed = []
+
+    class ProbeTool(Tool):
+        name = tool_name
+        description = "Verify a tool added through its owning registration definition."
+        parameters = {"type": "object", "properties": {}}
+
+        def __init__(self):
+            constructed.append(self)
+
+        async def execute(self):
+            return ToolResult(success=True, content="EXPERT_REGISTERED_TOOL_OK")
+
+    # Add only the owning declaration; neither ACP nor availability code is patched.
+    if owner == "workspace":
+        registrations = tool_setup._workspace_tool_registrations
+
+        def extended(*args, **kwargs):
+            yield tool_name, ProbeTool
+            yield from registrations(*args, **kwargs)
+
+        monkeypatch.setattr(tool_setup, "_workspace_tool_registrations", extended)
+    else:
+        registrations = agent_module._agent_tool_registrations
+
+        def extended(**kwargs):
+            discovery, state = registrations(**kwargs)
+            if kwargs.get("enable_builtin_tools", True):
+                discovery[tool_name] = lambda *_: ProbeTool()
+            return discovery, state
+
+        monkeypatch.setattr(agent_module, "_agent_tool_registrations", extended)
+
+    cwd = str(tmp_path / "workspace")
+    first = await host.new_session(cwd=cwd, session_id="registered-tool-chat")
+    original = host._sessions[first.sessionId]
+    assert tool_name in original.agent.tools
+    assert len(constructed) == 1
+    session_id = "registered-tool-chat" if entry == "new_session" else first.sessionId
+    call = getattr(host, entry)
+    before = original.agent.session_log.path.read_bytes()
+    missing = _workspace_tool_package(monkeypatch, "expert", "missing_registered_tool")
+
+    with pytest.raises(RequestError) as error:
+        await call(cwd=cwd, session_id=session_id, **missing)
+
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert host._sessions[first.sessionId] is original
+    assert original.agent.session_log.path.read_bytes() == before
+    assert len(constructed) == 1  # Rejected preflight did not invoke lazy factories.
+    continued = await host.prompt(
+        session_id=first.sessionId, prompt=[{"type": "text", "text": "continue"}],
+    )
+    assert continued.stopReason == "end_turn"
+
+    selected = _workspace_tool_package(monkeypatch, "expert", tool_name)
+    await call(cwd=cwd, session_id=session_id, **selected)
+    current = host._sessions[first.sessionId]
+    assert current is not original
+    assert len(constructed) == 2
+    result = await current.agent.tools[tool_name].execute()
+    assert result.success and result.content == "EXPERT_REGISTERED_TOOL_OK"
+
+
+async def _read_session_skill(state, name):
+    from box_agent.tools.base import ToolInvocationContext
+
+    return await state.agent.tools["get_skill"].invoke(
+        {"skill_name": name}, context=ToolInvocationContext(skill_reader=state.agent.skill_runtime.read),
+    )
+
+
+def _selected_mcp_meta(discovery):
+    if not discovery:
+        return {"selected_connector_ids": ["pkulaw"]}
+    meta = _ready_cli_connector_meta()
+    meta["connector_discovery"]["entries"][0]["kind"] = "mcp"
+    return meta
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expert", "team"])
+@pytest.mark.parametrize("discovery", [False, True])
+async def test_connected_mcp_expert_prepares_without_granting_reads_before_the_task(
+    host, tmp_path, monkeypatch, kind, discovery,
+):
+    _add_connector_skills(host, tmp_path)
+    monkeypatch.setattr(acp_module, "_connected_connector_ids", lambda ids: frozenset(ids))
+    response = await host.new_session(cwd=str(tmp_path / "workspace"),
+                                     **_selected_mcp_meta(discovery), **_connector_expert_profile(kind))
+    state = host._sessions[response.sessionId]
+    assert not state.connector_skill_grants
+    assert not (await state.agent.tools["get_skill"].execute("pkulaw")).success
+    await host.prompt(session_id=response.sessionId, prompt=[{"type": "text", "text": "请核对这份材料。"}],
+                      **_selected_mcp_meta(discovery))
+    result = await state.agent.tools["get_skill"].execute("pkulaw")
+    assert result.success, result.error
+    assert "Read the current legal sources" in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("cold", [False, True])
+@pytest.mark.parametrize("discovery", [False, True])
+async def test_connected_mcp_expert_restore_preserves_previously_read_skill(
+    host, tmp_path, monkeypatch, entry, cold, discovery,
+):
+    _add_connector_skills(host, tmp_path)
+    monkeypatch.setattr(acp_module, "_connected_connector_ids", lambda ids: frozenset(ids))
+    cwd = str(tmp_path / "workspace")
+    meta = _selected_mcp_meta(discovery)
+    first = await host.new_session(cwd=cwd, session_id="connected-mcp", **meta)
+    original = host._sessions[first.sessionId]
+    await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "使用 pkulaw 核对法律材料。"}],
+                      **meta)
+    assert (await _read_session_skill(original, "pkulaw")).success
+    if cold:
+        await original.aclose()
+        original.agent.session_log.close()
+        host._sessions.pop(first.sessionId)
+    session_id = "connected-mcp" if entry == "new_session" else first.sessionId
+    await getattr(host, entry)(cwd=cwd, session_id=session_id, **meta, **_connector_expert_profile("team"))
+    restored = host._sessions[first.sessionId]
+    assert restored is not original
+    assert "pkulaw" in restored.connector_skill_grants
+    assert (await restored.agent.tools["get_skill"].execute("pkulaw")).success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("failure", ["unselected", "disconnected", "discovery-unavailable"])
+async def test_unavailable_mcp_expert_keeps_live_session_and_can_retry(
+    host, tmp_path, monkeypatch, entry, failure,
+):
+    _add_connector_skills(host, tmp_path)
+    connected = {"pkulaw"}
+    monkeypatch.setattr(acp_module, "_connected_connector_ids", lambda ids: frozenset(ids & connected))
+    cwd = str(tmp_path / "workspace")
+    ready = _selected_mcp_meta(True)
+    first = await host.new_session(cwd=cwd, session_id="mcp-retry", **ready)
+    original = host._sessions[first.sessionId]
+    await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "使用 pkulaw 核对法律材料。"}],
+                      **ready)
+    assert (await _read_session_skill(original, "pkulaw")).success
+    before = original.agent.session_log.path.read_bytes()
+    requested = copy.deepcopy(ready)
+    if failure == "unselected":
+        requested["selected_connector_ids"] = []
+    elif failure == "disconnected":
+        connected.clear()
+    else:
+        requested["connector_discovery"]["available"] = False
+    session_id = "mcp-retry" if entry == "new_session" else first.sessionId
+    with pytest.raises(RequestError) as error:
+        await getattr(host, entry)(cwd=cwd, session_id=session_id, **requested, **_connector_expert_profile("expert"))
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert error.value.data["dependencies"][0]["state"] == "unavailable"
+    assert host._sessions[first.sessionId] is original
+    assert original.agent.session_log.path.read_bytes() == before
+    continued = await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "继续回答。"}],
+                                  **ready)
+    assert continued.stopReason == "end_turn"
+    connected.add("pkulaw")
+    await getattr(host, entry)(cwd=cwd, session_id=session_id, **ready, **_connector_expert_profile("expert"))
+    assert (await host._sessions[first.sessionId].agent.tools["get_skill"].execute("pkulaw")).success
+
+
+def _add_research_skills(host, tmp_path):
+    root = tmp_path / "user-skills"
+    for name, extra in (("research-synthesis", ""), ("review-method", "required_skills: [research-synthesis]\n")):
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Review the material\n{extra}---\nUse the research evidence.\n",
+            encoding="utf-8",
+        )
+    tools, loader = create_skill_tools(sources=[(root, "user")])
+    host._base_tools[:] = tools
+    host._skill_loader = loader
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["new_session", "load_session", "resume_session"])
+@pytest.mark.parametrize("kind", ["expert", "team"])
+@pytest.mark.parametrize("restriction", ["fast", "reader-blocked", "reader-scope"])
+async def test_expert_reader_restrictions_reject_before_retiring_live_session(
+    host, tmp_path, entry, kind, restriction,
+):
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    _add_research_skills(host, tmp_path)
+    cwd = str(tmp_path / "workspace")
+    first = await host.new_session(cwd=cwd, session_id="reader-retry")
+    original = host._sessions[first.sessionId]
+    before = original.agent.session_log.path.read_bytes()
+    reader = next(tool for tool in host._base_tools if isinstance(tool, GetSkillTool))
+    requested = {"execution_profile": "fast" if restriction == "fast" else "standard"}
+    if restriction == "reader-blocked":
+        reader.blocked_skill_names = {"research-synthesis"}
+    elif restriction == "reader-scope":
+        reader.allowed_skill_names = frozenset({"review-method"})
+    session_id = "reader-retry" if entry == "new_session" else first.sessionId
+    # The restricted Skill is a transitive dependency, not just the selected root.
+    selected = _connector_expert_profile(kind, "review-method")
+    with pytest.raises(RequestError) as error:
+        await getattr(host, entry)(cwd=cwd, session_id=session_id, **requested, **selected)
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    dependency = error.value.data["dependencies"][0]
+    assert dependency["name"] == "review-method"
+    assert dependency["dependencyName"] == "research-synthesis"
+    assert dependency["state"] == "unavailable"
+    assert host._sessions[first.sessionId] is original
+    assert original.agent.session_log.path.read_bytes() == before
+    assert (await original.agent.tools["get_skill"].execute("research-synthesis")).success
+    assert (await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "继续。"}])).stopReason == "end_turn"
+    reader.blocked_skill_names = frozenset()
+    reader.allowed_skill_names = None
+    await getattr(host, entry)(cwd=cwd, session_id=session_id, execution_profile="standard", **selected)
+    current = host._sessions[first.sessionId]
+    assert current is not original
+    for name in ("review-method", "research-synthesis"):
+        assert (await current.agent.tools["get_skill"].execute(name)).success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["fast", "standard", "deep"])
+async def test_expert_prepare_uses_the_same_execution_policy_as_skill_reads(host, tmp_path, profile):
+    _add_research_skills(host, tmp_path)
+    params = dict(cwd=str(tmp_path / "workspace"), execution_profile=profile,
+                  **_connector_expert_profile("expert", "research-synthesis"))
+    if profile == "fast":
+        with pytest.raises(RequestError) as error:
+            await host.new_session(**params)
+        assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+        assert not host._sessions
+    else:
+        response = await host.new_session(**params)
+        result = await host._sessions[response.sessionId].agent.tools["get_skill"].execute("research-synthesis")
+        assert result.success
+
+
+@pytest.mark.asyncio
+async def test_slow_expert_archive_write_does_not_block_other_acp_session(host, tmp_path, monkeypatch):
+    import threading
+    from acp.agent.connection import AgentSideConnection
+    from acp.client.connection import ClientSideConnection
+    from box_agent.acp.stdio_compat import StdioTransport
+
+    entered, release = threading.Event(), threading.Event()
+    original_open = Path.open
+
+    class SlowWriter:
+        def __init__(self, stream):
+            self.stream = stream
+        def write(self, chunk):
+            entered.set()
+            assert release.wait(10), "ZIP writing blocked the other ACP session"
+            return self.stream.write(chunk)
+        def close(self):
+            return self.stream.close()
+
+    def open_archive(path, mode="r", *args, **kwargs):
+        stream = original_open(path, mode, *args, **kwargs)
+        return SlowWriter(stream) if path.name == "package.zip" and mode == "xb" else stream
+
+    monkeypatch.setattr(Path, "open", open_archive)
+    local, remote = socket.socketpair()
+    client_reader, client_writer = await asyncio.open_connection(sock=local)
+    agent_reader, agent_writer = await asyncio.open_connection(sock=remote)
+    server = AgentSideConnection(host, StdioTransport(agent_reader, agent_writer))
+    client = ClientSideConnection(Connection(), StdioTransport(client_reader, client_writer))
+    preparation = None
+    try:
+        await asyncio.wait_for(client.initialize(protocol_version=1), 10)
+        first = await client.new_session(cwd=str(tmp_path / "workspace"), session_id="still-responsive")
+        preparation = asyncio.create_task(client.new_session(**new_params(tmp_path, session_id="slow-archive")))
+        assert await asyncio.to_thread(entered.wait, 5)
+        response = await asyncio.wait_for(client.prompt(
+            session_id=first.sessionId, prompt=[{"type": "text", "text": "回答一句即可。"}],
+        ), 5)
+        assert response.stopReason == "end_turn"
+        assert not preparation.done()
+        release.set()
+        prepared = await asyncio.wait_for(preparation, 10)
+        assert host._sessions[prepared.sessionId].expert_context.expert.id == "client-expert-id"
+    finally:
+        release.set()
+        if preparation is not None:
+            await asyncio.gather(preparation, return_exceptions=True)
+        await client.close()
+        await server.close()
+        client_writer.close()
+        agent_writer.close()
+        await asyncio.gather(client_writer.wait_closed(), agent_writer.wait_closed())
