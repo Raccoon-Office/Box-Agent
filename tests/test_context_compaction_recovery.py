@@ -8,6 +8,7 @@ import pytest
 from box_agent.agent import Agent
 from box_agent.events import ContentEvent, DoneEvent, ErrorEvent, StepStart, StopReason, SummarizationEvent
 from box_agent.kernel import context_engine
+from box_agent.kernel.context_types import ContextCompactionState
 from box_agent.schema import FunctionCall, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.session_log import SessionLog
 from box_agent.tools.base import Tool, ToolResult
@@ -241,6 +242,18 @@ async def test_cancelling_a_reactive_summary_keeps_the_uncompacted_surface(tmp_p
         assert log.replay().messages == original
     finally:
         log.close()
+
+
+def test_same_step_compactions_do_not_count_as_rapid_refills():
+    state = ContextCompactionState(step=1)
+    for _ in range(3):
+        state.record("summary", applied=True)
+    assert state.rapid_refills == 0
+    state.step += 2
+    assert state.refilled_rapidly and state.rapid_refills < 2
+    state.record("summary", applied=True)
+    assert state.rapid_refills == 1
+    assert not state.refilled_rapidly
 
 
 @pytest.mark.asyncio
