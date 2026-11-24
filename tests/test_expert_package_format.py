@@ -106,6 +106,38 @@ def test_unbound_market_definition_does_not_require_installation_or_lock(package
     assert load(root)["defaultSkills"] == ["actual-skill", "generate_image"]
 
 
+def test_optional_bundled_skill_keeps_its_binding_without_becoming_required(package):
+    root, manifest = package
+    manifest["agents"][0]["skillBindings"][0]["required"] = False
+    write_json(root / ".box-agent-plugin/plugin.json", manifest)
+    profile = load(root)
+    assert profile["defaultSkills"] == ["generate_image"]
+    assert profile["optionalSkills"] == ["actual-skill"]
+    context = ExpertSessionContext.from_meta({"expert": profile})
+    assert "actual-skill" in context.skill_names()
+    assert context.skill_bindings_by_path[root / "skills/skill-0/SKILL.md"] == "actual-skill"
+
+
+def test_team_keeps_each_members_required_and_optional_skill_selection(package):
+    root, manifest = package
+    (root / "agents/member.md").write_text("Member rules.")
+    (root / "workflow.md").write_text("Review and synthesize.")
+    manifest.update(expertType="team", team={"leadAgent": "lead", "memberAgents": ["member"],
+        "workflow": "workflow.md", "executionMode": "orchestrated"})
+    manifest["agents"][0]["skillBindings"][0]["required"] = False
+    manifest["agents"].append({"id": "member", "file": "agents/member.md",
+                              "skillBindings": [{"key": "method", "required": True}]})
+    write_json(root / ".box-agent-plugin/plugin.json", manifest)
+    profile = load(root, "team")
+    context = ExpertSessionContext.from_meta({"expert_team": profile})
+    assert context.team.leader.default_skills == ["generate_image"]
+    assert context.team.leader.optional_skills == ["actual-skill"]
+    assert context.team.members[0].default_skills == ["actual-skill"]
+    assert context.team.members[0].optional_skills == []
+    assert "optional skills: actual-skill" in context.team.leader.render_prompt()
+    assert "actual-skill" in context.team.leader.skill_query_terms()
+
+
 @pytest.mark.parametrize("resource", ["../outside", "/absolute", "C:/host", "skills\\method"])
 def test_resource_paths_cannot_escape_or_use_host_paths(package, resource):
     root, manifest = package

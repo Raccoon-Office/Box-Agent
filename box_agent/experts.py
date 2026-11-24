@@ -15,13 +15,21 @@ _EXPERT_TEAM_EXECUTION_MODES = {"advisory", "orchestrated", "review_panel"}
 class ExpertTeamValidationError(ValueError):
     code = "EXPERT_TEAM_INVALID_MEMBER_REFERENCE"
 
-    def __init__(self, team_id: str, missing_member_ids: list[str]) -> None:
+    def __init__(
+        self, team_id: str, missing_member_ids: list[str], *,
+        invalid_workstream_index: int | None = None,
+    ) -> None:
         self.team_id = team_id
         self.missing_member_ids = missing_member_ids
-        super().__init__(
-            "Required expert-team workstreams reference undefined members: "
-            + ", ".join(missing_member_ids)
-        )
+        if invalid_workstream_index is not None:
+            self.code = "EXPERT_TEAM_INVALID_WORKSTREAM"
+            detail = (
+                f"Required expert-team workstream at index {invalid_workstream_index} "
+                "must specify non-empty memberId and title."
+            )
+        else:
+            detail = "Required expert-team workstreams reference undefined members: " + ", ".join(missing_member_ids)
+        super().__init__(detail)
 
 
 def _clean_text(value: Any, *, max_len: int = _MAX_TEXT) -> str:
@@ -329,7 +337,7 @@ class ExpertTeamOrchestration:
     review_checklist: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_meta(cls, raw: Any) -> "ExpertTeamOrchestration | None":
+    def from_meta(cls, raw: Any, *, team_id: str = "") -> "ExpertTeamOrchestration | None":
         if not isinstance(raw, dict):
             return None
         stages = [
@@ -337,11 +345,14 @@ class ExpertTeamOrchestration:
             for stage in (ExpertTeamWorkflowStage.from_meta(item) for item in raw.get("stages", []))
             if stage is not None
         ][:_MAX_ITEMS]
-        workstreams = [
-            stream
-            for stream in (ExpertTeamWorkstream.from_meta(item) for item in raw.get("workstreams", []))
-            if stream is not None
-        ][:_MAX_ITEMS]
+        workstreams = []
+        for index, item in enumerate(raw.get("workstreams", [])):
+            stream = ExpertTeamWorkstream.from_meta(item)
+            if stream is not None:
+                workstreams.append(stream)
+            elif isinstance(item, dict) and _clean_bool(item.get("required")):
+                raise ExpertTeamValidationError(team_id, [], invalid_workstream_index=index)
+        workstreams = workstreams[:_MAX_ITEMS]
         review_checklist = _rule_list(raw.get("reviewChecklist") or raw.get("review_checklist"))
         trigger = _rule_text(raw.get("trigger"))
         if not trigger and not stages and not workstreams and not review_checklist:
@@ -413,6 +424,7 @@ class ExpertTeamMember:
     source_expert_id: str = ""
     instructions: list[str] = field(default_factory=list)
     default_skills: list[str] = field(default_factory=list)
+    optional_skills: list[str] = field(default_factory=list)
 
     @classmethod
     def from_meta(cls, raw: Any) -> "ExpertTeamMember | None":
@@ -429,6 +441,7 @@ class ExpertTeamMember:
             source_expert_id=_clean_text(raw.get("sourceExpertId") or raw.get("source_expert_id"), max_len=80),
             instructions=_rule_list(raw.get("instructions")),
             default_skills=_clean_list(raw.get("defaultSkills") or raw.get("default_skills"), max_items=8),
+            optional_skills=_clean_list(raw.get("optionalSkills") or raw.get("optional_skills"), max_items=8),
         )
 
     def render_prompt(self) -> str:
@@ -437,6 +450,8 @@ class ExpertTeamMember:
             parts.append(f"role: {self.role}")
         if self.default_skills:
             parts.append("skills: " + ", ".join(self.default_skills))
+        if self.optional_skills:
+            parts.append("optional skills: " + ", ".join(self.optional_skills))
         if self.instructions:
             parts.append("rules:\n" + "\n\n".join(self.instructions))
         return " - " + "; ".join(parts)
@@ -456,7 +471,8 @@ class ExpertTeamMember:
         }
 
     def skill_query_terms(self) -> list[str]:
-        return [self.name, self.id, self.role, self.source_expert_id, *self.default_skills, *self.instructions]
+        return [self.name, self.id, self.role, self.source_expert_id,
+                *self.default_skills, *self.optional_skills, *self.instructions]
 
 
 @dataclass(frozen=True)
@@ -495,7 +511,7 @@ class ExpertTeamProfile:
             if member is not None
         ][:_MAX_ITEMS]
         leader = ExpertTeamMember.from_meta(raw.get("leader"))
-        orchestration = ExpertTeamOrchestration.from_meta(raw.get("orchestration"))
+        orchestration = ExpertTeamOrchestration.from_meta(raw.get("orchestration"), team_id=team_id)
         if orchestration:
             member_ids = {member.id for member in members}
             if leader:

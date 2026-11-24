@@ -172,14 +172,19 @@ def load_expert_profile(package: Path, kind: str, metadata: dict[str, Any], dige
     for agent in agents:
         body = _body(_resource(package, agent.get("file")))
         declared = [indexed[binding["key"]] for binding in agent.get("skillBindings", []) if binding["key"] in indexed]
+        required_keys = {binding["key"] for binding in agent.get("skillBindings", [])
+                         if binding.get("required") is not False}
         tools = agent.get("toolRequests", [])
         if not isinstance(tools, list) or any(not isinstance(tool, str) or not _NAME.fullmatch(tool) for tool in tools):
             raise ExpertPackageError("Invalid expert tool requests")
         profiles[agent["id"]] = {
             "id": agent["id"], "name": agent["id"], "role": "", "instructions": [body],
-            "defaultSkills": [binding["slug"] for binding in declared] + tools,
+            "defaultSkills": [binding["slug"] for binding in declared if binding["key"] in required_keys] + tools,
             "skillBindings": declared + [{"slug": tool, "skillId": None, "source": "TOOL"} for tool in tools],
         }
+        optional = [binding["slug"] for binding in declared if binding["key"] not in required_keys]
+        if optional:
+            profiles[agent["id"]]["optionalSkills"] = optional
     common = {key: metadata[key] for key in ("id", "name", "description", "starterPrompt", "tags") if key in metadata}
     common.update(source="builtin", revision=f"package:{digest}",
                   packageSnapshot={"digest": digest, "directory": str(package), "manifest": manifest, "skills": skills})
