@@ -386,6 +386,7 @@ class SkillLoader:
         self.validation_timeout_seconds = SKILL_VALIDATION_TIMEOUT_SECONDS
         self._last_validated: dict[str, SkillReferenceSnapshot | SkillDependencyError] = {}
         self._force_reload = False
+        self._market_skill_bindings: dict[str, frozenset[str]] = {}
         self._sources = [
             _SourceEntry(directory=Path(d).expanduser(), source=s) for d, s in sources
         ]
@@ -653,29 +654,34 @@ class SkillLoader:
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
         skill_bindings_by_path: Mapping[Path, str] | None = None,
+        market_skill_bindings: Mapping[str, Collection[str]] | None = None,
     ) -> "SkillLoader":
         with self._reload_lock:
             return self._with_expert_skill_sources(
                 skill_names, skill_directories=skill_directories,
                 skill_bindings_by_directory=skill_bindings_by_directory,
                 skill_bindings_by_path=skill_bindings_by_path,
+                market_skill_bindings=market_skill_bindings,
             )
 
     async def awith_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
         skill_bindings_by_path: Mapping[Path, str] | None = None,
+        market_skill_bindings: Mapping[str, Collection[str]] | None = None,
     ) -> "SkillLoader":
         return await asyncio.to_thread(
             self.with_expert_skill_sources, skill_names, skill_directories=skill_directories,
             skill_bindings_by_directory=skill_bindings_by_directory,
             skill_bindings_by_path=skill_bindings_by_path,
+            market_skill_bindings=market_skill_bindings,
         )
 
     def _with_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
         skill_bindings_by_path: Mapping[Path, str] | None = None,
+        market_skill_bindings: Mapping[str, Collection[str]] | None = None,
     ) -> "SkillLoader":
         """Clone this loader with session-local expert skills.
 
@@ -690,7 +696,7 @@ class SkillLoader:
             for name in skill_names
             if isinstance(name, str) and _SKILL_NAME_RE.match(name.strip())
         ]
-        if not requested_names and not skill_directories:
+        if not requested_names and not skill_directories and not market_skill_bindings:
             return self
 
         extra_sources: List[Tuple[Path, SkillSource]] = []
@@ -712,7 +718,7 @@ class SkillLoader:
                     break
 
         package_directories = [Path(directory).resolve() for directory in skill_directories or []]
-        if not extra_sources and not package_directories:
+        if not extra_sources and not package_directories and not market_skill_bindings:
             return self
 
         # 仅调整会话副本的顺序；普通会话仍使用原加载器和原优先级。
@@ -723,6 +729,10 @@ class SkillLoader:
                 *extra_sources,
             ],
             skill_settings_path=self._skill_settings_path,
+        )
+        loader._market_skill_bindings = (
+            dict(self._market_skill_bindings) if market_skill_bindings is None
+            else {name: frozenset(ids) for name, ids in market_skill_bindings.items()}
         )
         for entry in loader._sources[:len(package_directories)]:
             entry.containment_root = entry.directory
@@ -1077,6 +1087,20 @@ class SkillLoader:
             entry.signature = signature
             entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
 
+        if self._market_skill_bindings:
+            from .skillhub_install_tool import is_installed_market_skill
+
+            for name, identities in self._market_skill_bindings.items():
+                skill = all_skills.get(name)
+                if skill is not None and not all(is_installed_market_skill(skill, identity) for identity in identities):
+                    # Keep the existing source precedence and diagnostic entry; do
+                    # not let any reader or restore path consume a same-name package.
+                    unavailable = replace(skill, content="", broken=True,
+                                          broken_reason="Skill does not match the expert's market installation identity.")
+                    all_skills[name] = unavailable
+                    if name in loaded:
+                        loaded[name] = unavailable
+
         self._catalog = _SkillCatalog(loaded, all_skills, sources, self.parse_errors,
                                      settings_signature)
         discovered = list(loaded.values())
@@ -1319,6 +1343,9 @@ class SkillLoader:
             candidates.extend(self._iter_skill_files(entry))
 
         candidates.extend(entry.bound_skill_paths)
+        if self._market_skill_bindings and entry.source == "user":
+            candidates.extend(path.parent / ".skill-installation.json"
+                              for path in tuple(candidates) if path.name == "SKILL.md")
         signatures = []
         for path in dict.fromkeys(candidates):
             if entry.containment_root is not None:

@@ -118,12 +118,14 @@ async def test_two_chats_share_package_but_not_workspace_or_expert_context(host,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["expert", "team"])
-@pytest.mark.parametrize("required,include_lock,installed", [
-    (False, False, False), (False, True, False), (False, True, True),
-    (True, True, False), (True, True, True),
+@pytest.mark.parametrize("required,include_lock,installation_state", [
+    (False, False, "missing"), (False, True, "missing"), (False, True, "matching_id"),
+    (True, True, "missing"), (True, True, "matching_id"),
+    (False, True, "mismatched_id"), (False, True, "unmarked"),
+    (True, True, "mismatched_id"),
 ])
 async def test_market_binding_requirement_survives_download_and_restore(
-    host, tmp_path, monkeypatch, kind, required, include_lock, installed,
+    host, tmp_path, monkeypatch, kind, required, include_lock, installation_state,
 ):
     with zipfile.ZipFile(io.BytesIO(archive_bytes(kind))) as archive:
         files = {name: archive.read(name) for name in archive.namelist()}
@@ -151,20 +153,26 @@ async def test_market_binding_requirement_survives_download_and_restore(
         return await packages.prepare_expert_meta(meta, transport=transport)
 
     monkeypatch.setattr(acp_module, "prepare_expert_meta", prepare)
-    if installed:
+    if installation_state != "missing":
         root = tmp_path / "installed"
         directory = root / "market-method"
         directory.mkdir(parents=True)
         (directory / "SKILL.md").write_text("---\nname: market-method\ndescription: Market method\n---\nMARKET_OK")
-        (directory / ".skill-installation.json").write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
+        if installation_state != "unmarked":
+            (directory / ".skill-installation.json").write_text(json.dumps({
+                "source": "hub", "skillId": "market-id" if installation_state == "matching_id" else "other-id",
+            }))
         host._base_tools[:], host._skill_loader = create_skill_tools(sources=[(root, "user")])
     key = "expert" if kind == "expert" else "expert_team"
     params = {"cwd": str(tmp_path / "workspace"), key: reference(body)}
-    if required and not installed:
+    if required and installation_state != "matching_id":
         with pytest.raises(RequestError) as error:
             await host.new_session(**params)
         assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
         assert error.value.data["dependencies"][0]["name"] == "market-method"
+        if installation_state != "missing":
+            assert error.value.data["dependencies"][0]["state"] == "unavailable"
+            assert "identity" in error.value.data["dependencies"][0]["reason"]
         assert not host._sessions
         return
     response = await host.new_session(**params)
@@ -177,8 +185,246 @@ async def test_market_binding_requirement_survives_download_and_restore(
         for profile in profiles:
             assert ("market-method" in profile.default_skills) is required
             assert ("market-method" in profile.optional_skills) is (include_lock and not required)
-        if installed:
-            assert (await state.agent.tools["get_skill"].execute("market-method")).success
+        read = await state.agent.tools["get_skill"].execute("market-method")
+        assert read.success is (installation_state == "matching_id")
+        if installation_state in ("mismatched_id", "unmarked"):
+            assert "MARKET_OK" not in (read.content or "")
+            listing = await state.agent.tools["list_skills"].execute(query="market-method")
+            assert listing.raw_output["skills"][0]["available"] is False
+            assert "identity" in listing.raw_output["skills"][0]["unavailable_reason"]
+
+
+def _installed_market_method(host, tmp_path, *, identity="other-id", required_by=None):
+    root = tmp_path / "user-skills"
+    directory = root / "installed-package-42"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        "---\nname: market-method\ndescription: Market method\n---\nMARKET_BODY\n",
+        encoding="utf-8",
+    )
+    marker = directory / ".skill-installation.json"
+    marker.write_text(json.dumps({"source": "hub", "skillId": identity}))
+    if required_by:
+        other = root / required_by
+        other.mkdir()
+        (other / "SKILL.md").write_text(
+            f"---\nname: {required_by}\ndescription: Root method\n"
+            "required_skills: [market-method]\n---\nRead the market method.\n",
+            encoding="utf-8",
+        )
+    host._base_tools[:], host._skill_loader = create_skill_tools(sources=[(root, "user")])
+    return marker
+
+
+def _optional_market_expert(*, default_skills=()):
+    return {"expert": {"id": "local-expert", "name": "Local expert",
+                       "defaultSkills": list(default_skills), "optionalSkills": ["market-method"],
+                       "skillBindings": [{"slug": "market-method", "source": "MARKET", "skillId": "market-id"}]}}
+
+
+def _mixed_market_team(*, required_role="leader", optional_identity="other-id"):
+    required = _optional_market_expert(default_skills=["market-method"])["expert"]
+    required.update(id="required-expert", name="Required expert", optionalSkills=[])
+    optional = _optional_market_expert()["expert"]
+    optional.update(id="optional-expert", name="Optional expert")
+    optional["skillBindings"][0]["skillId"] = optional_identity
+    leader, member = (required, optional) if required_role == "leader" else (optional, required)
+    return {"expert_team": {"id": "mixed-market-team", "name": "Mixed market team",
+                            "leader": leader, "members": [member]}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("required_role", ["leader", "member"])
+@pytest.mark.parametrize("optional_identity", ["other-id", None, []])
+async def test_conflicting_optional_identity_keeps_required_skill_and_reports_omitted_binding(
+    host, tmp_path, required_role, optional_identity,
+):
+    _installed_market_method(host, tmp_path, identity="market-id")
+    meta = _mixed_market_team(required_role=required_role, optional_identity=optional_identity)
+    original = copy.deepcopy(meta)
+    cwd = str(tmp_path / "workspace")
+    response = await host.new_session(cwd=cwd, **meta)
+    session_id = response.sessionId
+    for restore in (None, host.load_session, host.resume_session):
+        if restore is not None:
+            response = await restore(session_id=session_id, cwd=cwd, **meta)
+        state = host._sessions[session_id]
+        profiles = [state.expert_context.team.leader, *state.expert_context.team.members]
+        required = next(profile for profile in profiles if profile.id == "required-expert")
+        optional = next(profile for profile in profiles if profile.id == "optional-expert")
+        assert required.default_skills == ["market-method"]
+        assert optional.optional_skills == []
+        assert "optional skills: market-method" not in optional.render_prompt()
+        unavailable = response.field_meta["expert_context"]["unavailable_optional_skills"]
+        assert len(unavailable) == 1
+        assert unavailable[0]["expertId"] == "optional-expert"
+        assert unavailable[0]["name"] == "market-method"
+        assert unavailable[0]["requiredSkillId"] == "market-id"
+        assert "Do not substitute" in state.agent.system_prompt
+        read = await _read_session_skill(state, "market-method")
+        assert read.success and "MARKET_BODY" in read.content
+        listing = await state.agent.tools["list_skills"].execute(query="market-method")
+        assert listing.raw_output["skills"][0]["available"] is True
+    assert meta == original
+
+
+@pytest.mark.asyncio
+async def test_matching_optional_identity_keeps_its_contract_alongside_required_skill(host, tmp_path):
+    _installed_market_method(host, tmp_path, identity="market-id")
+    response = await host.new_session(cwd=str(tmp_path / "workspace"), **_mixed_market_team(optional_identity="market-id"))
+    state = host._sessions[response.sessionId]
+    assert state.expert_context.team.members[0].optional_skills == ["market-method"]
+    assert "unavailable_optional_skills" not in response.field_meta["expert_context"]
+    assert (await _read_session_skill(state, "market-method")).success
+
+
+@pytest.mark.asyncio
+async def test_omitted_optional_binding_is_reconsidered_when_required_expert_is_removed(host, tmp_path):
+    marker = _installed_market_method(host, tmp_path, identity="market-id")
+    meta = _mixed_market_team()
+    cwd = str(tmp_path / "workspace")
+    first = await host.new_session(cwd=cwd, **meta)
+    marker.write_text(json.dumps({"source": "hub", "skillId": "other-id"}))
+    meta["expert_team"].pop("leader")
+    response = await host.load_session(session_id=first.sessionId, cwd=cwd, **meta)
+    state = host._sessions[first.sessionId]
+    assert state.expert_context.team.members[0].optional_skills == ["market-method"]
+    assert "unavailable_optional_skills" not in response.field_meta["expert_context"]
+    assert (await _read_session_skill(state, "market-method")).success
+
+
+@pytest.mark.asyncio
+async def test_optional_identity_cannot_replace_required_identity_after_catalog_refresh(host, tmp_path):
+    from box_agent.tools.sub_agent_capabilities import CapabilityFailure, CapabilityResolver, parse_delegation_spec
+
+    marker = _installed_market_method(host, tmp_path, identity="market-id")
+    response = await host.new_session(cwd=str(tmp_path / "workspace"), **_mixed_market_team())
+    state = host._sessions[response.sessionId]
+    spec = parse_delegation_spec(task="Review the material.", skills=["market-method"])
+    assert not isinstance(spec, CapabilityFailure)
+    resolver = CapabilityResolver()
+    resolved = resolver.resolve(spec, parent_tools=state.agent.tools, skill_loader=state.skill_loader)
+    assert not isinstance(resolved, CapabilityFailure)
+    assert "MARKET_BODY" in resolved.skills[0].content
+    path = marker.parent / "SKILL.md"
+    original_body = path.read_text()
+    marker.write_text(json.dumps({"source": "hub", "skillId": "other-id"}))
+    path.write_text(original_body.replace("MARKET_BODY", "WRONG_OPTIONAL_BODY"))
+    read = await _read_session_skill(state, "market-method")
+    assert not read.success and "WRONG_OPTIONAL_BODY" not in (read.content or "")
+    resolved = resolver.resolve(spec, parent_tools=state.agent.tools, skill_loader=state.skill_loader)
+    assert isinstance(resolved, CapabilityFailure)
+    assert resolved.code == "SKILL_BROKEN"
+    state.agent.skill_runtime.select(["market-method"])
+    assert "WRONG_OPTIONAL_BODY" not in str(state.agent.skill_runtime.materialize_selected_messages([]))
+    marker.write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
+    path.write_text(original_body)
+    assert (await _read_session_skill(state, "market-method")).success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("both_required", [False, True])
+async def test_optional_conflict_handling_never_weakens_required_identity_checks(host, tmp_path, both_required):
+    _installed_market_method(host, tmp_path, identity="market-id" if both_required else "other-id")
+    meta = _mixed_market_team()
+    if both_required:
+        member = meta["expert_team"]["members"][0]
+        member["defaultSkills"] = member.pop("optionalSkills")
+    with pytest.raises(RequestError) as error:
+        await host.new_session(cwd=str(tmp_path / "workspace"), **meta)
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert not host._sessions
+
+
+@pytest.mark.asyncio
+async def test_optional_market_binding_does_not_change_unbound_local_or_ordinary_sessions(host, tmp_path):
+    _installed_market_method(host, tmp_path)
+    cwd = str(tmp_path / "workspace")
+    bounded = await host.new_session(cwd=cwd, **_optional_market_expert())
+    assert not (await host._sessions[bounded.sessionId].agent.tools["get_skill"].execute("market-method")).success
+    legacy = _optional_market_expert()
+    del legacy["expert"]["skillBindings"]
+    for meta in ({}, legacy):
+        response = await host.new_session(cwd=cwd, **meta)
+        read = await host._sessions[response.sessionId].agent.tools["get_skill"].execute("market-method")
+        assert read.success and "MARKET_BODY" in read.content
+    assert not host._skill_loader.get_skill("market-method").broken
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_identity", ["other-id", None, []])
+async def test_optional_team_market_conflict_cannot_be_delegated(host, tmp_path, other_identity):
+    from box_agent.tools.sub_agent_capabilities import (
+        CapabilityFailure, CapabilityResolver, parse_delegation_spec,
+    )
+
+    _installed_market_method(host, tmp_path, identity="market-id")
+    lead = _optional_market_expert()["expert"]
+    member = copy.deepcopy(lead)
+    member.update(id="member", name="Member")
+    member["skillBindings"][0]["skillId"] = other_identity
+    response = await host.new_session(cwd=str(tmp_path / "workspace"), expert_team={
+        "id": "local-team", "name": "Local team", "leader": lead, "members": [member],
+    })
+    state = host._sessions[response.sessionId]
+    assert not (await _read_session_skill(state, "market-method")).success
+    spec = parse_delegation_spec(task="Review the material.", skills=["market-method"])
+    assert not isinstance(spec, CapabilityFailure)
+    resolved = CapabilityResolver().resolve(spec, parent_tools=state.agent.tools, skill_loader=state.skill_loader)
+    assert isinstance(resolved, CapabilityFailure)
+    assert resolved.code == "SKILL_BROKEN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restore", ["load_session", "resume_session"])
+async def test_market_identity_change_blocks_restore_selection_and_recovers_after_install(host, tmp_path, restore):
+    marker = _installed_market_method(host, tmp_path, identity="market-id")
+    cwd = str(tmp_path / "workspace")
+    meta = _optional_market_expert()
+    response = await host.new_session(cwd=cwd, **meta)
+    state = host._sessions[response.sessionId]
+    assert (await _read_session_skill(state, "market-method")).success
+    assert state.agent.session_log.replay().skills
+    marker.write_text(json.dumps({"source": "hub", "skillId": "wrong-market-id"}))
+    (marker.parent / "SKILL.md").write_text(
+        "---\nname: market-method\ndescription: Wrong market method\n---\nWRONG_IDENTITY_CONTENT\n",
+        encoding="utf-8",
+    )
+    await getattr(host, restore)(session_id=response.sessionId, cwd=cwd, **meta)
+    state = host._sessions[response.sessionId]
+    assert "market-method" not in state.agent.skill_runtime.state.reads
+    state.agent.skill_runtime.select(["market-method"])
+    messages = state.agent.skill_runtime.materialize_selected_messages([])
+    assert messages and "WRONG_IDENTITY_CONTENT" not in str(messages)
+    assert "unavailable" in str(messages)
+    assert not (await _read_session_skill(state, "market-method")).success
+    # No SKILL.md edit or process restart: adding/removing the receipt alone
+    # must invalidate the session catalog and must not change other loaders.
+    marker.write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
+    assert (await _read_session_skill(state, "market-method")).success
+    marker.unlink()
+    assert not (await _read_session_skill(state, "market-method")).success
+    marker.write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
+    assert (await _read_session_skill(state, "market-method")).success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["new_session", "load_session", "resume_session"])
+async def test_transitively_required_market_identity_failure_keeps_live_session(host, tmp_path, method):
+    marker = _installed_market_method(host, tmp_path, required_by="root-method")
+    cwd = str(tmp_path / "workspace")
+    first = await host.new_session(cwd=cwd, session_id="stable-market-chat")
+    original = host._sessions[first.sessionId]
+    meta = _optional_market_expert(default_skills=["root-method"])
+    ident = "stable-market-chat" if method == "new_session" else first.sessionId
+    with pytest.raises(RequestError) as error:
+        await getattr(host, method)(cwd=cwd, session_id=ident, **meta)
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert error.value.data["dependencies"][0]["dependencyName"] == "market-method"
+    assert host._sessions[first.sessionId] is original
+    assert (await host.prompt(session_id=first.sessionId, prompt=[{"type": "text", "text": "continue"}])).stopReason == "end_turn"
+    marker.write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
+    await getattr(host, method)(cwd=cwd, session_id=ident, **meta)
 
 
 @pytest.mark.asyncio
@@ -705,7 +951,7 @@ async def test_utility_expert_cannot_require_registered_tool(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dependency", ["bash", "read_file", "research-synthesis", "pkulaw"])
+@pytest.mark.parametrize("dependency", ["bash", "read_file", "research-synthesis", "pkulaw", "market-method", "market-conflict"])
 async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usable(
     host, tmp_path, monkeypatch, dependency,
 ):
@@ -713,7 +959,13 @@ async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usab
     from acp.client.connection import ClientSideConnection
     from box_agent.acp.stdio_compat import StdioTransport
 
-    if dependency == "research-synthesis":
+    if dependency == "market-conflict":
+        marker = _installed_market_method(host, tmp_path)
+        selected = _mixed_market_team()
+    elif dependency == "market-method":
+        marker = _installed_market_method(host, tmp_path, required_by="root-method")
+        selected = _optional_market_expert(default_skills=["root-method"])
+    elif dependency == "research-synthesis":
         _add_research_skills(host, tmp_path)
         selected = {"execution_profile": "fast", **_connector_expert_profile("expert", dependency)}
     elif dependency == "pkulaw":
@@ -745,7 +997,9 @@ async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usab
             ), 10)
             assert response.stopReason == "end_turn"
 
-        if dependency == "research-synthesis":
+        if dependency in {"market-method", "market-conflict"}:
+            marker.write_text(json.dumps({"source": "hub", "skillId": "market-id"}))
+        elif dependency == "research-synthesis":
             selected["execution_profile"] = "standard"
         elif dependency == "pkulaw":
             selected["selected_connector_ids"] = ["pkulaw"]
@@ -761,7 +1015,8 @@ async def test_dependency_preflight_error_keeps_acp_connection_and_sessions_usab
                 session_id=retried.sessionId, prompt=[{"type": "text", "text": "请核对材料。"}],
             ), 10)
             assert response.stopReason == "end_turn"
-            assert (await _read_session_skill(current, dependency)).success
+            skill_name = "market-method" if dependency == "market-conflict" else dependency
+            assert (await _read_session_skill(current, skill_name)).success
     finally:
         await client.close()
         await server.close()
