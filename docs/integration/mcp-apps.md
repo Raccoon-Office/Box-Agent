@@ -119,9 +119,11 @@ AppBridge 回放快照中的输入和完整结果；恢复不会重跑原工具�
 - 沿用 Box-Agent 已有 MCP 连接及认证，不由 renderer 新建连接或获取凭据。
 - App 调用限定原服务、单次请求解析的当前连接及当前请求获准的 connector（未提供请求级状态时使用会话选择）。
   `visibility` 必须包含 `app`；仅含 `app` 的工具不进入模型发现/调用目录。
-- App 调用使用会话配置的调用前 Hook 和现有 invocation guards。会话正在运行时使用
-  当前能力门，暂停时读取已保存的能力门。Hook 拒绝返回 `MCP_APP_TOOL_DENIED`，
-  Hook 调整后的参数继续经过 schema 和能力门校验。`readOnlyHint` 仅供界面呈现参考。
+- App 调用使用会话配置的调用前 Hook，并执行参数 schema、聊天文件保护及连接有效性检查。
+  Hook 拒绝返回 `MCP_APP_TOOL_DENIED`，Hook 调整后的参数继续经过调用检查。
+  Hook 上下文不可用时返回 `MCP_APP_UNAVAILABLE`。`readOnlyHint` 仅供界面呈现参考。
+  completion gates 由模型工具执行器用于模型任务，包括模型发起的 MCP 工具调用。
+  App 交互独立于模型任务的检查状态，适用于运行中、等待用户及历史卡片。
   会话已经开始准备新回合且授权上下文还未就绪时，返回 `MCP_APP_SESSION_BUSY`。
   打开组件不会授予跨服务、跨会话或内置工具执行权限。
 - UI 操作不创建 LLM turn，也不追加没有模型 tool-call 配对的 `role=tool` 消息。

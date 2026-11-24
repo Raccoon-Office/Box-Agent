@@ -26,7 +26,6 @@ from box_agent.kernel.hook_types import copy_data
 from box_agent.session_log import run_session_write
 from box_agent.tools.base import ToolInvocationContext
 from box_agent.tools.chat_references import ChatReferences
-from box_agent.tools.completion_checks import CompletionChecks, CompletionContext
 from box_agent.tools.model_tool_context import set_model_tool_context, reset_model_tool_context
 
 log = logging.getLogger(__name__)
@@ -433,7 +432,7 @@ class McpAppsACP:
 
         async def apply_hooks(dispatch, base):
             if dispatch is None or base is None:
-                raise _error("MCP_APP_AUTHORIZATION_UNAVAILABLE")
+                raise _error("MCP_APP_UNAVAILABLE")
             context = replace(
                 base, event="tool.before_execution", tool_call_id=interaction_id,
                 is_cancelled=is_cancelled,
@@ -446,13 +445,6 @@ class McpAppsACP:
 
         if active is None:
             options = agent.default_run_options()
-            checks = await CompletionChecks.create(
-                agent.tools, CompletionContext(
-                    tuple(agent.messages), is_cancelled, agent.session_log, resume_scope=agent.messages,
-                ), include_inputs=False,
-            )
-            if checks.failures:
-                raise _error("MCP_APP_AUTHORIZATION_UNAVAILABLE")
             async with standalone_tool_hooks({
                 "llm": options.llm, "tools": agent.tools, "hooks": options.hooks,
                 "plugins": options.plugins, "session_id": options.session_id or session_id,
@@ -461,23 +453,19 @@ class McpAppsACP:
                 "tool_exposure_manager": agent.mcp_tool_exposure, "skill_engine": agent.skill_runtime,
             }) as bus:
                 arguments = await apply_hooks(bus, bus.context)
-            gates = tuple(checks.gates.values())
         else:
             if active.policy_error(tool_name, arguments):
                 raise _error("MCP_APP_TOOL_DENIED")
             arguments = await apply_hooks(active.hook_dispatch, active.hook_context)
-            gates = tuple(active.completion_gates.values())
 
         def still_authorized():
             return (agent.tool_run_context_generation == generation
                     and agent.active_tool_run_context is active) and (
-                not self._turn_is_preparing(state) if active is None else (
-                    tuple(active.completion_gates.values()) == gates
-                    and not active.policy_error(tool_name, arguments)
-                )
+                not self._turn_is_preparing(state) if active is None
+                else not active.policy_error(tool_name, arguments)
             )
 
-        return arguments, gates, still_authorized
+        return arguments, still_authorized
 
     async def _execute(self, session_id, state, snapshot, binding, interaction_id, interaction: _Interaction,
                        name, tool_name, arguments, allowed_connectors):
@@ -512,15 +500,15 @@ class McpAppsACP:
             interaction.cancellable = True
             await run_session_write(session_log, checkpoint, "started")
             with self._execution_scope(session_id, state):
-                arguments, gates, still_authorized = await self._authorize(
+                arguments, still_authorized = await self._authorize(
                     state, session_id, tool_name, interaction_id, arguments, revoked,
                 )
+                # App interactions carry session policy independently of model task completion.
                 context = ToolInvocationContext(
                     parent_tool_call_id=interaction_id,
                     chat_references=await run_session_write(
                         session_log, ChatReferences, state.agent.workspace_dir, state.agent.messages, session_log,
                     ),
-                    capability_gates=gates,
                 )
                 result = await call_mcp_app_tool(
                     snapshot["serverName"], name, arguments,

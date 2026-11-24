@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 from acp import PROTOCOL_VERSION, RequestError
@@ -25,6 +26,7 @@ from box_agent.tools.base import Tool
 from box_agent.tools.completion_checks import CompletionIssue
 from box_agent.tools.mcp_apps import set_mcp_apps_host_capability
 from box_agent.tools.mcp_sources import ResolvedMcpServer
+from box_agent.tools.skill_tool import GetSkillTool
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mcp_apps_server.py"
 
@@ -289,13 +291,15 @@ async def test_real_stdio_app_roundtrip_keeps_complete_data_out_of_model_and_ref
 @pytest.mark.asyncio
 @pytest.mark.parametrize("active_turn", [False, True], ids=["idle", "active"])
 @pytest.mark.parametrize("policy", ["hook-deny", "hook-modify", "capability"])
-async def test_app_call_enforces_session_policy_before_remote_dispatch(
+async def test_app_call_uses_hooks_independently_of_model_completion_gates(
     tmp_path, monkeypatch, policy, active_turn,
 ):
     async with environment(tmp_path, monkeypatch) as (host, _, llm, _, session_id, record):
         agent = host._sessions[session_id].agent
         await host.ext_method("mcp/apps/snapshot", request(session_id))
         hook_calls = []
+        gate_calls = []
+        restored_gates = []
 
         async def before(context):
             expected_session = (
@@ -314,8 +318,8 @@ async def test_app_call_enforces_session_policy_before_remote_dispatch(
 
         class Gate:
             async def check_invocation(self, name, arguments):
-                assert name == "mcp__flight-fixture__refresh_flights"
-                return CompletionIssue("TEST_GATE_DENIED", "Fixture capability denies refresh")
+                gate_calls.append(name)
+                return CompletionIssue("TEST_GATE_DENIED", "Fixture capability denies model execution")
 
             async def check(self):
                 return None
@@ -333,6 +337,7 @@ async def test_app_call_enforces_session_policy_before_remote_dispatch(
 
             async def restore_completion_gate(self, context, state):
                 assert state == {"fixture": True}
+                restored_gates.append(state)
                 return Gate()
 
         if policy == "capability":
@@ -369,17 +374,102 @@ async def test_app_call_enforces_session_policy_before_remote_dispatch(
                     await host.ext_method("mcp/apps/call", params)
             else:
                 result = await host.ext_method("mcp/apps/call", params)
-                if policy == "capability":
-                    assert result["isError"] and "TEST_GATE_DENIED" in result["content"][0]["text"]
-                else:
-                    assert result["structuredContent"]["revision"] == 2
-                    assert calls(record)[-1]["arguments"] == {"previous": 8}
-            assert len(calls(record)) == (2 if policy == "hook-modify" else 1)
+                assert result["structuredContent"]["revision"] == 2
+                assert calls(record)[-1]["arguments"] == {"previous": 8 if policy == "hook-modify" else 1}
+            assert len(calls(record)) == (1 if policy == "hook-deny" else 2)
+            assert gate_calls == restored_gates == []
             assert hook_calls == ([] if policy == "capability" else ["app-policy-check"])
         finally:
             release.set()
             if prompt_task is not None:
                 await asyncio.wait_for(prompt_task, timeout=5)
+
+        if policy == "capability":
+            target = next(tool for tool in agent.tools.values()
+                          if getattr(tool, "remote_name", None) == "list_flights")
+            sent_call = False
+
+            async def model_call(messages, tools=None, **kwargs):
+                nonlocal sent_call
+                if not sent_call:
+                    sent_call = True
+                    yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                        ToolCall(id="model-gated-call", type="function", function=FunctionCall(
+                            name=target.name, arguments={"date": "2026-11-20"}))])
+                else:
+                    yield StreamEvent(type="text", delta="The tool was denied.")
+                    yield StreamEvent(type="finish", finish_reason="stop")
+
+            monkeypatch.setattr(llm, "generate_stream", model_call)
+            await host.prompt(session_id, [{"type": "text", "text": "Find flights again"}])
+            assert gate_calls == [target.name]
+            assert len(calls(record)) == 2
+            assert any(message.tool_call_id == "model-gated-call" and "TEST_GATE_DENIED" in str(message.content)
+                       for message in agent.messages if message.role == "tool")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_checkpoint", [False, True], ids=["skill-checkpoint", "invalid-checkpoint"])
+@pytest.mark.parametrize("reload_session", [False, True], ids=["live", "reloaded"])
+async def test_app_call_after_user_decision_keeps_model_checkpoint_and_history(
+    tmp_path, monkeypatch, invalid_checkpoint, reload_session,
+):
+    async with environment(tmp_path, monkeypatch, interface_version=2) as (host, _, llm, _, session_id, record):
+        agent = host._sessions[session_id].agent
+        reader = GetSkillTool(agent.skill_runtime.loader)
+        decision = agent.tools["request_user_decision"]
+        agent.tools[reader.name] = reader
+
+        async def pause(messages, tools=None, **kwargs):
+            llm.requests.append(deepcopy(messages))
+            yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                ToolCall(id="choose-scope", type="function", function=FunctionCall(
+                    name=decision.name, arguments={
+                        "decision_kind": "delivery_scope", "question": "Which flights should I compare?",
+                        "options": [{"id": "direct", "label": "Direct flights"},
+                                    {"id": "all", "label": "All flights"}],
+                    }))])
+
+        monkeypatch.setattr(llm, "generate_stream", pause)
+        response = await host.prompt(session_id, [{"type": "text", "text": "Help me choose a scope"}],
+                                     turn_id="waiting-turn")
+        assert response.field_meta["lastStopReason"] == "waiting_for_user"
+        assert agent.active_tool_run_context is None
+        checkpoint = list(agent.session_log.events_of_type("completion.paused"))[-1]["data"]
+        assert "get_skill" in checkpoint["checks"]
+        if invalid_checkpoint:
+            checkpoint = {**checkpoint, "version": 99}
+            agent.session_log.append("completion.paused", checkpoint, ignorable=True)
+            agent.session_log.flush()
+        checkpoint_before = deepcopy(checkpoint)
+        if reload_session:
+            await host.load_session(str(tmp_path), session_id)
+            agent = host._sessions[session_id].agent
+        history_before = [message.model_dump() for message in agent.messages]
+        model_calls = len(llm.requests)
+        params = request(session_id, interactionId="while-waiting", name="refresh_flights", arguments={"previous": 1})
+        result = await host.ext_method("mcp/apps/call", params)
+        assert result["structuredContent"]["revision"] == 2
+        assert await host.ext_method("mcp/apps/call", params) == result
+        assert [item["name"] for item in calls(record)] == ["list_flights", "refresh_flights"]
+        assert len(llm.requests) == model_calls
+        assert [message.model_dump() for message in agent.messages] == history_before
+        assert list(agent.session_log.events_of_type("completion.paused"))[-1]["data"] == checkpoint_before
+
+
+@pytest.mark.asyncio
+async def test_app_call_with_unavailable_hooks_returns_unavailable(tmp_path, monkeypatch):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, _, session_id, record):
+        @asynccontextmanager
+        async def unavailable_hooks(_):
+            yield SimpleNamespace(context=None)
+
+        monkeypatch.setattr("box_agent.acp.mcp_apps.standalone_tool_hooks", unavailable_hooks)
+        with pytest.raises(RequestError, match="MCP_APP_UNAVAILABLE") as error:
+            await host.ext_method("mcp/apps/call", request(session_id, interactionId="unavailable-hooks",
+                                  name="refresh_flights", arguments={"previous": 1}))
+        assert error.value.data == {"code": "MCP_APP_UNAVAILABLE"}
+        assert [item["name"] for item in calls(record)] == ["list_flights"]
 
 
 @pytest.mark.asyncio
@@ -886,6 +976,13 @@ async def test_offline_agent_fixture_uses_real_acp_stdio_for_app_operations(tmp_
         assert resource['contents'][0]['mimeType'] == 'text/html;profile=mcp-app'
         refreshed = await rpc('_mcp/apps/call', request(session_id, interactionId='wire-refresh', name='refresh_flights', arguments={'previous': 1}))
         assert refreshed['structuredContent']['revision'] == 2
+        rejected = await rpc('_mcp/apps/call', request(session_id, interactionId='wire-invalid',
+            name='refresh_flights', arguments={'previous': 'invalid'}))
+        assert rejected['isError']
+        second_session = await rpc('session/new', {'cwd': str(state_dir / 'workspace'), 'mcpServers': []})
+        second_reply = await rpc('session/prompt', {'sessionId': second_session['sessionId'],
+            'prompt': [{'type': 'text', 'text': 'Hello'}]})
+        assert second_reply['stopReason'] == 'end_turn'
         assert any(item.get('params', {}).get('update', {}).get('_meta', {}).get('mcpApp') for item in updates)
         assert [item['name'] for item in calls(state_dir / 'calls.jsonl')] == ['list_flights', 'refresh_flights']
     finally:
