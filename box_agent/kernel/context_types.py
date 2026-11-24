@@ -5,12 +5,18 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..events import CompactionDegradation
 from ..schema import Message
 from ..tools.base import Tool
 
 if TYPE_CHECKING:
     from ..tools.engine.contracts import ToolDefinitionView
     from .context_engine import ContextTokenCalibration
+
+
+# Legacy projectors take history alone. The shared projector also accepts
+# max_skill_bodies to rebuild locators and visibility metadata together.
+CompactedHistoryProjector = Callable[..., list[Message] | Awaitable[list[Message]]]
 
 
 @dataclass(slots=True)
@@ -75,7 +81,7 @@ class CompactionInput:
     summary_input_token_limit: int | None = None
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None
     request_headroom_tokens: int | None = None
-    compacted_history_projector: Callable[[list[Message]], list[Message] | Awaitable[list[Message]]] | None = None
+    compacted_history_projector: CompactedHistoryProjector | None = None
     compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None
     session_log: Any = None
     calibration: ContextTokenCalibration | None = None
@@ -106,6 +112,7 @@ class CompactionOutcome:
     head_truncated: bool = False
     error_code: str | None = None
     summary_path: str | None = None
+    degradation: CompactionDegradation | None = None
 
     def __post_init__(self) -> None:
         blocked = self.mode == "blocked"

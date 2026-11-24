@@ -217,7 +217,8 @@ async def test_recovery_failure_still_reaches_model(monkeypatch, agent):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("token_limit,history_chars,expected_mode", [
-    (2000, 20000, "fallback"),
+    # Fit the complete deterministic fallback while still forcing compaction.
+    (6000, 20000, "fallback"),
     (8000, 6000, "summary"),
     (20000, 20000, None),
 ])

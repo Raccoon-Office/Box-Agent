@@ -213,6 +213,7 @@ class DefaultContextEngine:
 
     def compact_history(
         self, original: list[Message], compacted: list[Message], *, token_limit: int | None = None,
+        max_skill_bodies: int | None = None, defer_skill_budget: bool = False,
     ) -> list[Message]:
         """Apply resource retention only after the existing compaction decision."""
         if self.references is not None:
@@ -222,8 +223,10 @@ class DefaultContextEngine:
             def budget(messages: list[Message]) -> int:
                 return skill_reference_budget_chars(messages, definitions, limit, llm=self.llm) // 4
 
+            kwargs = {} if defer_skill_budget else {"budget_tokens": budget}
             compacted = self.references.compact_history(
-                original, compacted, budget_tokens=budget, count_text_tokens=context_text_counter(self.llm),
+                original, compacted, count_text_tokens=context_text_counter(self.llm),
+                max_skill_bodies=max_skill_bodies, **kwargs,
             )
         latest_date = _latest_current_date(original)
         if latest_date is not None and _latest_current_date(compacted) != latest_date:
@@ -232,6 +235,7 @@ class DefaultContextEngine:
 
     async def acompact_history(
         self, original: list[Message], compacted: list[Message], *, token_limit: int | None = None,
+        max_skill_bodies: int | None = None, defer_skill_budget: bool = False,
     ) -> list[Message]:
         """Keep source reads bounded and off the event loop on the compaction path."""
         runtime = self.references.runtime if self.references is not None else None
@@ -242,9 +246,15 @@ class DefaultContextEngine:
             kwargs = {"allow_stale": False} if "allow_stale" in inspect.signature(validate).parameters else {}
             validation = await validate(names, **kwargs)
         with runtime.reference_scope(validation) if validation is not None else nullcontext():
-            if token_limit is not None and getattr(self.compact_history, "__func__", None) is DefaultContextEngine.compact_history:
-                return self.compact_history(original, compacted, token_limit=token_limit)
-            return self.compact_history(original, compacted)
+            parameters = inspect.signature(self.compact_history).parameters
+            kwargs = {}
+            if "token_limit" in parameters:
+                kwargs["token_limit"] = token_limit
+            if "max_skill_bodies" in parameters:
+                kwargs["max_skill_bodies"] = max_skill_bodies
+            if "defer_skill_budget" in parameters:
+                kwargs["defer_skill_budget"] = defer_skill_budget
+            return self.compact_history(original, compacted, **kwargs)
 
     def compaction_source(self, messages: list[Message]) -> list[Message]:
         """Keep method bodies out of both generated and deterministic summaries."""

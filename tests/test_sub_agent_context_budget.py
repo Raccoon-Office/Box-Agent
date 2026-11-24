@@ -11,7 +11,7 @@ from box_agent.context_input import DefaultContextEngine
 from box_agent.config import AgentConfig, LLMConfig, derive_context_token_limit
 from box_agent.events import DoneEvent, StopReason
 from box_agent.kernel.context_engine import (
-    _SUMMARY_MARKER, _validate_transient_followup_result, request_input_tokens,
+    _SUMMARY_MARKER, _SUMMARY_MESSAGE_PREFIX, _validate_transient_followup_result, request_input_tokens,
 )
 from box_agent.llm.llm_wrapper import LLMClient
 from box_agent.runtime import run_agent_loop
@@ -30,6 +30,7 @@ class BudgetModel:
     model = "budget-fixture"
     provider = "fixture"
     estimate_text_tokens = LLMClient.estimate_text_tokens
+    summary = ("Task progress. " * 533).rstrip()
 
     def __init__(self, *, followup=False):
         self.followup = followup
@@ -42,7 +43,7 @@ class BudgetModel:
     async def generate_stream(self, messages, tools=None, **kwargs):
         if kwargs.get("call_kind") == "context_summary":
             self.summary_calls += 1
-            text = "<summary>" + ("Task progress. " * 580)[:8000] + "</summary>"
+            text = f"<summary>{self.summary}</summary>"
         else:
             self.request_sizes.append(request_input_tokens(messages, tools, llm=self))
             if self.followup and len(self.request_sizes) == 1:
@@ -143,9 +144,9 @@ async def test_child_compacts_history_with_the_full_followup_budget():
 
 @pytest.mark.parametrize("persisted", [False, True])
 @pytest.mark.parametrize("system_chars, overlay_chars, fits", [
-    # Both fitting cases require shortening the initial summary. The middle
-    # case exceeds 50k even with only the system and request-only overlay.
-    (35000, 16000, True), (35000, 25000, False), (45000, 7000, True),
+    # Both fitting cases need to drop the retained round after projection adds
+    # the overlay. The middle case exceeds 50k even without that round.
+    (35000, 14500, True), (35000, 25000, False), (45000, 4500, True),
 ])
 async def test_child_tightens_budget_after_reprojecting_compacted_history(
     monkeypatch, tmp_path, system_chars, overlay_chars, fits, persisted,
@@ -166,6 +167,8 @@ async def test_child_tightens_budget_after_reprojecting_compacted_history(
     model = BudgetModel()
     history = child_history(execution_chars=60000)
     history[0].content = "S" * system_chars
+    recent_round = Message(role="assistant", content="Recent result " + "A" * 3600)
+    history.insert(-1, recent_round)
     system, latest_user = history[0], history[-1]
     session_log = None
     if persisted:
@@ -177,9 +180,15 @@ async def test_child_tightens_budget_after_reprojecting_compacted_history(
     assert 2 <= model.summary_calls <= 3
     assert system in history and latest_user in history
     assert projections[0].budget_blocked and projections[1].budget_blocked
+    assert recent_round in projections[1].messages
+    for projection in projections[1:]:
+        summary = next(message.content for message in projection.messages
+                       if str(message.content).startswith(_SUMMARY_MESSAGE_PREFIX))
+        assert summary.removeprefix(_SUMMARY_MESSAGE_PREFIX).split("\n\n", 1)[0] == model.summary
     if fits:
         assert len(model.request_sizes) == 1 and model.request_sizes[0] <= 50000
         assert not projections[-1].blocked_reason
+        assert recent_round not in projections[-1].messages
     else:
         assert model.request_sizes == []
         assert result.raw_output["error_code"] == "CONTEXT_INPUT_BUDGET_EXCEEDED"

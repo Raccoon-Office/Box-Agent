@@ -353,6 +353,7 @@ class SkillReferenceContext:
         self, original: list[Message], compacted: list[Message], *,
         budget_tokens: int | Callable[[list[Message]], int] = _COMPACTED_SKILLS_TOKEN_LIMIT,
         count_text_tokens: Callable[[str], int] = estimate_text_tokens,
+        max_skill_bodies: int | None = None,
     ) -> list[Message]:
         """Restore only verified pages, newest invocation first, in one runtime message."""
         self.observe_history(original)
@@ -430,20 +431,24 @@ class SkillReferenceContext:
             locator_sections.append((identity, locator, record, locator_cost))
         available = budget_tokens(rebuilt) if callable(budget_tokens) else budget_tokens
         body_limit = min(available, _COMPACTED_SKILLS_TOKEN_LIMIT)
+        body_count = 0
         for identity, locator, record, locator_cost in locator_sections:
             section, spans = "", []
-            if record is not None and used_tokens - locator_cost < body_limit:
+            if (record is not None and used_tokens - locator_cost < body_limit
+                    and (max_skill_bodies is None or body_count < max_skill_bodies)):
                 header = f"### Skill: {record.name}\nPath: {record.path or '(caller reference)'}\n\n"
                 section, spans = _compacted_skill_body(record, header, count_text_tokens)
             section_cost = count_text_tokens("\n\n" + section) + 1 if section else 0
-            if section and used_tokens - locator_cost + section_cost <= body_limit:
+            has_body = bool(section and used_tokens - locator_cost + section_cost <= body_limit)
+            if has_body:
                 used_tokens += section_cost - locator_cost
+                body_count += 1
             else:
                 section, spans = locator, []
             offset = length + 2
             chunks.extend(("\n\n", section))
             length = offset + len(section)
-            entries.append({**identity, "spans": tuple(
+            entries.append({**identity, "has_body": has_body, "spans": tuple(
                 (start, end, offset + text_start, offset + text_end)
                 for start, end, text_start, text_end in spans
             )})

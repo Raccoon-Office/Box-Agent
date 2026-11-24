@@ -386,11 +386,13 @@ async def test_compacted_request_recounts_retained_tool_history_before_provider(
 
 
 @pytest.mark.asyncio
-async def test_compaction_shortens_summary_to_leave_room_for_request_overlays(monkeypatch):
+async def test_compaction_keeps_full_summary_when_no_headroom_was_requested(monkeypatch):
     from box_agent.kernel import context_engine
 
+    summary = ("Task progress. " * 400).rstrip()
+
     async def summarize(*args, **kwargs):
-        return "Task progress. " * 400
+        return summary
 
     monkeypatch.setattr(context_engine, "_create_summary", summarize)
     messages = [
@@ -405,7 +407,10 @@ async def test_compaction_shortens_summary_to_leave_room_for_request_overlays(mo
         None, messages, token_limit=limit, api_total_tokens=0, skip_check=False,
     )
     assert outcome.mode == "summary" and outcome.summary_calls == 1
-    assert outcome.estimated_after <= limit - context_engine.REQUEST_INPUT_HEADROOM_TOKENS
+    assert limit - context_engine.REQUEST_INPUT_HEADROOM_TOKENS < outcome.estimated_after <= limit
+    assert outcome.degradation is None
+    message = next(message for message in outcome.messages if context_engine._is_summary_marker(message))
+    assert message.content == context_engine._SUMMARY_MESSAGE_PREFIX + summary + context_engine._SUMMARY_MESSAGE_SUFFIX
 
 
 @pytest.mark.asyncio
@@ -448,7 +453,8 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
     from box_agent.runtime import run_agent_loop
 
     class Provider:
-        normal_requests = []
+        def __init__(self):
+            self.normal_requests = []
 
         def estimate_text_tokens(self, text):
             return len(text.encode("utf-8")) // 2
@@ -460,6 +466,14 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
                 self.normal_requests.append(messages)
                 yield StreamEvent(type="text", delta="resumed")
             yield StreamEvent(type="finish", finish_reason="stop")
+
+    class SummaryProvider(Provider):
+        model = "wide-summary-model"
+        context_window = 60_000
+        max_output_tokens = 4_000
+
+        async def generate(self, messages, **kwargs):
+            return LLMResponse(content="<summary>kept</summary>", finish_reason="stop")
 
     preparations = []
     original_prepare = DefaultContextEngine.prepare_request
@@ -479,10 +493,11 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
     monkeypatch.setattr(DefaultContextEngine, "prepare_request", prepare)
     provider = Provider()
     events = [event async for event in run_agent_loop(
-        llm=provider, tools={}, token_limit=30_000, max_steps=1,
+        llm=provider, summary_llm=SummaryProvider(), tools={}, token_limit=30_000, max_steps=1,
         messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * user_chars)],
     )]
     compactions = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert compactions[0].summary_path == "shared"
     assert compactions[0].estimated_after > 30_000 - REQUEST_INPUT_HEADROOM_TOKENS
     assert set(preparations) == {30_000}
     errors = [event for event in events if isinstance(event, ErrorEvent)]

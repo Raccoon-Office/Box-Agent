@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Union
+from typing import Any, TypedDict, Union
 
 
 class StopReason(str, Enum):
@@ -233,6 +233,15 @@ class ArtifactEvent:
 # ── Summarization ───────────────────────────────────────────────
 
 
+class CompactionDegradation(TypedDict):
+    """Optional context removed to fit the rebuilt request."""
+
+    droppedRounds: int
+    droppedSkillBodies: int
+    droppedEarlierUsers: int
+    droppedRuntimeState: list[str]
+
+
 @dataclass(frozen=True)
 class SummarizationEvent:
     """Message history is being summarized to stay within token limits."""
@@ -250,6 +259,7 @@ class SummarizationEvent:
     summary_retries: int = 0
     head_truncated: bool = False
     summary_path: str | None = None
+    degradation: CompactionDegradation | None = None
 
 
 # ── Errors & completion ─────────────────────────────────────────

@@ -7346,7 +7346,7 @@ async def test_compaction_restores_runtime_state_without_replaying_files():
         Message(role="system", content="system with pinned skill instructions"),
         Message(role="user", content="old request"),
         Message(role="assistant", content="", tool_calls=[read_call, skill_call]),
-        Message(role="tool", content="old file body " * 100, tool_call_id="read-old", name="read_file"),
+        Message(role="tool", content="old file body " * 1_000, tool_call_id="read-old", name="read_file"),
         Message(role="tool", content="skill loaded", tool_call_id="skill-old", name="get_skill"),
         Message(role="assistant", content="", tool_calls=[write_call]),
         Message(role="tool", content="write complete", tool_call_id="write-new", name="write_file"),
@@ -7362,13 +7362,14 @@ async def test_compaction_restores_runtime_state_without_replaying_files():
     outcome = await _maybe_summarize(
         _FakeSummaryLLM("history summary"),
         messages,
-        token_limit=100,
+        token_limit=1_800,
         api_total_tokens=0,
         skip_check=False,
         tools=tools,
     )
 
     assert outcome.messages is not None
+    assert not outcome.blocked
     rendered = "\n".join(str(message.content) for message in outcome.messages)
     assert any(message.tool_calls == [write_call] for message in outcome.messages)
     assert any(

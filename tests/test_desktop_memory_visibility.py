@@ -378,10 +378,10 @@ async def test_failed_core_read_revokes_grant_without_blocking_ordinary_projecti
 
 
 @pytest.mark.parametrize("summary_fails", [False, True])
-# The longer history misses the recovery headroom target and also exceeds
-# the summary input budget once the summary instructions are included.
+# The longer history exceeds the summary request budget and cannot fit with
+# the intact deterministic fallback once optional history is exhausted.
 @pytest.mark.parametrize("user_chars", [32_000, 56_400])
-async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_or_repeat_compaction(summary_fails, user_chars):
+async def test_irreducible_memory_read_failure_only_blocks_when_compaction_cannot_fit(summary_fails, user_chars):
     from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent, ToolCallResult
     from box_agent.runtime import run_agent_loop
     from box_agent.schema import FunctionCall, StreamEvent, ToolCall
@@ -433,24 +433,24 @@ async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_o
     events = [event async for event in run_agent_loop(
         llm=provider, tools={"memory_read": Reader()}, memory_manager=lookup, token_limit=30000, max_steps=3, logger=None,
         messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * user_chars)])]
-    assert not [event.message for event in events if isinstance(event, ErrorEvent)]
-    assert provider.normal_calls == 3
-    compactions = [event for event in events if isinstance(event, SummarizationEvent)]
-    assert len(compactions) == 1
-    if user_chars > 32_000:
-        assert provider.summary_calls == 0
-        assert compactions[0].summary_path == "deterministic"
-        assert 30000 - REQUEST_INPUT_HEADROOM_TOKENS < compactions[0].estimated_after <= 30000
-    elif summary_fails:
-        assert provider.summary_calls == 2
-        assert compactions[0].summary_path == "deterministic"
-    else:
-        assert provider.summary_calls == 1
-        assert compactions[0].summary_path == "shared"
+    (compaction,) = [event for event in events if isinstance(event, SummarizationEvent)]
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
     failures = [event for event in events if isinstance(event, ToolCallResult) and not event.success]
-    assert len(failures) == 2 and all(event.error == "CORE_CONTEXT_TOO_LARGE" for event in failures)
-    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
+    assert all(event.error == "CORE_CONTEXT_TOO_LARGE" for event in failures)
+    done = next(event for event in events if isinstance(event, DoneEvent))
     assert not any(event[1] for event in activations)
+    if user_chars > 32_000:
+        assert provider.summary_calls == 0 and provider.normal_calls == 1
+        assert compaction.summary_path == "deterministic" and compaction.mode == "blocked"
+        assert compaction.estimated_after > 30_000
+        assert len(failures) == 1 and [error.error_code for error in errors] == ["CONTEXT_INPUT_BUDGET_EXCEEDED"]
+        assert done.stop_reason == StopReason.ERROR
+        return
+
+    assert not errors and provider.normal_calls == 3
+    assert provider.summary_calls == (2 if summary_fails else 1)
+    assert compaction.summary_path == ("deterministic" if summary_fails else "shared")
+    assert len(failures) == 2 and done.stop_reason == StopReason.END_TURN
 
 
 async def test_blocked_model_input_never_grants_visibility(bound):

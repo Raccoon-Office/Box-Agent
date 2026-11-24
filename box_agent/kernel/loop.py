@@ -1183,19 +1183,24 @@ async def _run_agent_loop_impl(
         if initial_context_transition is not None:
             summary_projector = getattr(context_engine, "preview_summary", summary_projector)
 
-        async def project_compacted_history(history):
+        async def project_compacted_history(history, *, max_skill_bodies=None):
             if getattr(tool_exposure_manager, "stable_prefix", False):
                 history = tool_exposure_manager.restore_compacted_descriptions(history)
-            aproject = getattr(context_engine, "acompact_history", None)
-            if callable(aproject):
-                parameters = inspect.signature(aproject).parameters
-                if "token_limit" in parameters:
-                    return await aproject(messages, history, token_limit=history_token_limit)
-                return await aproject(messages, history)
-            project = getattr(context_engine, "compact_history", None)
-            if callable(project):
-                history = project(messages, history)
-            return history
+            project = getattr(context_engine, "acompact_history", None)
+            if not callable(project):
+                project = getattr(context_engine, "compact_history", None)
+            if not callable(project):
+                return history
+            parameters = inspect.signature(project).parameters
+            kwargs = {}
+            if "token_limit" in parameters:
+                kwargs["token_limit"] = history_token_limit
+            if "max_skill_bodies" in parameters:
+                kwargs["max_skill_bodies"] = max_skill_bodies
+            if "defer_skill_budget" in parameters:
+                kwargs["defer_skill_budget"] = True
+            projected = project(messages, history, **kwargs)
+            return await projected if inspect.isawaitable(projected) else projected
 
         inputs = CompactionInput(
             history=tuple(effective_messages), token_limit=history_token_limit,
@@ -1281,6 +1286,7 @@ async def _run_agent_loop_impl(
                         "summaryRetries": result.summary_retries,
                         "headTruncated": result.head_truncated,
                         **({"summaryPath": result.summary_path} if result.summary_path is not None else {}),
+                        **({"degradation": result.degradation} if result.degradation is not None else {}),
                     },
                 )
                 session_log.replace_surface(
@@ -1339,6 +1345,7 @@ async def _run_agent_loop_impl(
                 summary_retries=result.summary_retries,
                 head_truncated=result.head_truncated,
                 summary_path=result.summary_path,
+                degradation=result.degradation,
             )
             # The usage counters belong to the pre-compaction request.  The
             # rebuilt surface has been re-based by the compact engine; until a

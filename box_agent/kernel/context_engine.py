@@ -9,11 +9,12 @@ import logging
 import math
 import re
 from collections import Counter
-from collections.abc import Awaitable
+from collections.abc import Collection
 from pathlib import Path, PurePath
 from typing import Any, Callable, Final
 
 from ..cache_fingerprint import sha256_fingerprint
+from ..events import CompactionDegradation
 from ..llm.capabilities import bound_context_token_limit, image_input_support
 from ..llm.base import closing_llm_stream
 from ..llm.error_messages import structured_llm_error
@@ -24,7 +25,7 @@ from ..schema.schema import RequestUsageSnapshot, TokenUsage
 from ..session_log import SessionLog, run_session_write
 from ..tools.base import Tool, ToolResult
 from ..tools.engine.contracts import ToolDefinitionView
-from .context_types import CompactionOutcome
+from .context_types import CompactedHistoryProjector, CompactionOutcome
 from .tool_messages import InvalidToolHistory, tool_message_groups
 
 
@@ -347,7 +348,7 @@ def _deterministic_history_fallback(messages: list[Message]) -> str:
 
     remaining_messages = [
         message for message in messages
-        if message is not latest_user and message.earlier_user_messages is None
+        if message is not latest_user
         and not (message.source == "runtime" and isinstance(message.content, str)
                  and message.content.startswith(_EARLIER_USER_MARKER))
     ]
@@ -796,7 +797,7 @@ def _original_user_text(message: Message) -> str:
                      if isinstance(block.get("text"), str))
 
 
-def _collect_earlier_user_texts(messages: list[Message], retained: set[int]) -> list[str]:
+def _collect_earlier_user_texts(messages: list[Message], retained: Collection[int]) -> list[str]:
     texts: list[str] = []
     for index, message in enumerate(messages):
         if message.role == "user" and message.source == "runtime" and message.earlier_user_messages:
@@ -820,35 +821,45 @@ def _bound_earlier_user_text(text: str, count_tokens: Callable[[str], int]) -> s
     return text[:(low + 1) // 2] + _EARLIER_USER_MIDDLE + text[len(text) - low // 2:]
 
 
-def _earlier_user_message(
-    texts: list[str], count_tokens: Callable[[str], int], *, token_limit: int = _EARLIER_USER_TOKEN_LIMIT,
-) -> Message:
-    def header(omitted: int) -> str:
-        if omitted:
-            return f"{_EARLIER_USER_INTRO}\n\n[{omitted} earlier user messages are left out here; see the summary.]"
-        return _EARLIER_USER_INTRO
+def _earlier_user_header(omitted: int) -> str:
+    if omitted:
+        return f"{_EARLIER_USER_INTRO}\n\n[{omitted} earlier user messages are left out here; see the summary.]"
+    return _EARLIER_USER_INTRO
 
+
+def _earlier_user_entries(
+    texts: list[str], count_tokens: Callable[[str], int], token_limit: int,
+) -> list[str]:
     entries: list[str] = []
     entry_tokens = 0
     for index in range(len(texts) - 1, -1, -1):
         entry = f"\n\n{index + 1}. {_bound_earlier_user_text(texts[index], count_tokens)}"
         tokens = count_tokens(entry)
-        if count_tokens(header(index)) + entry_tokens + tokens > token_limit:
+        if count_tokens(_earlier_user_header(index)) + entry_tokens + tokens > token_limit:
             break
         entries.append(entry)
         entry_tokens += tokens
 
-    content = header(len(texts) - len(entries)) + "".join(reversed(entries))
-    while entries and count_tokens(content) > token_limit:
+    while entries:
+        content = _earlier_user_header(len(texts) - len(entries)) + "".join(reversed(entries))
+        if count_tokens(content) <= token_limit:
+            break
         entries.pop()
-        content = header(len(texts) - len(entries)) + "".join(reversed(entries))
+    return list(reversed(entries))
+
+
+def _render_earlier_users(texts: list[str], entries: list[str]) -> Message:
+    content = _earlier_user_header(len(texts) - len(entries)) + "".join(entries)
     return Message(role="user", source="runtime", content=content, earlier_user_messages=texts)
 
 
-async def _restore_runtime_state(
-    _messages: list[Message],
-    tools: dict[str, Tool] | None,
-) -> Message | None:
+def _earlier_user_message(
+    texts: list[str], count_tokens: Callable[[str], int], *, token_limit: int = _EARLIER_USER_TOKEN_LIMIT,
+) -> Message:
+    return _render_earlier_users(texts, _earlier_user_entries(texts, count_tokens, token_limit))
+
+
+def _runtime_state_sections(tools: dict[str, Tool] | None) -> list[tuple[str, str]]:
     """Render trusted read-only tool state without executing a tool call."""
 
     sections: list[tuple[str, str]] = []
@@ -868,27 +879,130 @@ async def _restore_runtime_state(
                 if content:
                     sections.append((label, content))
     if not sections:
-        return None
+        return []
     order = {"goal": 0, "plan": 1, "todo": 2}
     sections.sort(key=lambda section: order.get(section[0].casefold(), len(order)))
     headers = [f"\n\n## {label}\n" for label, _ in sections]
     remaining = _RUNTIME_STATE_CHAR_LIMIT - len(_RUNTIME_STATE_MARKER) - sum(map(len, headers))
     if remaining < 0:
-        return None
+        return []
     # Satisfy small sections first and share the leftover equally among large ones.
     caps = [0] * len(sections)
     by_size = sorted(range(len(sections)), key=lambda index: len(sections[index][1]))
     for rank, index in enumerate(by_size):
         caps[index] = min(len(sections[index][1]), remaining // (len(sections) - rank))
         remaining -= caps[index]
+    return [(label, _bound_text_middle(content, cap, label="runtime state"))
+            for (label, content), cap in zip(sections, caps)]
+
+
+def _runtime_state_message(sections: list[tuple[str, str]]) -> Message | None:
+    if not sections:
+        return None
     return Message(
         role="user",
         source="runtime",
         content=_RUNTIME_STATE_MARKER + "".join(
-            header + _bound_text_middle(content, cap, label="runtime state")
-            for header, (_, content), cap in zip(headers, sections, caps)
+            f"\n\n## {label}\n{content}" for label, content in sections
         ),
     )
+
+
+async def _restore_runtime_state(_messages: list[Message], tools: dict[str, Tool] | None) -> Message | None:
+    return _runtime_state_message(_runtime_state_sections(tools))
+
+
+async def _fit_compacted_history(
+    original: list[Message], retained: dict[int, Message], summary: Message,
+    runtime_sections: list[tuple[str, str]], *,
+    llm: Any, budget_tools: dict[str, Any] | None, target: int,
+    projector: CompactedHistoryProjector | None,
+) -> tuple[list[Message], int, CompactionDegradation | None]:
+    """Rebuild and measure after each removal, keeping the summary and current user."""
+    degradation: CompactionDegradation = {
+        "droppedRounds": 0, "droppedSkillBodies": 0,
+        "droppedEarlierUsers": 0, "droppedRuntimeState": [],
+    }
+    count_tokens = context_text_counter(llm)
+    earlier_users = _collect_earlier_user_texts(original, retained.keys())
+    earlier_entries = _earlier_user_entries(earlier_users, count_tokens, _EARLIER_USER_TOKEN_LIMIT)
+    show_archive = True
+    max_skill_bodies: int | None = None
+    try:
+        can_limit_skills = projector is not None and "max_skill_bodies" in inspect.signature(projector).parameters
+    except (TypeError, ValueError):
+        can_limit_skills = False
+
+    async def rebuild() -> tuple[list[Message], int]:
+        history = [original[0]]
+        summary_record = summary
+        if earlier_users:
+            if show_archive:
+                history.append(_render_earlier_users(earlier_users, earlier_entries))
+            else:
+                # The model sees only content. Session Log replay carries the
+                # originals on the summary once the standalone archive is gone.
+                summary_record = summary.model_copy(update={"earlier_user_messages": earlier_users})
+        history.extend((summary_record, *retained.values()))
+        state = _runtime_state_message(runtime_sections)
+        if state is not None:
+            history.append(state)
+        if projector is not None:
+            kwargs = {"max_skill_bodies": max_skill_bodies} if can_limit_skills else {}
+            projected = projector(history, **kwargs)
+            history = await projected if inspect.isawaitable(projected) else projected
+        return history, request_input_tokens(history, budget_tools, llm=llm)
+
+    history, tokens = await rebuild()
+    if tokens <= target:
+        return history, tokens, None
+
+    indices = list(retained)
+    latest_user = next(index for index in reversed(indices) if _is_real_user_message(original[index]))
+    window = list(retained.values())
+    start = 0
+    for group in tool_message_groups(window):
+        if tokens <= target:
+            break
+        if window[group.start].role != "assistant":
+            continue
+        for index in indices[start:group.stop]:
+            if index != latest_user:
+                del retained[index]
+        start = group.stop
+        earlier_users = _collect_earlier_user_texts(original, retained.keys())
+        earlier_entries = _earlier_user_entries(earlier_users, count_tokens, _EARLIER_USER_TOKEN_LIMIT)
+        degradation["droppedRounds"] += 1
+        history, tokens = await rebuild()
+
+    if tokens > target and can_limit_skills:
+        body_count = sum(bool(entry.get("has_body", entry.get("spans")))
+                         for message in history for entry in message.skill_compaction_ranges or ())
+        for max_skill_bodies in range(body_count - 1, -1, -1):
+            degradation["droppedSkillBodies"] += 1
+            history, tokens = await rebuild()
+            if tokens <= target:
+                break
+
+    while tokens > target and earlier_entries:
+        earlier_entries = earlier_entries[1:]
+        degradation["droppedEarlierUsers"] += 1
+        history, tokens = await rebuild()
+    if tokens > target and earlier_users:
+        show_archive = False
+        history, tokens = await rebuild()
+
+    for label in ("Todo", "Plan", "Goal"):
+        if tokens <= target:
+            break
+        kept_sections = [(name, content) for name, content in runtime_sections if name.casefold() != label.lower()]
+        if len(kept_sections) != len(runtime_sections):
+            runtime_sections = kept_sections
+            degradation["droppedRuntimeState"].append(label)
+            history, tokens = await rebuild()
+
+    changed = not show_archive or any(degradation.values())
+    return history, tokens, degradation if changed else None
 
 
 async def _maybe_summarize(
@@ -914,7 +1028,7 @@ async def _maybe_summarize(
     before_summary: Callable[[int], None] | None = None,
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None,
     request_headroom_tokens: int | None = None,
-    compacted_history_projector: Callable[[list[Message]], list[Message] | Awaitable[list[Message]]] | None = None,
+    compacted_history_projector: CompactedHistoryProjector | None = None,
     compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None,
     calibration: ContextTokenCalibration | None = None,
     summary_tools: tuple[ToolDefinitionView, ...] | None = None,
@@ -965,9 +1079,6 @@ async def _maybe_summarize(
             trigger_source=trigger_source,
         )
     retained_messages = _bound_retained_messages(retained_messages, llm=llm, token_limit=recent_limit)
-    earlier_user_texts = _collect_earlier_user_texts(messages, retained_indices)
-    earlier_user_message = (_earlier_user_message(earlier_user_texts, count_tokens)
-                            if earlier_user_texts else None)
     # Provider usage describes the pre-compaction request.  Retaining it would
     # make the next prepare pass anchor on the old, uncompressed context and
     # reject the freshly compacted request.  Keep the original objects (and
@@ -978,11 +1089,6 @@ async def _maybe_summarize(
         if message.usage is not None or message.request_only_input_tokens
         else message
         for message in retained_messages
-    ]
-    compacted_messages = [
-        message
-        for index, message in enumerate(messages)
-        if index > 0 and index not in retained_indices
     ]
 
     if before_summary is not None:
@@ -1095,69 +1201,25 @@ async def _maybe_summarize(
         summary = _deterministic_history_fallback(summary_source[1:])
     truncation_note = f"\n\n{_SUMMARY_TRUNCATION_NOTE}" if mode == "summary" and head_retries else ""
 
-    runtime_state = await _restore_runtime_state(messages, tools)
+    runtime_sections = _runtime_state_sections(tools)
     bounded_summary = _bound_text_middle(
         summary,
         _SUMMARY_OUTPUT_CHAR_LIMIT,
         label="summary",
     )
 
-    async def build_compacted_messages(summary_text: str) -> list[Message]:
-        rebuilt = [
-            messages[0],
-            *([earlier_user_message] if earlier_user_message is not None else []),
-            Message(
-                role="user",
-                source="runtime",
-                content=f"{_SUMMARY_MESSAGE_PREFIX}{summary_text}{truncation_note}{log_hint}{_SUMMARY_MESSAGE_SUFFIX}",
-            ),
-            *retained_messages,
-        ]
-        if runtime_state is not None:
-            rebuilt.append(runtime_state)
-        if compacted_history_projector is not None:
-            projected = compacted_history_projector(rebuilt)
-            rebuilt = await projected if inspect.isawaitable(projected) else projected
-        return rebuilt
-
-    new_messages = await build_compacted_messages(bounded_summary)
-    # Use the same request estimator as Context.prepare_request.  With the
-    # pre-compaction usage metadata cleared above this deliberately falls back
-    # to measuring the rebuilt messages and offered tool schemas.
-    estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
-    # Leave room for request-only content when shortening the existing
-    # summary can do so. The history limit remains the hard ceiling.
-    headroom = REQUEST_INPUT_HEADROOM_TOKENS if request_headroom_tokens is None else request_headroom_tokens
-    summary_target = max(1, token_limit - headroom)
-    for summary_limit in (4_000, 2_000):
-        if estimated_after <= summary_target or len(bounded_summary) <= summary_limit:
-            continue
-        bounded_summary = _bound_text_middle(
-            summary,
-            summary_limit,
-            label="summary",
-        )
-        new_messages = await build_compacted_messages(bounded_summary)
-        estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
-    # A 2,000-character summary is a preferred floor, not a reason to abort a
-    # task whose protected history and restored resources can otherwise fit.
-    # Only an actually over-budget candidate takes this bounded fallback;
-    # never trim user input, tool-call arguments, or split protocol groups.
-    for summary_limit in (1_000, 512):
-        if estimated_after <= token_limit:
-            break
-        if len(bounded_summary) <= summary_limit:
-            continue
-        bounded_summary = _bound_text_middle(summary, summary_limit, label="summary")
-        new_messages = await build_compacted_messages(bounded_summary)
-        estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
-    if estimated_after > token_limit and earlier_user_message is not None:
-        # Small windows may have less room than the Earlier User Messages cap.
-        # The full originals remain in durable metadata for later compactions.
-        available = max(0, count_tokens(earlier_user_message.content) - (estimated_after - token_limit))
-        earlier_user_message = _earlier_user_message(earlier_user_texts, count_tokens, token_limit=available)
-        new_messages = await build_compacted_messages(bounded_summary)
-        estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
+    summary_message = Message(
+        role="user", source="runtime",
+        content=f"{_SUMMARY_MESSAGE_PREFIX}{bounded_summary}{truncation_note}{log_hint}{_SUMMARY_MESSAGE_SUFFIX}",
+    )
+    # Explicit headroom is a soft target. Exhausting optional history still
+    # permits a request within the hard input limit.
+    target = max(1, token_limit - max(0, request_headroom_tokens or 0))
+    retained = dict(zip(sorted(retained_indices), retained_messages))
+    new_messages, estimated_after, degradation = await _fit_compacted_history(
+        messages, retained, summary_message, runtime_sections, llm=llm,
+        budget_tools=budget_tools, target=target, projector=compacted_history_projector,
+    )
     if estimated_after > token_limit:
         mode = "blocked"
     _log.info(
@@ -1170,8 +1232,8 @@ async def _maybe_summarize(
         token_limit,
         summary_calls,
         summary_path,
-        len(compacted_messages),
-        len(retained_messages),
+        len(messages) - 1 - len(retained),
+        len(retained),
         error_type,
     )
     return CompactionOutcome(
@@ -1186,7 +1248,8 @@ async def _maybe_summarize(
         error=error,
         error_type=None if error_type == "none" else error_type,
         trigger_source=trigger_source,
-        protected_messages=len(retained_messages),
+        protected_messages=len(retained),
+        degradation=degradation,
     )
 
 
