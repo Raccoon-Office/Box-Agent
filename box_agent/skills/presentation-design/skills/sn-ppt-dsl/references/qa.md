@@ -20,7 +20,7 @@ python "<SKILL_ROOT>/scripts/dsl.py" review "<DECK_DIR>/presentation.pptx" --pag
 
 `review` 命令只记录当前 Agent 的视觉结论，不调用视觉模型。审阅图或单页已经看清且未变化时不重复加载；画面无法辨认或发现实际问题时才放大、复查，不用固定调用次数代替质量判断。
 
-在 Box-Agent 中，最终验收图用 `inspect_images(..., strategy="proxy")` 查看。Harness 只把成功返回的代理看图调用计入可核验记录；当前原生图片路径还没有“已送入模型并得到有效回应”的完成记录，不能用它声明 Harness 验收通过。每次最多送入当前需要检查的图片，避免重复看未变化页面。
+最终审阅由写稿的 Agent 在当前会话完成。对最终 PPTX 的分批 JPG 和风险页原图，调用 `inspect_images(image_paths=[...], instruction=..., strategy="native")`。在接到这些图片的下一次作者回复中，根据可见内容逐页指出观察或登记返修。工具的 Loaded 回执只表示准备送图。若某图没有到达，或尺寸影响辨认，单独补看相应页。原生看图不可用时保留待审页码。代理意见不代替作者的最终观察。
 
 
 ## 层级与阅读顺序的成品判断

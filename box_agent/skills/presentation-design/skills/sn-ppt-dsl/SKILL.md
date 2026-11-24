@@ -18,7 +18,7 @@ metadata:
 
 1. 读取当前任务包、材料索引、唯一 `outline.md`、已有页面与素材；保留大纲确定的页数、顺序、标题和核心结论。首次写 XML 前，确认新大纲已经写明逐页作用与整套叙事检查；缺失时返回 Story 补齐，不能由出口即兴重排。
 2. 首次写 XML 时读取 [本地格式与能力](references/xml-local.md)，需要详细语法时查看 `vendor/doubao/references/xml/xml-schema-quick-ref.md`。本地支持范围以 `xml-local.md` 和编译器报错为准；上游规范中的飞书命令和云端资源步骤不执行。
-3. 读取 [设计与素材](references/design.md)，按其中的图片用途规则规划每页素材，再按场景选择一份设计参考。设计风格可以参考 Kimi，但源文件始终使用 XML，不生成 PPTD。
+3. 读取 [设计与素材](references/design.md)。先落实大纲里的主图页：取到原图，按主体位置留出图幅，再写 XML。未指定图片但要求图文结合时，可在已有页的视觉设计中补充贴题主图。以大纲确定的短标题上屏，其余数字与条件放在对应图注或正文。按场景选择一份设计参考。
 4. 当前 Agent 逐页完成任务。除非用户明确要求，不使用 subagent。使用宿主模型的文字/视觉能力；搜索和生图按同级 `sn-ppt-design-tools/references/capability-policy.md` 路由，不新配模型接口。
 
 ## 逐页生产
@@ -51,7 +51,7 @@ python "<SKILL_ROOT>/scripts/dsl.py" preview "<DECK_DIR>/presentation.pptx"
 
 不自动启动浏览器、在线编辑器或工作台。直接用宿主文件/图像查看能力检查生成结果。
 
-预览后看清所有分批图及风险页原图。在当前成品上用 `dsl.py review` 记录实际看过的页与具体观察。发现视觉问题，直接修改该页的 XML 或素材，对任务目录执行 `build`，成功后执行 `preview`，查看返回目录中的新图并登记。构建自动记录受影响页，包括共用素材的所有引用页。可先用 `review --status fix` 留下观察，既有 `repair-start` 命令仍可使用。每页最多两轮返修。构建失败时，上一次可用成品仍然保留；先处理构建错误，再审新版。预算耗尽且缺陷仍在，交付现有成品并注明具体页和问题。在已有 PPTX 上继续补审时，未导出的页面修改会单列；本次结论只属于该 PPTX。需要取回生成其中某页的 XML，可用 `dsl.py page-source presentation.pptx --pages N` 查看只读副本。要交付新修改就直接重建并看新版。
+最终 PPTX 由当前写稿 Agent 亲自逐页审阅。对预览返回的分批 JPG 和风险页原图调用 `inspect_images(..., strategy="native")`，在实际接收图像的作者回复中给出具体观察。缺图时只补相应页。在当前成品上用 `dsl.py review` 记录实际看过的页与具体观察。发现视觉问题，直接修改该页的 XML 或素材，对任务目录执行 `build`，成功后执行 `preview`，查看返回目录中的新图并登记。构建自动记录受影响页，包括共用素材的所有引用页。可先用 `review --status fix` 留下观察，既有 `repair-start` 命令仍可使用。每页最多两轮返修。构建失败时，上一次可用成品仍然保留；先处理构建错误，再审新版。预算耗尽且缺陷仍在，交付现有成品并注明具体页和问题。在已有 PPTX 上继续补审时，未导出的页面修改会单列；本次结论只属于该 PPTX。需要取回生成其中某页的 XML，可用 `dsl.py page-source presentation.pptx --pages N` 查看只读副本。要交付新修改就直接重建并看新版。
 
 ## 修改、恢复与交付
 

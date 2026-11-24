@@ -144,6 +144,17 @@ def test_design_pptx_and_html_have_distinct_destinations(loader):
     assert all(f'get_skill(skill_name="{name}")' in design for name in ("sn-ppt-design-story", "sn-ppt-dsl"))
     assert "outline_confirmation" in design and "最终 PPTX" in design
 
+
+def test_design_author_receives_native_review_and_figure_selection_instructions(loader):
+    entry = loader.get_skill("sn-ppt-design-entry").content
+    story = loader.get_skill("sn-ppt-design-story").content
+    author = loader.get_skill("sn-ppt-dsl").content
+    assert "pdf_figures.py" in entry and "figure_index_warning" in entry
+    assert "短标题" in story or "标题只说本页最值得记住的一件事" in story
+    assert "从哪里取" in story
+    assert 'strategy="native"' in author and "当前写稿 Agent" in author
+
+
 @pytest.mark.asyncio
 async def test_design_outline_card_uses_the_existing_client_contract(loader):
     design = loader.get_skill("sn-ppt-design-entry").content.split("## 客户端大纲确认", 1)[1]

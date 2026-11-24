@@ -66,6 +66,7 @@ runtime = [
     "scikit-learn",
     "python-docx",
     "pypdf",
+    "pymupdf>=1.24.3,<2",
     "pdfplumber",
     "reportlab",
     "python-pptx",

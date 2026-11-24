@@ -107,7 +107,10 @@ Box-Agent 的文件工具根可能是会话 workspace 下的 `output`，须以 `
      --asset-dir "<DECK_DIR>/source_assets"
    ```
 
-   保留正文、表格、本地图片引用、内嵌图片和按需生成的 `page_visuals`。页图必须位于 `source_assets/`；没有真实页图时不能假装完成 Figure 裁切。单份文件解析失败记录后继续其他材料。
+   保留正文、表格、本地图片与内嵌图片。PDF 取图从 `raw_documents.json` 中的 `figure_index` 进入。它列出每页标题及明细路径。选中材料页后，明细提供原页上可见图片 F 编号、文字 T 编号、原文和位置。每张图的 `nearby_text` 列出附近文字编号，作者结合原页判断哪些属于图注。
+   - 用 `python "<ENTRY_SKILL_ROOT>/scripts/pdf_figures.py" sheet --index "<figure_index>" --page N --out "<DECK_DIR>/source_assets/pN.jpg"` 看带编号的原页。作者需辨认素材时，用 `inspect_images` 显式指定 `strategy="native"`。
+   - 独立原图用同一脚本的 `image --index ... --page N --ids F2 --out "<DECK_DIR>/assets/figure.png"`，保留原像素和透明层。说明、图例或单位在图外时，用 `region` 与对应的 F、T 编号一起导出。扫描页或矢量图可用编号页图上的 `--grid B2-D6` 选区；需要整页时省略选区。导出按材料与页码命名。同一选区已有可用文件时直接复用。
+   解析结果含 `figure_index_warning` 时仍可读取正文并使用已提取的图片。
 4. **理解材料**：完整阅读原文、表格和图片索引，缓存相关图片说明，写入 `info_pack.json`。长材料可以分段读取，但不能只看开头。
 5. **完成证据补充**：
    - Draft 默认跳过外部研究；明确要求核查的事实按需搜索。
@@ -146,7 +149,7 @@ Standard / Deep 先展示当前 `outline.md` 的可点击链接和叙事概括�
 
 ## 可选搜索与素材能力
 
-按同级 `sn-ppt-design-tools/references/capability-policy.md` 的 `native → bundled → none` 顺序选择。媒体能力不作为 Entry 的强制前置。缺图时改用文字、形状、原生图表等 XML 版式，不留下空图片框。
+按同级 `sn-ppt-design-tools/references/capability-policy.md` 的 `native → bundled → none` 顺序选择。已安排主图而输入没有现成文件时，在素材步骤按用途取图。实际取不到合适图片时，再为受影响页改用示意、图表或文字构图。
 
 生图和搜图仅提供嵌入 XML 的局部素材。按 `sn-ppt-dsl/references/design.md` 逐页判断图片用途，将实际使用的图片、来源、许可或模型写入 `assets/sources.json`；图片可跨页复用。能力状态记录到 `state.capabilities`，只含来源、状态、非敏感错误摘要和时间；不得记录密钥和鉴权头。配置问题调用 `sn-ppt-design-doctor`，不在入口重复配置模型。
 

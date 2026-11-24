@@ -12,23 +12,23 @@ import zipfile
 
 # The test entry can coexist with any built-in or user-installed PPT skill.
 NAMES = {
-    "sn-ppt-design-entry": "ppt062-entry",
-    "sn-ppt-design-story": "ppt062-story",
-    "sn-ppt-design-doctor": "ppt062-doctor",
-    "sn-ppt-design-tools": "ppt062-tools",
-    "sn-ppt-dsl": "ppt062-dsl",
+    "sn-ppt-design-entry": "ppt066-entry",
+    "sn-ppt-design-story": "ppt066-story",
+    "sn-ppt-design-doctor": "ppt066-doctor",
+    "sn-ppt-design-tools": "ppt066-tools",
+    "sn-ppt-dsl": "ppt066-dsl",
 }
 ENTRY = """---
-name: ppt-design-062
-displayName: PPT 设计 0.6.2
-description: 在当前客户端主动选择此技能，以 0.6.2 设计模式制作 PowerPoint 文件。
+name: ppt-design-066
+displayName: PPT 设计 0.6.6
+description: 在当前客户端主动选择此技能，以 0.6.6 设计模式制作 PowerPoint 文件。
 metadata:
   user_visible: true
 ---
 
-# PPT 设计 0.6.2
+# PPT 设计 0.6.6
 
-用户点选本技能即选择设计模式。将原题、附件和宿主工作目录交给 `get_skill(skill_name="ppt062-entry")`，按该入口完成大纲、写页、导出和最终看图。四个辅助模块和入口均随此技能提供。
+用户点选本技能即选择设计模式。将原题、附件和宿主工作目录交给 `get_skill(skill_name="ppt066-entry")`，按该入口完成大纲、写页、导出和最终看图。四个辅助模块和入口均随此技能提供。
 """
 NATIVE = ("sharp", "@img/colour", "detect-libc", "semver", "@img/sharp-darwin-arm64",
           "@img/sharp-libvips-darwin-arm64")
@@ -69,8 +69,8 @@ def build(runtime: Path, esbuild: Path, output: Path) -> None:
     source = runtime / "skills/presentation-design"
     if not source.is_dir():
         source = runtime / "bin/_internal/box_agent/skills/presentation-design"
-    if json.loads((source / "source.json").read_text())["version"] != "0.6.2":
-        raise ValueError("Expected the 0.6.2 presentation release")
+    if json.loads((source / "source.json").read_text())["version"] != "0.6.6":
+        raise ValueError("Expected the 0.6.6 presentation release")
     with tempfile.TemporaryDirectory() as folder:
         root = Path(folder)
         (root / "SKILL.md").write_text(ENTRY)
@@ -85,7 +85,7 @@ def build(runtime: Path, esbuild: Path, output: Path) -> None:
                     text = text.replace(standard, portable)
                 if text != original:
                     file.write_text(text)
-        add_renderer(source / "skills/sn-ppt-dsl", root / "modules/ppt062-dsl", esbuild)
+        add_renderer(source / "skills/sn-ppt-dsl", root / "modules/ppt066-dsl", esbuild)
         output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=output.parent) as staging:
             candidate = Path(staging) / output.name

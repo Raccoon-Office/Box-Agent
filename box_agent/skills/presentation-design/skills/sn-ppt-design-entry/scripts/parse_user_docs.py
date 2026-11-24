@@ -18,8 +18,7 @@ Inherited images: each item = {"doc_index": int, "image_index": int, "path": str
                   docx/pdf are extracted under that deck-owned directory;
                   md image references are resolved relative to the md file).
 
-No extra deps beyond stdlib + pypdf + python-docx. Markdown-first (table + image
-extraction), pdf/docx best-effort.
+PDF placement indexing uses the entry skill's PyMuPDF dependency.
 """
 from __future__ import annotations
 
@@ -125,6 +124,11 @@ def parse_md_or_txt(path: Path) -> dict:
 def parse_pdf(path: Path, asset_root: Path | None = None) -> dict:
     from pypdf import PdfReader
     try:
+        from pdf_figures import index_document
+        return index_document(path, _asset_output_dir(path, asset_root))
+    except (ImportError, RuntimeError, ValueError, OSError) as exc:
+        index_warning = f'Figure index unavailable: {exc}'
+    try:
         reader = PdfReader(str(path))
         pages = [p.extract_text() or "" for p in reader.pages]
     except PdfReadError as exc:
@@ -165,6 +169,7 @@ def parse_pdf(path: Path, asset_root: Path | None = None) -> dict:
         "pages": len(reader.pages),
         "tables": [],  # best-effort pdf table extraction out of scope (no pdfplumber)
         "inherited_images": images,
+        "figure_index_warning": index_warning,
         "page_visuals": []
     }
 
