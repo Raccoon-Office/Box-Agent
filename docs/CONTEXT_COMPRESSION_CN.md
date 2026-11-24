@@ -3,14 +3,16 @@
 Box-Agent 在两个边界控制持久上下文增长：
 
 1. 工具结果在占满后续模型请求之前按需落盘；
-2. 只有下一次请求接近模型有效输入上限时，才压缩会话历史。
+2. 下一次请求达到有效输入上限，或 provider 拒绝请求长度时，压缩会话历史。
 
 两者彼此独立。工具结果落盘在存储层是无损的：完整结果保存在磁盘，模型保留有界的 head + tail 工作预览和恢复路径；会话摘要是有损的，因此更晚触发，并显式保留一个有界的工作集。
 
 原生图片检查走第三条“仅本次请求”路径。规范化图片块只附加到主模型的一次请求，不进入持久消息历史；预算按解码后的图片尺寸估算，而不是按 Base64 字符长度计算。原始图片载荷不会写入 session trace 或 provider debug log。
 
-摘要请求发送前，会估算投影完成的完整请求，包括追加的摘要指令和图片，并按摘要客户端自己的窗口检查：先减去实际输出预留（上限 8,192 tokens），再取 90% 作为输入预算。客户端未声明窗口或输出预留时，回退到会话输入预算。
-普通压缩和强制压缩都执行此检查；超预算时不调用摘要模型，直接使用本地有界兜底，再按主模型预算检查压缩后的主请求是否可以发送。
+每次尝试摘要前，Box-Agent 都会估算投影后的完整请求，包括追加的摘要指令和图片。
+输入预算按摘要客户端的窗口推导，输出预留最多 8,192 tokens。客户端未声明窗口或输出
+预留时，使用会话输入预算。普通压缩和强制压缩都执行此检查，重建后的主请求还需符合
+主模型的预算。
 
 ## 请求生命周期
 
@@ -35,7 +37,9 @@ Box-Agent 在两个边界控制持久上下文增长：
 
 覆盖层只追加到下一次 provider 调用的内存消息列表，不参与 ToolResult 序列化、会话持久化、普通 AgentLogger 历史、cache fingerprint 或摘要输入。Session trace 只保留文字以及图片的媒体类型、宽高、源字节数和摘要；provider debug log 会始终脱敏 Anthropic Base64 source 与 OpenAI-compatible data URL，即使显式开启 full-payload logging 也不会记录原图。空的 provider-stale 重试会暂时保留覆盖层；一旦收到实际内容或正常结束就立即释放。能力或预算校验失败时，工具结果会变成有界错误，提示改用 `strategy="proxy"` 或减少图片数量。
 
-Provider 返回的 usage 仍会包含本次图片输入。因此对应 assistant message 只持久化一个纯数字的 request-only 估算值；下一次上下文计算会先扣除它，再累加后续持久消息。这样已释放图片不会导致提前压缩，重启恢复后也能继续正确估算，同时不保存任何图片字节。
+Provider 返回的 usage 包含图片输入。assistant 消息记录数字形式的 request-only 估算值，
+供没有请求快照的 usage 扣减。请求快照也能识别已由真实 usage 计量的临时消息。上下文
+估算按图片尺寸计量，传输预算按编码后的字节数计量。
 
 ## 大表计算的前置上下文策略
 
@@ -206,10 +210,18 @@ blocked 模式一致。
 ### 触发阈值
 
 ```text
-autoCompactThreshold = 0.9 * (context_window - max_output_tokens)
+output_reserve = min(max_output_tokens, 20_000)
+autoCompactThreshold = int(0.9 * (context_window - output_reserve))
 ```
 
-`LLMConfig.context_token_limit` 会先预留配置的最大输出预算，再从剩余输入预算中保留 10% 作为 token 估算误差和摘要请求的余量。
+以 180,000 tokens 的窗口为例，输出上限配置为 8,000 时，触发阈值为 154,800 tokens。
+配置为 20,000、64,000 或 80,000 时，阈值均为 144,000 tokens。
+
+主模型窗口已知时，发送前从窗口扣除本次投影输入和 1,024 tokens 的组装余量，计算可用
+输出空间，并以 `output_reserve` 为下限。本次输出上限取适用的输出额度与可用空间的较小值。
+Anthropic 和 OpenAI 兼容客户端仅在当前请求应用覆盖值。Anthropic 会按有效输出上限重算
+thinking 预算，确保低于本次输出上限。窗口未知时使用配置的输出额度。辅助请求沿用各自的
+输出上限。
 
 子 Agent 在实际模型路由完成后使用同一公式。`sub_agent_token_limit` 默认 `null`
 （自动），显式正数仅作为额外上限；Skill 预检、子循环及预取后的 batch_files
@@ -248,24 +260,36 @@ ACP 模型绑定可以通过当前所选模型的 `contextWindow` 和 `maxTokens
 
 ### 估算下一次请求
 
-Provider 会把真实 API 响应的 usage 附在对应 assistant message 上。压缩器找到最近一条带真实 usage 的响应，按以下方式得到当时完整上下文：
+同一路由最近可用的 provider usage 是上下文估算的基线。Anthropic 上下文计数包含输入、
+缓存写入、缓存读取及输出。OpenAI 兼容接口的 prompt 总数已含缓存输入。只返回
+`total_tokens` 时可作为上下文基线，但输入计数校准需要独立报告的输入用量。
 
-```text
-input_tokens
-+ cache_creation_input_tokens
-+ cache_read_input_tokens
-+ output_tokens
-```
+估算器在基线上增加新增或变更的消息和工具 schema 成本。请求快照保存历史与临时附加消息
+的指纹，每个已计量的相同出现次数最多复用一次，新增副本和变更内容计入增量。快照基线上
+已删除内容的成本会保留至下一次真实 usage。内存中没有快照的 usage 会先扣减
+`request_only_input_tokens`，再补算新增内容和当前工具 schema。无 usage、路由无法匹配，
+或压缩已清除旧 usage 时，从头估算完整请求。
 
-如果这份 usage 有同一路由的请求快照，就以真实用量为基线，补算新增或改写的消息，以及新增或变化的工具 schema。删除项暂不从旧用量中扣除，等下一份服务端 usage 更新基线。新写入的 assistant 记录会将快照指纹和聚合计数保存为 Session Log 的私有 `contextUsage` 元数据，不保存临时请求正文，也不改变公开 usage 字段。重放时校验版本、字段类型以及绑定响应的校验和，只保留当前有效历史中最新的快照；历史回退恢复对应检查点，压缩则清除旧 usage 基线。旧日志没有可恢复的快照，元数据缺失或校验失败时安全回退。没有可用快照时会重新估算完整请求，旧会话和底层调用中未配对的 usage 仍可作为保护下限。
+Session Log 的私有 `contextUsage` 元数据保存快照指纹和聚合计数，也记录绑定响应的
+校验和。重放验证通过后才复用 usage。有效历史保留最新快照，回退时恢复对应检查点。完整
+请求已经符合预算时，可跳过单独的历史阈值检查，以免为已计入的附加内容重复预留空间。
 
-请求快照也记录历史之后追加的临时消息指纹。真实 usage 已包含的相同消息按出现次数复用，每个已计量的出现次数最多匹配一次；新增副本或变化内容仍计入增量。删除内容的旧成本继续保留到下一次响应更新基准。完整请求已确认符合输入预算时，默认压缩器跳过单独的历史阈值检查，避免在已含附加内容的 usage 基准上再次预留同一份空间；真正超限时仍进行有界压缩和完整复检。
+默认本地估算器按字符类别、类别切换和重复段计费。常用汉字约为每字 1.07 tokens，假名
+0.77，韩文音节 1.31。英文字母、数字、标点、空格及换行各用不同权重。自定义客户端可以
+提供同步 `estimate_text_tokens(text)`。图片仍按尺寸估算，Skill 文本和普通文本共用同一
+文本计数器。
 
-标准模型客户端不知道接口的真实分词器时，统一按每 2 个 UTF-8 字节估算 1 个 token，向上取整，并保留原字符／字节估算作为下限。这个离线近似值可能高估或低估实际用量。自定义客户端可通过 `estimate_text_tokens(text)` 提供计数。未提供同步计数的自定义客户端仍使用字节上界，未传客户端的底层兼容路径仍使用原启发式。图片载荷单独估算，Skill 附加内容和最终请求使用同一个计数器。压缩会尝试缩短已有摘要以留出组装余量，最终请求仍按完整输入预算复检。
+收到带输入 usage 的主模型响应后，将真实输入 token 数除以本次请求的本地估算值，并将
+比例限制在 `[0.5, 2.0]`。每个模型路由的最新比例用于后续增量估算。可从 provider 的上下文
+超限错误解析实际输入 token 数时，也用于校准。比例初始为 `1.0`，在当前会话内存中保存。
 
-运行预算受当前客户端和匹配目录项的已知窗口约束，并预留实际输出额度。ACP 优先使用绑定显式传入的 `contextWindow`，并为本会话目录中所选模型补齐或覆盖窗口。字段缺省时，才从适用于当前模型的 profile／客户端、匹配目录项和启动配置中取最小的已知窗口。显式切换模型但没有任何已知窗口时，本地拒绝。自动路由也会将选中候选的已知窗口传给解析后的客户端，子循环因此能按目标模型的窗口检查组装后的完整请求。宿主遗漏输出额度时保留 profile 的真实额度。这些检查仍依赖准确的能力声明，服务端静默缩小自身上限无法仅凭本地配置发现。
+运行预算受当前客户端和匹配目录项的已知窗口约束。ACP 优先使用绑定显式传入的
+`contextWindow`，并在会话目录中设置所选模型的窗口。字段缺省时，从适用的 profile、
+客户端、目录项和启动配置中取最小的已知窗口。显式切换至另一模型要求窗口已知。宿主遗漏
+输出额度时沿用 profile 的额度。
 
-压缩会创建新的历史 epoch。压缩结果中保留的 assistant 消息会清除旧的 provider usage，下一次 `prepare request` 从压缩后的消息面重新估算；loop 同时清除旧的 API token 锚点，直到新的 provider 响应提供新的 usage。
+本地估算会与 provider 的实际分词结果有偏差。Provider 省略 reasoning tokens 时，usage
+计数也可能与实际上下文成本不同。
 
 ACP 切到较小输入预算的模型时，先按目标模型投影完整请求，必要时使用原会话的摘要路由压缩，再按目标预算复检；通过后才提交新绑定。失败返回 `MODEL_SWITCH_CONTEXT_PREPARATION_FAILED`，保留原模型、历史及本次输入和附件。同一运行进程内，通过 `session/resume`、`session/load` 或重复 `session/new` 重建已有会话（例如同时切换执行档位）也遵循此流程：恢复只暂存目标绑定，下一次 prompt 才执行切换，显式传入的新选择优先。恢复本身不会调用模型。进程重启后没有仍存活的原模型客户端时，继续使用传入模型的普通有界压缩流程。
 
@@ -273,9 +297,18 @@ ACP 切到较小输入预算的模型时，先按目标模型投影完整请求�
 
 ### 压缩后的消息组织
 
-压缩会在原始 message 列表末尾临时追加一条 `user` 摘要指令，并调用一次摘要模型。历史不会被序列化进新 prompt，也不会分块或滚动摘要，因此摘要请求保留完整的 provider message 前缀，可以复用 KV cache。ACP 通过会话模型路由器解析该调用，并把输出上限限制为 8,192 tokens。自动模式只能在宿主下发的 `autoRouting.models` 模型池中，按摘要任务标签、能力和上下文适配度排序选择；上下文适配使用当前 Agent 的安全输入上限，避免把大段历史交给小窗口工具模型。显式选择模式始终锁定原模型，不再切换独立 lite 模型。`routingMode=manual` 时，ACP 忽略宿主误传的 `autoRouting`，包括过期或格式错误的候选池；该规则统一作用于会话、子任务和辅助调用。未声明路由模式的旧版 builtin 绑定仍兼容候选池路由。其他 host 可传入独立摘要客户端，未提供时回退主模型。这次调用不提供工具并关闭 thinking。指令要求按时间顺序列出全部 user message，把所有结构化分析放进唯一的 `<summary>...</summary>` 块，并内置九节输出结构示例。响应必须严格由一个非空 summary 块组成；写入 `Summary:` 后只取标签内部文本，标签本身会被丢弃。摘要请求和本地写回的上限均为 8,000 字符；若重建后的历史离上限不足 1,024 tokens，同一份摘要会在不增加 provider 调用的前提下依次收紧到 4,000、2,000 字符。摘要调用失败、格式错误或返回空内容时，使用明确标注为有损的确定性有界摘要兜底。若重建请求仍超限，本轮返回普通上下文超限错误，不进入任何领域恢复状态机。
+首次摘要尝试在投影后的历史末尾追加一条临时 `user` 指令，保留可复用 KV cache 的消息
+前缀。ACP 通过会话模型路由器解析该调用，输出上限为 8,192 tokens。自动模式从宿主下发
+的 `autoRouting.models` 池按任务、能力和上下文适配度选择，显式模式沿用所选模型。
+`routingMode=manual` 优先于 `autoRouting`，适用于会话、子任务和辅助调用。未声明路由
+模式的旧版 builtin 绑定仍可使用候选池。其他宿主可提供独立摘要客户端，默认沿用主客户端。
 
-模型输出包装成以下合成 `user` message：
+摘要调用关闭工具和 thinking，要求按时间顺序整理用户消息，并输出一个非空的
+`<summary>...</summary>` 块。写入 `Summary:` 时取标签内的正文，最多 8,000 字符。
+若重建历史后组装空间不足，使用同一份摘要继续尝试 4,000 和 2,000 字符的版本。仍超过
+请求上限时，可继续尝试 1,000 和 512 字符，再缩短早期用户记录的渲染内容。
+
+合成 `user` 消息的结构如下：
 
 ```text
 This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
@@ -290,18 +323,59 @@ Continue the conversation from where it left off. Do not acknowledge the summary
 
 ```text
 system message
+[Earlier User Messages] 运行时 user message
 摘要 user message
-按规则保留的近期 messages
+近期完整轮次和最新真实 user message
+[Invoked Skills] 运行时 user message
 运行状态 user message
 ```
 
-recent 选择统一覆盖 user、assistant 和 tool message；assistant 工具调用与连续 tool results 按组保留。目标上限为 5 条消息、合计 20,000 字符，并始终原样保留最新真实 user message。如果最新完整协议组本身超过字符上限，压缩会保留精确的 assistant 工具调用、参数、result ID、顺序和数量，同时将已经进入 continuation summary 的 assistant reasoning 与 tool-result 正文替换为有界 receipt。只有剩余的精确用户文本、工具调用参数、system 指令、工具 schema、有界摘要和运行状态仍无法放入安全窗口时，才标记为 blocked。
+近期历史最多保留五个 assistant 轮次，目标上限为 15,000 个本地估算 tokens。模型窗口较小
+或请求固定前缀较长时，保留空间可进一步收紧。assistant 工具调用与其连续工具结果算一个
+轮次，无工具调用的 assistant 文本也算一个轮次。user 消息可
+随窗口保留，不计入轮次数。最新真实 user 消息始终按原始相对位置保留。最新完整轮次即使
+单独超限也会保留。其 assistant 正文和工具结果正文可改成有界回执，工具调用、参数、标识符、
+结果顺序和数量原样保留。
 
-上下文压缩不再发现、重新读取或重放近期文件。
+`[Earlier User Messages]` 从最早到最新记录窗口之外的真实用户原文，并注明这些是历史记录。
+超过 2,000 tokens 的单条消息保留头尾，中间加入省略标记。渲染总预算为 10,000 tokens，
+超出时从最早的条目开始省略并写明数量，主请求空间不足时可继续缩短渲染。Session Log 用
+结构化字段保存原文，重放和后续压缩可继续累积这些消息。确定性兜底也包含这段记录。
+查询最新用户文本、记忆召回、Goal 和语言判定时仍使用真实用户消息。
 
-Goal、Todo 和 Plan 通过显式、无副作用的 `compaction_state` 契约读取；压缩不会执行普通工具调用，合并后的运行状态消息上限为 12,000 字符。SkillRuntime 管理选择及带版本的读取事实；Context 将显式选择或恢复的 Skill 正文放入普通请求资料，或接收真实读取工具的回复，并按最终可见文本核实覆盖。完整 Skill 正文不固定在 system message 中，也不会回放历史 `get_skill` 调用。分页、来源校验和请求提交边界见 [Skill Engine](design/skill-engine.md)。控制策略查询“最新用户文本”时会排除内部摘要与运行状态消息。
+Goal、Plan 和 Todo 通过无副作用的 `compaction_state` 契约提供状态，按该顺序共享
+12,000 字符预算。每个区块为后续区块预留空间，未用额度顺延。
+
+压缩会按最近交付时间倒序恢复曾实际交付给模型的 Skill。当前 Skill 的 revision、source 和
+path 须通过校验。`[Invoked Skills]` 提示模型以这些 Skill 为参考，避免重复一次性初始化。
+每个 Skill 区块最多 5,000 tokens，整条消息最多 25,000 tokens。正文截断时提示通过
+`get_skill` 读取其余内容。版本过期或正文放不下时保留名称和路径。append-only 模式和普通
+模式按可见区间记账，已通过 system 后缀生效的 Skill 跳过重复恢复。主请求空间不足时可少
+恢复正文、保留定位提示。摘要源以回执代替 Skill 正文，普通请求的 100,000 字符引用预算
+继续生效。[Skill Engine](design/skill-engine.md)
 
 若重建后的请求仍超过安全阈值，结果会标记为 blocked，不会静默发送一个已知超限的请求。
+
+### 重试、超长恢复和熔断
+
+- 摘要本地预检或 provider 报输入超长时，从最早的消息组开始裁剪，每次约删除可裁内容的
+  20% tokens，至少删除一整组。保留 system 和最新真实 user 消息，最多裁剪重试三次。
+  重试输入含 `[earlier conversation truncated for compaction retry]` 标记。成功摘要会说明
+  裁掉的内容不在摘要覆盖范围内，早期用户原文仍由独立的历史记录保留。
+- 摘要因输出上限截断或缺少所需的摘要块时，追加更严格的长度指令后再试一次。网络、超时、
+  5xx 和限流走 LLM 客户端原有重试。没有内置重试的自定义客户端可再试一次。鉴权、权限
+  或其他请求错误直接进入有界确定性兜底，摘要重试用尽时也走兜底。
+- 主请求在产生任何输出前收到上下文超长错误时，强制压缩并收紧历史预算，重新组装请求后
+  再发。Provider 错误如果报告实际和上限 token 数，可用于校准和收紧预算。每轮最多两次
+  此类重试，仍失败时返回 `CONTEXT_INPUT_BUDGET_EXCEEDED`。已经产生输出的请求保留已收到的
+  assistant 内容并结束本轮。恢复过程复用已完成的工具结果，只提交一次成功回复。
+
+连续三次压缩进入 fallback 或 blocked 模式后，会话停止调用摘要模型，后续使用确定性压缩。
+如果压缩后 3 个 step 内再次触发压缩，且连续出现三次，本轮以
+`CONTEXT_COMPACTION_THRASHING` 结束并重置快速重复触发计数。可分块读取过大的文件或工具
+结果，也可新开会话。ACP 通过现有 `errorCode` 透传。计数保存在会话内存中，可跨轮次累积。
+压缩事件用 `summary_retries` 和 `head_truncated` 记录摘要重试次数及摘要源截头，Session Log
+的对应字段为 `summaryRetries` 和 `headTruncated`。本地预检触发的恢复也计入重试次数。
 
 ## 相邻保护
 
@@ -310,5 +384,9 @@ write/edit 工具调用参数会保留原文，直到整段历史压缩摘要其
 ## 验证
 
 - `tests/test_tool_result_storage.py`：类型处理、独占写入、预览、Read 单结果豁免、失败保留、去重和总预算排序；
-- `tests/test_core.py`：请求前执行、usage 加增量估算、原始前缀单次摘要、回退估算、近期消息边界与运行状态恢复；
-- `tests/test_auth.py`：阈值推导。
+- `tests/test_auth.py` 和 `tests/test_main_input_budget.py` 覆盖触发阈值、模型绑定及请求输出限制。
+- `tests/test_context_token_estimation.py` 和 `tests/test_session_log.py` 覆盖 usage 格式、校准和重放。
+- `tests/test_context_compaction_retention.py` 和 `tests/test_core.py` 覆盖历史保留和运行状态恢复。
+- `tests/test_compaction_resource_retention.py` 覆盖 Skill 恢复和引用可见范围。
+- `tests/test_context_compaction_e2e.py`、`tests/test_context_compaction_recovery.py` 和
+  `tests/test_error_messages.py` 覆盖摘要预检、重试、熔断和 provider 错误。

@@ -3,7 +3,7 @@
 Box-Agent controls durable context growth at two boundaries:
 
 1. Tool results are persisted before they can dominate a later model request.
-2. Conversation history is summarized only when the next request approaches the model's effective input limit.
+2. Conversation history is compacted when the next request reaches the effective input limit or the provider rejects its length.
 
 The two mechanisms are deliberately separate. Tool-result storage is lossless at the storage layer: the complete result remains on disk while the model keeps a bounded head-and-tail working preview plus the recovery path. Context summarization is lossy, so it runs later and preserves a bounded working set.
 
@@ -14,7 +14,12 @@ inferences, subject to encoded-byte and provider request-body limits. Pixels sta
 outside durable message content; SessionLog records references and lifecycle
 metadata. See [Image context](IMAGE_CONTEXT.md) for the complete contract.
 
-Before sending a summary request, Box-Agent estimates the complete projected request, including the appended summary instruction and images, against the summary client's safe input budget: `90% × (context window − actual output reservation)`, with the output reservation capped at 8,192 tokens. If the client does not declare its window or output reservation, the session's input budget remains the fallback. Both ordinary and forced compaction apply this check. An over-budget summary skips the provider call and uses the local bounded fallback; the rebuilt main request is then checked against the main model's budget before sending.
+Before each summary attempt, Box-Agent estimates the complete projected request,
+including the appended instruction and images. The summary client's safe input
+budget uses its own context window and an output allowance of at most 8,192 tokens.
+If the client's window or output allowance is unknown, the session input budget
+is the fallback. Both ordinary and forced compaction use this check. The rebuilt
+main request must then fit the main model's budget.
 
 When an ACP prompt selects a model with a smaller safe input budget, Box-Agent
 prepares the full request against the target model before changing the session
@@ -79,10 +84,11 @@ a user turn. Other tools' transient overlays, and CUA with `persist_images: fals
 retain their one-request behavior. Session restore and history edits restore
 image occurrences together with their committed inference counter.
 
-Provider usage includes image input. The assistant message retains the numeric
-request-only token estimate, which is subtracted from the text-history estimate
-before adding the current request's overlay. Image cost is estimated from pixel
-dimensions; base64 length is used for transport budgets, not conversational text.
+Provider usage includes image input. The assistant message retains a numeric
+request-only estimate for usage recorded without a request snapshot. Snapshots
+also recognize request-only messages already covered by measured usage. The
+local context calculation uses image dimensions, and the transport budget uses
+the encoded byte length.
 
 ## Large-table processing before context growth
 
@@ -300,12 +306,22 @@ its limit flag must agree with its existing blocked mode.
 The trigger is derived from the model's input budget:
 
 ```text
-autoCompactThreshold = 0.9 * (context_window - max_output_tokens)
+output_reserve = min(max_output_tokens, 20_000)
+autoCompactThreshold = int(0.9 * (context_window - output_reserve))
 ```
 
-`LLMConfig.context_token_limit` reserves the configured maximum output budget,
-then keeps 10% of the remaining input budget as headroom for estimation drift
-and the summary request.
+On a 180,000-token window, a configured output of 8,000 gives a threshold of
+154,800 tokens. Configured outputs of 20,000, 64,000, and 80,000 all give a
+threshold of 144,000 tokens.
+
+Before sending a main request with a known window, Box-Agent computes the
+available output from the projected input and 1,024 tokens of envelope headroom,
+with `output_reserve` as the floor. The request's output limit is the smaller of
+the applicable output allowance and that available capacity. OpenAI-compatible
+and Anthropic adapters apply the override to the current request only. Anthropic
+recomputes its thinking budget below the effective output limit. With an unknown
+window the request uses the configured allowance. Auxiliary requests still have
+their own output caps.
 
 Sub-agents use the same formula after their actual model has been selected.
 The default `sub_agent_token_limit` is `null` (automatic), with a positive
@@ -403,28 +419,71 @@ and independent task outcomes separate.
 
 ### Estimating the next request
 
-Provider clients attach usage metadata to the assistant message produced by a real API response. Compaction finds the newest such message and computes its complete response context as:
+The most recent available provider usage for the same route anchors the estimate.
+Anthropic's context count includes input, cache creation, cache reads, and output.
+OpenAI-compatible prompt totals already include cached input. A response that
+reports only `total_tokens` can anchor context size, while calibration needs a
+separately reported input count.
 
-```text
-input_tokens
-+ cache_creation_input_tokens
-+ cache_read_input_tokens
-+ output_tokens
-```
+The runtime adds estimated costs for new or changed messages and offered tool
+schemas. A snapshot fingerprints the prior request, including any appended
+material. Each unchanged occurrence uses its prior measured cost once. Added
+copies and changed content cost extra. Removing material from a snapshot-based
+request keeps its measured cost in the baseline until fresh usage arrives.
+Snapshotless in-memory usage deducts `request_only_input_tokens` and charges new
+messages and offered schemas. The runtime estimates the whole request when usage
+is absent, the route cannot be matched, or compaction has cleared the old usage.
 
-When usage has a request snapshot for the same route, the runtime starts with measured usage and adds estimates for new or changed messages and new or changed offered tool schemas. Appended request-only messages are fingerprinted too: each unchanged occurrence already covered by usage is counted once; additional copies or changed content are charged. Removed material is left in the baseline until the next provider response updates it. New assistant records also persist the snapshot's hashes and aggregate counts as private `contextUsage` metadata in the Session Log, without storing request-only content or changing the public usage payload. Replay validates the metadata version, field types, and checksum bound to the response; only the latest active snapshot is retained. History revisions restore the matching checkpoint, while compaction clears the old usage baseline. Older logs have no snapshot to restore; missing or invalid metadata falls back safely. Without a usable snapshot the runtime estimates the complete request, retaining unpaired usage from older sessions and low-level callers as a protective floor.
+The Session Log keeps snapshot hashes and aggregate counts in private
+`contextUsage` metadata, along with a checksum bound to the response. Replay
+validates that metadata before reusing usage. The latest active snapshot is kept,
+and history revisions restore the corresponding checkpoint. A fully assembled
+request within budget can skip the separate history-only check, which avoids
+reserving room for appended content twice.
 
-When the fully assembled request fits the input budget, the default compactor skips its history-only threshold check. This prevents reserving appended content a second time against a usage baseline that already includes it. A blocked or oversized request still goes through bounded compaction and full-request rechecking.
+The default local counter uses character classes, transitions, and repeated runs.
+For example, common Han characters cost about 1.07 tokens each, kana 0.77, and
+Hangul syllables 1.31. Latin letters, digits, punctuation, spaces, and newlines use
+different weights. Custom clients can supply a synchronous
+`estimate_text_tokens(text)` method. Image estimates still use dimensions. Skill
+text and regular text share the same counter.
 
-The standard client estimates text at one token per two UTF-8 bytes, rounded up, with the legacy character/byte estimate as a floor. This offline approximation can overestimate or underestimate actual usage. Custom clients may provide `estimate_text_tokens(text)`. Custom clients without a synchronous counter still use the byte bound. Low-level estimates without a client retain the legacy heuristic. Images are estimated separately. Skill overlays use the same counter as the final request. Compaction tries to shorten the existing summary to leave room for request assembly, then the final request is checked against the full input budget.
+After each main response with reported input usage, the session divides actual
+input by the local estimate of that request and clamps the ratio to `[0.5, 2.0]`.
+The newest ratio for each route scales future incremental estimates. A provider's
+context-length rejection can also supply an actual input count for calibration.
+The ratio starts at `1.0` and is held in memory for the session.
 
-The run budget is capped by the active client's known window and matching catalog entry after reserving its output cap. ACP uses the binding's explicit `contextWindow` when present and sets that window on the selected model's entry in the session catalog, even if the entry omitted it. Otherwise it uses the smallest known window from the applicable profile/client, matching catalog entry, and startup configuration. A binding for a different model without any known window is rejected locally. Profile output limits are retained when host metadata omits them. These checks depend on accurate capability declarations. Detecting a silent reduction in the service's limit requires evidence from the service.
+The active client's window and matching catalog entry bound the run budget. ACP
+uses the binding's explicit `contextWindow` when present and adds it to the
+selected session catalog entry. Otherwise it uses the smallest applicable window
+from the profile, client, catalog, and startup configuration. A binding for a
+different model requires a known window. Profile output limits apply when host
+metadata omits them.
+
+The local counter approximates provider tokenization. Context accounting can
+also differ when the provider omits reasoning tokens from usage.
 
 ### Compacted message layout
 
-Compaction makes one summary request by appending a temporary `user` instruction to the exact existing message list. It does not serialize messages into a new prompt and does not split or roll the source. This preserves the complete provider message prefix so the summary request can reuse its KV cache. ACP resolves this call through the session model router and caps it at 8,192 output tokens. Automatic sessions may select only from the host-provided `autoRouting.models` pool, ranked by the summary task tags, ability, and context fit. Context fit uses the active Agent's safe input limit so a small-window utility model is not selected for a larger history. Explicitly selected sessions stay on that exact model; there is no independent lite-model switch. ACP ignores `autoRouting` when `routingMode=manual`, even if the host sends a stale or malformed pool. This applies to session, child-agent, and utility bindings; legacy builtin bindings without a routing mode retain pool-based routing. Other hosts may supply a dedicated summary client or fall back to the main client. Tools and thinking are disabled. The instruction requires a chronological list of every user message and places all structured analysis inside one `<summary>...</summary>` block, with an embedded nine-section output example. The response must consist of exactly one non-empty summary block; only its inner text is written after `Summary:` and the tags are discarded. The requested and locally enforced summary limit is 8,000 characters; if the rebuilt history leaves less than 1,024 tokens of headroom, the same summary is deterministically tightened to 4,000 and finally 2,000 characters without another provider call. If the call fails, is malformed, or returns empty output, an explicitly lossy deterministic bounded fallback is used. If the rebuilt request still exceeds the limit, the turn ends with a normal context-limit error; compaction does not invoke a domain recovery state machine.
+The first summary attempt appends a temporary `user` instruction to the projected
+history. This preserves the available provider prefix for KV-cache reuse. ACP
+routes this call through the session model router and caps output at 8,192 tokens.
+Automatic sessions choose from the host's `autoRouting.models` pool by task,
+ability, and context fit. Explicitly selected sessions stay on the selected model.
+`routingMode=manual` takes precedence over `autoRouting` for session, child, and
+auxiliary calls. Legacy builtin bindings without a routing mode can use the pool.
+Other hosts can supply a dedicated summary client or use the main client.
 
-The model output is wrapped in this synthetic `user` message:
+The summary request disables tools and thinking. Its instruction asks for a
+chronological account of user messages inside one `<summary>...</summary>` block.
+The runtime writes only the nonempty text inside those tags after `Summary:`.
+It limits the summary to 8,000 characters. If the rebuilt history leaves too
+little room, the runtime also tries 4,000 and 2,000 characters using the same
+summary response. If the request still exceeds the hard limit, it can try 1,000
+and 512 characters before reducing the rendered earlier-user record.
+
+The synthetic `user` message uses this framing:
 
 ```text
 This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
@@ -439,18 +498,85 @@ The rebuilt history is ordered as follows:
 
 ```text
 system message
+[Earlier User Messages] runtime user message
 summary user message
-bounded recent messages
+recent complete rounds and the latest real user message
+[Invoked Skills] runtime user message
 runtime-state user message
 ```
 
-Recent selection applies to user, assistant, and tool messages. Assistant tool calls stay grouped with their contiguous tool results. Selection targets at most 5 messages and 20,000 total characters, and the latest real user message is always retained verbatim. When the newest complete protocol group alone exceeds the character cap, compaction keeps the exact assistant tool calls, arguments, result IDs, ordering, and result count while replacing already-summarized assistant reasoning and tool-result bodies with bounded receipts. A request is blocked only when the remaining exact user text, tool-call arguments, system instructions, tool schemas, bounded summary, and runtime state still cannot fit.
+Recent history keeps up to five assistant rounds and targets at most 15,000
+locally estimated tokens. A smaller model or a large fixed request prefix can
+leave less room. An assistant tool call and all contiguous results form one
+round, and assistant text without tools also counts as one round. User
+messages can stay in the window without consuming a round. The latest real user
+message always stays in its original relative position. The newest complete round
+is protected even when it exceeds the token cap. Its assistant and tool-result
+bodies can be replaced by bounded receipts while calls, arguments, identifiers,
+result order, and result count are preserved.
 
-Compaction does not discover, reread, or replay recent files.
+Earlier real user text appears oldest first, introduced as a historical record.
+An entry over 2,000 tokens keeps its beginning and end with an omission marker.
+The rendered record fits within 10,000 tokens by leaving out the oldest entries
+and reporting their count. It can shrink further to fit the main request.
+Session Log keeps the original texts in a structured field so later compactions
+and replay can reuse them. The rendered record is also
+included when the summary falls back to deterministic compaction. The latest-user
+lookup, memory recall, goal handling, and language selection still use real user
+messages.
 
-Current goal, todo, and plan state are read through their explicit, side-effect-free `compaction_state` contract; compaction never invokes a normal tool call. Their combined runtime-state message is capped at 12,000 characters. SkillRuntime owns selection and versioned read facts. Context places selected or restored Skill bodies in ordinary request material, or they arrive through real reading-tool replies; it checks coverage against final visible text. Full Skill bodies are not pinned in the system message, and historical `get_skill` calls are never replayed. See [Skill Engine](design/skill-engine.md) for paging, source validation and request-commit behavior. Internal summary/runtime-state messages are excluded whenever control policy asks for the latest real user text.
+Goal, Plan, and Todo contribute through their side-effect-free `compaction_state`
+contract. The runtime shares the 12,000-character budget across the blocks in that
+order, leaving room for later blocks and passing along unused capacity.
+
+Compaction restores Skill text that the model actually received, newest delivery
+first. The live Skill's revision, source, and path must still match. The
+`[Invoked Skills]` message tells the model to treat these Skills as reference and
+avoid repeating one-time setup. Each section is capped at 5,000 tokens and the
+message at 25,000. A truncated body directs the model to `get_skill` for the rest.
+Stale Skills and Skills whose bodies do not fit retain name and path locators.
+The delivery ledger credits only visible ranges, in both append-only and ordinary
+contexts. A Skill already in an effective system suffix needs no duplicate
+attachment. Near the request limit, compaction can keep locators with fewer Skill
+bodies. Summary input substitutes receipts for Skill bodies, and ordinary request
+delivery retains its 100,000-character reference budget. [Skill Engine](design/skill-engine.md)
 
 If the rebuilt request still exceeds the safe limit, the outcome is marked blocked instead of silently sending a known-oversized request.
+
+### Retry and recovery
+
+- When summary preflight or the provider rejects the input length, Box-Agent
+  drops whole groups from the oldest end. Each retry aims to remove about 20% of
+  the removable source tokens, with at least one group removed. The system message and
+  latest real user message are protected. There are at most three truncation
+  retries. Retried source carries `[earlier conversation truncated for
+  compaction retry]` after the system message. A successful summary notes that the trimmed part is
+  outside its coverage. Earlier user text remains available through the separate
+  history record.
+- A summary cut off by its output limit or missing its required summary block
+  gets one retry with a stricter length instruction. Transient network, timeout,
+  upstream, and rate-limit failures use the LLM client's existing retry policy.
+  A custom client without that retry policy gets one retry. Authentication,
+  permission, and other bad-request errors go to the bounded deterministic
+  fallback. Exhausted summary retries also use that fallback.
+- If a main request returns a context-length error before emitting output,
+  Box-Agent forces compaction with a tighter history budget, prepares a fresh
+  request, and retries. Provider-reported text may supply actual and maximum
+  counts for estimation and budget tightening. The turn allows at most two
+  reactive retries. Exhaustion returns `CONTEXT_INPUT_BUDGET_EXCEEDED`.
+  A failure after output preserves partial assistant text and ends the turn.
+  Reactive recovery reuses completed tool results and commits the accepted reply once.
+
+After three consecutive compaction outcomes in fallback or blocked mode, the
+session continues with deterministic compaction and stops calling the summary
+model. If compaction is triggered again within three steps of a prior compaction
+three times in succession, the turn stops with `CONTEXT_COMPACTION_THRASHING`
+and resets the rapid-refill streak.
+The user can read a large file or tool result in chunks, or start a new session.
+ACP forwards the error code through its existing `errorCode` field. Both counters
+are held in memory across turns. Compaction events report `summary_retries` and
+`head_truncated`. Session Log uses `summaryRetries` and `headTruncated` for the
+same fields. The retry count includes recovery from local preflight failures.
 
 ## Adjacent protections
 
@@ -461,8 +587,11 @@ Write/edit tool-call arguments remain verbatim until whole-history compaction su
 Direct regression coverage lives in:
 
 - `tests/test_tool_result_storage.py` for type handling, exclusive writes, previews, Read single-result opt-out, failures, deduplication, and aggregate ordering;
-- `tests/test_core.py` for pre-request enforcement, usage-plus-delta estimation, exact-prefix one-shot summarization, fallback estimation, bounded retention, and runtime-state restoration;
-- `tests/test_auth.py` for the derived threshold.
+- `tests/test_auth.py` and `tests/test_main_input_budget.py` for the derived threshold, model binding, and request output limits.
+- `tests/test_context_token_estimation.py` and `tests/test_session_log.py` for usage shapes, calibration, and replay.
+- `tests/test_context_compaction_retention.py` and `tests/test_core.py` for retention and runtime-state restoration.
+- `tests/test_compaction_resource_retention.py` for Skill restoration and reference coverage.
+- `tests/test_context_compaction_e2e.py`, `tests/test_context_compaction_recovery.py`, and `tests/test_error_messages.py` for summary preflight, retries, circuit breakers, and provider errors.
 - `tests/test_image_inspection_tool.py`, `tests/test_multimodal_message_conversion.py`,
   `tests/test_session_trace.py`, and `tests/test_llm_debug_logging.py` for the
   request-only native image path, provider conversion, and payload redaction.
