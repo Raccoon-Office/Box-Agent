@@ -172,7 +172,7 @@ async def test_summary_checks_complete_projected_input_against_its_own_capacity(
 
     def project(messages, **kwargs):
         assert kwargs["purpose"] == "summary"
-        assert kwargs["llm"].max_output_tokens == 8_192
+        assert kwargs["llm"].max_output_tokens == 50_000
         return SimpleNamespace(messages=[*messages, extra], manifest={}, input_tokens=llm.estimate_text_tokens(extra.content),
                                blocked_reason=None)
 

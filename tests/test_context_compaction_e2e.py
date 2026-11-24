@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 
 import pytest
 
@@ -11,8 +12,12 @@ from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEve
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.context_input import DefaultContextEngine
 from box_agent.kernel.compact_engine import DefaultCompactEngine
-from box_agent.kernel.context_engine import _create_summary, _fallback_context_estimate, _SUMMARY_REQUEST
+from box_agent.kernel.context_engine import (
+    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_MESSAGE_PREFIX, _SUMMARY_MESSAGE_SUFFIX, _SUMMARY_REQUEST,
+    _create_summary, _fallback_context_estimate, _is_summary_marker,
+)
 from box_agent.llm.llm_wrapper import LLMClient
+from box_agent.session_log import SessionLog
 from box_agent.tools.base import Tool, ToolResult
 
 
@@ -210,6 +215,47 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
 
 
 @pytest.mark.asyncio
+async def test_agent_sends_and_replays_full_long_summary_with_original_whitespace(tmp_path):
+    summary = "\n  First detail\n" + "Complete evidence record.\n" * 350 + "Last detail.  \n"
+
+    class LongSummaryProvider(CompactionE2ELLM):
+        context_window = 100_000
+        max_output_tokens = 16_000
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                yield StreamEvent(type="text", delta=f"  <summary>{summary}</summary>\n")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            async for event in super().generate_stream(messages, tools, **kwargs):
+                yield event
+
+    provider = LongSummaryProvider()
+    root = tmp_path / "sessions"
+    with closing(SessionLog.create(root, session_id="long-summary", cwd=tmp_path)) as log:
+        agent = Agent(llm_client=provider, system_prompt="E2E system prompt", tools=[], max_steps=1,
+                      workspace_dir=str(tmp_path), token_limit=18_000, session_log=log,
+                      deferred_mcp_loading_enabled=False)
+        agent.messages.extend([
+            Message(role="user", content="First task"),
+            Message(role="assistant", content="x" * 65_000),
+        ])
+        agent.add_user_message("Continue the latest task.")
+        events = [event async for event in agent.run_events()]
+
+    assert len(summary) > 8_000
+    (event,) = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert event.mode == "summary" and event.summary_calls == 1 and not event.head_truncated
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
+    sent = next(message.content for message in provider.normal_messages if _is_summary_marker(message))
+    assert sent.startswith(_SUMMARY_MESSAGE_PREFIX + summary + "\n\nIf you need specific details")
+    assert sent.endswith(_SUMMARY_MESSAGE_SUFFIX)
+    with closing(SessionLog.open(root, session_id="long-summary", cwd=tmp_path)) as log:
+        replayed = next(message.content for message in log.replay().messages if _is_summary_marker(message))
+    assert replayed == sent
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("history_chars", [100_000, 45_000], ids=["history-overflow", "summary-instruction-overflow"])
 async def test_agent_trims_an_over_budget_summary_and_resumes(tmp_path, history_chars):
     llm = CompactionE2ELLM()
@@ -256,9 +302,13 @@ async def test_agent_trims_an_over_budget_summary_and_resumes(tmp_path, history_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("summary_window", [100_000, 60_000])
-@pytest.mark.parametrize("history_chars", [114_000, 115_500, 180_000])
-async def test_summary_uses_its_own_window_and_output_reservation(summary_window, history_chars):
+@pytest.mark.parametrize("summary_window, history_chars, request_shape", [
+    (130_000, 98_000, "full"),
+    (100_000, 98_000, "tight-output"),
+    (100_000, 100_500, "summary-instruction-overflow"),
+    (60_000, 98_000, "summary-history-overflow"),
+], ids=["full", "tight-output", "summary-instruction-overflow", "summary-history-overflow"])
+async def test_summary_uses_its_own_window_and_output_reservation(summary_window, history_chars, request_shape):
     from box_agent.config import derive_context_token_limit
     from box_agent.runtime import run_agent_loop
     from tests.test_main_input_budget import wire_llm
@@ -270,18 +320,23 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
         *(Message(role="assistant", content=f"recent result {index}") for index in range(6)),
         Message(role="user", content="continue"),
     ]
-    async with wire_llm(context_window=100_000) as (llm, requests):
-        llm.max_output_tokens = 50_000
-        summary_llm = llm.for_model("summary-model")
+    configured_output = 50_000
+    async with wire_llm(context_window=80_000, max_output_tokens=configured_output) as (llm, requests):
+        summary_llm = llm.for_model("summary-model", max_output_tokens=configured_output)
         summary_llm.context_window = summary_window
-        main_limit = derive_context_token_limit(100_000, 50_000)
-        summary_limit = derive_context_token_limit(summary_window, 8_192)
+        main_limit = derive_context_token_limit(80_000, configured_output)
+        summary_limit = derive_context_token_limit(summary_window, configured_output)
+        history_tokens = _fallback_context_estimate(history, {}, llm=llm)
         summary_tokens = _fallback_context_estimate([
             *history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
         ], {}, llm=summary_llm)
-        assert _fallback_context_estimate(history, {}, llm=llm) > main_limit
-        if summary_window == 100_000 and history_chars == 115_500:
-            assert _fallback_context_estimate(history, {}, llm=summary_llm) <= summary_limit < summary_tokens
+        assert history_tokens > main_limit
+        if request_shape == "summary-instruction-overflow":
+            assert history_tokens <= summary_limit < summary_tokens
+        elif request_shape == "summary-history-overflow":
+            assert summary_limit < history_tokens
+        else:
+            assert summary_tokens <= summary_limit
 
         events = [event async for event in run_agent_loop(
             llm=llm, summary_llm=summary_llm, messages=history, tools={},
@@ -294,12 +349,24 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
         assert compaction.summary_retries == int(summary_tokens > summary_limit)
         assert compaction.head_truncated == (summary_tokens > summary_limit)
         assert len(summary_requests) == 1
-        assert summary_requests[0]["messages"][-1]["content"] == _SUMMARY_REQUEST
-        assert summary_requests[0].get("max_tokens", summary_requests[0].get("max_completion_tokens")) == 8_192
+        summary_request = summary_requests[0]
+        assert summary_request["messages"][-1]["content"] == _SUMMARY_REQUEST
+        output = summary_request.get("max_tokens", summary_request.get("max_completion_tokens"))
+        if request_shape == "tight-output":
+            assert output == summary_window - summary_tokens - REQUEST_INPUT_HEADROOM_TOKENS
+            assert 20_000 <= output < configured_output
+        else:
+            assert output == configured_output
+        sent_input = _fallback_context_estimate(
+            [Message(role=message["role"], content=message["content"]) for message in summary_request["messages"]],
+            {}, llm=summary_llm,
+        )
+        assert sent_input <= summary_limit
+        assert sent_input + output + REQUEST_INPUT_HEADROOM_TOKENS <= summary_window
         main_requests = [request for request in requests if request["model"] == llm.model]
         assert len(main_requests) == 1
         assert compaction.estimated_after <= main_limit
-        assert llm.max_output_tokens == 50_000
+        assert llm.max_output_tokens == summary_llm.max_output_tokens == configured_output
         assert not any(isinstance(event, ErrorEvent) for event in events)
 
 

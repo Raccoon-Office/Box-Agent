@@ -12,7 +12,9 @@ import pytest
 
 from box_agent.cli import _probe_llm_api
 from box_agent.config import AgentConfig
-from box_agent.kernel.context_engine import _create_summary
+from box_agent.kernel.context_engine import (
+    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_REQUEST, _create_summary, _fallback_context_estimate,
+)
 from box_agent.llm.lightweight import LightweightPromptError, run_lightweight_prompt
 from box_agent.llm.model_routing import resolve_model_client
 from box_agent.llm import LLMClient
@@ -111,15 +113,30 @@ def test_auxiliary_cap_preserves_smaller_model_limits_and_the_execution_client(r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("finish_reason", ["stop", "length", "max_tokens"])
-async def test_summary_caps_its_request_and_rejects_truncated_envelopes(finish_reason):
+async def test_summary_uses_its_client_output_budget_and_rejects_truncated_envelopes(finish_reason):
     llm = BudgetLLM("<summary>valid-looking partial summary</summary>", finish_reason)
     if finish_reason == "stop":
         assert await _create_summary(llm, [Message(role="user", content="hello")], 1)
     else:
         with pytest.raises(RuntimeError, match="output token limit"):
             await _create_summary(llm, [Message(role="user", content="hello")], 1)
-    assert llm.calls[-1]["max_tokens"] == 8_192
+    assert llm.calls[-1]["max_tokens"] == llm.calls[-1]["max_output_tokens"] == 100_000
     assert llm.max_output_tokens == 100_000
+
+
+@pytest.mark.asyncio
+async def test_summary_uses_default_output_budget_when_client_has_no_declared_maximum():
+    outputs = []
+
+    class UndeclaredBudget:
+        async def generate_stream(self, messages, *, max_output_tokens, **kwargs):
+            outputs.append(max_output_tokens)
+            yield StreamEvent(type="text", delta="<summary>Complete.</summary>")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    result = await _create_summary(UndeclaredBudget(), [Message(role="user", content="hello")], 1)
+    assert result == "Complete."
+    assert outputs == [8_192]
 
 
 @pytest.mark.asyncio
@@ -254,6 +271,49 @@ async def test_anthropic_auxiliary_wire_budget_preserves_native_thinking_and_mai
     if thinking:
         assert judge["max_tokens"] > judge["thinking"]["budget_tokens"] == 8_000
     assert llm.max_output_tokens == 100_000
+
+
+@pytest.mark.asyncio
+async def test_anthropic_summary_clamps_only_the_request_that_needs_it():
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        events = [
+            {"type": "message_start", "message": {"id": "msg_test", "type": "message", "role": "assistant",
+             "model": "claude-test", "content": [], "stop_reason": None, "stop_sequence": None,
+             "usage": {"input_tokens": 5, "output_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "<summary>Complete.</summary>"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 4}},
+            {"type": "message_stop"},
+        ]
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text="".join(
+            f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+        ))
+
+    llm = LLMClient(api_key="test", provider="anthropic", model="claude-test",
+                    max_output_tokens=64_000, context_window=80_000)
+    await llm.aclose()
+    llm._client.client = anthropic.AsyncAnthropic(
+        api_key="test", max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    long_history = [Message(role="user", content="中" * 28_000)]
+    summary_input = _fallback_context_estimate([
+        *long_history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
+    ], {}, llm=llm)
+    try:
+        assert await _create_summary(llm, long_history, 1) == "Complete."
+        assert await _create_summary(llm, [Message(role="user", content="short request")], 1) == "Complete."
+    finally:
+        await llm.aclose()
+
+    tight, wide = requests
+    assert tight["max_tokens"] == 80_000 - summary_input - REQUEST_INPUT_HEADROOM_TOKENS
+    assert 20_000 <= tight["max_tokens"] < wide["max_tokens"] == llm.max_output_tokens == 64_000
 
 
 @pytest.mark.asyncio

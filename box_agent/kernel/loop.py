@@ -64,10 +64,12 @@ from .context_engine import (
     _is_summary_marker,
     _session_log_hint,
     _validate_transient_followup_result,
+    accepts_request_output_tokens,
     capture_request_usage,
     context_text_counter,
     reported_input_tokens,
     request_input_tokens,
+    request_output_room,
 )
 from .context_types import CompactionInput, CompactionOutcome, ContextCompactionState, InitialContextTransition
 from .ports import KernelServices
@@ -741,14 +743,7 @@ async def _run_agent_loop_impl(
     """
     llm = _services.llm
     token_limit = bound_context_token_limit(llm, token_limit)
-    # Existing injected LLMs can keep their original streaming signature.
-    try:
-        stream_parameters = inspect.signature(getattr(llm, "generate_stream", None)).parameters
-    except (TypeError, ValueError):
-        stream_parameters = {}
-    request_output_override = "max_output_tokens" in stream_parameters or any(
-        param.kind is inspect.Parameter.VAR_KEYWORD for param in stream_parameters.values()
-    )
+    request_output_override = accepts_request_output_tokens(llm)
     summary_llm = _services.summary_llm
     permission_negotiator = _services.permission_gateway
     memory_lookup = _services.memory_lookup
@@ -1859,8 +1854,7 @@ async def _run_agent_loop_impl(
                     else request_input_tokens(provider_request_messages, budget_tools_by_name, llm=llm,
                                               calibration=calibration)
                 )
-                reserve = min(request_max_output, OUTPUT_RESERVE_CAP_TOKENS)
-                available_output = max(reserve, window - input_tokens - REQUEST_INPUT_HEADROOM_TOKENS)
+                available_output = request_output_room(window, input_tokens, request_max_output)
                 if output_override is not None or available_output < request_max_output:
                     output_override = min(output_override or request_max_output, available_output)
             if output_override is not None:
@@ -2737,7 +2731,7 @@ async def _run_agent_loop_impl(
                 boost_cap = max(truncated_tool_call_boost_cap, requested_max)
                 boosted = min(boost, boost_cap)
                 if not stream_dropped and hasattr(llm, "set_ephemeral_max_output_tokens"):
-                    if "max_output_tokens" in stream_parameters:
+                    if accepts_request_output_tokens(llm, allow_kwargs=False):
                         pending_output_boost = boosted
                     else:
                         llm.set_ephemeral_max_output_tokens(boosted)

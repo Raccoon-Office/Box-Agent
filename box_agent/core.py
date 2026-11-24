@@ -71,7 +71,6 @@ from .kernel.context_engine import (
     _SUMMARY_MARKER,
     _SUMMARY_MESSAGE_PREFIX,
     _SUMMARY_MESSAGE_SUFFIX,
-    _SUMMARY_OUTPUT_CHAR_LIMIT,
     _SUMMARY_REQUEST,
     _WORKFLOW_CHECKPOINT_MARKER,
     _bound_retained_messages,

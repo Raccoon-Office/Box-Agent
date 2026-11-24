@@ -6628,7 +6628,7 @@ async def test_create_summary_passes_thinking_disabled_and_no_tools():
     assert sent[-1].content == _SUMMARY_REQUEST
     assert "list all user messages that are not tool results" in _SUMMARY_REQUEST
     assert "<summary>...</summary>" in _SUMMARY_REQUEST
-    assert "below 8,000 characters" in _SUMMARY_REQUEST
+    assert "characters" not in _SUMMARY_REQUEST
     assert "<analysis>" in _SUMMARY_REQUEST
     example = _SUMMARY_REQUEST.split("<example>", 1)[1].split("</example>", 1)[0]
     assert "<analysis>" not in example
@@ -6677,7 +6677,7 @@ async def test_create_summary_does_not_truncate_model_output():
     )
 
     assert len(output) > 12_000
-    assert output == body.strip()
+    assert output == body
     assert "<summary>" not in output
 
 
@@ -6688,6 +6688,7 @@ async def test_create_summary_does_not_truncate_model_output():
         "summary without tags",
         "preamble<summary>body</summary>",
         "<summary></summary>",
+        "<summary> \n\t </summary>",
         "<summary>body</summary>trailing text",
         "<summary>first</summary><summary>second</summary>",
     ],
@@ -7044,7 +7045,6 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
         _RECENT_GROUP_TOKEN_LIMIT,
         _SUMMARY_MESSAGE_PREFIX,
         _SUMMARY_MESSAGE_SUFFIX,
-        _SUMMARY_OUTPUT_CHAR_LIMIT,
     )
 
     class _LargeActivatedTool:
@@ -7082,8 +7082,9 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
         ],
     ]
 
+    summary = "\n  " + "continuation summary " * 700 + "\n"
     outcome = await _maybe_summarize(
-        _FakeSummaryLLM("continuation summary " * 700),
+        _FakeSummaryLLM(summary),
         messages,
         token_limit=90_000,
         api_total_tokens=0,
@@ -7102,11 +7103,8 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
     assert [message.tool_call_id for message in retained_tools] == [call.id for call in calls]
     assert _fallback_context_estimate(outcome.messages[2:], None) <= _RECENT_GROUP_TOKEN_LIMIT
     summary_message = outcome.messages[1]
-    assert len(str(summary_message.content)) <= (
-        len(_SUMMARY_MESSAGE_PREFIX)
-        + _SUMMARY_OUTPUT_CHAR_LIMIT
-        + len(_SUMMARY_MESSAGE_SUFFIX)
-    )
+    assert len(summary) > 8_000
+    assert summary_message.content == _SUMMARY_MESSAGE_PREFIX + summary + _SUMMARY_MESSAGE_SUFFIX
 
 
 @pytest.mark.asyncio

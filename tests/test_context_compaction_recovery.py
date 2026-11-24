@@ -97,7 +97,7 @@ async def test_summary_provider_overflow_is_retried_at_most_three_times(all_fail
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", [("<summary>partial", "length"), ("wrong envelope", "stop")])
+@pytest.mark.parametrize("outcome", [("<summary>partial</summary>", "length"), ("wrong envelope", "stop")])
 async def test_bad_summary_output_gets_one_strict_retry(outcome):
     provider = _Summary([outcome] * 3)
     result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
@@ -105,7 +105,14 @@ async def test_bad_summary_output_gets_one_strict_retry(outcome):
     assert result.summary_path == "deterministic"
     assert result.summary_retries == 2
     assert result.summary_calls == len(provider.requests) == 3
-    assert "4,000 characters" in provider.requests[1][-1].content
+    first, retry, independent = provider.requests
+    assert first[-1].content == context_engine._SUMMARY_REQUEST
+    assert retry[:-1] == first[:-1]
+    assert retry[-1].content == independent[-1].content == (
+        context_engine._SUMMARY_REQUEST + context_engine._SUMMARY_FORMAT_RETRY
+    )
+    assert "characters" not in retry[-1].content
+    assert independent[0].content != first[0].content
     assert not result.head_truncated
 
 
@@ -185,6 +192,7 @@ async def test_summary_caps_calls_and_keeps_the_resolved_model_for_every_layer()
         ("KITE-214", "stop"), ConnectionError("connection reset"),
     ])
     capped.model = "fixed-summary-model"
+    capped.max_output_tokens = 20_000
 
     class ResolvedSummary(_Summary):
         model = capped.model
@@ -192,7 +200,7 @@ async def test_summary_caps_calls_and_keeps_the_resolved_model_for_every_layer()
         clones = 0
 
         def for_model(self, model, *, max_output_tokens):
-            assert model == self.model and max_output_tokens == 8_192
+            assert model == self.model and max_output_tokens == self.max_output_tokens
             self.clones += 1
             return capped
 
@@ -209,6 +217,7 @@ async def test_summary_caps_calls_and_keeps_the_resolved_model_for_every_layer()
     assert result.summary_retries == 5 and result.head_truncated
     assert all(request[0] is history[0] for request in capped.requests[:-1])
     assert all(options["tools"] == list(tools) for options in capped.request_options[:-1])
+    assert all(options["max_output_tokens"] == resolved.max_output_tokens for options in capped.request_options)
     independent = capped.requests[-1]
     assert [message.content for message in independent if message.role == "system"] == [
         "You are a helpful AI assistant tasked with summarizing conversations.",
@@ -251,9 +260,9 @@ class _ReactiveProvider:
                           usage=TokenUsage(prompt_tokens=1500, completion_tokens=10, total_tokens=1510))
 
 
-def _agent(tmp_path, provider, *, tools=(), **kwargs):
+def _agent(tmp_path, provider, *, tools=(), token_limit=12_000, **kwargs):
     return Agent(llm_client=provider, system_prompt="System prompt.", tools=list(tools),
-                 workspace_dir=str(tmp_path), token_limit=12_000,
+                 workspace_dir=str(tmp_path), token_limit=token_limit,
                  deferred_mcp_loading_enabled=False, **kwargs)
 
 
@@ -364,7 +373,8 @@ def test_same_step_compactions_do_not_count_as_rapid_refills():
     assert not state.refilled_rapidly
 
 
-def test_deterministic_summary_preserves_the_newest_round_in_chronological_order():
+@pytest.mark.asyncio
+async def test_deterministic_summary_preserves_the_newest_round_and_full_fallback():
     call = ToolCall(id="latest-read", type="function", function=FunctionCall(name="read", arguments={}))
     messages = [
         Message(role="user", content="Oldest request"),
@@ -376,7 +386,7 @@ def test_deterministic_summary_preserves_the_newest_round_in_chronological_order
         Message(role="user", content="Current request"),
     ]
     summary = context_engine._deterministic_history_fallback(messages)
-    assert len(summary) <= 12_000
+    assert 8_000 < len(summary) <= 12_000
     assert "Current user request (prioritized):\n<role=user>\nCurrent request" in summary
     assert "<fallback omitted 2 earlier source messages>" in summary
     assert "Oldest request" not in summary and "Oldest reply" not in summary
@@ -386,6 +396,14 @@ def test_deterministic_summary_preserves_the_newest_round_in_chronological_order
     positions = [summary.index(text) for text in expected]
     assert positions == sorted(positions)
 
+    outcome = await context_engine._maybe_summarize(
+        _Summary(), [Message(role="system", content="system"), *messages],
+        30_000, 0, False, force=True, allow_llm_summary=False,
+    )
+    compacted = next(message for message in outcome.messages if context_engine._is_summary_marker(message))
+    assert outcome.mode == "fallback"
+    assert compacted.content == context_engine._SUMMARY_MESSAGE_PREFIX + summary + context_engine._SUMMARY_MESSAGE_SUFFIX
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_fails", [False, True])
@@ -393,7 +411,7 @@ async def test_compaction_circuit_breakers_span_turns(tmp_path, summary_fails):
     provider = _ReactiveProvider(0)
     if summary_fails:
         provider.summary_provider.outcomes = [_AuthenticationError("Authentication failed")] * 3
-    agent = _agent(tmp_path, provider, max_steps=1)
+    agent = _agent(tmp_path, provider, token_limit=20_000, max_steps=1)
     outcomes = []
     for turn in range(4):
         if summary_fails and turn:
@@ -402,7 +420,7 @@ async def test_compaction_circuit_breakers_span_turns(tmp_path, summary_fails):
                 agent.add_user_message(f"Small request {turn}-{step}")
                 _ = [event async for event in agent.run_events()]
         agent.messages.extend([
-            Message(role="assistant", content="材料" * 10_000),
+            Message(role="assistant", content="材料" * 24_000),
             Message(role="user", content=f"Continue turn {turn}"),
         ])
         outcomes.append([event async for event in agent.run_events()])
