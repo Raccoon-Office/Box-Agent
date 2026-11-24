@@ -246,7 +246,10 @@ from box_agent.run_observer import (
     cleanup_turn_resources,
 )
 from box_agent.experts import ExpertSessionContext, ExpertTeamValidationError
-from box_agent.expert_dependencies import ExpertDependencyError, validate_expert_dependencies
+from box_agent.expert_dependencies import (
+    ExpertDependencyError, expert_market_skill_bindings, resolve_optional_market_conflicts,
+    validate_expert_dependencies,
+)
 from box_agent.expert_package_format import ExpertPackageError
 from box_agent.expert_packages import prepare_expert_meta
 from box_agent.llm.reasoning import (
@@ -2061,6 +2064,8 @@ class BoxACPAgent:
             try:
                 meta = await prepare_expert_meta(meta)
                 expert_context = ExpertSessionContext.from_meta(meta)
+                if expert_context is not None:
+                    expert_context = resolve_optional_market_conflicts(meta, expert_context)
                 params.field_meta = meta
             except ExpertTeamValidationError as exc:
                 raise RequestError(-32602, "Invalid expert team", {
@@ -2325,6 +2330,7 @@ class BoxACPAgent:
                 expert_context.skill_names(), skill_directories=expert_context.skill_directories,
                 skill_bindings_by_directory=expert_context.skill_bindings_by_directory,
                 skill_bindings_by_path=expert_context.skill_bindings_by_path,
+                market_skill_bindings=expert_market_skill_bindings(meta, expert_context),
             )
         connector_skill_grants: set[str] = set()
         skillhub_search_tool: SkillHubSearchTool | None = None
