@@ -99,6 +99,7 @@ from box_agent.agent import (
     goal_autopilot_prompt,
     goal_autopilot_progress_signature,
     goal_payload,
+    resolve_agent_tool_availability,
     should_continue_goal_autopilot,
 )
 from box_agent.tools.setup import (
@@ -110,6 +111,7 @@ from box_agent.tools.setup import (
     build_sandbox_info_prompt,
     initialize_base_tools,
     render_system_prompt_template,
+    resolve_workspace_tool_availability,
     # Retained as module-level compatibility hooks; MCP reconciliation now
     # delegates through ``MCPRuntimeController`` below.
     sync_mcp_tool_list,
@@ -253,8 +255,9 @@ from box_agent.llm.reasoning import (
     parse_reasoning_effort,
 )
 from box_agent.execution_profile import (
-    FAST_OPTIONAL_SKILLS,
     ExecutionProfile,
+    blocked_skills_for_profile,
+    is_skill_blocked,
     normalize_execution_profile,
 )
 from box_agent.memory import MemoryManager, memory_identity, memory_user_turn, uses_local_memory
@@ -2379,20 +2382,51 @@ class BoxACPAgent:
                 skill, selected_connector_ids, connector_discovery
             ))
 
-        async def preflight_expert_dependencies():
+        process_owner_id = f"acp-runtime-{uuid4().hex}"
+
+        def preflight_expert_dependencies(session_log: SessionLog | None):
             if expert_context is None:
                 return
-            from box_agent.tools.setup import image_generation_tool_settings
-
-            expert_tools = {tool.name for tool in [*self._base_tools, *tools]}
+            expert_tools = set()
             if not utility:
-                expert_tools.add("tool_search")
-                if image_generation_tool_settings(self._config, session_llm)[0]:
-                    expert_tools.add("generate_image")
+                expert_tools.update(tool.name for tool in [*self._base_tools, *tools])
+                runtime_context = build_skill_runtime_context(
+                    sandbox_mode=session_sandbox_mode, env_context=env_context,
+                )
+                expert_tools.update(resolve_workspace_tool_availability(
+                    self._config, sandbox_mode=session_sandbox_mode,
+                    session_mode=session_mode, llm=session_llm,
+                    runtime_env=runtime_context.env(), process_owner_id=process_owner_id,
+                ))
+                # Restored logs pin the same interface used by Agent registration.
+                tool_version = self._config.agent.tool_interface_version
+                if session_log is not None:
+                    tool_version = session_log.resolve_tool_interface_version(tool_version)
+                expert_tools.update(resolve_agent_tool_availability(
+                    tool_interface_version=tool_version,
+                ))
+            from box_agent.tools.skill_tool import GetSkillTool
+
+            reader = next((tool for tool in reversed([*self._base_tools, *tools])
+                           if isinstance(tool, GetSkillTool)), None)
+            allowed_skills = getattr(reader, "allowed_skill_names", None)
+            blocked_skills = blocked_skills_for_profile(
+                execution_profile, getattr(reader, "blocked_skill_names", ()),
+            )
+
+            def dependency_is_available(skill):
+                # Read grants are restored/matched later. Preparation checks the
+                # host's current selection and readiness, without granting access.
+                return (
+                    _connector_skill_is_available(skill, selected_connector_ids, connector_discovery)
+                    and (allowed_skills is None or skill.name in allowed_skills)
+                    and not is_skill_blocked(skill.name, blocked_skills)
+                )
+
             try:
-                await asyncio.to_thread(
-                    validate_expert_dependencies, meta, expert_context, session_skill_loader, expert_tools,
-                    skill_access_filter=skill_access_filter,
+                validate_expert_dependencies(
+                    meta, expert_context, session_skill_loader, expert_tools,
+                    skill_access_filter=dependency_is_available,
                 )
             except ExpertDependencyError as exc:
                 raise RequestError(-32602, "Expert dependencies are not ready", {
@@ -2406,7 +2440,7 @@ class BoxACPAgent:
         expert_preflight_complete = expert_context is not None and bound_state is not None
         if expert_preflight_complete:
             connector_discovery = prepare_connector_discovery(bound_state.agent.session_log, new_session=False)
-            await preflight_expert_dependencies()
+            await asyncio.to_thread(preflight_expert_dependencies, bound_state.agent.session_log)
 
         recovery_prompt = (
             _RECOVERY_PROMPT if upstream_session_id and _RECOVERY_SESSION_ID.fullmatch(upstream_session_id) else None
@@ -2513,7 +2547,7 @@ class BoxACPAgent:
         try:
             if not expert_preflight_complete:
                 connector_discovery = prepare_connector_discovery(session_log, new_session=not resumed)
-                await preflight_expert_dependencies()
+                await asyncio.to_thread(preflight_expert_dependencies, session_log)
             state = await SessionState.open(
                 config=self._config,
                 runtime=self._plugin_runtime,
@@ -2524,7 +2558,7 @@ class BoxACPAgent:
                     memory_user_id=memory_meta.get("user_id"),
                     session_mode=session_mode, allow_full_access=session_allow_full_access,
                     permission_mode=permission_mode, effective_policy=effective_policy,
-                    process_owner_id=f"acp-runtime-{uuid4().hex}",
+                    process_owner_id=process_owner_id,
                     workspace_layout=_normalize_workspace_layout(meta.get("workspace_layout") or meta.get("workspaceLayout") if isinstance(meta, dict) else None),
                     follow_up_suggestions_enabled=follow_up_suggestions_enabled,
                 ),
