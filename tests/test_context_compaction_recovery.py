@@ -364,6 +364,29 @@ def test_same_step_compactions_do_not_count_as_rapid_refills():
     assert not state.refilled_rapidly
 
 
+def test_deterministic_summary_preserves_the_newest_round_in_chronological_order():
+    call = ToolCall(id="latest-read", type="function", function=FunctionCall(name="read", arguments={}))
+    messages = [
+        Message(role="user", content="Oldest request"),
+        Message(role="assistant", content="Oldest reply"),
+        Message(role="user", source="runtime", content="[Earlier User Messages]\nArchived original"),
+        Message(role="assistant", content="Older payload start\n" + "x" * 20_000 + "\nOlder payload end"),
+        Message(role="assistant", content="Latest tool call", tool_calls=[call]),
+        Message(role="tool", content="Latest tool result", name="read", tool_call_id=call.id),
+        Message(role="user", content="Current request"),
+    ]
+    summary = context_engine._deterministic_history_fallback(messages)
+    assert len(summary) <= 12_000
+    assert "Current user request (prioritized):\n<role=user>\nCurrent request" in summary
+    assert "<fallback omitted 2 earlier source messages>" in summary
+    assert "Oldest request" not in summary and "Oldest reply" not in summary
+    assert "Archived original" not in summary
+    expected = ["Current request", "<fallback omitted", "Older payload start", "Older payload end",
+                "Latest tool call", "Latest tool result"]
+    positions = [summary.index(text) for text in expected]
+    assert positions == sorted(positions)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_fails", [False, True])
 async def test_compaction_circuit_breakers_span_turns(tmp_path, summary_fails):

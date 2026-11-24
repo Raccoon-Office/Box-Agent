@@ -6742,7 +6742,7 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
     assert new_msgs[1].earlier_user_messages == ["old request"]
     assert "Deterministic history fallback" in str(new_msgs[2].content)
     assert new_msgs[-1] is msgs[-1]
-    assert "fallback stopped: 1 source messages remain" in str(new_msgs[2].content)
+    assert "<fallback omitted 2 earlier source messages>" in str(new_msgs[2].content)
     assert sum(len(str(m.content)) for m in new_msgs) < sum(len(str(m.content)) for m in msgs)
 
 

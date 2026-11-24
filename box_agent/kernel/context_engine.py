@@ -315,7 +315,6 @@ def _deterministic_history_fallback(messages: list[Message]) -> str:
     """Build an explicitly lossy bounded record when the summary provider fails."""
 
     lines = ["Deterministic history fallback (summary provider unavailable):"]
-    used = len(lines[0])
     latest_user = next(
         (
             message
@@ -327,37 +326,35 @@ def _deterministic_history_fallback(messages: list[Message]) -> str:
     if latest_user is not None:
         user_text = _summary_message_text(latest_user).replace("\x00", "")
         user_limit = min(4_000, _LOCAL_FALLBACK_CHAR_LIMIT // 3)
-        if len(user_text) > user_limit:
-            head_limit = user_limit * 3 // 4
-            tail_limit = user_limit - head_limit
-            omitted = len(user_text) - head_limit - tail_limit
-            user_text = (
-                f"{user_text[:head_limit]}\n"
-                f"...[fallback omitted {omitted} chars]...\n"
-                f"{user_text[-tail_limit:]}"
-            )
-        prioritized = f"Current user request (prioritized):\n{user_text}"
-        lines.append(prioritized)
-        used += len(prioritized)
+        user_text = _bound_text_middle(user_text, user_limit, label="fallback")
+        lines.append(f"Current user request (prioritized):\n{user_text}")
 
     remaining_messages = [
         message for message in messages
         if message is not latest_user and message.earlier_user_messages is None
+        and not (message.source == "runtime" and isinstance(message.content, str)
+                 and message.content.startswith(_EARLIER_USER_MARKER))
     ]
-    for index, msg in enumerate(remaining_messages):
-        text = _summary_message_text(msg).replace("\x00", "")
-        remaining = _LOCAL_FALLBACK_CHAR_LIMIT - used
-        if remaining <= 0:
-            lines.append(
-                f"<fallback stopped: {len(remaining_messages) - index} source messages remain>"
-            )
+    used = len("\n\n".join(lines))
+    recent: list[str] = []
+    for index in range(len(remaining_messages) - 1, -1, -1):
+        omitted_marker = f"<fallback omitted {index} earlier source messages>" if index else ""
+        reserve = len(omitted_marker) + 2 if omitted_marker else 0
+        available = _LOCAL_FALLBACK_CHAR_LIMIT - used - 2 - reserve
+        if available <= 0:
             break
-        if len(text) > remaining:
-            omitted = len(text) - remaining
-            text = text[:remaining] + f"\n...[fallback omitted {omitted} chars]"
-        lines.append(text)
-        used += len(text)
-    return "\n\n".join(lines)
+        text = _summary_message_text(remaining_messages[index]).replace("\x00", "")
+        if len(text) > available:
+            # Leave enough room for the excerpt marker and both ends.
+            if available < 64:
+                break
+            text = _bound_text_middle(text, available, label="fallback")
+        recent.append(text)
+        used += len(text) + 2
+    omitted = len(remaining_messages) - len(recent)
+    if omitted:
+        lines.append(f"<fallback omitted {omitted} earlier source messages>")
+    return "\n\n".join([*lines, *reversed(recent)])
 
 
 def _message_chars(message: Message) -> int:
