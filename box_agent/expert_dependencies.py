@@ -229,6 +229,19 @@ def validate_expert_dependencies(
                 if failure is None and selected is not None:
                     try:
                         for dependency in resolve_required_skills(skill_loader, [name]):
+                            # A binding omitted from optionalSkills may still be
+                            # required transitively by this profile, not another's.
+                            if dependency.name != name and any(
+                                not isinstance(candidate.get("skillId"), str)
+                                or not is_installed_market_skill(dependency, candidate["skillId"])
+                                for candidate in declared
+                                if isinstance(candidate, dict)
+                                and candidate.get("source") == "MARKET"
+                                and candidate.get("slug") == dependency.name
+                            ):
+                                failure = "unavailable", f"Required Skill '{dependency.name}' does not match this expert's market installation identity."
+                                dependency_name = dependency.name
+                                break
                             if skill_access_filter is not None and not skill_access_filter(dependency):
                                 failure = "unavailable", f"Required Skill '{dependency.name}' is not enabled for this conversation."
                                 dependency_name = dependency.name
