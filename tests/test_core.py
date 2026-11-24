@@ -6586,7 +6586,7 @@ async def test_create_summary_passes_thinking_disabled_and_no_tools():
     assert all(sent[index] is message for index, message in enumerate(original))
     assert sent[-1].role == "user"
     assert sent[-1].content == _SUMMARY_REQUEST
-    assert "lists every user message" in _SUMMARY_REQUEST
+    assert "list all user messages that are not tool results" in _SUMMARY_REQUEST
     assert "<summary>...</summary>" in _SUMMARY_REQUEST
     assert "below 8,000 characters" in _SUMMARY_REQUEST
     assert "<analysis>" in _SUMMARY_REQUEST
