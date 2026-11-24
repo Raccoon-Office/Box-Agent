@@ -21,10 +21,10 @@ import sys
 import threading
 import time
 from asyncio import transports as aio_transports
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 from box_agent.log_files import open_private_log
 
@@ -109,6 +109,8 @@ class StdioTransport:
 
     async def close(self) -> None:
         self._closed = True
+        if isinstance(self._reader, _StdioStreamReader):
+            await self._reader.close_input()
         async with self._send_lock:
             transport = getattr(self._writer, "transport", None)
             if isinstance(transport, _StdoutTransport):
@@ -128,6 +130,11 @@ class _StdioStreamReader(asyncio.StreamReader):
     def __init__(self, on_eof: Callable[[], None] | None = None) -> None:
         super().__init__(limit=_READ_LIMIT)
         self._on_eof = on_eof
+        self.stop_feeder: Callable[[], Awaitable[None]] | None = None
+
+    async def close_input(self) -> None:
+        if self.stop_feeder is not None:
+            await self.stop_feeder()
 
     async def readline(self) -> bytes:
         try:
@@ -169,22 +176,96 @@ class _WritePipeProtocol(asyncio.BaseProtocol):
             await asyncio.shield(self._drain_waiter)
 
 
-def _start_stdin_feeder(loop: asyncio.AbstractEventLoop, reader: asyncio.StreamReader) -> None:
-    def blocking_read() -> None:
-        try:
-            while True:
-                # Bound the feeder allocation too: a Windows pipe does not use
-                # asyncio's read transport or its buffer limit.
-                data = sys.stdin.buffer.readline(_READ_LIMIT + 1)
-                if not data:
-                    break
-                loop.call_soon_threadsafe(reader.feed_data, data)
-                if len(data) > _READ_LIMIT and not data.endswith(b"\n"):
-                    break  # Let bounded readline report the oversized frame.
-        finally:
-            loop.call_soon_threadsafe(reader.feed_eof)
+class _WindowsReadThread:
+    """A real handle to the calling thread, valid even after its ID is reused."""
 
-    threading.Thread(target=blocking_read, daemon=True).start()
+    def __init__(self) -> None:
+        import ctypes
+        import _winapi
+
+        self._kernel = ctypes.WinDLL("kernel32")
+        self._kernel.GetCurrentThread.restype = ctypes.c_void_p
+        process = _winapi.GetCurrentProcess()
+        self._handle = ctypes.c_void_p(_winapi.DuplicateHandle(
+            process, self._kernel.GetCurrentThread(), process,
+            0, False, _winapi.DUPLICATE_SAME_ACCESS,
+        ))
+
+    def cancel_read(self) -> None:
+        self._kernel.CancelSynchronousIo(self._handle)
+
+    def close(self) -> None:
+        self._kernel.CloseHandle(self._handle)
+
+
+def _start_stdin_feeder(
+    loop: asyncio.AbstractEventLoop, reader: _StdioStreamReader, source: BinaryIO,
+) -> None:
+    stopping = threading.Event()
+    finished = loop.create_future()
+    handle_lock = threading.Lock()
+    native_thread: _WindowsReadThread | None = None
+
+    def finish() -> None:
+        reader.stop_feeder = None
+        reader.feed_eof()
+        finished.set_result(None)
+
+    def blocking_read() -> None:
+        nonlocal native_thread
+        try:
+            with source:
+                try:
+                    handle = _WindowsReadThread()
+                except OSError as exc:
+                    logging.warning("ACP stdin read cancellation unavailable: %s", exc)
+                else:
+                    with handle_lock:
+                        native_thread = handle
+                while not stopping.is_set():
+                    data = source.readline(_READ_LIMIT + 1)
+                    if not data or stopping.is_set():
+                        break
+                    loop.call_soon_threadsafe(reader.feed_data, data)
+                    if len(data) > _READ_LIMIT and not data.endswith(b"\n"):
+                        break  # Let bounded readline report the oversized frame.
+        except BrokenPipeError:
+            pass  # Host disconnected.
+        except Exception as exc:
+            if not stopping.is_set():
+                loop.call_soon_threadsafe(reader.set_exception, exc)
+        finally:
+            # The event loop can stop after accepting a callback but before
+            # running it. Release the handle here, serialized with cancellation.
+            with handle_lock:
+                if native_thread is not None:
+                    native_thread.close()
+                    native_thread = None
+            try:
+                loop.call_soon_threadsafe(finish)
+            except RuntimeError:
+                # A driver can complete a cancelled read after server teardown.
+                if not loop.is_closed():
+                    raise
+
+    async def stop() -> None:
+        stopping.set()
+        # Cancellation can race the first read or a subsequent raw read inside
+        # BufferedReader.readline(). Retry on close only, while the host keeps
+        # its write end open. The receive path never polls an idle pipe.
+        deadline = loop.time() + 0.5
+        while not finished.done():
+            with handle_lock:
+                if native_thread is not None:
+                    native_thread.cancel_read()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logging.warning("ACP stdin read did not retire before the close deadline")
+                return
+            await asyncio.wait({finished}, timeout=min(0.025, remaining))
+
+    reader.stop_feeder = stop
+    threading.Thread(target=blocking_read, name="acp-stdin", daemon=True).start()
 
 
 @dataclass(slots=True)
@@ -405,15 +486,14 @@ async def _windows_stdio_streams(
     on_eof: Callable[[], None] | None = None,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     reader = _StdioStreamReader(on_eof)
-    _ = asyncio.StreamReaderProtocol(reader)
-
-    _start_stdin_feeder(loop, reader)
-
     write_protocol = _WritePipeProtocol()
     transport = _StdoutTransport()
     writer = asyncio.StreamWriter(
         cast(aio_transports.WriteTransport, transport), write_protocol, None, loop
     )
+    # The worker owns its buffer. A blocked read can never hold the global
+    # sys.stdin buffer lock while CPython is finalizing the interpreter.
+    _start_stdin_feeder(loop, reader, os.fdopen(os.dup(sys.stdin.fileno()), "rb"))
     return reader, writer
 
 

@@ -1,0 +1,40 @@
+name: Windows ACP process isolation
+
+on:
+  pull_request:
+    paths:
+      - 'box_agent/acp/__init__.py'
+      - 'box_agent/acp/stdio_compat.py'
+      - 'box_agent/tools/bash_tool.py'
+      - 'box_agent/tools/jupyter_tool.py'
+      - 'tests/desktop_runtime_fixture.py'
+      - 'tests/test_acp_stdio.py'
+      - 'tests/test_bash_tool.py'
+      - 'tests/test_desktop_runtime_fixture.py'
+      - 'tests/test_jupyter_runtime_python.py'
+      - '.github/workflows/windows-acp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  console-and-pipes:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --extra dev --python 3.12
+      - name: Verify console ownership, tool failure and host shutdown
+        run: >-
+          uv run --no-sync pytest -q --tb=short
+          tests/test_desktop_runtime_fixture.py::test_tool_process_exit_preserves_peer_session_and_host_shutdown
+          tests/test_acp_stdio.py::test_windows_stdio_close_retires_partial_read_while_host_pipe_is_open
+          tests/test_acp_stdio.py::test_windows_stdin_worker_releases_native_handle_without_another_loop_tick
+          tests/test_bash_tool.py::test_windows_spawn_logs_filter_command_before_the_preview_cut
+          tests/test_jupyter_runtime_python.py::test_sandbox_kernel_survives_its_own_python_interrupt
+          tests/test_jupyter_runtime_python.py::test_windows_host_session_requires_external_python_in_frozen_runtime

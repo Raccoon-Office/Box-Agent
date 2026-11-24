@@ -252,7 +252,7 @@ async def test_request_cleanup_preserves_interleaved_sessions_and_host_permissio
         probe = AcpHostProbe(
             command=[sys.executable, "-m", "tests.desktop_runtime_fixture"], cwd=root,
             env={"BOX_AGENT_DESKTOP_TEST_ROOT": str(root), "BOX_AGENT_HOME": str(root / "profile"),
-                 "PYTHONUTF8": "1"}, timeout_s=10,
+                 "BOX_AGENT_ACP_HOST_MANAGED": "1", "PYTHONUTF8": "1"}, timeout_s=10,
         )
         await probe.start()
         process = probe._proc
@@ -346,6 +346,52 @@ async def test_request_cleanup_preserves_interleaved_sessions_and_host_permissio
             await probe.stop()
         assert "Task exception was never retrieved" not in probe.stderr_text
         assert "Task was destroyed" not in probe.stderr_text
+
+
+@pytest.mark.parametrize("host_managed", [
+    True, pytest.param(False, marks=pytest.mark.skipif(os.name != "nt", reason="Windows console control")),
+])
+@pytest.mark.asyncio
+async def test_tool_process_exit_preserves_peer_session_and_host_shutdown(host_managed):
+    # Establish an attached console even on a headless runner. Query membership
+    # before and after ACP startup without sending control events to any process.
+    bootstrap = """import ctypes
+pid = ctypes.c_ulong()
+kernel = ctypes.windll.kernel32
+if not kernel.GetConsoleProcessList(ctypes.byref(pid), 1):
+    assert kernel.AllocConsole()
+assert kernel.GetConsoleProcessList(ctypes.byref(pid), 1)
+from tests.desktop_runtime_fixture import main
+main()
+"""
+    workspace = Path(__file__).resolve().parents[1] / "workspace"
+    workspace.mkdir(exist_ok=True)
+    with TemporaryDirectory(prefix="console-owner-", dir=workspace) as directory:
+        root = Path(directory)
+        args = ["-c", bootstrap] if os.name == "nt" else ["-m", "tests.desktop_runtime_fixture"]
+        probe = AcpHostProbe(
+            command=[sys.executable, *args], cwd=root, timeout_s=15,
+            env={"BOX_AGENT_DESKTOP_TEST_ROOT": str(root), "PYTHONUTF8": "1",
+                 "BOX_AGENT_DESKTOP_TEST_SHELL_EXIT": "1",
+                 "BOX_AGENT_ACP_HOST_MANAGED": "1" if host_managed else "0"},
+        )
+        await probe.start()
+        try:
+            await probe.initialize()
+            if os.name == "nt":
+                assert await probe.ext_request("fixture_console_attached") == {"attached": not host_managed}
+            first = await probe.session_new(cwd=str(root / "profile/workspaces/first"))
+            peer = await probe.session_new(cwd=str(root / "profile/workspaces/peer"))
+            assert (await probe.session_prompt(first, "fixture:shell_exit"))["stopReason"] == "end_turn"
+            updates = collect_session_updates(probe.drain_notifications())
+            assert any(item.get("status") == "failed" for item in updates)
+            assert "Command failed with exit code 23" in message_text_from_updates(updates)
+            assert (await probe.session_prompt(peer, "fixture:normal"))["stopReason"] == "end_turn"
+            probe._proc.stdin.close()
+            assert await asyncio.wait_for(probe._proc.wait(), 5) == 0
+            assert not probe._protocol.parse_errors
+        finally:
+            await probe.stop()
 
 
 @pytest.mark.asyncio

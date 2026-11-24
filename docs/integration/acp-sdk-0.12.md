@@ -116,6 +116,15 @@ SDK 默认 NDJSON transport 会拼接 `readuntil` 超限分段，故 reader 的 
 Windows 输出在 transport 创建时绑定原 stdout，避免 stdout 重定向后协议写入 stderr；
 写失败向上抛出，由 transport 通知断连。
 
+Windows 桌面宿主在创建 ACP 进程时可设置 `BOX_AGENT_ACP_HOST_MANAGED=1`，并为三个标准流提供管道。
+ACP 启动时消费该标记，随后脱离控制台。交互式 ACP 启动时应省略该标记，以保留键盘中断。
+宿主可以关闭 stdin 请求正常退出，也可以通过自己的 Windows Job 终止进程树。Windows 的 stdin
+读线程独占缓冲，关闭时取消正在进行的读取，即使宿主仍持有管道写端也能结束读取。
+
+Windows 上的 Git Bash、PowerShell 和外部 Jupyter 内核使用独立的无窗口启动方式。
+冻结版 ACP 会话需要宿主提供独立 Python 才能执行 `execute_code`。缺少解释器时，该工具返回
+`ISOLATED_KERNEL_UNAVAILABLE`，同一进程中的其他会话可以继续工作。
+
 旧 SDK 的请求 state store / sender 适配已删除。0.12.1 只保存未完成回包，
 但接收循环会在等待下一帧时保留上一条消息。`request_state.release_received_frames`
 使用单实例的 `_process_message` 钩子：浅拷贝消息封套交给 SDK，然后清空接收循环持有的封套。

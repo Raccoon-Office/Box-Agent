@@ -6666,6 +6666,18 @@ async def _close_acp_connection(
 
 async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
+    if sys.platform == "win32" and os.environ.pop("BOX_AGENT_ACP_HOST_MANAGED", None) == "1":
+        # The desktop supplies three pipes and owns this process via its Job.
+        # Detach before starting any tools so their console events cannot reach ACP.
+        import ctypes
+
+        if not ctypes.windll.kernel32.FreeConsole():
+            # Keep serving on the host pipes even if the console cannot detach.
+            # This process has no interactive Ctrl+C contract with the desktop.
+            logging.getLogger(__name__).warning("Could not detach desktop ACP console: %s", ctypes.WinError())
+            for console_signal in (signal.SIGINT, signal.SIGBREAK):
+                signal.signal(console_signal, signal.SIG_IGN)
+
     config = config or Config.load()
     from ..desktop_memory.launch import desktop_launch_agent
 
@@ -6711,6 +6723,7 @@ async def run_acp_server(config: Config | None = None) -> None:
 
     shutdown_event = asyncio.Event()
     connection: AgentSideConnection | None = None
+    stdio_transport: StdioTransport | None = None
     server_adapter: BoxACPAgent | None = None
     llm = lite_llm = None
     mcp_task = skill_task = None
@@ -6811,11 +6824,12 @@ async def run_acp_server(config: Config | None = None) -> None:
         # Restore real stdout for ACP transport, then re-guard sys.stdout
         sys.stdout = _real_stdout
         reader, writer = await stdio_streams_largebuf(on_eof=shutdown_event.set)
+        stdio_transport = StdioTransport(reader, writer, on_disconnect=shutdown_event.set)
+        sys.stdout = sys.stderr
 
         from box_agent.hooks import load_hooks
         _hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
 
-        sys.stdout = sys.stderr
         def create_adapter(conn):
             nonlocal server_adapter
             server_adapter = BoxACPAgent(
@@ -6826,7 +6840,7 @@ async def run_acp_server(config: Config | None = None) -> None:
             return server_adapter
 
         connection = AgentSideConnection(
-            create_adapter, StdioTransport(reader, writer, on_disconnect=shutdown_event.set),
+            create_adapter, stdio_transport,
             # SDK 0.12.1 gates session/resume behind this flag. The other
             # gated lifecycle methods have no handler on BoxACPAgent.
             use_unstable_protocol=True,
@@ -6877,6 +6891,8 @@ async def run_acp_server(config: Config | None = None) -> None:
                         shutdown.push_async_callback(stop_background_task, task)
                 if connection is not None:
                     shutdown.push_async_callback(_close_acp_connection, connection, writer)
+                elif stdio_transport is not None:
+                    shutdown.push_async_callback(stdio_transport.close)
                 if server_adapter is not None:
                     # Settle owned runs while the SDK sender is still live:
                     # prompt cancellation can emit final protocol updates.

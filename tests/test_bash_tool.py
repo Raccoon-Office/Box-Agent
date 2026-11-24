@@ -288,6 +288,7 @@ async def test_bash_permission_check_filters_the_logged_command_preview(tmp_path
 async def test_windows_spawn_logs_filter_command_before_the_preview_cut(tmp_path, monkeypatch, caplog, bundled):
     tool = BashTool(workspace_dir=str(tmp_path))
     tool.is_windows = True
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     tool._bundled_win_bash = "bash.exe" if bundled else None
     tool._bundled_win_path_dirs = []
     tool._powershell_executable = "powershell.exe"
@@ -300,6 +301,8 @@ async def test_windows_spawn_logs_filter_command_before_the_preview_cut(tmp_path
     with caplog.at_level(logging.INFO, logger=bash_tool_module.__name__):
         await tool._spawn_subprocess(command, environment={"PATH": path})
     assert command in spawn.call_args.args[-1]
+    assert spawn.call_args.kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW
+    assert spawn.call_args.kwargs["stdin"] == subprocess.DEVNULL
     assert spawn.call_args.kwargs["env"]["PATH"] == path
     assert "https://<redacted>@" in caplog.text and "fixture-boundary" not in caplog.text
     assert "fixture-path-boundary" not in caplog.text

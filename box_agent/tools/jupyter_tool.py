@@ -118,7 +118,10 @@ async def _start_sandbox_kernel(
 ) -> None:
     """Start a Jupyter kernel without blocking the host event loop forever."""
     async_start = getattr(kernel_manager, "_async_start_kernel", None)
-    start_kwargs = {"env": dict(env)} if env is not None else {}
+    start_kwargs: dict[str, Any] = {"env": dict(env)} if env is not None else {}
+    if sys.platform == "win32":
+        # Jupyter keeps its own interrupt event and parent-lifetime handle.
+        start_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
         if callable(async_start):
             await asyncio.wait_for(async_start(**start_kwargs), timeout=timeout)
@@ -1622,7 +1625,7 @@ class JupyterSandboxTool(Tool):
         self._skill_scratch_dir = skill_scratch_dir
         self.process_owner_id = (process_owner_id or "").strip()
         self._session_id: Optional[str] = None
-        self._requires_subprocess = False
+        self._requires_subprocess = sys.platform == "win32" and bool(self.process_owner_id)
         # Optional ACP host binding. CLI and older hosts retain their existing behavior.
         self.runtime_preparer: Callable[[], Awaitable[None]] | None = None
 
@@ -1762,7 +1765,7 @@ class JupyterSandboxTool(Tool):
         if IS_FROZEN:
             if self._requires_subprocess:
                 raise RuntimeError(
-                    "ISOLATED_KERNEL_UNAVAILABLE: child Python execution requires "
+                    "ISOLATED_KERNEL_UNAVAILABLE: isolated Python execution requires "
                     "a standalone runtime Python (BOX_AGENT_SANDBOX_PYTHON)."
                 )
             return InProcessKernelSession(session_id, workspace)

@@ -6,6 +6,16 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## Windows desktop ACP process ownership
+
+Desktop hosts can opt into console detachment with `BOX_AGENT_ACP_HOST_MANAGED=1`.
+Hosts that use terminal interrupts can omit the variable. Windows frozen ACP sessions
+require an external Python interpreter for Jupyter execution. A missing interpreter
+produces a tool error and leaves the remaining sessions available.
+Deploy the matching host and runtime to enable the full behavior. Omitting the launch
+flag restores the runtime's normal terminal signal handling. See the [host contract](../integration/acp-sdk-0.12.md#长驻进程约束)
+and the [native Windows checks](../../.github/workflows/windows-acp.yml).
+
 ## Five-level session reasoning and unified hosted thinking (PR #257)
 
 - **Scope and source:** [PR #257](https://github.com/Raccoon-Office/Box-Agent/pull/257)
@@ -363,6 +373,7 @@ decision, read those entries together.
 
 | Area | Affected paths or keywords | Current effective decision | Relationship | Details |
 | --- | --- | --- | --- | --- |
+| Windows ACP lifecycle | `BOX_AGENT_ACP_HOST_MANAGED`, `stdio_compat.py` | The desktop owns process shutdown and an external kernel owns Python tool execution. | Opt-in desktop launch contract. | [Process ownership](#windows-desktop-acp-process-ownership) |
 | Session reasoning and hosted thinking | `llm/reasoning.py`, `model_profiles.py`, `reasoning_effort`, `raccoon_thinking_level`, `raccoonThinkingModels` | PR #257 adds isolated native effort and capability-gated hosted preferences; utilities retain disabled policy and unmanaged entries retain native routing. | Companion record precedes implementation; coordinates host/backend/runtime adoption and rollback, without changing existing data. | [PR #257 contract and rollout](#five-level-session-reasoning-and-unified-hosted-thinking-pr-257) |
 | Product directory access | `PermissionEngine`, `shell_inspection.py`, `BOX_AGENT_CLIENT_ROOT`, `BOX_AGENT_CLIENT_DATA_ROOT`, restricted ACP | Actual product roots default to read/write; Bash product symlink traversal is accepted while canonical file checks and recognized builtin Skill write guards remain. | Supersedes physical containment for Bash product access; paired desktop path propagation and runtime rollout remain separate. | [PR #264](#product-directory-defaults-and-bash-traversal-pr-264) |
 | ACP structured input | `input_context.py`, `selection_context`, `database_context`, history edit, `_inject` | Agent validates and projects host facts; semantic context participates in idempotency without granting tool access. | Paired host contract; prompts without new context retain their fingerprint. | [PR #246](#structured-input-and-selection-ownership-pr-246) |
