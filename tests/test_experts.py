@@ -1047,3 +1047,30 @@ def test_expert_team_without_orchestration_keeps_existing_profile_behavior():
     }})
     assert context.team.id == "legacy-team"
     assert context.team.orchestration is None
+
+
+@pytest.mark.parametrize("workstream", [
+    {"memberId": "lead", "required": True},
+    {"member_id": "lead", "title": "  ", "required": "true"},
+    {"title": "Review", "required": True},
+    {"memberId": " ", "title": "Review", "required": True},
+])
+def test_expert_team_rejects_incomplete_required_workstreams(workstream):
+    with pytest.raises(ValueError) as error:
+        ExpertSessionContext.from_meta({"expert_team": {
+            "id": "review-team", "name": "Review team",
+            "leader": {"id": "lead", "name": "Lead"},
+            "orchestration": {"workstreams": [workstream]},
+        }})
+    assert error.value.code == "EXPERT_TEAM_INVALID_WORKSTREAM"
+    assert error.value.team_id == "review-team"
+    assert "memberId" in str(error.value) and "title" in str(error.value)
+
+
+@pytest.mark.parametrize("required", [None, False])
+def test_incomplete_optional_workstream_keeps_legacy_ignored_behavior(required):
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "review-team", "name": "Review team",
+        "orchestration": {"workstreams": [{"memberId": "lead", "required": required}]},
+    }})
+    assert context.team.orchestration is None
