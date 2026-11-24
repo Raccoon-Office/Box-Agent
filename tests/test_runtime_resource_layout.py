@@ -77,6 +77,13 @@ def test_resource_copy_refuses_a_link_outside_the_source_tree(tmp_path):
     assert foreign.read_text() == "must not be packaged"
 
 
+def test_windows_packaging_rejects_npm_success_without_the_native_renderer(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_runtime.shutil, "which", lambda name: "npm")
+    monkeypatch.setattr(build_runtime.subprocess, "run", lambda cmd, **kwargs: CompletedProcess(cmd, 0))
+    with pytest.raises(RuntimeError, match="@img/sharp-win32-x64"):
+        build_runtime.install_ppt_design_dependencies(tmp_path, "win32", "x64")
+
+
 def test_linux_assembly_keeps_resources_beside_bin_and_mcp_inside_the_frozen_package(tmp_path, monkeypatch):
     project = source_tree(tmp_path / "source")
     captured = []

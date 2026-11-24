@@ -153,6 +153,10 @@ still need `--bundled-python-sandbox`. A profile mismatch, missing manifest, or
 unknown profile is rejected before any build changes. To switch profiles, omit
 `--exe-only` and run a clean build, preferably in a separate output directory.
 
+The Windows build host needs Node.js 22–24 and npm on PATH. Clean builds and
+incremental updates install the locked Windows x64 PPT renderer dependencies
+in the Skill directory so clients can export offline.
+
 #### Key Constraints
 
 | Channel | Content | Rule |

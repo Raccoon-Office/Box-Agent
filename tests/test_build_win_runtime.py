@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CalledProcessError, CompletedProcess
 from unittest.mock import Mock
 
 import pytest
 
 from scripts import build_runtime, build_win_runtime
+
+
+RENDERER = Path("skills/presentation-design/skills/sn-ppt-dsl")
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +26,18 @@ def resource_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     skills.mkdir()
     (skills / "_manifest.json").write_text('{"skills": []}', encoding="utf-8")
     (skills / "SKILL.md").write_text("new Skill", encoding="utf-8")
+    renderer = project / "box_agent" / RENDERER
+    renderer.mkdir(parents=True)
+    (renderer / "package-lock.json").write_text("{}", encoding="utf-8")
+
+    def install_test_renderer(runtime_dir: Path, plat: str, arch: str) -> None:
+        module = runtime_dir / RENDERER
+        assert (module / "package-lock.json").is_file()
+        dependencies = module / "node_modules"
+        dependencies.mkdir()
+        (dependencies / "target.txt").write_text(f"{plat}-{arch}", encoding="utf-8")
+
+    monkeypatch.setattr(build_runtime, "install_ppt_design_dependencies", install_test_renderer)
     monkeypatch.setattr(build_win_runtime, "PROJECT_ROOT", project)
     return project
 
@@ -184,6 +199,7 @@ def test_windows_build_entry_preserves_selected_profile_and_existing_tools(
     if not exe_only:
         assert called_bin == runtime_dir / "bin"
     assert build.call_args.kwargs == {"external_python_sandbox": not bundled}
+    assert (runtime_dir / RENDERER / "node_modules/target.txt").read_text() == "win32-x64"
     assert (runtime_dir / "skills/SKILL.md").read_text() == "new Skill"
     assert (runtime_dir / "config/config-example.yaml").read_text() == "new resource config-example.yaml"
     manifest = json.loads((runtime_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -321,6 +337,7 @@ def test_exe_only_install_preserves_tools_in_a_matching_target(tmp_path, monkeyp
     build_win_runtime.main()
 
     assert (target_dir / "bin" / "box-agent-acp.exe").read_bytes() == b"rebuilt exe"
+    assert (target_dir / RENDERER / "node_modules/target.txt").read_text() == "win32-x64"
     assert (target_dir / "skills/SKILL.md").read_text() == "new Skill"
     assert (target_dir / "config/config-example.yaml").read_text() == "new resource config-example.yaml"
     manifest = json.loads((target_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -331,3 +348,35 @@ def test_exe_only_install_preserves_tools_in_a_matching_target(tmp_path, monkeyp
         assert not (target_dir / "runtimes").exists()
     else:
         assert (target_dir / "runtime" / "PortableGit" / "usr" / "bin" / "bash.exe").read_bytes() == b"existing bash"
+
+
+def test_exe_only_failed_renderer_install_keeps_both_existing_copies(tmp_path, monkeypatch):
+    output = tmp_path / "output"
+    installed = tmp_path / "installed"
+    existing = (output / "box-agent-runtime", installed)
+    for root in existing:
+        root.mkdir(parents=True)
+        build_win_runtime._write_manifest(root, "previous")
+        dependencies = root / RENDERER / "node_modules"
+        dependencies.mkdir(parents=True)
+        (dependencies / "target.txt").write_text("previous renderer")
+
+    def fail_install(*args):
+        raise CalledProcessError(1, "npm ci")
+
+    monkeypatch.setattr(build_win_runtime, "_ensure_win", lambda: None)
+    monkeypatch.setattr(build_win_runtime, "_install_runtime_extras", lambda: None)
+    monkeypatch.setattr(build_win_runtime, "_load_build_dependencies", lambda: None)
+    monkeypatch.setattr(build_win_runtime, "BUILD_TOOLS_CACHE", tmp_path / "cache", raising=False)
+    monkeypatch.setattr(build_win_runtime, "_run_pyinstaller", Mock())
+    monkeypatch.setattr(build_runtime, "install_ppt_design_dependencies", fail_install)
+    monkeypatch.setattr(build_win_runtime.sys, "argv", [
+        "build_win_runtime.py", "--exe-only", "--output", str(output), "--install-to", str(installed),
+    ])
+    with pytest.raises(CalledProcessError):
+        build_win_runtime.main()
+
+    for root in existing:
+        assert (root / "VERSION").read_text().strip() == "previous"
+        assert (root / RENDERER / "node_modules/target.txt").read_text() == "previous renderer"
+    assert not list(output.glob("*.tar.gz"))

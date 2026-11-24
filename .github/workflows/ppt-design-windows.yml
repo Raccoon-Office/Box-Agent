@@ -1,0 +1,45 @@
+name: Windows PPT design package
+
+on:
+  pull_request:
+    paths:
+      - 'box_agent/skills/presentation-design/**'
+      - 'scripts/build_runtime.py'
+      - 'scripts/build_win_runtime.py'
+      - 'scripts/verify_ppt_design_runtime.py'
+      - 'tests/test_build_win_runtime.py'
+      - 'tests/test_runtime_resource_layout.py'
+      - '.github/workflows/ppt-design-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller
+      - name: Build and install a clean runtime
+        run: >-
+          python scripts/build_win_runtime.py --version ci-clean --no-tar
+          --output "$env:RUNNER_TEMP/ppt-build" --install-to "$env:RUNNER_TEMP/ppt-installed"
+      - name: Export an offline PPTX from the clean install
+        run: python scripts/verify_ppt_design_runtime.py "$env:RUNNER_TEMP/ppt-installed" ci-clean
+      - name: Update the same installation
+        run: >-
+          python scripts/build_win_runtime.py --version ci-update --exe-only --no-tar
+          --output "$env:RUNNER_TEMP/ppt-build" --install-to "$env:RUNNER_TEMP/ppt-installed"
+      - name: Export an offline PPTX from the updated install
+        run: python scripts/verify_ppt_design_runtime.py "$env:RUNNER_TEMP/ppt-installed" ci-update

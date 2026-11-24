@@ -424,13 +424,14 @@ def main() -> None:
     print(f"Output: {runtime_dir}")
     print(f"Mode: {'exe-only' if args.exe_only else 'full'}")
 
+    from scripts.build_runtime import assemble_runtime_resources
+
     if args.exe_only:
         # Prepare the whole versioned payload before replacing existing files.
-        from scripts.build_runtime import copy_runtime_resources
         with tempfile.TemporaryDirectory(prefix=".box-agent-build-", dir=output_dir) as folder:
             staging = Path(folder)
             _run_pyinstaller(staging / "bin", external_python_sandbox=external_python_sandbox)
-            copy_runtime_resources(PROJECT_ROOT, staging)
+            assemble_runtime_resources(PROJECT_ROOT, staging, "win32", "x64")
             _write_manifest(staging, version, external_python_sandbox=external_python_sandbox)
             _replace_exe_only_payload(staging, runtime_dir)
     else:
@@ -441,8 +442,7 @@ def main() -> None:
         bin_dir = runtime_dir / "bin"
         bin_dir.mkdir()
         _run_pyinstaller(bin_dir, external_python_sandbox=external_python_sandbox)
-        from scripts.build_runtime import copy_runtime_resources
-        copy_runtime_resources(PROJECT_ROOT, runtime_dir)
+        assemble_runtime_resources(PROJECT_ROOT, runtime_dir, "win32", "x64")
         _write_manifest(runtime_dir, version, external_python_sandbox=external_python_sandbox)
         # bash + python + sandbox packages + node
         if not external_python_sandbox:

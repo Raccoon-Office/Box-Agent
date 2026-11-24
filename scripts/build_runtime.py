@@ -110,7 +110,7 @@ def copy_runtime_resources(project_root: Path, runtime_dir: Path) -> None:
 def install_ppt_design_dependencies(runtime_dir: Path, plat: str, arch: str) -> None:
     """Install the locked renderer and native image library for the target once."""
     module = runtime_dir / "skills/presentation-design/skills/sn-ppt-dsl"
-    npm = shutil.which("npm")
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if not npm:
         raise RuntimeError("Building the PPT design renderer requires npm on the build host")
     subprocess.run(
@@ -118,6 +118,17 @@ def install_ppt_design_dependencies(runtime_dir: Path, plat: str, arch: str) -> 
          "--no-audit", "--no-fund", "--os=" + plat, "--cpu=" + arch],
         check=True, cwd=module,
     )
+    if plat == "win32":
+        # npm may exit successfully even when the optional native package was skipped.
+        native = f"sharp-win32-{arch}"
+        if not (module / "node_modules" / "@img" / native / "lib" / f"{native}.node").is_file():
+            raise RuntimeError(f"npm ci did not install @img/{native}, required for PPT image export")
+
+
+def assemble_runtime_resources(project_root: Path, runtime_dir: Path, plat: str, arch: str) -> None:
+    """Stage clean Skill sources, then install the renderer for the target platform."""
+    copy_runtime_resources(project_root, runtime_dir)
+    install_ppt_design_dependencies(runtime_dir, plat, arch)
 
 
 # ── Platform detection ───────────────────────────────────────
@@ -811,8 +822,7 @@ def build_runtime(
         else:
             shutil.copy2(item, dest)
 
-    copy_runtime_resources(project_root, runtime_dir)
-    install_ppt_design_dependencies(runtime_dir, plat, arch)
+    assemble_runtime_resources(project_root, runtime_dir, plat, arch)
 
     # Ensure entry is executable
     entry_bin = bin_dir / "box-agent-acp"
