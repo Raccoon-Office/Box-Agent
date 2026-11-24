@@ -399,7 +399,7 @@ async def test_execute_code_runs_with_runtime_env_python(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from box_agent.tools.skill_scratch import SessionSkillScratch
+    from box_agent.tools import skill_scratch
 
     _clear_python_runtime_env(monkeypatch)
     monkeypatch.setattr(jupyter_tool, "SANDBOX_BASE_DIR", tmp_path / "sandbox")
@@ -410,30 +410,55 @@ async def test_execute_code_runs_with_runtime_env_python(
     JupyterSandboxTool._sandbox_env_key = None
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    scratch = SessionSkillScratch(workspace)
+    scratch = skill_scratch.SessionSkillScratch(workspace)
     tool = JupyterSandboxTool(
         workspace_dir=str(workspace),
         runtime_env={"BOX_AGENT_SANDBOX_PYTHON": sys.executable},
         skill_scratch_dir=scratch,
     )
 
+    release = threading.Event()
     try:
         assert not scratch.path.parent.exists()
         # Verify interpreter execution, not shared-runner startup latency.
         result = await tool.execute(
-            "import os\nfrom pathlib import Path\n"
+            "import os\nfrom pathlib import Path\nkernel_value = 'still running'\n"
             'Path(os.environ["BOX_AGENT_SCRATCH_DIR"], "check.txt").write_text("scratch-ok")\n'
             "print('external-python-ok')",
             session_id="runtime-env", timeout=120,
         )
+        assert result.success and "external-python-ok" in result.content
+        first = scratch.path / "check.txt"
+        assert first.read_text() == "scratch-ok"
+        entered = threading.Event()
+        rename = Path.rename
+
+        def delay_move(path, target):
+            if path == first:
+                entered.set()
+                assert release.wait(30)
+            return rename(path, target)
+
+        monkeypatch.setattr(Path, "rename", delay_move)
+        monkeypatch.setattr(skill_scratch, "_CLEANUP_TIMEOUT_SECONDS", 0.5)
+        assert await skill_scratch.acleanup_skill_scratch_dir(scratch) == []
+        assert entered.is_set()
+        result = await tool.execute(
+            'Path(os.environ["BOX_AGENT_SCRATCH_DIR"], "check.txt").write_text(kernel_value)',
+            session_id="runtime-env", timeout=120,
+        )
+        assert result.success, result.error
+        assert scratch.path != first.parent
+        assert (scratch.path / "check.txt").read_text() == "still running"
     finally:
+        release.set()
+        if scratch._cleanup is not None:
+            await asyncio.wait_for(scratch._cleanup, 5)
         await JupyterSandboxTool.shutdown_all()
         JupyterSandboxTool._sandbox_env = None
         JupyterSandboxTool._sandbox_env_key = None
 
-    assert result.success is True
-    assert "external-python-ok" in result.content
-    assert (scratch.path / "check.txt").read_text() == "scratch-ok"
+    assert first.read_text() == "scratch-ok"
 
 
 @pytest.mark.asyncio

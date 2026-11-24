@@ -110,14 +110,14 @@ async def test_scratch_cleanup_error_does_not_fail_session_close(tmp_path, monke
     scratch = SessionSkillScratch(tmp_path)
     disposable = (await scratch.ensure()) / "cleanup.txt"
     disposable.write_text("keep if denied")
-    unlink = Path.unlink
+    rename = Path.rename
 
-    def deny_scratch_unlink(path, *args, **kwargs):
+    def deny_scratch_move(path, target):
         if path == disposable:
             raise PermissionError("cleanup refused")
-        return unlink(path, *args, **kwargs)
+        return rename(path, target)
 
-    monkeypatch.setattr(Path, "unlink", deny_scratch_unlink)
+    monkeypatch.setattr(Path, "rename", deny_scratch_move)
     await close_skill_scratch_dir(scratch)
     assert disposable.exists()
     assert "cleanup refused" in caplog.text
@@ -146,6 +146,25 @@ def test_prepare_and_cleanup_skill_scratch_dir(tmp_path: Path) -> None:
     assert scratch_dir.is_dir()
     assert not list(scratch_dir.iterdir())
     assert outside.read_text(encoding="utf-8") == "keep"
+
+
+def test_scratch_retries_failed_deletion_without_nesting_quarantines(tmp_path, monkeypatch):
+    scratch = prepare_skill_scratch_dir(tmp_path)
+    preview = scratch.path / "draft.html"
+    preview.write_text("discard")
+    unlink = Path.unlink
+
+    def refuse_once(path, *args, **kwargs):
+        monkeypatch.setattr(Path, "unlink", unlink)
+        raise PermissionError("busy")
+
+    monkeypatch.setattr(Path, "unlink", refuse_once)
+    with pytest.raises(PermissionError, match="busy"):
+        cleanup_skill_scratch_dir(scratch)
+    assert list(scratch.path.iterdir()) == [preview]
+    assert preview.read_text() == "discard"
+    assert cleanup_skill_scratch_dir(scratch) == [str(preview)]
+    assert not list(scratch.path.iterdir())
 
 
 def test_prepare_skill_scratch_dir_accepts_session_private_root(tmp_path: Path) -> None:
@@ -930,6 +949,120 @@ async def test_scratch_timeout_is_not_treated_as_a_validated_path(tmp_path, monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_directory", [False, True], ids=["file", "directory"])
+async def test_late_scratch_deletion_preserves_reused_preview_path(tmp_path, monkeypatch, is_directory):
+    scratch = SessionSkillScratch(tmp_path)
+    directory = await scratch.ensure()
+    entry = directory / ("bundle" if is_directory else "preview.html")
+    if is_directory:
+        entry.mkdir()
+    preview = entry / "preview.html" if is_directory else entry
+    preview.write_text("first turn")
+    deleting = threading.Event()
+    resume = threading.Event()
+
+    def pause_delete(operation):
+        def delete(path, *args, **kwargs):
+            if Path(path).name == entry.name and not deleting.is_set():
+                deleting.set()
+                assert resume.wait(5)
+            return operation(path, *args, **kwargs)
+        return delete
+
+    if is_directory:
+        monkeypatch.setattr(skill_scratch.shutil, "rmtree", pause_delete(skill_scratch.shutil.rmtree))
+    else:
+        monkeypatch.setattr(Path, "unlink", pause_delete(Path.unlink))
+    monkeypatch.setattr(skill_scratch, "_CLEANUP_TIMEOUT_SECONDS", 0.5)
+    try:
+        assert await skill_scratch.acleanup_skill_scratch_dir(scratch) == []
+        assert deleting.is_set()
+        assert cleanup_skill_scratch_dir(scratch.prepared) == []
+        assert await scratch.ensure() == directory
+        if is_directory:
+            entry.mkdir(exist_ok=True)
+        preview.write_text("second turn")
+        ChatReferences(tmp_path).retain_text(f"[Preview]({preview.as_uri()})")
+    finally:
+        resume.set()
+    assert await asyncio.wait_for(scratch._cleanup, 2) == [str(entry)]
+    assert preview.read_text() == "second turn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
+@pytest.mark.parametrize("phase", ["scan", "before-rename", "after-rename"])
+async def test_interrupted_cleanup_releases_scratch_without_losing_new_files(
+    tmp_path, monkeypatch, phase, interrupt,
+):
+    scratch = SessionSkillScratch(tmp_path)
+    first_root = await scratch.ensure()
+    preview = first_root / "preview.html"
+    preview.write_text("old")
+    entered, resume = threading.Event(), threading.Event()
+
+    def pause():
+        entered.set()
+        assert resume.wait(5)
+
+    if phase == "scan":
+        check = skill_scratch.retained_chat_file_in
+
+        def delayed_check(path):
+            result = check(path)
+            if path == preview:
+                pause()
+            return result
+
+        monkeypatch.setattr(skill_scratch, "retained_chat_file_in", delayed_check)
+    else:
+        rename = Path.rename
+
+        def delayed_rename(path, target):
+            if path == preview and phase == "before-rename":
+                pause()
+            result = rename(path, target)
+            if path == preview and phase == "after-rename":
+                pause()
+            return result
+
+        monkeypatch.setattr(Path, "rename", delayed_rename)
+
+    monkeypatch.setattr(skill_scratch, "_CLEANUP_TIMEOUT_SECONDS", 0.5 if interrupt == "timeout" else 10)
+    cleanup = asyncio.create_task(skill_scratch.acleanup_skill_scratch_dir(scratch))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        if interrupt == "cancel":
+            cleanup.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cleanup
+        else:
+            assert await asyncio.wait_for(cleanup, 2) == []
+        next_root = await scratch.ensure()
+        # Only an already-issued move requires new tools to change namespace.
+        assert (next_root == first_root) == (phase == "scan")
+        next_preview = next_root / preview.name
+        next_preview.write_text("new preview")
+        ChatReferences(tmp_path).retain_text(f"[Preview]({next_preview.as_uri()})")
+        leftover = first_root / "leftover.tmp"
+        leftover.touch()
+        if first_root != next_root:
+            # The model may also explicitly edit a path from the old conversation.
+            preview.write_text("updated at the original path")
+            ChatReferences(tmp_path).retain_text(f"[Existing]({preview.as_uri()})")
+    finally:
+        resume.set()
+    assert await asyncio.wait_for(scratch._cleanup, 2) == []
+    assert next_preview.read_text() == "new preview"
+    assert leftover.is_file()
+    assert str(leftover) in await skill_scratch.acleanup_skill_scratch_dir(scratch)
+    assert not leftover.exists()
+    assert next_preview.read_text() == "new preview"
+    if first_root != next_root:
+        assert preview.read_text() == "updated at the original path"
+
+
+@pytest.mark.asyncio
 async def test_cleanup_wait_is_bounded_and_does_not_overlap(tmp_path, monkeypatch, caplog):
     import logging
 
@@ -937,14 +1070,14 @@ async def test_cleanup_wait_is_bounded_and_does_not_overlap(tmp_path, monkeypatc
     await scratch.ensure()
     release = threading.Event()
     calls = []
-    real_cleanup = skill_scratch.cleanup_skill_scratch_dir
+    real_cleanup = skill_scratch._clean_prepared_scratch
 
-    def stuck_cleanup(prepared):
+    def stuck_cleanup(prepared, lease):
         calls.append(1)
         release.wait(3)
-        return real_cleanup(prepared)
+        return real_cleanup(prepared, lease)
 
-    monkeypatch.setattr(skill_scratch, "cleanup_skill_scratch_dir", stuck_cleanup)
+    monkeypatch.setattr(skill_scratch, "_clean_prepared_scratch", stuck_cleanup)
     monkeypatch.setattr(skill_scratch, "_CLEANUP_TIMEOUT_SECONDS", 0.05)
     caplog.set_level(logging.WARNING, logger="box_agent.tools.skill_scratch")
     try:
@@ -969,7 +1102,7 @@ async def test_cleanup_wait_is_bounded_and_does_not_overlap(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_stuck_cleanup_does_not_starve_other_sessions_preparation(tmp_path, monkeypatch):
     release = threading.Event()
-    monkeypatch.setattr(skill_scratch, "cleanup_skill_scratch_dir", lambda prepared: release.wait(5) and [])
+    monkeypatch.setattr(skill_scratch, "_clean_prepared_scratch", lambda prepared, lease: release.wait(5) and [])
     monkeypatch.setattr(skill_scratch, "_CLEANUP_TIMEOUT_SECONDS", 0.01)
     stuck = []
     try:

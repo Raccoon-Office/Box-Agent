@@ -250,8 +250,10 @@ Bash 和 Python 沙箱照常执行，`BOX_AGENT_SCRATCH_DIR` 保持指向已校�
 视频读取必须使用临时目录，失败时同样返回该工具错误。ACP 连接继续处理会话请求。
 
 临时目录的准备、诊断和清理各自在独立守护线程中运行，互不占用，也不阻塞进程退出。准备最多等待 5 秒，
-诊断 2 秒，清理 10 秒；清理超时记 `skill_scratch/cleanup_timeout`，本轮照常结束，上一次清理未结束时不再叠加
-（`skill_scratch/cleanup_skipped`），残留文件在之后的清理中回收。
+诊断 2 秒，清理 10 秒。清理会先把可丢弃的文件或目录移入本次清理的私有目录，再从那里删除。
+超时记 `skill_scratch/cleanup_timeout`，本轮照常结束。超时和取消都会停止领取其他文件。
+若此时文件系统仍在移动某个条目，下次工具调用会使用新的会话临时目录，旧目录中剩余的文件会在后续清理时重新检查。
+正在删除已隔离文件时，下一轮可直接复用原路径。上一次清理未结束时跳过重复清理（`skill_scratch/cleanup_skipped`）。
 
 失败原因只记日志：ACP 写到 stderr，CLI 写到 `~/.box-agent/log/skill_scratch_<pid>.log`，每个会话同一原因只记一次，
 恢复后记一条 `skill_scratch/recovered`。`skill_scratch/unavailable` 行包含 `error_type`、`winerror`、`errno`、
