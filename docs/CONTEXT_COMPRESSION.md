@@ -15,8 +15,9 @@ outside durable message content; SessionLog records references and lifecycle
 metadata. See [Image context](IMAGE_CONTEXT.md) for the complete contract.
 
 Before each summary attempt, Box-Agent estimates the complete projected request,
-including the appended instruction and images. The summary client's safe input
-budget uses its own context window and an output allowance of at most 8,192 tokens.
+including the appended instruction, images, and any offered tool schemas. The
+summary client's safe input budget uses its own context window and an output
+allowance of at most 8,192 tokens.
 If the client's window or output allowance is unknown, the session input budget
 is the fallback. Both ordinary and forced compaction use this check. The rebuilt
 main request must then fit the main model's budget.
@@ -289,8 +290,9 @@ The Kernel supplies a `CompactionInput` to `CompactEnginePort`. The default
 engine delegates to the existing compression algorithm; it does not replace
 the request Context interface or introduce a second Skill loading policy.
 Inputs distinguish the tool catalog used for runtime-state recovery from the
-exact offered schemas used for estimation, and retain forced recovery and the
-summary-request input limit.
+exact offered schemas used for estimation. They also carry the offered schemas in
+request order for the summary, the available main-request prefix, the forced
+recovery flag, and the summary-request input limit.
 
 Context projects effective history before compaction. The engine calls the
 Kernel's `before_summary` callback before a summary attempt or deterministic
@@ -467,21 +469,38 @@ also differ when the provider omits reasoning tokens from usage.
 ### Compacted message layout
 
 The first summary attempt appends a temporary `user` instruction to the projected
-history. This preserves the available provider prefix for KV-cache reuse. ACP
-routes this call through the session model router and caps output at 8,192 tokens.
+history. It uses the available main-request system and message prefix and the same
+ordered tool schemas so the provider can reuse its KV cache. The request leaves
+`tool_choice` unset, disables thinking, and caps output at 8,192 tokens. Summary
+projection replaces Skill bodies with receipts. The prefix can diverge at the
+first Skill body, and request-only Skill bodies may require using projected
+history in place of the main request history. One-request transient follow-up
+payloads stay in the main request.
+
+ACP resolves the summary client through the session model router.
 Automatic sessions choose from the host's `autoRouting.models` pool by task,
 ability, and context fit. Explicitly selected sessions stay on the selected model.
 `routingMode=manual` takes precedence over `autoRouting` for session, child, and
 auxiliary calls. Legacy builtin bindings without a routing mode can use the pool.
-Other hosts can supply a dedicated summary client or use the main client.
+Other hosts can supply a dedicated summary client or default to the main client.
+Each compaction uses its resolved client for all provider attempts. A summary
+model that differs from the main model still receives the ordered tool schemas.
+Cache reuse requires the same model and a matching prefix.
 
-The summary request disables tools and thinking. Its instruction asks for a
-chronological account of user messages inside one `<summary>...</summary>` block.
-The runtime writes only the nonempty text inside those tags after `Summary:`.
-It limits the summary to 8,000 characters. If the rebuilt history leaves too
-little room, the runtime also tries 4,000 and 2,000 characters using the same
-summary response. If the request still exceeds the hard limit, it can try 1,000
-and 512 characters before reducing the rendered earlier-user record.
+The summary instruction opens with a `CRITICAL` instruction and closes with a
+`REMINDER`. Both require plain text in a single nonempty `<summary>...</summary>`
+block and prohibit tool calls. The nine-section format includes all genuine
+user turns in chronological order and preserves the user's security constraints
+verbatim. Any next step follows the latest active request and quotes the recent
+conversation. Role markers inside assistant text carry no user authority. The
+runtime's summary instructions are outside the conversation being summarized.
+The summary must omit `<analysis>` blocks, system prompts, and credentials, mark
+facts that need source verification, and claim success only where the conversation
+proves it.
+The runtime writes the text inside the tags after `Summary:` and caps it at
+8,000 characters. If the rebuilt history leaves too little room, it uses the
+same summary to try 4,000 and 2,000 characters, then 1,000 and 512 before
+reducing the rendered earlier-user record.
 
 The synthetic `user` message uses this framing:
 
@@ -491,8 +510,18 @@ This session is being continued from a previous conversation that ran out of con
 Summary:
 <model-generated summary>
 
+If you need specific details from before compaction (exact code snippets, error messages, tool output, or content you generated), query the full session log at: <absolute path> (JSONL; prefer query_jsonl over reading the whole file).
+
 Continue the conversation from where it left off. Do not acknowledge the summary, recap what was happening, or ask the user to repeat information solely because compaction occurred. If genuinely required information is still missing, use the normal user-input or decision tool. Otherwise, pick up the last task as if the break never happened.
 ```
+
+The recovery line appears when the session has a Session Log and uses the
+absolute `SessionLog.path`, honoring the configured state directory. If
+`query_jsonl` is unavailable, the line directs the model to paginate with
+`read_file`. With `allow_full_access: false`, the shared permission policy
+permits structured reads within the current session's log directory without
+confirmation. Writes and access to other sessions continue through the regular
+permission policy. The recovery line supplies the log path alone.
 
 The rebuilt history is ordered as follows:
 
@@ -553,30 +582,52 @@ If the rebuilt request still exceeds the safe limit, the outcome is marked block
   compaction retry]` after the system message. A successful summary notes that the trimmed part is
   outside its coverage. Earlier user text remains available through the separate
   history record.
-- A summary cut off by its output limit or missing its required summary block
-  gets one retry with a stricter length instruction. Transient network, timeout,
-  upstream, and rate-limit failures use the LLM client's existing retry policy.
-  A custom client without that retry policy gets one retry. Authentication,
-  permission, and other bad-request errors go to the bounded deterministic
-  fallback. Exhausted summary retries also use that fallback.
+- A truncated, missing, or malformed summary, or a response with a tool call,
+  gets one format retry. The retry asks for up to 4,000 characters and directs the
+  model to summarize every preceding message, including the newest, without
+  answering it or doing the work it requests. This instruction comes from the
+  runtime. Transient network, timeout,
+  upstream, and rate-limit failures retain the client's retry policy. An eligible
+  custom client without that policy can retry within the same attempt budget.
+- If the shared request still fails, Box-Agent makes one independent request on
+  the same client. It uses a short summarization-only system prompt, the current
+  (possibly trimmed) history without its original system message, and the summary
+  instruction with the format retry text. It omits tools. Authentication or
+  permission failures skip the independent request. A compaction makes at most
+  six summary calls at the application level, with one slot reserved for the
+  independent request. Provider SDK retries remain governed by the SDK.
+- When provider summarization fails or is disabled, the local fallback puts the
+  current user request first. Within its 12,000-character budget it collects
+  history newest first, presents the retained messages in chronological order,
+  and reports omitted older messages as `<fallback omitted N earlier source messages>`.
+  A long message preserves its head and tail. The `[Earlier User Messages]`
+  archive is handled separately.
 - If a main request returns a context-length error before emitting output,
   Box-Agent forces compaction with a tighter history budget, prepares a fresh
-  request, and retries. Provider-reported text may supply actual and maximum
-  counts for estimation and budget tightening. The turn allows at most two
-  reactive retries. Exhaustion returns `CONTEXT_INPUT_BUDGET_EXCEEDED`.
+  request, and retries. Recognized formats include DashScope input ranges,
+  vLLM and TGI token limits, Moonshot model token limits, GLM prompt length errors,
+  DeepSeek input token limits, and the SenseNova gateway's input-plus-output
+  count. A reported input count can calibrate estimation and a reported maximum
+  can tighten the budget. Both fields are optional. HTTP 413 body-size errors and
+  ordinary string-length validation retain their own classification. The turn
+  allows at most two reactive retries. Exhaustion returns `CONTEXT_INPUT_BUDGET_EXCEEDED`.
   A failure after output preserves partial assistant text and ends the turn.
   Reactive recovery reuses completed tool results and commits the accepted reply once.
 
 After three consecutive compaction outcomes in fallback or blocked mode, the
 session continues with deterministic compaction and stops calling the summary
-model. If compaction is triggered again within three steps of a prior compaction
-three times in succession, the turn stops with `CONTEXT_COMPACTION_THRASHING`
-and resets the rapid-refill streak.
+model. The rapid-refill counter credits at most one applied compaction per step,
+including convergence and reactive attempts. Three consecutive refills within
+the following one to three steps stop the turn with `CONTEXT_COMPACTION_THRASHING`
+and reset the streak.
 The user can read a large file or tool result in chunks, or start a new session.
 ACP forwards the error code through its existing `errorCode` field. Both counters
 are held in memory across turns. Compaction events report `summary_retries` and
 `head_truncated`. Session Log uses `summaryRetries` and `headTruncated` for the
 same fields. The retry count includes recovery from local preflight failures.
+`summary_path` in the Python event and `summaryPath` in the Session Log
+`compaction/summary` event report the outcome as `shared`, `independent`, or
+`deterministic`.
 
 ## Adjacent protections
 
@@ -592,6 +643,7 @@ Direct regression coverage lives in:
 - `tests/test_context_compaction_retention.py` and `tests/test_core.py` for retention and runtime-state restoration.
 - `tests/test_compaction_resource_retention.py` for Skill restoration and reference coverage.
 - `tests/test_context_compaction_e2e.py`, `tests/test_context_compaction_recovery.py`, and `tests/test_error_messages.py` for summary preflight, retries, circuit breakers, and provider errors.
+- `tests/test_compaction_session_log.py` for the recovery hint and scoped log reads.
 - `tests/test_image_inspection_tool.py`, `tests/test_multimodal_message_conversion.py`,
   `tests/test_session_trace.py`, and `tests/test_llm_debug_logging.py` for the
   request-only native image path, provider conversion, and payload redaction.

@@ -9,7 +9,8 @@ Box-Agent 在两个边界控制持久上下文增长：
 
 原生图片检查走第三条“仅本次请求”路径。规范化图片块只附加到主模型的一次请求，不进入持久消息历史；预算按解码后的图片尺寸估算，而不是按 Base64 字符长度计算。原始图片载荷不会写入 session trace 或 provider debug log。
 
-每次尝试摘要前，Box-Agent 都会估算投影后的完整请求，包括追加的摘要指令和图片。
+每次尝试摘要前，Box-Agent 都会估算投影后的完整请求，包括追加的摘要指令、图片和
+实际提供的工具 schema。
 输入预算按摘要客户端的窗口推导，输出预留最多 8,192 tokens。客户端未声明窗口或输出
 预留时，使用会话输入预算。普通压缩和强制压缩都执行此检查，重建后的主请求还需符合
 主模型的预算。
@@ -199,6 +200,7 @@ Preview (head + tail, up to 2.0KB):
 Kernel 通过 `CompactionInput` 调用 `CompactEnginePort`。默认引擎沿用现有压缩算法，
 不替换请求 Context 接口，也不增加第二套 Skill 加载策略。输入分别保留用于恢复运行状态的
 工具目录、用于估算的本次实际提供 schema、强制恢复标志及摘要请求输入上限。
+摘要输入还携带按请求顺序排列的工具 schema，以及可用的主请求前缀。
 
 Context 先投影有效历史。压缩引擎必须在摘要调用或确定性兜底前调用 Kernel 提供的
 `before_summary`；Kernel 提交并 flush 返回的 surface 后才更新内存历史。请求交付及响应
@@ -297,16 +299,26 @@ ACP 切到较小输入预算的模型时，先按目标模型投影完整请求�
 
 ### 压缩后的消息组织
 
-首次摘要尝试在投影后的历史末尾追加一条临时 `user` 指令，保留可复用 KV cache 的消息
-前缀。ACP 通过会话模型路由器解析该调用，输出上限为 8,192 tokens。自动模式从宿主下发
+首次摘要尝试在投影后的历史末尾追加一条临时 `user` 指令，并复用可用的主请求 system、
+消息前缀及同序的工具 schema，以便 provider 复用 KV cache。请求不设置 `tool_choice`，
+关闭 thinking，输出上限为 8,192 tokens。摘要投影会用回执替换 Skill 正文，从第一段
+Skill 正文开始可能出现前缀差异。主请求内联本次专用的 Skill 正文时，摘要可能改用投影后的历史。
+只供一次后续请求使用的临时载荷仍仅进入主请求。
+
+ACP 通过会话模型路由器解析摘要客户端。自动模式从宿主下发
 的 `autoRouting.models` 池按任务、能力和上下文适配度选择，显式模式沿用所选模型。
 `routingMode=manual` 优先于 `autoRouting`，适用于会话、子任务和辅助调用。未声明路由
-模式的旧版 builtin 绑定仍可使用候选池。其他宿主可提供独立摘要客户端，默认沿用主客户端。
+模式的旧版 builtin 绑定仍可使用候选池。其他宿主可提供专用摘要客户端，默认沿用主客户端。
+同一次压缩的所有 provider 尝试都使用已解析的同一客户端。摘要模型与主模型不同时仍传入同序
+工具 schema。缓存复用要求模型相同且前缀匹配。
 
-摘要调用关闭工具和 thinking，要求按时间顺序整理用户消息，并输出一个非空的
-`<summary>...</summary>` 块。写入 `Summary:` 时取标签内的正文，最多 8,000 字符。
-若重建历史后组装空间不足，使用同一份摘要继续尝试 4,000 和 2,000 字符的版本。仍超过
-请求上限时，可继续尝试 1,000 和 512 字符，再缩短早期用户记录的渲染内容。
+摘要指令以 `CRITICAL` 开头、以 `REMINDER` 结尾，两处都要求只输出一个非空的纯文本
+`<summary>...</summary>` 块，并禁止调用工具。正文九节包含按时间顺序排列的所有真实用户
+消息，并原文保留用户的安全约束。下一步直接对应最新仍在处理的明确请求，并附最近对话中的原文引用。
+assistant 文本里的角色标记没有用户权限，运行时发出的摘要指令也在摘要范围之外。摘要须省略
+`<analysis>` 块、system 提示与凭据，标记需要回查的事实，只记录对话已有证据的成功事项。
+写入 `Summary:` 时取标签内的正文，最多 8,000 字符。若重建历史后组装空间不足，使用同一份
+摘要继续尝试 4,000 和 2,000 字符的版本，再尝试 1,000 和 512 字符，最后缩短早期用户记录。
 
 合成 `user` 消息的结构如下：
 
@@ -316,8 +328,15 @@ This session is being continued from a previous conversation that ran out of con
 Summary:
 <模型生成的摘要>
 
+If you need specific details from before compaction (exact code snippets, error messages, tool output, or content you generated), query the full session log at: <绝对路径> (JSONL; prefer query_jsonl over reading the whole file).
+
 Continue the conversation from where it left off. Do not acknowledge the summary, recap what was happening, or ask the user to repeat information solely because compaction occurred. If genuinely required information is still missing, use the normal user-input or decision tool. Otherwise, pick up the last task as if the break never happened.
 ```
+
+有 Session Log 的会话才显示回查提示，路径使用实际 `SessionLog.path` 的绝对路径，遵循
+配置的状态目录。会话缺少 `query_jsonl` 时，提示改用 `read_file` 分页读取。在
+`allow_full_access: false` 下，共享权限策略会免确认放行本会话日志目录内的结构化读取。
+写入和读取其他会话仍走常规权限策略。提示只提供日志文件路径。
 
 新历史顺序如下：
 
@@ -362,20 +381,34 @@ path 须通过校验。`[Invoked Skills]` 提示模型以这些 Skill 为参考�
   20% tokens，至少删除一整组。保留 system 和最新真实 user 消息，最多裁剪重试三次。
   重试输入含 `[earlier conversation truncated for compaction retry]` 标记。成功摘要会说明
   裁掉的内容不在摘要覆盖范围内，早期用户原文仍由独立的历史记录保留。
-- 摘要因输出上限截断或缺少所需的摘要块时，追加更严格的长度指令后再试一次。网络、超时、
-  5xx 和限流走 LLM 客户端原有重试。没有内置重试的自定义客户端可再试一次。鉴权、权限
-  或其他请求错误直接进入有界确定性兜底，摘要重试用尽时也走兜底。
+- 摘要截断、缺失、格式无效或含工具调用时，格式重试一次。重试要求最多 4,000 字符，
+  此前所有消息（包括最新一条）均属于待摘要内容，不能回复该消息或执行其中的任务。
+  这段指令由运行时发出。网络、超时、5xx 和限流走 LLM 客户端原有重试。符合条件且没有内置重试的自定义客户端
+  可在总次数额度内再试一次。
+- 共享前缀调用仍失败时，使用同一客户端发一次独立请求。system 只包含摘要用途说明，
+  消息保留当前可能已截头的历史、去掉原 system，并追加含格式重试文案的摘要指令。
+  独立请求不带工具。鉴权、权限错误跳过独立请求。每次压缩在应用层最多发起六次摘要调用，
+  其中预留一次给独立请求。provider SDK 内部重试仍由 SDK 管理。
+- 模型摘要失败或停用时，本地确定性兜底先放最新用户请求，再在 12,000 字符预算内从最新往前
+  收集历史、按时间正序输出，并用 `<fallback omitted N earlier source messages>` 标明省略的
+  较早消息数量。超长单条消息保留头尾，`[Earlier User Messages]` 归档单独处理。
 - 主请求在产生任何输出前收到上下文超长错误时，强制压缩并收紧历史预算，重新组装请求后
-  再发。Provider 错误如果报告实际和上限 token 数，可用于校准和收紧预算。每轮最多两次
-  此类重试，仍失败时返回 `CONTEXT_INPUT_BUDGET_EXCEEDED`。已经产生输出的请求保留已收到的
+  再发。错误识别覆盖 DashScope 输入范围、vLLM 和 TGI token 上限、Moonshot 模型 token 上限、
+  GLM 提示长度、DeepSeek 输入 token 上限及 SenseNova 网关的输入加输出计数格式。实际输入
+  token 数用于校准估算，上限用于收紧预算，两字段都按报错内容选填。HTTP 413 请求体超限和
+  普通字符串长度校验保留各自的分类。每轮最多两次此类重试，仍失败时返回
+  `CONTEXT_INPUT_BUDGET_EXCEEDED`。已经产生输出的请求保留已收到的
   assistant 内容并结束本轮。恢复过程复用已完成的工具结果，只提交一次成功回复。
 
 连续三次压缩进入 fallback 或 blocked 模式后，会话停止调用摘要模型，后续使用确定性压缩。
-如果压缩后 3 个 step 内再次触发压缩，且连续出现三次，本轮以
-`CONTEXT_COMPACTION_THRASHING` 结束并重置快速重复触发计数。可分块读取过大的文件或工具
-结果，也可新开会话。ACP 通过现有 `errorCode` 透传。计数保存在会话内存中，可跨轮次累积。
+快速回填计数在同一个 step 最多计入一次已应用的压缩，涵盖收敛及反应式尝试。若连续三次在
+后续 1 至 3 个 step 内再次触发压缩，本轮以 `CONTEXT_COMPACTION_THRASHING` 结束并重置计数。
+可分块读取过大的文件或工具结果，也可新开会话。ACP 通过现有 `errorCode` 透传。
+计数保存在会话内存中，可跨轮次累积。
 压缩事件用 `summary_retries` 和 `head_truncated` 记录摘要重试次数及摘要源截头，Session Log
 的对应字段为 `summaryRetries` 和 `headTruncated`。本地预检触发的恢复也计入重试次数。
+Python 事件的 `summary_path` 与 Session Log `compaction/summary` 事件的 `summaryPath`
+记录摘要路径，取值为 `shared`、`independent` 或 `deterministic`。
 
 ## 相邻保护
 
@@ -390,3 +423,4 @@ write/edit 工具调用参数会保留原文，直到整段历史压缩摘要其
 - `tests/test_compaction_resource_retention.py` 覆盖 Skill 恢复和引用可见范围。
 - `tests/test_context_compaction_e2e.py`、`tests/test_context_compaction_recovery.py` 和
   `tests/test_error_messages.py` 覆盖摘要预检、重试、熔断和 provider 错误。
+- `tests/test_compaction_session_log.py` 覆盖日志回查提示和本会话读取范围。
