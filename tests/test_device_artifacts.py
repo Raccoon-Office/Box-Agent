@@ -32,11 +32,11 @@ async def test_cloud_delivery_survives_restart_and_wakes_parent_once(required):
 
     async def request(_, params):
         calls.append(params)
-        if params["operation"] == "subagent.start":
+        if params["operation"] == "session.start":
             return {**target, "status": "accepted"}
-        if params["operation"] == "subagent.get":
+        if params["operation"] == "session.get_turn":
             return state
-        if params["operation"] == "subagent.wait":
+        if params["operation"] == "session.wait":
             return {"timedOut": False, "results": [state]}
         return {**target, **ref, "cloudFileRef": uri}
 
@@ -48,19 +48,19 @@ async def test_cloud_delivery_survives_restart_and_wakes_parent_once(required):
     args = {"deviceId": target["deviceId"], "instruction": "prepare report"}
     if required:
         args["artifactDelivery"] = "cloud"
-    assert (await DeviceTool(broker, "start").invoke(args)).success
+    assert (await DeviceTool(broker, "session.start").invoke(args)).success
     first = calls[0]
     assert first["args"] == {key: value for key, value in args.items() if key != "deviceId"}
     op = first["operationId"]
 
     def update(seq, artifact):
-        state.update({**target, "operationId": op, "status": "succeeded", "complete": True,
+        state.update({**target, "operationId": op, "status": "succeeded", "complete": True, "source": "device",
                       "seq": seq, "summary": "done", "result": {"artifactRefs": [artifact]}})
         return {"version": 1, "sessionId": "parent", "event": dict(state)}
 
     broker.event(update(1, ref))
     broker.end("turn")
-    got = await broker.query("subagent.get", target)
+    got = await broker.query("session.get_turn", target)
     if required:
         assert got["deliveryStatus"] == "pending" and got["complete"] is False
         assert broker.next_wake() is None
@@ -79,8 +79,8 @@ async def test_cloud_delivery_survives_restart_and_wakes_parent_once(required):
         assert restored.next_wake()
         assert restored.operations[op]["seq"] == 2
     for result in [
-        await restored.query("subagent.get", target),
-        (await restored.query("subagent.wait", {"targets": [target]}))["results"][0],
+        await restored.query("session.get_turn", target),
+        (await restored.query("session.wait", {"targets": [target]}))["results"][0],
     ]:
         assert result["result"]["artifactRefs"][0]["cloudFileRef"] == uri
     assert (await DeviceTool(restored, "artifact.upload").invoke({**target, "artifactId": ref["artifactId"]})).success
@@ -97,7 +97,7 @@ async def test_transfer_failure_is_ready_and_older_sessions_keep_the_existing_to
     async def request(_, params):
         return {**target, "status": "accepted"}
     old = DeviceDelegations("p", request, lambda: "t")
-    assert "artifactDelivery" not in DeviceTool(old, "start").parameters["properties"]
+    assert "artifactDelivery" not in DeviceTool(old, "session.start").parameters["properties"]
     with pytest.raises(ValueError, match="unsupported"):
         DeviceTool(old, "artifact.upload")
     run = DeviceDelegations("p", request, lambda: "t", Log(), artifact_upload=True)

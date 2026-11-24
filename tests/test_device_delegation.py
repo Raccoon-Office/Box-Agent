@@ -2,11 +2,18 @@ import asyncio
 from copy import deepcopy
 
 import pytest
+from acp import RequestError
 from box_agent.device_delegation import DeviceDelegations, DeviceTool
 
 
 def target(device="d", session="s", turn="t"):
     return {"deviceId": device, "sessionId": session, "turnId": turn}
+
+
+def bind_wait_targets(broker, *targets):
+    for index, identity in enumerate(targets, 1):
+        broker.save({**identity, "operationId": f"wait-fixture-{index}", "parentTurnId": "prior-turn",
+                     "status": "accepted", "seq": 0})
 
 
 def approval():
@@ -31,11 +38,11 @@ async def test_start_returns_acceptance_and_terminal_events_restore_without_reex
         return {"deviceId": "FixtureDesktopA", "sessionId": "local-9", "turnId": "t1", "status": "accepted"}
     log = Log()
     broker = DeviceDelegations("cloud-3", request, lambda: "parent-1", log)
-    result = await DeviceTool(broker, "start").invoke({"deviceId": "FixtureDesktopA", "instruction": "write"})
+    result = await DeviceTool(broker, "session.start").invoke({"deviceId": "FixtureDesktopA", "instruction": "write"})
     assert result.success
     op = calls[0][1]["operationId"]
     assert calls[0][0] == "device/request"
-    assert calls[0][1]["operation"] == "subagent.start"
+    assert calls[0][1]["operation"] == "session.start"
     event = {"version": 1, "sessionId": "cloud-3", "event": {
         "operationId": op, "deviceId": "FixtureDesktopA", "sessionId": "local-9", "turnId": "t1", "seq": 1, "status": "succeeded", "result": {"text": "ok"}}}
     assert broker.event(event) == {"recorded": True}
@@ -54,7 +61,7 @@ async def test_cancel_before_start_receipt_cancels_only_original_child_turn():
     turn = "parent-1"
     async def request(method, params):
         calls.append(params)
-        if params["operation"] == "subagent.start":
+        if params["operation"] == "session.start":
             await gate.wait()
         return {"deviceId": "FixtureDesktopA", "sessionId": "local-9", "turnId": "t1", "status": "accepted"}
     broker = DeviceDelegations("cloud-3", request, lambda: turn)
@@ -66,7 +73,7 @@ async def test_cancel_before_start_receipt_cancels_only_original_child_turn():
     gate.set()
     result = await pending
     await asyncio.wait_for(asyncio.gather(*broker.pending), 5)
-    assert calls[-1]["operation"] == "subagent.cancel"
+    assert calls[-1]["operation"] == "session.cancel"
     assert calls[-1]["operationId"] != result["operationId"]
     assert calls[-1]["args"] == {"sessionId": "local-9", "turnId": "t1"}
     assert broker.operations[result["operationId"]]["status"] == "accepted"
@@ -78,7 +85,7 @@ async def test_invalid_tool_arguments_and_wrong_event_identity_are_rejected():
     async def request(*args):
         return {"deviceId": "d", "sessionId": "s", "turnId": "t", "status": "accepted"}
     broker = DeviceDelegations("p", request, lambda: "turn")
-    assert not (await DeviceTool(broker, "start").invoke({"deviceId": "d"})).success
+    assert not (await DeviceTool(broker, "session.start").invoke({"deviceId": "d"})).success
     result = await broker.start("d", "work")
     with pytest.raises(ValueError, match="identity mismatch"):
         broker.event({"version": 1, "sessionId": "p", "event": {"operationId": result["operationId"], "deviceId": "other"}})
@@ -98,12 +105,12 @@ async def test_acp_device_tools_are_session_opt_in_and_events_use_request_receip
     try:
         plain = await adapter.new_session(str(tmp_path), [])
         enabled = await adapter.new_session(str(tmp_path), [], device={"version": 1})
-        assert "device_subagent_start" not in adapter._sessions[plain.session_id].agent.tools
+        assert "session_start" not in adapter._sessions[plain.session_id].agent.tools
         state = adapter._sessions[enabled.session_id]
-        assert "device_subagent_start" in state.agent.tools
-        assert "device_subagent_cancel" in state.agent.tools
-        from box_agent.device_delegation import OPERATIONS
-        expected = {"device_" + op.replace(".", "_") for op in OPERATIONS}
+        assert "session_start" in state.agent.tools
+        assert "session_cancel" in state.agent.tools
+        expected = {"device_list", "session_list", "session_read", "session_start",
+                    "session_send", "session_get_turn", "session_wait", "session_cancel"}
         assert expected <= state.agent.tools.keys()
         assert not expected.intersection(adapter._sessions[plain.session_id].agent.tools)
     finally:
@@ -120,11 +127,11 @@ async def test_real_parent_discovers_and_targets_registered_device_name(tmp_path
     from examples.device_parent_demo import DeterministicLLM
     calls = []
     device_id = "FixtureDesktop-" + uuid4().hex[:8]
-    eligible = {"online": True, "capabilities": ["subagent.start"], "authorization": {"execute": True}}
+    eligible = {"online": True, "capabilities": ["session.execute"], "authorization": {"execute": True}}
     earlier_devices = [
         {**eligible, "deviceId": "OfflineFixture", "online": False},
         {**eligible, "deviceId": "ReadOnlyFixture", "authorization": {"execute": False}},
-        {**eligible, "deviceId": "HistoryFixture", "capabilities": ["session.read"]},
+        {**eligible, "deviceId": "HistoryFixture", "capabilities": ["session.history"]},
     ]
     if selection in {"named", "ambiguous"}:
         earlier_devices.append({**eligible, "deviceId": "AnotherFixture"})
@@ -155,7 +162,7 @@ async def test_real_parent_discovers_and_targets_registered_device_name(tmp_path
         if selection in {"ambiguous", "missing"}:
             assert operations == ["list", "list"]
             return
-        assert operations == ["list", "list", "subagent.start"]
+        assert operations == ["list", "list", "session.start"]
         assert calls[-1][1]["args"] == {"instruction": "write"}
         op = calls[-1][1]["operationId"]
         assert await adapter.ext_method("device/event", {"version": 1, "sessionId": sid, "event": {
@@ -171,7 +178,7 @@ async def test_cancelled_parent_tool_still_processes_late_start_receipt():
     calls = []
     async def request(method, params):
         calls.append(params)
-        if params["operation"] == "subagent.start":
+        if params["operation"] == "session.start":
             started.set()
             await gate.wait()
         return {"deviceId": "d", "sessionId": "s", "turnId": "old", "status": "accepted"}
@@ -184,7 +191,7 @@ async def test_cancelled_parent_tool_still_processes_late_start_receipt():
         await task
     gate.set()
     await asyncio.gather(*broker.pending)
-    assert calls[-1]["operation"] == "subagent.cancel"
+    assert calls[-1]["operation"] == "session.cancel"
     assert calls[-1]["args"]["turnId"] == "old"
 
 @pytest.mark.asyncio
@@ -217,11 +224,11 @@ async def test_stdio_parent_emits_id_bearing_device_request_and_acknowledges_eve
         assert "deviceId" not in discovery["params"]
         await send({"id": discovery["id"], "result": {"devices": [{
             "deviceId": device_id, "online": True, "authorization": {"execute": True},
-            "capabilities": ["subagent.start"],
+            "capabilities": ["session.execute"],
         }]}})
         request = await until(lambda m: m.get("method") == "_device/request")
         assert "id" in request
-        assert request["params"]["operation"] == "subagent.start"
+        assert request["params"]["operation"] == "session.start"
         assert request["params"]["deviceId"] == device_id
         await send({"id": request["id"], "result": {**target(device_id, "local", "child"), "status": "accepted"}})
         await until(lambda m: m.get("id") == 3)
@@ -251,7 +258,7 @@ async def test_real_parent_stop_targets_direct_child_and_waits_for_cancelled_eve
     class Conn:
         async def ext_method(self, method, params):
             calls.append(params)
-            if params["operation"] == "subagent.cancel":
+            if params["operation"] == "session.cancel":
                 cancel_dispatched.set()
                 await remote_release.wait()
             else:
@@ -273,7 +280,7 @@ async def test_real_parent_stop_targets_direct_child_and_waits_for_cancelled_eve
         assert (await asyncio.wait_for(task, 20)).stop_reason == "cancelled"
         await asyncio.wait_for(cancel_dispatched.wait(), 5)
         assert not remote_release.is_set()
-        assert [c["operation"] for c in calls] == ["subagent.start", "subagent.cancel"]
+        assert [c["operation"] for c in calls] == ["session.start", "session.cancel"]
         broker = adapter._sessions[sid].device_delegations
         op = calls[0]["operationId"]
         assert broker.operations[op]["status"] == "accepted"
@@ -347,11 +354,11 @@ async def test_events_before_acceptance_preserve_terminal_state_and_reject_late_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation,arguments,response", [
-    ("list", {"cursor": "page-1", "limit": 2}, {"devices": [{"deviceId": "view-only", "online": False, "capabilities": ["session.read"], "authorization": {"view": True, "execute": False}}], "nextCursor": "page-2"}),
+    ("list", {"cursor": "page-1", "limit": 2}, {"devices": [{"deviceId": "view-only", "online": False, "capabilities": ["session.history"], "authorization": {"view": True, "execute": False}}], "nextCursor": "page-2"}),
     ("session.list", {"deviceId": "d", "cursor": "p1", "limit": 1}, {"sessions": [{"sessionId": "s", "title": "authorized", "workspaceDir": "/original", "status": "idle"}], "nextCursor": "p2"}),
     ("session.read", {"deviceId": "d", "sessionId": "s", "limit": 1}, {"sessionId": "s", "messages": [{"role": "user", "content": "hello", "turnId": "t"}], "nextCursor": "p2"}),
-    ("subagent.get", target(), {**target(), "status": "running", "deviceOnline": False, "source": "backend", "observedAt": "2026-11-18T10:00:00Z", "seq": 1}),
-    ("subagent.wait", {"targets": [target(), target("d2")], "timeoutMs": 0}, {"results": [], "timedOut": True, "states": [{**target(), "status": "running"}, {**target("d2"), "status": "unknown"}]}),
+    ("session.get_turn", target(), {**target(), "status": "running", "deviceOnline": True, "source": "device", "observedAt": "2026-11-18T10:00:00Z", "seq": 1}),
+    ("session.wait", {"targets": [target()], "timeoutMs": 0}, {"results": [], "timedOut": True, "states": [{**target(), "status": "running", "source": "device"}]}),
 ])
 async def test_query_tools_route_valid_arguments_and_deliver_full_response(operation, arguments, response):
     calls = []
@@ -359,6 +366,8 @@ async def test_query_tools_route_valid_arguments_and_deliver_full_response(opera
         calls.append((method, params))
         return response
     broker = DeviceDelegations("parent", request, lambda: "turn")
+    if operation == "session.wait":
+        bind_wait_targets(broker, *arguments["targets"])
     tool = DeviceTool(broker, operation)
     result = await tool.invoke(arguments)
     assert result.success
@@ -379,11 +388,13 @@ async def test_query_tools_route_valid_arguments_and_deliver_full_response(opera
 @pytest.mark.parametrize("operation,arguments", [
     ("list", {"limit": 0}), ("session.list", {}),
     ("session.read", {"deviceId": "d"}),
-    ("subagent.start", {"deviceId": "d", "instruction": ""}),
-    ("subagent.send", {"deviceId": "d", "instruction": "hi"}),
-    ("subagent.get", {"operationId": 1}),
-    ("subagent.wait", {"targets": [{**target(), "afterSeq": 1}]}),
-    ("subagent.cancel", {"operationId": "x", "turnId": "untrusted"}),
+    ("session.start", {"deviceId": "d", "instruction": ""}),
+    ("session.start", {"deviceId": "d", "instruction": "  "}),
+    ("session.start", {"deviceId": "d", "instruction": "x" * 4097}),
+    ("session.send", {"deviceId": "d", "instruction": "hi"}),
+    ("session.get_turn", {"operationId": 1}),
+    ("session.wait", {"targets": [{**target(), "afterSeq": 1}]}),
+    ("session.cancel", {"operationId": "x", "turnId": "untrusted"}),
 ])
 async def test_each_device_tool_validates_before_rpc(operation, arguments):
     async def request(*args):
@@ -398,16 +409,16 @@ async def test_send_tracks_new_child_turn_and_get_carries_exact_local_identity()
     calls = []
     async def request(method, params):
         calls.append(params)
-        if params["operation"] == "subagent.send":
+        if params["operation"] == "session.send":
             return {"deviceId": "d", "sessionId": "original", "turnId": "new-turn", "status": "accepted"}
         return {"deviceId": "d", "sessionId": "original", "turnId": "new-turn", "status": "running", "seq": 1, "deviceOnline": True, "source": "device", "observedAt": "now"}
     broker = DeviceDelegations("p", request, lambda: "parent-turn")
-    sent = await DeviceTool(broker, "subagent.send").invoke({"deviceId": "d", "sessionId": "original", "instruction": "continue"})
+    sent = await DeviceTool(broker, "session.send").invoke({"deviceId": "d", "sessionId": "original", "instruction": "continue"})
     assert sent.success
     assert "operationId" not in sent.raw_output
     op = calls[0]["operationId"]
     assert calls[0]["args"] == {"sessionId": "original", "instruction": "continue"}
-    got = await DeviceTool(broker, "subagent.get").invoke(target("d", "original", "new-turn"))
+    got = await DeviceTool(broker, "session.get_turn").invoke(target("d", "original", "new-turn"))
     assert got.raw_output["source"] == "device"
     assert calls[1]["deviceId"] == "d"
     assert calls[1]["args"] == {"sessionId": "original", "turnId": "new-turn"}
@@ -415,15 +426,30 @@ async def test_send_tracks_new_child_turn_and_get_carries_exact_local_identity()
 
 
 @pytest.mark.asyncio
+async def test_discovery_ignores_unknown_capability_groups():
+    async def request(*args):
+        return {"devices": [{"deviceId": "d", "capabilities": [
+            "session.history", "session.execute", "future.capability", "artifact.upload",
+        ]}]}
+
+    broker = DeviceDelegations("p", request, lambda: "t")
+    result = await DeviceTool(broker, "list").invoke({})
+    assert result.success
+    assert result.raw_output["devices"][0]["capabilities"] == [
+        "session.history", "session.execute", "artifact.upload",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_send_busy_and_unauthorized_history_remain_tool_failures():
     class BusyError(Exception):
         code = -32001
     async def request(method, params):
-        if params["operation"] == "subagent.send":
+        if params["operation"] == "session.send":
             raise BusyError("SESSION_BUSY")
         return {"error": {"code": "FORBIDDEN", "message": "unauthorized history"}}
     broker = DeviceDelegations("p", request, lambda: "t")
-    busy = await DeviceTool(broker, "subagent.send").invoke({"deviceId": "d", "sessionId": "s", "instruction": "continue"})
+    busy = await DeviceTool(broker, "session.send").invoke({"deviceId": "d", "sessionId": "s", "instruction": "continue"})
     assert not busy.success and "SESSION_BUSY" in busy.error
     assert busy.raw_output["code"] == -32001
     forbidden = await DeviceTool(broker, "session.read").invoke({"deviceId": "d", "sessionId": "s"})
@@ -434,12 +460,12 @@ async def test_send_busy_and_unauthorized_history_remain_tool_failures():
 async def test_consumption_suppresses_push_but_repeated_wait_returns_same_result():
     from box_agent.schema import Message
     calls = []
-    result = {"operationId": "op", "deviceId": "d", "sessionId": "s", "turnId": "t", "status": "succeeded", "seq": 9, "complete": True, "result": {"text": "full output"}}
+    result = {"operationId": "op", "deviceId": "d", "sessionId": "s", "turnId": "t", "status": "succeeded", "seq": 9, "complete": True, "source": "device", "result": {"text": "full output"}}
     async def request(method, params):
         calls.append(params)
-        return result if params["operation"] == "subagent.get" else {"results": [result], "timedOut": False}
+        return result if params["operation"] == "session.get_turn" else {"results": [result], "timedOut": False}
     broker = DeviceDelegations("p", request, lambda: "parent")
-    got = await DeviceTool(broker, "subagent.get").invoke(target())
+    got = await DeviceTool(broker, "session.get_turn").invoke(target())
     broker.save({**result, "parentTurnId": "parent"})
     assert broker.request_injections([])
     assert not broker.request_injections([
@@ -454,21 +480,21 @@ async def test_consumption_suppresses_push_but_repeated_wait_returns_same_result
     broker.confirm_receipts(broker.response_receipts([Message(role="tool", content=got.content, tool_call_id="full")]))
     assert broker._consumed_seq(target()) == 9
     for _ in range(2):
-        reply = await DeviceTool(broker, "subagent.wait").invoke({"targets": [target()], "timeoutMs": 0})
+        reply = await DeviceTool(broker, "session.wait").invoke({"targets": [target()], "timeoutMs": 0})
         assert reply.raw_output["results"][0]["status"] == "succeeded"
         assert reply.raw_output["results"][0]["result"] == result["result"]
     assert calls[-1]["args"]["targets"] == [target()]
     assert broker.request_injections([]) == ()
-    assert all(c["operation"] != "subagent.cancel" for c in calls)
+    assert all(c["operation"] != "session.cancel" for c in calls)
 
 
 @pytest.mark.asyncio
 async def test_incomplete_tool_result_is_not_consumed_even_after_model_delivery():
     from box_agent.schema import Message
     async def request(*args):
-        return {**target(), "status": "succeeded", "seq": 2, "complete": False, "result": "preview"}
+        return {**target(), "status": "succeeded", "seq": 2, "complete": False, "source": "device", "result": "preview"}
     broker = DeviceDelegations("p", request, lambda: "t")
-    result = await DeviceTool(broker, "subagent.get").invoke(target())
+    result = await DeviceTool(broker, "session.get_turn").invoke(target())
     assert broker.offered == {}
     broker.confirm_receipts(broker.response_receipts([Message(role="tool", content=result.content, tool_call_id="x")]))
     assert broker.consumed == {}
@@ -479,11 +505,11 @@ async def test_incomplete_tool_result_is_not_consumed_even_after_model_delivery(
     ("list", {}, None, {"devices": []}),
     ("session.list", {"limit": 1}, "d", {"sessions": [], "nextCursor": "p2"}),
     ("session.read", {"sessionId": "existing", "limit": 1}, "d", {"sessionId": "existing", "messages": []}),
-    ("subagent.start", {"instruction": "write"}, "d", {"deviceId": "d", "sessionId": "existing", "turnId": "child", "status": "accepted"}),
-    ("subagent.send", {"sessionId": "existing", "instruction": "continue"}, "d", {"deviceId": "d", "sessionId": "existing", "turnId": "child", "status": "accepted"}),
-    ("subagent.get", {"sessionId": "existing", "turnId": "child"}, "d", {"operationId": "op-existing", "deviceId": "d", "sessionId": "existing", "turnId": "child", "seq": 2, "status": "succeeded", "complete": True, "result": {"text": "ok"}, "source": "device", "deviceOnline": True, "observedAt": "now"}),
-    ("subagent.wait", {"targets": [target("d", "existing", "child")], "timeoutMs": 0}, None, {"results": [], "timedOut": True, "states": [{**target("d", "existing", "child"), "status": "running"}]}),
-    ("subagent.cancel", {"sessionId": "existing", "turnId": "child"}, "d", {"deviceId": "d", "sessionId": "existing", "turnId": "child", "status": "accepted"}),
+    ("session.start", {"instruction": "write"}, "d", {"deviceId": "d", "sessionId": "existing", "turnId": "child", "status": "accepted"}),
+    ("session.send", {"sessionId": "existing", "instruction": "continue"}, "d", {"deviceId": "d", "sessionId": "existing", "turnId": "child", "status": "accepted"}),
+    ("session.get_turn", {"sessionId": "existing", "turnId": "child"}, "d", {"operationId": "op-existing", "deviceId": "d", "sessionId": "existing", "turnId": "child", "seq": 2, "status": "succeeded", "complete": True, "result": {"text": "ok"}, "source": "device", "deviceOnline": True, "observedAt": "now"}),
+    ("session.wait", {"targets": [target("d", "existing", "child")], "timeoutMs": 0}, None, {"results": [], "timedOut": True, "states": [{**target("d", "existing", "child"), "status": "running", "source": "device"}]}),
+    ("session.cancel", {"sessionId": "existing", "turnId": "child"}, "d", {"deviceId": "d", "sessionId": "existing", "turnId": "child", "status": "accepted"}),
 ])
 async def test_each_device_operation_runs_through_real_parent_model_dispatch(tmp_path, operation, args, device_id, response):
     import json
@@ -510,7 +536,8 @@ async def test_each_device_operation_runs_through_real_parent_model_dispatch(tmp
         assert len(calls) == 1
         assert calls[0][0] == "device/request"
         assert calls[0][1]["operation"] == operation
-        if operation == "subagent.get":
+        assert calls[0][1].get("deviceId") == ("d" if operation == "session.wait" else device_id)
+        if operation == "session.get_turn":
             assert state.device_delegations._consumed_seq(target("d", "existing", "child")) == 2
     finally:
         await adapter.aclose()
@@ -559,25 +586,30 @@ async def test_consumed_sequences_restore_and_do_not_regress_on_old_results(tmp_
 @pytest.mark.parametrize("operation,args,response", [
     ("list", {}, {"devices": "malformed"}),
     ("session.read", {"deviceId": "d", "sessionId": "s"}, {"sessionId": "other", "messages": []}),
-    ("subagent.get", target(), {**target("other"), "status": "running"}),
-    ("subagent.wait", {"targets": [target()]}, {"results": [], "timedOut": "false"}),
+    ("session.get_turn", target(), {**target("other"), "status": "running"}),
+    ("session.wait", {"targets": [target()]}, {"results": [], "timedOut": "false"}),
 ])
 async def test_query_tools_reject_malformed_or_mismatched_responses(operation, args, response):
     async def request(*args):
         return response
-    result = await DeviceTool(DeviceDelegations("p", request, lambda: "t"), operation).invoke(args)
+    broker = DeviceDelegations("p", request, lambda: "t")
+    if operation == "session.wait":
+        bind_wait_targets(broker, *args["targets"])
+    result = await DeviceTool(broker, operation).invoke(args)
     assert not result.success
 
 
 @pytest.mark.asyncio
-async def test_device_request_timeout_is_not_reported_as_offline_or_child_failure():
+@pytest.mark.parametrize("failure", [asyncio.TimeoutError, ConnectionError])
+async def test_transport_failure_is_not_reported_as_offline_or_child_failure(failure):
     async def request(*args):
-        raise asyncio.TimeoutError("connected device request timed out")
+        raise failure("device RPC response lost")
     broker = DeviceDelegations("p", request, lambda: "t")
-    result = await DeviceTool(broker, "subagent.get").invoke(target())
+    result = await DeviceTool(broker, "session.get_turn").invoke(target())
     assert not result.success
-    assert "timed out" in result.error
-    assert result.raw_output is None
+    assert "DEVICE_DELIVERY_UNKNOWN" in result.error
+    assert result.raw_output == {"code": -32008, "message": "DEVICE_DELIVERY_UNKNOWN",
+                                 "data": {"deviceId": "d", "delivery": "unknown"}}
     assert broker.operations == {}
     assert broker.consumed == {}
 
@@ -690,7 +722,7 @@ async def test_real_parent_wakes_once_and_stale_stop_cannot_cancel_next_turn(tmp
 
     class Conn:
         async def ext_method(self, method, params):
-            assert params["operation"] == "subagent.start"
+            assert params["operation"] == "session.start"
             return {"deviceId": "d", "sessionId": "s", "turnId": "child", "status": "accepted"}
         async def session_update(self, *args, **kwargs):
             pass
@@ -745,7 +777,8 @@ async def test_real_parent_wakes_once_and_stale_stop_cannot_cancel_next_turn(tmp
         await reopened.aclose()
 
 @pytest.mark.asyncio
-async def test_reopened_parent_runs_durable_uncommitted_wake(tmp_path):
+@pytest.mark.parametrize("outcome", ["completed", "error", "cancelled"])
+async def test_reopened_parent_reports_outcome_of_durable_uncommitted_wake(tmp_path, monkeypatch, outcome):
     from acp import text_block
     from box_agent.acp import BoxACPAgent
     from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
@@ -754,7 +787,7 @@ async def test_reopened_parent_runs_durable_uncommitted_wake(tmp_path):
     class Conn:
         def __init__(self):
             self.finished = asyncio.Event()
-            self.phase = []
+            self.notifications = []
 
         async def ext_method(self, method, params):
             return {"deviceId": "d", "sessionId": "s", "turnId": "child", "status": "accepted"}
@@ -764,7 +797,7 @@ async def test_reopened_parent_runs_durable_uncommitted_wake(tmp_path):
 
         async def ext_notification(self, method, params):
             assert method == "device/turn"
-            self.phase.append((params["turnId"], params["phase"]))
+            self.notifications.append(params)
             if params["phase"] == "finished":
                 self.finished.set()
 
@@ -794,12 +827,31 @@ async def test_reopened_parent_runs_durable_uncommitted_wake(tmp_path):
     conn = Conn()
     adapter = open_adapter(conn)
     try:
+        if outcome != "completed":
+            async def interrupt_wake(*args, **kwargs):
+                if outcome == "cancelled":
+                    raise asyncio.CancelledError()
+                raise RequestError(-32000, "test wake failure", {"reason": "test interruption"})
+
+            monkeypatch.setattr(adapter, "_prompt_for_session", interrupt_wake)
         session = await adapter.new_session(str(tmp_path), [], device={"version": 1}, session_id="restart-parent")
         await asyncio.wait_for(conn.finished.wait(), 10)
-        assert conn.phase == [(turn, "started"), (turn, "finished")]
-        broker = adapter._sessions[session.session_id].device_delegations
-        assert broker.log.has_committed_input(turn)
-        assert broker._consumed_seq(target("d", "s", "child")) == 1
+        started, finished = conn.notifications
+        identity = {"version": 1, "sessionId": session.session_id, "turnId": turn}
+        assert started == {**identity, "phase": "started"}
+        if outcome == "completed":
+            assert finished == {**identity, "phase": "finished", "result": finished["result"]}
+            assert finished["result"]["stopReason"] == "end_turn"
+            assert "_meta" in finished["result"]
+            broker = adapter._sessions[session.session_id].device_delegations
+            assert broker.log.has_committed_input(turn)
+            assert broker._consumed_seq(target("d", "s", "child")) == 1
+        elif outcome == "cancelled":
+            assert finished == {**identity, "phase": "finished", "result": {"stopReason": "cancelled"}}
+        else:
+            assert finished == {**identity, "phase": "finished",
+                                "error": {"code": -32000, "message": "test wake failure",
+                                          "data": {"reason": "test interruption"}}}
     finally:
         await adapter.aclose()
 
@@ -815,10 +867,16 @@ async def test_turn_ids_scope_wait_and_cancel_to_exact_device_and_round(tmp_path
     async def request(method, params):
         calls.append(params)
         operation = params["operation"]
-        if operation == "subagent.get":
-            return {**first, "status": "succeeded", "seq": 7, "complete": True, "result": "ok"}
-        if operation == "subagent.wait":
-            return {"results": [{**other_device, "status": "waiting_approval", "seq": 1, "approval": approval()}], "timedOut": False}
+        if operation == "session.get_turn":
+            return {**first, "status": "succeeded", "seq": 7, "complete": True, "source": "device", "result": "ok"}
+        if operation == "session.wait":
+            if params["deviceId"] == other_device["deviceId"]:
+                return {"results": [{**other_device, "status": "waiting_approval", "seq": 1,
+                                     "complete": False, "source": "device", "approval": approval()}],
+                        "timedOut": False}
+            return {"results": [], "timedOut": True, "states": [
+                {**item, "status": "running", "source": "device"} for item in params["args"]["targets"]
+            ]}
         return {"accepted": False, "sessionId": first["sessionId"], "turnId": first["turnId"]}
 
     root = tmp_path / "logs"
@@ -827,7 +885,7 @@ async def test_turn_ids_scope_wait_and_cancel_to_exact_device_and_round(tmp_path
     for idx, identity in enumerate((first, other_device, next_turn)):
         broker.save({**identity, "operationId": f"private-{idx}", "seq": 0,
                      "parentTurnId": "parent", "status": "accepted"})
-    result = await DeviceTool(broker, "subagent.get").invoke(first)
+    result = await DeviceTool(broker, "session.get_turn").invoke(first)
     assert result.success
     assert calls[-1]["args"] == {"sessionId": first["sessionId"], "turnId": first["turnId"]}
     receipts = broker.response_receipts([Message(role="tool", content=result.content, tool_call_id="get")])
@@ -841,13 +899,14 @@ async def test_turn_ids_scope_wait_and_cancel_to_exact_device_and_round(tmp_path
     log = SessionLog.open(root, session_id="parent", cwd=tmp_path)
     try:
         broker = DeviceDelegations("cloud", request, lambda: "parent-2", log)
-        wait = await DeviceTool(broker, "subagent.wait").invoke({"targets": [first, other_device, next_turn]})
+        wait = await DeviceTool(broker, "session.wait").invoke({"targets": [first, other_device, next_turn]})
         assert wait.success
-        assert calls[-1]["args"]["targets"] == [first, other_device, next_turn]
+        wait_calls = {call["deviceId"]: call["args"]["targets"] for call in calls if call["operation"] == "session.wait"}
+        assert wait_calls == {first["deviceId"]: [first, next_turn], other_device["deviceId"]: [other_device]}
         assert broker._consumed_seq(first) == 7
         assert broker._consumed_seq(other_device) == 0
         for _ in range(2):
-            cancelled = await DeviceTool(broker, "subagent.cancel").invoke(first)
+            cancelled = await DeviceTool(broker, "session.cancel").invoke(first)
             assert cancelled.success and cancelled.raw_output["accepted"] is False
         assert calls[-1] == calls[-2]
         assert calls[-1]["deviceId"] == "FixtureDesktopA"
@@ -855,7 +914,7 @@ async def test_turn_ids_scope_wait_and_cancel_to_exact_device_and_round(tmp_path
         assert calls[-1]["operationId"] != "private-0"
         assert not broker.operations["private-1"].get("cancelRequested")
         assert not broker.operations["private-2"].get("cancelRequested")
-        denied = await DeviceTool(broker, "subagent.cancel").invoke(target("FixtureDesktopC"))
+        denied = await DeviceTool(broker, "session.cancel").invoke(target("FixtureDesktopC"))
         assert not denied.success
     finally:
         log.close()
@@ -887,7 +946,7 @@ async def test_start_rejection_leaves_no_phantom_delegation_and_unknown_retries_
             await broker.start("d", "continue", session_id="s")
         assert broker.operations[calls[0]["operationId"]]["status"] == "rejected"
         assert broker.request_injections([]) == ()
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(RequestError, match="DEVICE_DELIVERY_UNKNOWN"):
             await broker.start("d", "continue", session_id="s")
         assert calls[0]["operationId"] != calls[1]["operationId"]
         assert broker.operations[calls[1]["operationId"]]["status"] == "unknown_delivery"
@@ -988,7 +1047,7 @@ async def test_restart_after_wake_input_commit_before_model_response_reconciles_
             self.updates = []
 
         async def ext_method(self, method, params):
-            assert params["operation"] == "subagent.start"
+            assert params["operation"] == "session.start"
             return {"deviceId": "d", "sessionId": "s", "turnId": "child", "status": "accepted"}
 
         async def ext_notification(self, method, params):
@@ -1053,12 +1112,12 @@ async def test_unknown_delivery_does_not_claim_identical_instruction_in_a_new_pa
         calls.append(params)
         if len(calls) == 1:
             raise asyncio.TimeoutError("unknown")
-        if params["operation"] == "subagent.start":
+        if params["operation"] == "session.start":
             return {"deviceId": "d", "sessionId": "s", "turnId": "new-child", "status": "accepted"}
         return {"accepted": True}
 
     broker = DeviceDelegations("cloud", request, lambda: turn)
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(RequestError, match="DEVICE_DELIVERY_UNKNOWN"):
         await broker.start("d", "same instruction")
     turn = "C2"
     accepted = await broker.start("d", "same instruction")
@@ -1066,7 +1125,7 @@ async def test_unknown_delivery_does_not_claim_identical_instruction_in_a_new_pa
     assert broker.operations[accepted["operationId"]]["parentTurnId"] == "C2"
     broker.stop("C2")
     await asyncio.wait_for(asyncio.gather(*broker.pending), 5)
-    assert calls[-1]["operation"] == "subagent.cancel"
+    assert calls[-1]["operation"] == "session.cancel"
     assert calls[-1]["args"] == {"sessionId": "s", "turnId": "new-child"}
     assert broker.operations[calls[0]["operationId"]]["status"] == "unknown_delivery"
     assert "cancelRequested" not in broker.operations[calls[0]["operationId"]]
@@ -1168,8 +1227,10 @@ asyncio.run(demo.main())
 
         restarted = await launch("-m", "examples.device_parent_demo")
         assert await open_session(restarted) == sid
-        await receive(restarted, lambda m: m.get("method") == "_device/turn"
-                      and m["params"]["phase"] == "finished", forbid_device_request=True)
+        finished = await receive(restarted, lambda m: m.get("method") == "_device/turn"
+                                 and m["params"]["phase"] == "finished", forbid_device_request=True)
+        assert finished["params"]["result"]["stopReason"] == "end_turn"
+        assert "_meta" in finished["params"]["result"]
         after = load_log()
         recovery = [e["data"] for e in after if e["type"] == "device/wake" and e["data"].get("recoveryOf")]
         assert len(recovery) == 1 and recovery[0]["recoveryOf"] == first
@@ -1189,14 +1250,14 @@ async def test_late_running_event_cancels_stopped_unknown_delivery_without_block
     dispatched = asyncio.Event()
     async def request(method, params):
         calls.append(params)
-        if params["operation"] == "subagent.start":
+        if params["operation"] == "session.start":
             raise asyncio.TimeoutError("lost response")
         dispatched.set()
         await release.wait()
         return {"accepted": True}
 
     broker = DeviceDelegations("cloud", request, lambda: "C1")
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(RequestError, match="DEVICE_DELIVERY_UNKNOWN"):
         await broker.start("d", "work")
     op = calls[0]["operationId"]
     broker.stop("C1")
@@ -1207,7 +1268,7 @@ async def test_late_running_event_cancels_stopped_unknown_delivery_without_block
     assert broker.event(update) == {"recorded": True}
     assert broker.event(update) == {"recorded": True}
     await asyncio.wait_for(dispatched.wait(), 5)
-    assert calls[-1]["operation"] == "subagent.cancel"
+    assert calls[-1]["operation"] == "session.cancel"
     assert calls[-1]["operationId"] != op
     assert calls[-1]["args"] == {"sessionId": "s", "turnId": "late-child"}
     assert len(calls) == 2
@@ -1223,20 +1284,285 @@ async def test_wait_timeout_only_returns_current_status_without_followup_get():
 
     async def request(method, params):
         calls.append((method, params))
-        return {"timedOut": True, "results": [], "states": [
-            {**first, "status": "running", "seq": 3, "summary": "intermediate tool output",
-             "toolCalls": [{"name": "ignored"}]},
-            {**second, "status": "unknown", "deviceOnline": False},
-        ]}
+        state = ({**first, "status": "running", "seq": 3, "summary": "intermediate tool output",
+                  "toolCalls": [{"name": "ignored"}]} if params["deviceId"] == "d"
+                 else {**second, "status": "unknown"})
+        return {"timedOut": True, "results": [], "states": [{**state, "source": "device"}]}
 
-    tool = DeviceTool(DeviceDelegations("p", request, lambda: "turn"), "subagent.wait")
+    broker = DeviceDelegations("p", request, lambda: "turn")
+    bind_wait_targets(broker, first, second)
+    tool = DeviceTool(broker, "session.wait")
     result = await tool.invoke({"targets": [first, second], "timeoutMs": 0})
     assert result.success
     assert result.raw_output == {"timedOut": True, "results": [], "states": [
-        {**first, "status": "running", "seq": 3},
-        {**second, "status": "unknown", "deviceOnline": False},
+        {**first, "status": "running", "seq": 3, "source": "device"},
+        {**second, "status": "unknown", "source": "device"},
     ]}
-    assert len(calls) == 1 and calls[0][1]["operation"] == "subagent.wait"
+    assert {params["deviceId"] for _, params in calls} == {"d", "d2"}
+    assert len({params["operationId"] for _, params in calls}) == 2
+    for _, params in calls:
+        assert params["operation"] == "session.wait"
+        assert params["args"] == {"targets": [target(params["deviceId"])], "timeoutMs": 0}
+
+
+@pytest.mark.asyncio
+async def test_wait_returns_ready_group_while_other_devices_are_offline_or_silent():
+    silent_started = asyncio.Event()
+    silent_released = asyncio.Event()
+    offline_replied = asyncio.Event()
+    ready = {**target("ready"), "status": "succeeded", "source": "device",
+             "seq": 2, "complete": True, "result": "available"}
+    calls = []
+
+    async def request(_, params):
+        calls.append(params)
+        if params["deviceId"] == "offline":
+            offline_replied.set()
+            raise RequestError(-32004, "DEVICE_OFFLINE", {"deviceId": "offline", "delivery": "not_sent"})
+        if params["deviceId"] == "silent":
+            silent_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                silent_released.set()
+        await silent_started.wait()
+        await offline_replied.wait()
+        return {"timedOut": False, "results": [ready]}
+
+    broker = DeviceDelegations("p", request, lambda: "parent")
+    bind_wait_targets(broker, target("offline"), target("silent"), target("ready"))
+    before = deepcopy(broker.operations)
+    result = await asyncio.wait_for(DeviceTool(broker, "session.wait").invoke({
+        "targets": [target("offline"), target("silent"), target("ready")],
+    }), 1)
+    assert result.success
+    assert result.raw_output == {"timedOut": False, "results": [ready], "unavailable": [
+        {"deviceId": "offline", "reason": "DEVICE_OFFLINE", "delivery": "not_sent"},
+    ]}
+    assert silent_released.is_set()
+    assert {item["operation"] for item in calls} == {"session.wait"}
+    assert broker.operations == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_business_reply", [False, True])
+async def test_wait_reports_only_observed_states_and_preserves_delivery_errors(has_business_reply):
+    observed = {**target("online"), "status": "running", "source": "device", "seq": 1}
+
+    async def request(_, params):
+        device_id = params["deviceId"]
+        if has_business_reply and device_id == "online":
+            return {"timedOut": True, "results": [], "states": [observed]}
+        name, delivery = (("DEVICE_OFFLINE", "not_sent") if device_id == "offline"
+                          else ("DEVICE_DELIVERY_UNKNOWN", "unknown"))
+        raise RequestError(-32004 if delivery == "not_sent" else -32008, name, {
+            "deviceId": device_id, "delivery": delivery,
+        })
+
+    broker = DeviceDelegations("p", request, lambda: "parent")
+    bind_wait_targets(broker, target("offline"), target("online"))
+    result = await asyncio.wait_for(DeviceTool(broker, "session.wait").invoke({
+        "targets": [target("offline"), target("online")], "timeoutMs": 60000,
+    }), 1)
+    assert result.success == has_business_reply
+    assert result.raw_output["unavailable"][0] == {
+        "deviceId": "offline", "reason": "DEVICE_OFFLINE", "delivery": "not_sent",
+    }
+    if has_business_reply:
+        assert result.raw_output["timedOut"] is True
+        assert result.raw_output["states"] == [observed]
+    else:
+        assert result.raw_output["error"][1] == {
+            "code": -32008, "message": "DEVICE_DELIVERY_UNKNOWN",
+            "data": {"deviceId": "online", "delivery": "unknown"},
+        }
+
+
+@pytest.mark.asyncio
+async def test_wait_shares_a_hard_deadline_and_reports_silence_as_unknown(monkeypatch):
+    monkeypatch.setattr("box_agent.device_delegation.RPC_TIMEOUT_SECONDS", 0.02)
+    observed = {**target("online"), "status": "running", "source": "device", "seq": 1}
+    arrivals = []
+    cancelled = []
+    all_arrived = asyncio.Event()
+
+    async def request(_, params):
+        device_id = params["deviceId"]
+        arrivals.append(device_id)
+        if len(arrivals) == 3:
+            all_arrived.set()
+        await all_arrived.wait()
+        if device_id == "online":
+            return {"timedOut": True, "results": [], "states": [observed]}
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.append(device_id)
+
+    broker = DeviceDelegations("p", request, lambda: "parent")
+    targets = [target("silent-a"), target("online"), target("silent-b")]
+    bind_wait_targets(broker, *targets)
+    result = await asyncio.wait_for(DeviceTool(broker, "session.wait").invoke({
+        "targets": targets, "timeoutMs": 10,
+    }), 1)
+    assert result.success
+    assert result.raw_output["timedOut"] is True
+    assert result.raw_output["states"] == [observed]
+    assert {item["deviceId"]: item["delivery"] for item in result.raw_output["unavailable"]} == {
+        "silent-a": "unknown", "silent-b": "unknown",
+    }
+    assert set(cancelled) == {"silent-a", "silent-b"}
+
+
+@pytest.mark.asyncio
+async def test_acp_stop_cancels_all_wait_groups_without_cancelling_other_parent_turns(tmp_path):
+    import json
+    from acp import text_block
+    from box_agent.acp import BoxACPAgent
+    from box_agent.config import Config, ToolsConfig, LLMConfig, AgentConfig
+    from examples.device_parent_demo import DeterministicLLM
+
+    entered = asyncio.Event()
+    started = set()
+    released = set()
+    targets = [target("first"), target("second")]
+
+    class Conn:
+        async def ext_method(self, method, params):
+            assert params["operation"] == "session.wait"
+            device = params["deviceId"]
+            started.add(device)
+            if started == {"first", "second"}:
+                entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                released.add(device)
+
+        async def session_update(self, *args, **kwargs):
+            pass
+
+    config = Config(tools=ToolsConfig(), llm=LLMConfig(api_key="test"),
+                    agent=AgentConfig(workspace_dir=str(tmp_path)))
+    adapter = BoxACPAgent(Conn(), config, DeterministicLLM(), [], "test")
+    try:
+        session = await adapter.new_session(str(tmp_path), [], device={"version": 1})
+        sid = session.session_id
+        broker = adapter._sessions[sid].device_delegations
+        bind_wait_targets(broker, *targets)
+        text = json.dumps({"operation": "session.wait", "args": {"targets": targets, "timeoutMs": 60000}})
+        prompt = asyncio.create_task(adapter.prompt(sid, [text_block(text)], turnId="waiting"))
+        await asyncio.wait_for(entered.wait(), 5)
+        await adapter.cancel(sid, turnId="waiting")
+        await asyncio.wait_for(prompt, 5)
+        assert released == started == {"first", "second"}
+        assert {record["status"] for record in broker.operations.values()} == {"accepted"}
+        assert all("cancelOperationId" not in record for record in broker.operations.values())
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["duplicate", "different_device", "unknown_target"])
+async def test_invalid_wait_batch_fails_before_contacting_any_device(invalid):
+    async def request(*args):
+        pytest.fail("invalid wait reached the transport")
+
+    broker = DeviceDelegations("p", request, lambda: "parent")
+    broker.save({**target(), "operationId": "known", "status": "accepted", "seq": 0,
+                 "parentTurnId": "p1"})
+    other = {"duplicate": target(), "different_device": target("wrong-device"),
+             "unknown_target": target("unknown-device", "unknown-session", "unknown-turn")}[invalid]
+    result = await DeviceTool(broker, "session.wait").invoke({"targets": [target(), other]})
+    assert not result.success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["wrong_group", "backend_source", "incomplete", "invalid_seq"])
+async def test_wait_does_not_expose_an_invalid_ready_snapshot(defect):
+    snapshot = {**target(), "status": "succeeded", "source": "device",
+                "complete": True, "seq": 1, "result": "should not be exposed"}
+    snapshot.update({"wrong_group": {"deviceId": "other"}, "backend_source": {"source": "backend"},
+                     "incomplete": {"complete": False}, "invalid_seq": {"seq": True}}[defect])
+
+    async def request(*args):
+        return {"timedOut": False, "results": [snapshot]}
+
+    broker = DeviceDelegations("p", request, lambda: "parent")
+    bind_wait_targets(broker, target(), target("other"))
+    result = await DeviceTool(broker, "session.wait").invoke({"targets": [target(), target("other")]})
+    assert not result.success
+    assert result.raw_output is None
+    assert "should not be exposed" not in result.error
+    assert not broker.offered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["session.start", "session.send"])
+async def test_start_and_send_retry_unknown_delivery_after_a_not_sent_attempt(operation):
+    returned = iter(["not_sent", "unknown", "not_sent", "accepted"])
+    calls = []
+
+    async def request(_, params):
+        calls.append(params)
+        delivery = next(returned)
+        if delivery == "accepted":
+            return {**target(), "status": "accepted"}
+        code, message = ((-32004, "DEVICE_OFFLINE") if delivery == "not_sent"
+                         else (-32008, "DEVICE_DELIVERY_UNKNOWN"))
+        raise RequestError(code, message, {"deviceId": "d", "delivery": delivery})
+
+    broker = DeviceDelegations("p", request, lambda: "p1")
+    tool = DeviceTool(broker, operation)
+    args = {"deviceId": "d", "instruction": "write"}
+    if operation == "session.send":
+        args["sessionId"] = "s"
+    for expected in ("not_sent", "unknown", "not_sent"):
+        result = await tool.invoke(args)
+        assert not result.success
+        assert result.raw_output["data"] == {"deviceId": "d", "delivery": expected}
+        assert expected in result.error
+    assert broker.operations[calls[0]["operationId"]]["status"] == "rejected"
+    assert broker.operations[calls[1]["operationId"]]["status"] == "unknown_delivery"
+    assert (await tool.invoke(args)).success
+    assert calls[0]["operationId"] != calls[1]["operationId"]
+    assert calls[1] == calls[2] == calls[3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["session.start", "session.send"])
+@pytest.mark.parametrize("rpc_error", [True, False], ids=["rpc-denial", "negative-receipt"])
+async def test_retry_after_lost_receipt_and_denial_executes_child_once(operation, rpc_error):
+    received = []
+    executions = {}
+    log = Log()
+
+    async def request(_, params):
+        operation_id = params["operationId"]
+        received.append(operation_id)
+        if len(received) == 2:
+            if rpc_error:
+                raise RequestError(-32003, "DEVICE_NOT_AUTHORIZED")
+            return {"accepted": False, "error": "DEVICE_NOT_AUTHORIZED"}
+        # The desktop durably accepts the first attempt before its reply gets lost.
+        receipt = executions.setdefault(operation_id, {**target(), "status": "accepted"})
+        if len(received) == 1:
+            raise ConnectionError("receipt lost")
+        return receipt
+
+    args = {"deviceId": "d", "instruction": "append a row"}
+    if operation == "session.send":
+        args["sessionId"] = "s"
+    broker = DeviceDelegations("p", request, lambda: "p1", log)
+    tool = DeviceTool(broker, operation)
+    assert not (await tool.invoke(args)).success
+    assert not (await tool.invoke(args)).success
+    assert broker.operations[received[0]]["status"] == "unknown_delivery"
+    reopened = DeviceDelegations("p", request, lambda: "p1", log)
+    assert (await DeviceTool(reopened, operation).invoke(args)).success
+    assert received == [received[0]] * 3
+    assert list(executions) == [received[0]]
+    assert reopened.operations[received[0]]["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -1245,10 +1571,10 @@ async def test_pending_approval_survives_reopen_and_is_consumed_without_hiding_r
     from box_agent.session_log import SessionLog
 
     async def request(method, params):
-        assert params["operation"] == "subagent.wait"
+        assert params["operation"] == "session.wait"
         return {"timedOut": False, "results": [
             {**target(), "status": "waiting_approval", "approval": approval(),
-             "seq": 1, "complete": False},
+             "seq": 1, "complete": False, "source": "device"},
         ]}
 
     root = tmp_path / "log"
@@ -1267,7 +1593,7 @@ async def test_pending_approval_survives_reopen_and_is_consumed_without_hiding_r
         restored = DeviceDelegations("p", request, lambda: "parent", log)
         assert restored.operations["op"]["approval"] == approval()
         assert approval()["approvalRequestId"] in restored.request_injections([])[0].content
-        wait = DeviceTool(restored, "subagent.wait")
+        wait = DeviceTool(restored, "session.wait")
         first = await wait.invoke({"targets": [target()]})
         receipt = restored.response_receipts([Message(role="tool", content=first.content)])
         assert receipt
@@ -1297,7 +1623,7 @@ async def test_box_cannot_submit_permission_decision_from_tool_or_extension(tmp_
     try:
         session = await agent.new_session(str(tmp_path), [], device={"version": 1})
         tools = agent._sessions[session.session_id].agent.tools
-        assert len([name for name in tools if name.startswith("device_")]) == 8
+        assert len([tool for tool in tools.values() if isinstance(tool, DeviceTool)]) == 8
         assert "device_permission_decision" not in tools
         response = await agent.ext_method("device/permission_decision", {
             **target(), "cloudSessionId": session.session_id,
@@ -1617,13 +1943,13 @@ async def test_success_keeps_summary_and_separate_permission_issue_after_reopen(
     from box_agent.session_log import SessionLog
 
     issue = {"code": "PERMISSION_TIMEOUT", "message": "One earlier approval expired"}
-    terminal = {**target(), "status": "succeeded", "seq": 1, "complete": True,
+    terminal = {**target(), "status": "succeeded", "seq": 1, "complete": True, "source": "device",
                 "summary": "Finished the available work",
                 "toolTrace": ["do not expose"], "privateDiagnostics": {"private": True},
                 "permissionIssue": {**issue, "privateToolData": "omit this"}}
 
     async def request(method, params):
-        if params["operation"] == "subagent.get":
+        if params["operation"] == "session.get_turn":
             return terminal
         return {"timedOut": False, "results": [terminal]}
 
@@ -1638,8 +1964,8 @@ async def test_success_keeps_summary_and_separate_permission_issue_after_reopen(
     try:
         restored = DeviceDelegations("p", request, lambda: "parent", log)
         pushed = json.loads(restored.request_injections([])[0].content.split("\n", 1)[1])[0]
-        fetched = await DeviceTool(restored, "subagent.get").invoke(target())
-        waited = await DeviceTool(restored, "subagent.wait").invoke({"targets": [target()]})
+        fetched = await DeviceTool(restored, "session.get_turn").invoke(target())
+        waited = await DeviceTool(restored, "session.wait").invoke({"targets": [target()]})
         for snapshot in (pushed, fetched.raw_output, waited.raw_output["results"][0]):
             assert snapshot["status"] == "succeeded"
             assert snapshot["summary"] == terminal["summary"]
@@ -1650,11 +1976,12 @@ async def test_success_keeps_summary_and_separate_permission_issue_after_reopen(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("aborted", [False, True])
-async def test_wait_uses_ready_final_snapshot_instead_of_timeout_or_failure(aborted, monkeypatch):
+async def test_wait_uses_final_ready_snapshot_only_from_a_successful_response(aborted, monkeypatch):
     issue = {"code": "APPROVAL_EXPIRED", "message": "A prior approval expired"}
     first = {**target(), "status": "succeeded", "summary": "Available output",
+             "seq": 1, "complete": True, "source": "device",
              "permissionIssue": issue, "toolTrace": ["private"]}
-    second = {**target("other"), "status": "running"}
+    second = {**target(turn="second"), "status": "running", "source": "device"}
     calls = []
 
     async def request(method, params):
@@ -1665,18 +1992,24 @@ async def test_wait_uses_ready_final_snapshot_instead_of_timeout_or_failure(abor
         return {**envelope, "states": [first, second]}
 
     broker = DeviceDelegations("p", request, lambda: "parent")
+    bind_wait_targets(broker, target(), target(turn="second"))
     from unittest.mock import Mock
     snapshot = Mock(wraps=broker._snapshot)
     monkeypatch.setattr(broker, "_snapshot", snapshot)
-    result = await DeviceTool(broker, "subagent.wait").invoke({
-        "targets": [target(), target("other")], "timeoutMs": 0,
+    result = await DeviceTool(broker, "session.wait").invoke({
+        "targets": [target(), target(turn="second")], "timeoutMs": 0,
     })
-    assert result.success
-    assert result.raw_output == {"timedOut": False, "results": [{
-        key: item for key, item in first.items() if key != "toolTrace"
-    }]}
-    assert snapshot.call_count == 2
-    assert calls == ["subagent.wait"]
+    if aborted:
+        assert not result.success
+        assert result.raw_output == {"error": {"code": "TIMED_OUT", "message": "Wait ended"}}
+        snapshot.assert_not_called()
+    else:
+        assert result.success
+        assert result.raw_output == {"timedOut": False, "results": [{
+            key: item for key, item in first.items() if key != "toolTrace"
+        }]}
+        assert snapshot.call_count == 2
+    assert calls == ["session.wait"]
 
 @pytest.mark.asyncio
 async def test_wait_does_not_expose_snapshots_from_an_authorization_error():
@@ -1685,7 +2018,8 @@ async def test_wait_does_not_expose_snapshots_from_an_authorization_error():
                 "states": [{**target(), "status": "succeeded", "summary": "private"}]}
 
     broker = DeviceDelegations("p", request, lambda: "parent")
-    result = await DeviceTool(broker, "subagent.wait").invoke({"targets": [target()]})
+    bind_wait_targets(broker, target())
+    result = await DeviceTool(broker, "session.wait").invoke({"targets": [target()]})
     assert not result.success
     assert result.raw_output == {"error": {"code": "FORBIDDEN", "message": "Not authorized"}}
 
@@ -1694,7 +2028,7 @@ async def test_device_send_schema_uses_receipt_session_without_a_turn_id():
     async def request(*args):
         pytest.fail("invalid device send arguments must not reach the transport")
 
-    tool = DeviceTool(DeviceDelegations("p", request, lambda: "parent"), "subagent.send")
+    tool = DeviceTool(DeviceDelegations("p", request, lambda: "parent"), "session.send")
     schema = tool.parameters
     assert set(schema["required"]) == {"deviceId", "sessionId", "instruction"}
     assert set(schema["properties"]) == {"deviceId", "sessionId", "instruction"}
@@ -1706,7 +2040,7 @@ async def test_device_send_schema_uses_receipt_session_without_a_turn_id():
                                    "turnId": "old-turn"})).success
 
 
-@pytest.mark.parametrize("operation", ["subagent.get", "subagent.wait"])
+@pytest.mark.parametrize("operation", ["session.get_turn", "session.wait"])
 def test_device_tool_guides_parent_to_yield_when_approval_is_pending(operation):
     async def request(*args):
         pytest.fail("reading the device tool description must not reach the transport")
@@ -1718,7 +2052,7 @@ def test_device_tool_guides_parent_to_yield_when_approval_is_pending(operation):
     assert "If there is none, tell the user approval is pending and end the parent turn" in description
     assert "The Harness delivers the terminal result" in description
     assert "Do not sleep or poll" in description
-    if operation == "subagent.wait":
+    if operation == "session.wait":
         assert "return immediately, including repeat waits for the same pending approval" in description
 
 
@@ -1755,7 +2089,7 @@ async def test_reopened_stopped_parent_retries_unacknowledged_cancel_with_same_o
     first_timeout = asyncio.Event()
 
     async def request(method, params):
-        if params["operation"] == "subagent.start":
+        if params["operation"] == "session.start":
             return {**target("d", "s", "t"), "status": "accepted"}
         calls.append(params)
         if not acknowledge:
@@ -1804,7 +2138,7 @@ async def test_opt_in_default_turn_id_is_durable_and_unique_after_stopping_and_r
 
     class Connection:
         async def ext_method(self, method, params):
-            if params["operation"] == "subagent.cancel":
+            if params["operation"] == "session.cancel":
                 return {"accepted": True}
             calls.append(params)
             started.set()
@@ -1942,15 +2276,15 @@ async def test_device_runtime_input_skips_user_memory_and_next_manual_prompt_bin
 
 @pytest.mark.asyncio
 async def test_waiting_input_is_ready_for_get_and_wait_and_clears_when_the_child_runs():
-    ready = {**target(), "status": "waiting_input", "seq": 1,
+    ready = {**target(), "status": "waiting_input", "seq": 1, "complete": False, "source": "device",
              "inputRequest": {"question": "Which project code?", "private": "drop"}}
     broker = None
 
     async def request(method, params):
         operation = params["operation"]
-        if operation == "subagent.start":
+        if operation == "session.start":
             return {**target(), "status": "accepted"}
-        if operation == "subagent.get":
+        if operation == "session.get_turn":
             return ready
         return {"timedOut": True, "results": [], "states": [ready]}
 
@@ -1959,8 +2293,8 @@ async def test_waiting_input_is_ready_for_get_and_wait_and_clears_when_the_child
     update = {"version": 1, "sessionId": "parent", "event": {**ready, "operationId": accepted["operationId"]}}
     assert broker.event(update) == {"recorded": True}
     expected_request = {"question": "Which project code?"}
-    get = DeviceTool(broker, "get")
-    wait = DeviceTool(broker, "wait")
+    get = DeviceTool(broker, "session.get_turn")
+    wait = DeviceTool(broker, "session.wait")
     result = await get.invoke(target())
     assert result.success and result.raw_output["inputRequest"] == expected_request
     for _ in range(2):
@@ -2002,7 +2336,7 @@ async def test_waiting_input_reaches_the_model_once_and_does_not_end_the_child(t
     class Connection:
         async def ext_method(self, method, params):
             nonlocal start_request
-            assert params["operation"] == "subagent.start"
+            assert params["operation"] == "session.start"
             start_request = params
             if during_parent_turn:
                 assert await report(params, params["sessionId"], 1, "waiting_input",
@@ -2093,7 +2427,7 @@ async def test_stopped_child_cancel_retries_without_events_but_stops_on_definite
     calls = []
 
     async def request(method, params):
-        if params["operation"] == "subagent.start":
+        if params["operation"] == "session.start":
             return {**target(), "status": "accepted"}
         calls.append(params)
         if len(calls) == 1:
@@ -2118,7 +2452,9 @@ async def test_stopped_child_cancel_retries_without_events_but_stops_on_definite
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation,arguments", [("get", target()), ("wait", {"targets": [target()], "timeoutMs": 25})])
+@pytest.mark.parametrize("operation,arguments", [
+    ("session.get_turn", target()), ("session.wait", {"targets": [target()], "timeoutMs": 25}),
+])
 async def test_get_and_wait_enforce_local_deadline_without_inventing_child_state(monkeypatch, operation, arguments):
     import box_agent.device_delegation as delegation
 
@@ -2132,12 +2468,15 @@ async def test_get_and_wait_enforce_local_deadline_without_inventing_child_state
             inflight.set()
 
     broker = DeviceDelegations("parent", request, lambda: "turn")
+    if operation == "session.wait":
+        bind_wait_targets(broker, *arguments["targets"])
+    before = deepcopy(broker.operations)
     result = await asyncio.wait_for(DeviceTool(broker, operation).invoke(arguments), 1)
     assert inflight.is_set()
     assert not result.success
-    assert result.error == "device request timed out"
-    assert result.raw_output is None
-    assert broker.operations == {}
+    assert result.raw_output == {"code": -32008, "message": "DEVICE_DELIVERY_UNKNOWN",
+                                 "data": {"deviceId": "d", "delivery": "unknown"}}
+    assert broker.operations == before
 
 
 @pytest.mark.asyncio
@@ -2167,7 +2506,7 @@ async def test_history_edit_hides_removed_device_turn_and_keeps_late_event_recei
 
     class Connection:
         async def ext_method(self, method, params):
-            assert params["operation"] == "subagent.start"
+            assert params["operation"] == "session.start"
             dispatched.append(params)
             return {**target(), "status": "accepted"}
 
@@ -2292,7 +2631,7 @@ async def test_rebinding_device_events_retry_without_starting_work_on_the_closed
         assert new_broker is not old_broker
         assert await adapter.ext_method("device/event", envelope) == {"recorded": True}
         await asyncio.wait_for(asyncio.gather(*new_broker.pending), 5)
-        assert len(calls) == 1 and calls[0]["operation"] == "subagent.cancel"
+        assert len(calls) == 1 and calls[0]["operation"] == "session.cancel"
         assert not old_broker.pending
     finally:
         finish_close.set()
@@ -2611,5 +2950,5 @@ def test_wait_timeout_rejects_malformed_status_before_checking_readiness():
     broker = DeviceDelegations("p", None, lambda: "parent")
     with pytest.raises(ValueError, match="invalid device status snapshot"):
         broker._wait_result({
-            "timedOut": True, "results": [], "states": [{**target(), "status": {}}],
+            "timedOut": True, "results": [], "states": [{**target(), "status": {}, "source": "device"}],
         }, [target()])
