@@ -197,6 +197,7 @@ from box_agent.session_trace import (
 from box_agent.session_log import (
     SessionLog, SessionLogCorrupted, SessionLogDurabilityError, SessionLogInUseError,
     SessionLogReplayError, SessionLogWorkspaceMismatch, TOOL_OUTCOME_UNKNOWN, run_session_io, run_session_write,
+    session_write_lock,
 )
 from box_agent.windows_session_lock import ERROR_ACCESS_DENIED
 from box_agent.api.input import UserInput
@@ -3214,7 +3215,8 @@ class BoxACPAgent:
         async def run() -> None:
             try:
                 while ready():
-                    turn = broker.next_wake()
+                    async with session_write_lock(broker.log):
+                        turn = broker.next_wake() if ready() else None
                     if turn is None:
                         return
                     try:
@@ -3310,7 +3312,8 @@ class BoxACPAgent:
                 )
             finally:
                 if state.device_delegations is not None:
-                    state.device_delegations.reconcile_history()
+                    async with session_write_lock(state.device_delegations.log):
+                        state.device_delegations.reconcile_history()
             state.source_text = ""
             state.pending_plan_approval = None
             state.waiting_for_user_input = False
@@ -4339,7 +4342,8 @@ class BoxACPAgent:
             state.device_delegations is not None and not state.cancelled
             and not failed and not waiting_for_user and acp_stop_reason == "end_turn"
         ):
-            state.device_delegations.end(turn_id)
+            async with session_write_lock(state.device_delegations.log):
+                state.device_delegations.end(turn_id)
         return PromptResponse(
             stop_reason=acp_stop_reason,
             field_meta=response_meta,
@@ -4353,9 +4357,9 @@ class BoxACPAgent:
         target = _meta_string(meta, "turnId", "turn_id") if targeted_cancel else ""
         if targeted_cancel and not target and ("turnId" in meta or "turn_id" in meta):
             return
-        self._cancel_turn(state, session_id, target, targeted_cancel=targeted_cancel)
+        await self._cancel_turn(state, session_id, target, targeted_cancel=targeted_cancel)
 
-    def _cancel_turn(
+    async def _cancel_turn(
         self, state: SessionState, session_id: str, target: str, *, targeted_cancel: bool,
     ) -> bool:
         active_turn = state.prompt_target_turn if state._prompt_in_progress else ""
@@ -4376,8 +4380,10 @@ class BoxACPAgent:
         pending_suggestions = state.follow_up_suggestions_task
         if pending_suggestions is not None and not pending_suggestions.done():
             pending_suggestions.cancel()
-        if state.device_delegations is not None:
-            state.device_delegations.stop(active_turn)
+        if state.device_delegations is not None and active_turn:
+            state.device_delegations.interrupt_waits(active_turn)
+            async with session_write_lock(state.device_delegations.log):
+                state.device_delegations.stop(active_turn)
         log.info("session/cancel", session_id=session_id, message="Cancel requested")
         return True
 
@@ -4486,7 +4492,7 @@ class BoxACPAgent:
             state = self._sessions.get(sid)
             if state is None or (state.device_delegations is None and not self._device_delegation_receiver):
                 return {"accepted": False}
-            return {"accepted": self._cancel_turn(state, sid, turn, targeted_cancel=True)}
+            return {"accepted": await self._cancel_turn(state, sid, turn, targeted_cancel=True)}
         if method == "device/event":
             sid = params.get("sessionId", "")
             if not isinstance(sid, str):
@@ -4496,9 +4502,10 @@ class BoxACPAgent:
             state = self._sessions.get(sid)
             if state is None or state.device_delegations is None:
                 raise ValueError("device capability is not enabled for this session")
-            if state.device_wake_closed:
-                raise _session_busy_error(sid, rebinding=True)
-            receipt = state.device_delegations.event(params)
+            async with session_write_lock(state.device_delegations.log):
+                if state.device_wake_closed:
+                    raise _session_busy_error(sid, rebinding=True)
+                receipt = state.device_delegations.event(params)
             self._schedule_device_wake(sid, state)
             return receipt
         if method == "request_wrap_up":

@@ -85,7 +85,7 @@ from .tool_messages import (
 )
 from ..logger import AgentLogger
 from ..payload_privacy import redact_diagnostic_text
-from ..session_log import SessionLogReplayError, run_session_write
+from ..session_log import SessionLogReplayError, run_session_write, session_write_lock
 from ..llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from ..loop_guards import (
     EMPTY_ARGS_LIMIT,
@@ -1036,25 +1036,35 @@ async def _run_agent_loop_impl(
     receipt_response: Message | None = None
     model_receipts: dict[str, dict[str, int]] = {}
 
-    def commit_model_response(message: Message) -> None:
+    async def commit_model_response(message: Message) -> None:
         if not (message.content or message.thinking or message.tool_calls):
             return
-        commit_response = getattr(context_engine, "commit_response", None)
-        if callable(commit_response):
-            commit_response(message)
-        if message.usage is not None and message.usage._request_snapshot is not None:
-            for previous in reversed(messages):
-                if previous.usage is not None and previous.usage._request_snapshot is not None:
-                    previous.usage._request_snapshot = None
-                    break
         receipts = model_receipts if message is receipt_response else {}
-        messages.append(message)
-        if session_log is not None and session_turn is not None:
-            if receipts:
-                session_log.mark_runtime_input_receipts(message, receipts)
-            checkpoint_messages(step + 1)
-        if receipts and isinstance(inject_queue, InjectionManager) and inject_queue.on_model_commit is not None:
-            inject_queue.on_model_commit(receipts)
+        committed = False
+
+        def persist_response() -> None:
+            nonlocal committed
+            commit_response = getattr(context_engine, "commit_response", None)
+            if callable(commit_response):
+                commit_response(message)
+            if message.usage is not None and message.usage._request_snapshot is not None:
+                for previous in reversed(messages):
+                    if previous.usage is not None and previous.usage._request_snapshot is not None:
+                        previous.usage._request_snapshot = None
+                        break
+            messages.append(message)
+            if session_log is not None and session_turn is not None:
+                if receipts:
+                    session_log.mark_runtime_input_receipts(message, receipts)
+                checkpoint_messages(step + 1)
+            committed = True
+
+        try:
+            await run_session_write(session_log, persist_response)
+        finally:
+            # A cancelled await can still have committed on the worker.
+            if committed and receipts and isinstance(inject_queue, InjectionManager) and inject_queue.on_model_commit is not None:
+                inject_queue.on_model_commit(receipts)
 
     def validate_followup(result, tool, pending):
         accepted, blocks, tokens = _validate_transient_followup_result(
@@ -1455,8 +1465,9 @@ async def _run_agent_loop_impl(
             if message is not None
         ]
         request_context_messages.extend(correction_messages)
-        if isinstance(inject_queue, InjectionManager):
-            runtime_messages, runtime_events = inject_queue.prepare_request_context(messages)
+        if isinstance(inject_queue, InjectionManager) and inject_queue.request_injections is not None:
+            async with session_write_lock(session_log):
+                runtime_messages, runtime_events = inject_queue.prepare_request_context(messages)
             request_context_messages.extend(runtime_messages)
             for event in runtime_events:
                 yield event
@@ -2085,8 +2096,7 @@ async def _run_agent_loop_impl(
                 partial_text = exc.partial_text or ""
                 partial_thinking = exc.partial_thinking or ""
                 if partial_text or partial_thinking:
-                    await run_session_write(
-                        session_log, commit_model_response,
+                    await commit_model_response(
                         Message(
                             role="assistant",
                             content=partial_text,
@@ -2321,7 +2331,7 @@ async def _run_agent_loop_impl(
                 if not has_partial_content:
                     provider_stale_retries += 1
                 if has_partial_content:
-                    await run_session_write(session_log, commit_model_response, assistant_msg)
+                    await commit_model_response(assistant_msg)
                     recovery_text = (
                         "模型服务在上一轮已经输出部分内容、但尚未完成动作时长时间没有返回"
                         "新数据。请从未完成的动作继续，不要重复已经输出的说明，也不要把"
@@ -2382,7 +2392,7 @@ async def _run_agent_loop_impl(
                 for item in details
             ) or "unknown tool"
             if response.content.strip():
-                await run_session_write(session_log, commit_model_response, assistant_msg)
+                await commit_model_response(assistant_msg)
             if oversized_tool_argument_retries < 1:
                 oversized_tool_argument_retries += 1
                 repair_text = (
@@ -2527,7 +2537,7 @@ async def _run_agent_loop_impl(
             # No tool attempt: preserve the existing text continuation and
             # empty-response retry behavior.
             if visible_text and truncation_continuations < max_truncation_continuations:
-                await run_session_write(session_log, commit_model_response, assistant_msg)
+                await commit_model_response(assistant_msg)
                 truncation_continuations += 1
                 tail = response.content.rstrip()[-40:]
                 cont_text = truncation_continuation_text(tail)
@@ -2599,7 +2609,7 @@ async def _run_agent_loop_impl(
 
             # Retries / continuations exhausted — persist plain text and
             # surface the error.
-            await run_session_write(session_log, commit_model_response, assistant_msg)
+            await commit_model_response(assistant_msg)
             usage = response.usage
             diag_parts: list[str] = []
             if usage is not None:
@@ -2639,7 +2649,7 @@ async def _run_agent_loop_impl(
             return
 
         # ── Append assistant message (non-truncated path) ───
-        await run_session_write(session_log, commit_model_response, assistant_msg)
+        await commit_model_response(assistant_msg)
 
         # Reset the retry counter now that a clean turn landed — a future
         # truncation on a later step should get its own fresh budget.

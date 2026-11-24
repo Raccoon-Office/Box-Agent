@@ -12,8 +12,9 @@ import re
 import shutil
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
@@ -62,12 +63,22 @@ async def run_session_io(operation: Callable[..., _T], /, *args: Any, **kwargs: 
     return result
 
 
+@asynccontextmanager
+async def session_write_lock(store: object) -> AsyncIterator[None]:
+    """Serialize a log transaction with its worker writes."""
+    if isinstance(store, SessionLog):
+        async with store._write_lock:
+            yield
+    else:
+        yield
+
+
 async def run_session_write(store: object, operation: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
     """Run file work in order for this log and wait for its durability barrier."""
     if not isinstance(store, SessionLog):
         # Custom synchronous stores keep their original calling convention.
         return operation(*args, **kwargs)
-    async with store._write_lock:
+    async with session_write_lock(store):
         return await run_session_io(operation, *args, **kwargs)
 
 
