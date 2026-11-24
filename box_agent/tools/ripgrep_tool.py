@@ -653,10 +653,6 @@ class GlobTool(_RipgrepTool):
                     continue
                 if not _matches_file_pattern(relative, compiled_patterns):
                     continue
-                if self._perm is not None and await asyncio.to_thread(
-                    self._permission_error, search_path / relative,
-                ):
-                    continue
                 display_path = self._display_path(search_path, relative)
                 if len(files) >= normalized_limit:
                     truncated = True
@@ -1039,8 +1035,6 @@ class GrepTool(_RipgrepTool):
         rendered: list[str] = []
         output_chars = 0
         truncated = False
-        last_path = None
-        current_path_allowed = True
         async with aclosing(self._search_records(
             search_path, pattern, include, compiled_include, deadline, status,
         )) as records:
@@ -1066,13 +1060,6 @@ class GrepTool(_RipgrepTool):
                     raw_path = path_bytes.decode("utf-8")
                 except UnicodeDecodeError:
                     status.undecodable_paths = True
-                    continue
-                if self._perm is not None and raw_path != last_path:
-                    current_path_allowed = await asyncio.to_thread(
-                        self._permission_error, cwd / raw_path,
-                    ) is None
-                    last_path = raw_path
-                if not current_path_allowed:
                     continue
                 text = line_bytes.decode("utf-8", errors="replace")
                 if compiled_include is not None and not _matches_file_pattern(

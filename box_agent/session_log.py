@@ -389,12 +389,6 @@ class SessionLog:
         lock_handle: BinaryIO | WindowsSessionLock,
     ) -> None:
         self.path = path
-        # Pin the directory for read-only tool access while opening the log.
-        # An invocation must not follow a later directory alias or do extra I/O.
-        try:
-            self.resolved_directory: Path | None = path.parent.resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
-            self.resolved_directory = None
         self.header = dict(header)
         self._events = events
         self._durable_event_count = len(events)

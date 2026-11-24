@@ -1230,7 +1230,6 @@ class SubAgentTool(EventEmittingTool):
                     invocation_context=ToolInvocationContext(
                         event_queue=queue,
                         parent_tool_call_id=parent_tool_call_id,
-                        session_log=session_log,
                     ),
                 )
             except SessionLogDurabilityError:

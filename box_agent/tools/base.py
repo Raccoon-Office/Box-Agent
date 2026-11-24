@@ -21,7 +21,6 @@ from .schema_validation import (
 )
 
 if TYPE_CHECKING:
-    from ..session_log import SessionLog
     from .completion_checks import CompletionCheck, CompletionContext
 
 
@@ -152,7 +151,6 @@ class ToolInvocationContext:
     capability_gates: tuple[Any, ...] = ()
     parallel_window: ParallelToolWindow | None = None
     managed_browser_click_requested: bool = False
-    session_log: SessionLog | None = None
 
 
 class Tool:

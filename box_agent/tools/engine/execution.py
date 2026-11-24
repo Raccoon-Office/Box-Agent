@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Final
 from ...session_log import SessionLogDurabilityError, run_session_write
 from ..base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
 from ..delegated_budget import current_budgets
-from ..permissions import bind_session_log_permissions
 from ..schema_validation import validate_tool_arguments, ToolSchemaValidationError
 from ..chat_references import bind_chat_references
 
@@ -105,7 +104,7 @@ async def invoke_tool_once(
     except BaseException:
         context.budget_charge.release_unexecuted()
         raise
-    with bind_chat_references(guard, allowed_deletions), bind_session_log_permissions(context.session_log):
+    with bind_chat_references(guard, allowed_deletions):
         if isinstance(tool, EventEmittingTool) or getattr(tool, "uses_invocation_context", False):
             result = await tool.invoke(arguments, context=context)
         else:
