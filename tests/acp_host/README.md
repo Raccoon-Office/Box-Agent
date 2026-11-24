@@ -76,6 +76,12 @@ uv run python test_workspace/run_acp_eval.py --count 3
 
 These commands use the configured provider and are separate from the isolated tests.
 
+`test_acp_streaming.py` uses the shared chunked JSONL reader, so tool results larger
+than asyncio's default 64 KiB line limit remain readable. Partial frames survive
+polling timeouts; a quiet interval does not imply completion. The prompt loop waits
+for its response, EOF, or `--timeout`. Its protocol captures are temporary and are
+removed on exit.
+
 ## Run
 
 ```bash
