@@ -255,7 +255,64 @@ def test_source_changed_since_discovery_fails_preflight(tmp_path):
     (directory / "SKILL.md").write_text("changed")
     with pytest.raises(ExpertDependencyError) as raised:
         _validate(_expert(["review"]), loader)
-    assert raised.value.dependencies[0]["state"] == "unavailable"
+    item = raised.value.dependencies[0]
+    assert item["state"] == "unavailable"
+    assert item["dependencyCode"] == "SKILL_SOURCE_CHANGED"
+    assert "dependencyName" not in item
+
+
+def test_preflight_collects_root_and_child_failures_without_leaking_details(tmp_path):
+    _write_skill(tmp_path, "review", extra="required_skills: [evidence]\n")
+    _write_skill(tmp_path, "blocked-root")
+    loader = _loader((tmp_path, "user"))
+    meta = _expert(["missing-root", "review", "blocked-root"])
+    with pytest.raises(ExpertDependencyError) as raised:
+        validate_expert_dependencies(
+            meta, ExpertSessionContext.from_meta(meta), loader, [],
+            skill_access_filter=lambda skill: skill.name != "blocked-root",
+        )
+    common = {"expertId": "custom-reviewer", "expertName": "Custom reviewer",
+              "source": None, "required": True}
+    assert raised.value.dependencies == [
+        {**common, "name": "missing-root", "state": "missing",
+         "reason": "The selected Skill is not available in the cloud runtime."},
+        {**common, "name": "review", "state": "missing",
+         "reason": "Required Skill 'evidence' is not found.",
+         "dependencyName": "evidence", "dependencyCode": "SKILL_NOT_FOUND"},
+        {**common, "name": "blocked-root", "state": "unavailable",
+         "reason": "Required Skill 'blocked-root' is not enabled for this conversation.",
+         "dependencyName": "blocked-root"},
+    ]
+
+
+@pytest.mark.parametrize("first_failure", ["market", "access", "source"])
+def test_child_identity_and_access_errors_precede_source_changes(tmp_path, first_failure):
+    _write_skill(tmp_path, "review", extra="required_skills: [evidence]\n")
+    child = _write_skill(tmp_path, "evidence")
+    (child / ".skill-installation.json").write_text(
+        json.dumps({"source": "hub", "skillId": "other-id"}),
+    )
+    loader = _loader((tmp_path, "user"))
+    (child / "SKILL.md").write_text("changed after discovery")
+    bindings = ([{"slug": "evidence", "source": "MARKET", "skillId": "expected-id"}]
+                if first_failure == "market" else [])
+    meta = _expert(["review"], optionalSkills=["evidence"], skillBindings=bindings)
+    with pytest.raises(ExpertDependencyError) as raised:
+        validate_expert_dependencies(
+            meta, ExpertSessionContext.from_meta(meta), loader, [],
+            skill_access_filter=lambda skill: first_failure == "source" or skill.name != "evidence",
+        )
+    item = raised.value.dependencies[0]
+    assert item["name"] == "review" and item["state"] == "unavailable"
+    assert "skillId" not in item
+    if first_failure == "source":
+        assert item["dependencyCode"] == "SKILL_SOURCE_CHANGED"
+        assert "dependencyName" not in item
+    else:
+        assert item["dependencyName"] == "evidence"
+        assert "dependencyCode" not in item
+        assert ("market installation identity" if first_failure == "market" else
+                "not enabled for this conversation") in item["reason"]
 
 
 @pytest.mark.parametrize("selection", ["expert", "expert_team", "expertTeam"])
