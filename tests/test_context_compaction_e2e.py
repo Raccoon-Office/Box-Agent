@@ -11,7 +11,89 @@ from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEve
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.context_input import DefaultContextEngine
 from box_agent.kernel.compact_engine import DefaultCompactEngine
-from box_agent.kernel.context_engine import _fallback_context_estimate, _SUMMARY_REQUEST
+from box_agent.kernel.context_engine import _create_summary, _fallback_context_estimate, _SUMMARY_REQUEST
+from box_agent.llm.llm_wrapper import LLMClient
+from box_agent.tools.base import Tool, ToolResult
+
+
+class _PrefixTool(Tool):
+    name = "second_by_name"
+    description = "Load the first report."
+    parameters = {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs):
+        return ToolResult(success=True, content="report")
+
+
+class _AnotherPrefixTool(_PrefixTool):
+    name = "first_by_name"
+    description = "Load the second report."
+
+
+@pytest.mark.asyncio
+async def test_reactive_summary_reuses_main_request_wire_prefix_and_tool_order(tmp_path):
+    import httpx
+    from openai import AsyncOpenAI
+
+    from box_agent.schema import LLMProvider
+
+    requests = []
+
+    def respond(request):
+        payload = json.loads(request.content)
+        if not payload.get("stream"):
+            return httpx.Response(200, json={"choices": [{
+                "index": 0, "message": {"role": "assistant", "content": '{"continue":false}'},
+                "finish_reason": "stop",
+            }]})
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(400, json={"error": {
+                "code": "context_length_exceeded", "message": "This model's maximum context length is 12000 tokens.",
+            }})
+        text = "<summary>Progress retained.</summary>" if len(requests) == 2 else "completed"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=(
+            f"data: {json.dumps({'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': 'stop'}]})}\n\n"
+            "data: [DONE]\n\n"
+        ))
+
+    model = LLMClient(provider=LLMProvider.OPENAI, api_key="test", api_base="https://example.invalid/v1",
+                      model="prefix-test", max_output_tokens=1000)
+    await model._client.client.close()
+    async with AsyncOpenAI(api_key="test", base_url=model.api_base, max_retries=0,
+                           http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))) as client:
+        model._client.client = client
+        agent = Agent(llm_client=model, system_prompt="`<current_date>` is the session date.",
+                      tools=[_PrefixTool(), _AnotherPrefixTool()], max_steps=1, token_limit=10_000,
+                      workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False)
+        agent.messages.extend([Message(role="user", content="First report"),
+                               Message(role="assistant", content="Already checked the first report.")])
+        agent.add_user_message("Summarize the checkpoints.")
+        events = [event async for event in agent.run_events()]
+
+    assert any(isinstance(event, SummarizationEvent) and event.mode == "summary" for event in events)
+    assert len(requests) == 3
+    initial, summary, _ = requests
+    assert [tool["function"]["name"] for tool in initial["tools"][:2]] == ["second_by_name", "first_by_name"]
+    assert summary["tools"] == initial["tools"]
+    assert "tool_choice" not in summary
+    assert any("<current_date>" in message["content"] for message in initial["messages"][1:])
+    assert summary["messages"] == [*initial["messages"], {"role": "user", "content": _SUMMARY_REQUEST}]
+
+
+@pytest.mark.asyncio
+async def test_summary_preflight_counts_the_shared_tools():
+    from box_agent.kernel.context_engine import _SummaryInputBudgetExceeded
+    from box_agent.tools.engine.contracts import ToolDefinitionView
+
+    llm = CompactionE2ELLM()
+    history = [Message(role="system", content="system"), Message(role="user", content="request")]
+    limit = _fallback_context_estimate([*history, Message(role="user", content=_SUMMARY_REQUEST)], None, llm=llm)
+    with pytest.raises(_SummaryInputBudgetExceeded):
+        await _create_summary(llm, history, 1, input_token_limit=limit,
+                              tools=(ToolDefinitionView.from_tool(_PrefixTool()),))
+    assert not llm.summary_messages
+    assert await _create_summary(llm, history, 1, input_token_limit=limit)
 
 
 class CompactionE2ELLM:

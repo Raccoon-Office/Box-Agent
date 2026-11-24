@@ -9,6 +9,7 @@ from ..schema import Message
 from ..tools.base import Tool
 
 if TYPE_CHECKING:
+    from ..tools.engine.contracts import ToolDefinitionView
     from .context_engine import ContextTokenCalibration
 
 
@@ -53,6 +54,7 @@ class CompactionInput:
 
     token_limit is the safe input threshold. tools restores runtime state;
     estimate_tools is the exact offered schema set used for cost estimation.
+    summary_tools and summary_request_history carry the main request prefix.
     Call before_summary before any model summary or deterministic fallback.
     """
     history: tuple[Message, ...]
@@ -77,6 +79,8 @@ class CompactionInput:
     compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None
     session_log: Any = None
     calibration: ContextTokenCalibration | None = None
+    summary_tools: tuple[ToolDefinitionView, ...] | None = None
+    summary_request_history: tuple[Message, ...] | None = None
 
 
 @dataclass(frozen=True)

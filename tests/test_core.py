@@ -245,6 +245,46 @@ async def test_transient_image_is_sent_once_without_entering_durable_history():
 
 
 @pytest.mark.asyncio
+async def test_reactive_summary_does_not_receive_transient_followup_images():
+    class OverflowOnImage(CapturingStreamLLM):
+        capabilities = {"image_input": True}
+
+        def __init__(self):
+            super().__init__([
+                LLMResponse(content="", finish_reason="tool", tool_calls=[_transient_tool_call()]),
+                LLMResponse(content="I inspected it.", finish_reason="stop"),
+            ])
+            self.rejected = False
+            self.summary_messages = []
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                self.summary_messages.extend(messages)
+                yield StreamEvent(type="text", delta="<summary>The image tool completed.</summary>")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            if self.message_calls and not self.rejected:
+                assert has_image(messages)
+                self.rejected = True
+                raise RuntimeError("This model's maximum context length is 12000 tokens.")
+            async for event in super().generate_stream(messages, tools=tools, **kwargs):
+                yield event
+
+    def has_image(messages):
+        return any(isinstance(message.content, list)
+                   and any(block.get("type") == "input_image" for block in message.content)
+                   for message in messages)
+
+    llm = OverflowOnImage()
+    await collect(run_agent_loop(
+        llm=llm, messages=_msgs(), tools={"transient_image": TransientImageTool()},
+        max_steps=5, token_limit=10_000,
+    ))
+    assert llm.summary_messages and not has_image(llm.summary_messages)
+    assert has_image(llm.message_calls[-1])
+
+
+@pytest.mark.asyncio
 async def test_transient_image_over_budget_becomes_a_safe_tool_failure():
     llm = CapturingStreamLLM(
         [

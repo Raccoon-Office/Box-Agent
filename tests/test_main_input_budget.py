@@ -415,9 +415,7 @@ async def test_new_tool_schema_after_usage_is_compacted_then_blocked_locally():
         )]
     assert any(isinstance(event, SummarizationEvent) and event.mode == "blocked" for event in events)
     assert any(isinstance(event, ErrorEvent) for event in events)
-    assert len(requests) == 1
-    assert requests[0]["messages"][-1]["content"] == _SUMMARY_REQUEST
-    assert not requests[0].get("tools")
+    assert requests == []  # The offered schema is too large even for the summary.
 
 
 @pytest.mark.parametrize("binding,client_window,expected", [

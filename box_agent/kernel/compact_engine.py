@@ -24,4 +24,6 @@ class DefaultCompactEngine:
             compacted_history_projector=inputs.compacted_history_projector,
             compaction_source_projector=inputs.compaction_source_projector,
             calibration=inputs.calibration,
+            summary_tools=inputs.summary_tools,
+            summary_request_history=inputs.summary_request_history,
         )

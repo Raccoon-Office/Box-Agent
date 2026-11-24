@@ -22,6 +22,7 @@ from ..schema import Message
 from ..schema.schema import RequestUsageSnapshot, TokenUsage
 from ..session_log import SessionLog, run_session_write
 from ..tools.base import Tool, ToolResult
+from ..tools.engine.contracts import ToolDefinitionView
 from .context_types import CompactionOutcome
 from .tool_messages import InvalidToolHistory, tool_message_groups
 
@@ -220,6 +221,7 @@ async def _create_summary(
     input_token_limit: int | None = None,
     session_log=None,
     strict_format: bool = False,
+    tools: tuple[ToolDefinitionView, ...] | None = None,
 ) -> str:
     """Append one instruction to the exact history so provider KV cache survives."""
 
@@ -239,12 +241,13 @@ async def _create_summary(
     output = getattr(summary_llm, "max_output_tokens", None)
     if type(window) is int and window > 0 and type(output) is int and output > 0:
         input_token_limit = bound_context_token_limit(summary_llm, window)
+    budget_tools = {tool.name: tool for tool in tools} if tools else None
     if (input_token_limit is not None
-            and _fallback_context_estimate(summary_messages, None, llm=summary_llm) > input_token_limit):
+            and _fallback_context_estimate(summary_messages, budget_tools, llm=summary_llm) > input_token_limit):
         raise _SummaryInputBudgetExceeded("Summary request exceeds the safe input budget")
     async with closing_llm_stream(summary_llm.generate_stream(
         messages=summary_messages,
-        tools=None,
+        tools=list(tools) if tools else None,
         thinking_enabled=False,
         session_id=session_id,
         turn_id=turn_id,
@@ -896,6 +899,8 @@ async def _maybe_summarize(
     compacted_history_projector: Callable[[list[Message]], list[Message] | Awaitable[list[Message]]] | None = None,
     compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None,
     calibration: ContextTokenCalibration | None = None,
+    summary_tools: tuple[ToolDefinitionView, ...] | None = None,
+    summary_request_history: tuple[Message, ...] | None = None,
 ) -> CompactionOutcome:
     """Compact once when the complete next request exceeds its safe limit."""
     if skip_check:
@@ -983,8 +988,14 @@ async def _maybe_summarize(
         await run_session_write(session_log, record_compaction_start)
 
     summary_source = compaction_source_projector(messages) if compaction_source_projector else messages
-    attempt_source = summary_source
     summary_client = summary_llm or llm
+    attempt_source = summary_source
+    if summary_request_history is not None and _usage_route(summary_client) == _usage_route(llm):
+        attempt_source = list(summary_request_history)
+        if compaction_source_projector is not None:
+            attempt_source = compaction_source_projector(attempt_source)
+        # Already projected for this route, including its overlays and images.
+        summary_projector = None
     summary_calls = 0
     head_retries = 0
     format_retry = transient_retry = False
@@ -1003,6 +1014,7 @@ async def _maybe_summarize(
                    if summary_projector is not None else {}),
                 **({"input_token_limit": summary_input_token_limit} if summary_input_token_limit is not None else {}),
                 **({"strict_format": True} if format_retry else {}),
+                **({"tools": summary_tools} if summary_tools else {}),
             )
             if not summary.strip():
                 raise _SummaryOutputInvalid("summary provider returned empty content")

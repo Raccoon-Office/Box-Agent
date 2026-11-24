@@ -1157,6 +1157,7 @@ async def _run_agent_loop_impl(
 
     async def prepare_compaction(
         history_token_limit, *, force=False, estimate_tools=None, skip_check=False, request_headroom_tokens=None,
+        summary_request_history=None,
     ):
         # Context may project effective rules before estimation and summary.
         # Older custom contexts retain the identity projection.
@@ -1212,6 +1213,8 @@ async def _run_agent_loop_impl(
             compacted_history_projector=project_compacted_history,
             compaction_source_projector=getattr(context_engine, "compaction_source", None),
             calibration=calibration,
+            summary_tools=tuple(tool_list),
+            summary_request_history=summary_request_history,
         )
         try:
             return await compact_engine.compact_if_needed(inputs)
@@ -1346,9 +1349,11 @@ async def _run_agent_loop_impl(
 
     async def compact_context(
         history_token_limit, *, force=False, estimate_tools=None, skip_check=False, abandon_if_cancelled=False,
+        summary_request_history=None,
     ):
         result = await prepare_compaction(
             history_token_limit, force=force, estimate_tools=estimate_tools, skip_check=skip_check,
+            summary_request_history=summary_request_history,
         )
         if abandon_if_cancelled and cancelled():
             return result, None
@@ -1567,6 +1572,16 @@ async def _run_agent_loop_impl(
         if session_log is not None and session_turn is not None:
             await run_session_write(session_log, checkpoint_messages, step + 1)
 
+        def summary_prefix(projected):
+            if transient_message is not None:
+                # One-request follow-up payloads are reserved for the main call.
+                return None
+            if projected is None:
+                return (*messages, *request_context_messages)
+            # Request-only Skill references can be embedded inside a user block.
+            # Use the history projection when such material may have been added.
+            return None if getattr(projected, "input_tokens", 0) else tuple(projected.messages)
+
         # ── LLM call (streaming) ──────────────────────────────
         if context_engine is not None:
             output_budget = getattr(llm, "max_output_tokens", 0)
@@ -1608,6 +1623,7 @@ async def _run_agent_loop_impl(
                     result = await prepare_compaction(
                         history_token_limit, force=True, estimate_tools=budget_tools_by_name,
                         request_headroom_tokens=reserve,
+                        summary_request_history=summary_prefix(projection),
                     )
                     if result.messages is not None and not result.blocked and not cancelled():
                         result.messages[0] = messages[0]
@@ -1660,6 +1676,7 @@ async def _run_agent_loop_impl(
                         compaction_limit,
                         force=projection_budget_blocked,
                         estimate_tools=budget_tools_by_name,
+                        summary_request_history=summary_prefix(projection),
                         skip_check=(not projection.blocked_reason
                                     and projected_input_tokens(projection) <= token_limit),
                     )
@@ -1749,6 +1766,7 @@ async def _run_agent_loop_impl(
             # bundles; the canonical path above is prepare-first.
             result, summarization_event = await compact_context(
                 history_token_limit, estimate_tools=budget_tools_by_name,
+                summary_request_history=summary_prefix(None),
             )
             if summarization_event is not None:
                 yield summarization_event
@@ -2211,6 +2229,7 @@ async def _run_agent_loop_impl(
                         result, summarization_event = await compact_context(
                             tightened_limit, force=True, estimate_tools=budget_tools_by_name,
                             abandon_if_cancelled=True,
+                            summary_request_history=summary_prefix(projection if context_engine is not None else None),
                         )
                         if summarization_event is not None:
                             yield summarization_event
