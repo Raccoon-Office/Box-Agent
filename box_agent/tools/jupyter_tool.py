@@ -1625,9 +1625,13 @@ class JupyterSandboxTool(Tool):
         self._skill_scratch_dir = skill_scratch_dir
         self.process_owner_id = (process_owner_id or "").strip()
         self._session_id: Optional[str] = None
-        self._requires_subprocess = sys.platform == "win32" and bool(self.process_owner_id)
+        self._requires_subprocess = False
         # Optional ACP host binding. CLI and older hosts retain their existing behavior.
         self.runtime_preparer: Callable[[], Awaitable[None]] | None = None
+
+    def require_external_kernel(self) -> None:
+        """Prevent Python tool code from executing inside the owning process."""
+        self._requires_subprocess = True
 
     def fork_for_child(self, child_id: str) -> "JupyterSandboxTool":
         """Reuse runtime settings while isolating a trusted child's kernels."""
@@ -1637,7 +1641,7 @@ class JupyterSandboxTool(Tool):
             process_owner_id=f"{self.process_owner_id or '__default__'}:{child_id}",
             skill_scratch_dir=self._skill_scratch_dir,
         )
-        child._requires_subprocess = True
+        child.require_external_kernel()
         if self.runtime_preparer is not None:
             prepare_runtime = self.runtime_preparer
 

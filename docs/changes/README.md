@@ -9,9 +9,10 @@ of every commit.
 ## Windows desktop ACP process ownership
 
 Desktop hosts can opt into console detachment with `BOX_AGENT_ACP_HOST_MANAGED=1`.
-Hosts that use terminal interrupts can omit the variable. Windows frozen ACP sessions
-require an external Python interpreter for Jupyter execution. A missing interpreter
-produces a tool error and leaves the remaining sessions available.
+Frozen Windows sessions launched with this flag require an external Python
+interpreter for Jupyter execution. A missing interpreter produces a tool error and
+leaves the remaining sessions available. Older hosts and interactive clients can
+omit the flag to keep terminal interrupts and the existing in-process Python fallback.
 Deploy the matching host and runtime to enable the full behavior. Omitting the launch
 flag restores the runtime's normal terminal signal handling. See the [host contract](../integration/acp-sdk-0.12.md#长驻进程约束)
 and the [native Windows checks](../../.github/workflows/windows-acp.yml).

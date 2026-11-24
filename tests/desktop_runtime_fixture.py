@@ -102,10 +102,13 @@ class FixtureLLM:
             for message in messages if message.role == "user")
         has_results = any(message.role == "tool" for message in messages)
         mode = scenario.get()
-        if mode == "shell_exit":
+        if mode in {"shell_exit", "frozen_python"}:
             if not has_results:
-                yield StreamEvent(type="finish", finish_reason="tool_use",
-                                  tool_calls=[call("bash", {"command": "exit 23"}, 0)])
+                if mode == "shell_exit":
+                    invocation = call("bash", {"command": "exit 23"}, 0)
+                else:
+                    invocation = call("execute_code", {"code": "print(f'ACP_PYTHON_RESULT={6 * 7}')"}, 0)
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[invocation])
             else:
                 result = next(message for message in messages if message.role == "tool")
                 yield StreamEvent(type="text", delta=str(result.content))
@@ -430,6 +433,9 @@ def main():
     os.environ["BOX_AGENT_SESSION_TRACE_ENABLED"] = "0"
     import box_agent.acp as acp
 
+    if os.environ.get("BOX_AGENT_DESKTOP_TEST_FROZEN_PYTHON") == "1":
+        from box_agent.tools import jupyter_tool
+        jupyter_tool.IS_FROZEN = True
     install_fixture(acp, root)
     config = Config(
         # Protocol fixtures include complete large snapshots plus supplements.

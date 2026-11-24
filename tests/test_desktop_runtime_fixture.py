@@ -352,7 +352,7 @@ async def test_request_cleanup_preserves_interleaved_sessions_and_host_permissio
     True, pytest.param(False, marks=pytest.mark.skipif(os.name != "nt", reason="Windows console control")),
 ])
 @pytest.mark.asyncio
-async def test_tool_process_exit_preserves_peer_session_and_host_shutdown(host_managed):
+async def test_tool_process_exit_preserves_peer_session_and_host_shutdown(host_managed, monkeypatch):
     # Establish an attached console even on a headless runner. Query membership
     # before and after ACP startup without sending control events to any process.
     bootstrap = """import ctypes
@@ -369,12 +369,15 @@ main()
     with TemporaryDirectory(prefix="console-owner-", dir=workspace) as directory:
         root = Path(directory)
         args = ["-c", bootstrap] if os.name == "nt" else ["-m", "tests.desktop_runtime_fixture"]
-        probe = AcpHostProbe(
-            command=[sys.executable, *args], cwd=root, timeout_s=15,
-            env={"BOX_AGENT_DESKTOP_TEST_ROOT": str(root), "PYTHONUTF8": "1",
-                 "BOX_AGENT_DESKTOP_TEST_SHELL_EXIT": "1",
-                 "BOX_AGENT_ACP_HOST_MANAGED": "1" if host_managed else "0"},
-        )
+        env = {
+            "BOX_AGENT_DESKTOP_TEST_ROOT": str(root), "PYTHONUTF8": "1",
+            "BOX_AGENT_DESKTOP_TEST_SHELL_EXIT": "1", "BOX_AGENT_DESKTOP_TEST_FROZEN_PYTHON": "1",
+            "BOX_AGENT_SANDBOX_PYTHON": "", "BOX_AGENT_BUNDLED_PYTHON": "",
+        }
+        monkeypatch.delenv("BOX_AGENT_ACP_HOST_MANAGED", raising=False)
+        if host_managed:
+            env["BOX_AGENT_ACP_HOST_MANAGED"] = "1"
+        probe = AcpHostProbe(command=[sys.executable, *args], cwd=root, env=env)
         await probe.start()
         try:
             await probe.initialize()
@@ -386,6 +389,14 @@ main()
             updates = collect_session_updates(probe.drain_notifications())
             assert any(item.get("status") == "failed" for item in updates)
             assert "Command failed with exit code 23" in message_text_from_updates(updates)
+            python_session = await probe.session_new(cwd=str(root / "profile/workspaces/python"))
+            result = await probe.session_prompt(python_session, "fixture:frozen_python")
+            assert result["stopReason"] == "end_turn"
+            python_output = message_text_from_updates(collect_session_updates(probe.drain_notifications()))
+            if os.name == "nt" and host_managed:
+                assert "KERNEL_START_FAILED: ISOLATED_KERNEL_UNAVAILABLE" in python_output
+            else:
+                assert "ACP_PYTHON_RESULT=42" in python_output
             assert (await probe.session_prompt(peer, "fixture:normal"))["stopReason"] == "end_turn"
             probe._proc.stdin.close()
             assert await asyncio.wait_for(probe._proc.wait(), 5) == 0

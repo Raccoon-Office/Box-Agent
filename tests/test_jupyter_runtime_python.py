@@ -510,11 +510,16 @@ def test_frozen_without_host_python_keeps_in_process_fallback(
     assert isinstance(session, InProcessKernelSession)
 
 
-def test_windows_host_session_requires_external_python_in_frozen_runtime(monkeypatch, tmp_path):
+@pytest.mark.parametrize("host_managed", [False, True])
+def test_windows_host_session_requires_external_python_in_frozen_runtime(monkeypatch, tmp_path, host_managed):
     _clear_python_runtime_env(monkeypatch)
     monkeypatch.setattr(jupyter_tool, "IS_FROZEN", True)
     monkeypatch.setattr(sys, "platform", "win32")
     env = SandboxEnvironment(base_dir=tmp_path)
     tool = JupyterSandboxTool(workspace_dir=str(tmp_path), process_owner_id="desktop-session")
-    with pytest.raises(RuntimeError, match="ISOLATED_KERNEL_UNAVAILABLE"):
-        tool._create_session("kernel", tmp_path, env)
+    if host_managed:
+        tool.require_external_kernel()
+        with pytest.raises(RuntimeError, match="ISOLATED_KERNEL_UNAVAILABLE"):
+            tool._create_session("kernel", tmp_path, env)
+    else:
+        assert isinstance(tool._create_session("kernel", tmp_path, env), InProcessKernelSession)

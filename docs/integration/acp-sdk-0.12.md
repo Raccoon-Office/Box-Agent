@@ -122,7 +122,8 @@ ACP 启动时消费该标记，随后脱离控制台。交互式 ACP 启动时�
 读线程独占缓冲，关闭时取消正在进行的读取，即使宿主仍持有管道写端也能结束读取。
 
 Windows 上的 Git Bash、PowerShell 和外部 Jupyter 内核使用独立的无窗口启动方式。
-Windows 冻结版 ACP 会话执行 `execute_code` 需要独立 Python。宿主环境尚未就绪时，工具返回
+设置该标记后，Windows 冻结版 ACP 会话执行 `execute_code` 需要独立 Python。
+未设置标记的旧宿主和交互式 ACP 保留原有的进程内 Python 回退。宿主环境尚未就绪时，工具返回
 `RUNTIME_NOT_READY`，等待宿主准备超时则返回 `SANDBOX_PREPARE_TIMEOUT`。如果执行到内核启动阶段
 仍缺少独立 Python，工具返回 `KERNEL_START_FAILED`，错误详情包含 `ISOLATED_KERNEL_UNAVAILABLE`。
 这些错误只影响本次工具调用，同一进程中的其他会话可以继续工作。

@@ -1365,8 +1365,10 @@ class BoxACPAgent:
         skill_task: asyncio.Task | None = None,
         *,
         lite_llm: LLMClient | None = None,
+        windows_host_managed: bool = False,
     ):
         self._conn = conn
+        self._windows_host_managed = windows_host_managed
         self._plugin_runtime = create_application_runtime()
         self._config = config
         self._llm = llm
@@ -2431,6 +2433,7 @@ class BoxACPAgent:
             from box_agent.tools.connector_discovery import (
                 ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
             )
+            from box_agent.tools.jupyter_tool import JupyterSandboxTool
 
             configured_tool_version = self._config.agent.tool_interface_version
             discovery_mode = resolve_discovery_mode(
@@ -2526,8 +2529,6 @@ class BoxACPAgent:
             session_skill_loader = state.skill_loader
             tools = list(agent.tools.values())
             if runtime_environment_tool is not None:
-                from box_agent.tools.jupyter_tool import JupyterSandboxTool
-
                 def _apply_runtime_environment(values: dict[str, str]) -> dict[str, str] | None:
                     shell = None
                     for runtime_tool in agent.tools.values():
@@ -2551,6 +2552,8 @@ class BoxACPAgent:
                         runtime_environment_tool.runtime_env.update(runtime_tool.runtime_env)
                         runtime_tool.runtime_preparer = runtime_environment_tool.ensure_python
             for tool in tools:
+                if self._windows_host_managed and isinstance(tool, JupyterSandboxTool):
+                    tool.require_external_kernel()
                 # Keep Bash ownership across a rebind while other process-backed
                 # tools (notably Python kernels) remain handle-scoped.
                 if isinstance(tool, (BashTool, BashOutputTool, BashKillTool)):
@@ -6666,7 +6669,10 @@ async def _close_acp_connection(
 
 async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
-    if sys.platform == "win32" and os.environ.pop("BOX_AGENT_ACP_HOST_MANAGED", None) == "1":
+    windows_host_managed = (
+        sys.platform == "win32" and os.environ.pop("BOX_AGENT_ACP_HOST_MANAGED", None) == "1"
+    )
+    if windows_host_managed:
         # The desktop supplies three pipes and owns this process via its Job.
         # Detach before starting any tools so their console events cannot reach ACP.
         import ctypes
@@ -6836,6 +6842,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 conn, config, llm, base_tools, system_prompt,
                 memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader,
                 mcp_task=mcp_task, skill_task=skill_task, lite_llm=lite_llm,
+                windows_host_managed=windows_host_managed,
             )
             return server_adapter
 
