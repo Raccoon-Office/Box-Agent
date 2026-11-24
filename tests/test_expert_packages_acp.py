@@ -476,6 +476,154 @@ async def test_omitted_market_binding_cannot_be_satisfied_by_another_members_ide
     assert (await _read_session_skill(current, "market-method")).success
 
 
+def _recording_skill_delegate(state):
+    from box_agent.tools.sub_agent_tool import SubAgentTool
+
+    class RecordingLLM(DoneLLM):
+        def __init__(self):
+            self.requests = []
+
+        async def generate_stream(self, *args, **kwargs):
+            self.requests.append((args, kwargs))
+            async for event in super().generate_stream(*args, **kwargs):
+                yield event
+
+    llm = RecordingLLM()
+    tool = SubAgentTool(llm=llm, parent_tools=state.agent.tools,
+                        workspace_dir=str(state.agent.workspace_dir),
+                        parent_system_prompt=state.agent.system_prompt)
+    tool.set_skill_provider(lambda: state.skill_loader)
+    tool.set_parent_session_log(state.agent.session_log)
+    return tool, llm
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("indirect", [False, True])
+@pytest.mark.parametrize("skills", [["member-root"], ["market-method", "member-root"],
+                                  ["member-root", "market-method"]])
+async def test_optional_root_cannot_read_or_delegate_another_experts_market_identity(
+    host, tmp_path, indirect, skills,
+):
+    _installed_market_method(host, tmp_path, identity="market-id",
+                             required_by="intermediate" if indirect else "member-root")
+    if indirect:
+        root = tmp_path / "user-skills/member-root"
+        root.mkdir()
+        (root / "SKILL.md").write_text(
+            "---\nname: member-root\ndescription: Member method\n"
+            "required_skills: [intermediate]\n---\nMEMBER_BODY\n",
+        )
+    meta = _mixed_market_team()
+    meta["expert_team"]["members"][0]["optionalSkills"].append("member-root")
+    response = await host.new_session(cwd=str(tmp_path / "workspace"), **meta)
+    state = host._sessions[response.sessionId]
+    delegate, llm = _recording_skill_delegate(state)
+    read = await _read_session_skill(state, "member-root")
+    result = await delegate.execute(task="Review the material using the member method.", skills=skills,
+                                    budget={"max_steps": 1, "max_tool_calls": 1})
+    assert not read.success and "identity" in str(read.error)
+    assert not result.success and "SKILL_DEPENDENCY_IDENTITY_MISMATCH" in str(result.error)
+    assert llm.requests == []  # Reject before a child receives the wrong market Skill body.
+    leader_read = await _read_session_skill(state, "market-method")
+    assert leader_read.success and "MARKET_BODY" in leader_read.content
+    assert not state.skill_loader.get_skill("market-method").broken
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("optional_root", [False, True])
+async def test_market_dependency_added_after_start_is_rechecked_and_recovers_after_removal(
+    host, tmp_path, optional_root,
+):
+    _installed_market_method(host, tmp_path, identity="market-id", required_by="member-root")
+    path = tmp_path / "user-skills/member-root/SKILL.md"
+    dependent_body = path.read_text()
+    standalone_body = dependent_body.replace("required_skills: [market-method]\n", "")
+    path.write_text(standalone_body)
+    meta = _mixed_market_team(dependent_skill=None if optional_root else "member-root")
+    if optional_root:
+        meta["expert_team"]["members"][0]["optionalSkills"].append("member-root")
+    response = await host.new_session(cwd=str(tmp_path / "workspace"), **meta)
+    state = host._sessions[response.sessionId]
+    delegate, llm = _recording_skill_delegate(state)
+    assert (await _read_session_skill(state, "member-root")).success
+    assert (await delegate.execute(task="Review the material.", skills=["member-root"],
+                                   budget={"max_steps": 1, "max_tool_calls": 1})).success
+    assert llm.requests
+    llm.requests.clear()
+
+    path.write_text(dependent_body)
+    read = await _read_session_skill(state, "member-root")
+    result = await delegate.execute(task="Review the updated material.", skills=["member-root"],
+                                    budget={"max_steps": 1, "max_tool_calls": 1})
+    assert not read.success and "identity" in str(read.error)
+    assert not result.success and "SKILL_DEPENDENCY_IDENTITY_MISMATCH" in str(result.error)
+    assert llm.requests == []
+    assert host._sessions[response.sessionId] is state
+    assert (await _read_session_skill(state, "market-method")).success
+
+    path.write_text(standalone_body)
+    assert (await _read_session_skill(state, "member-root")).success
+    assert (await delegate.execute(task="Review the corrected material.", skills=["member-root"],
+                                   budget={"max_steps": 1, "max_tool_calls": 1})).success
+    assert llm.requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("optional_identity", ["market-id", "other-id"])
+async def test_shared_optional_root_requires_all_owners_market_identities(host, tmp_path, optional_identity):
+    _installed_market_method(host, tmp_path, identity="market-id", required_by="shared-root")
+    meta = _mixed_market_team(optional_identity=optional_identity)
+    meta["expert_team"]["leader"]["optionalSkills"].append("shared-root")
+    meta["expert_team"]["members"][0]["optionalSkills"].append("shared-root")
+    response = await host.new_session(cwd=str(tmp_path / "workspace"), **meta)
+    state = host._sessions[response.sessionId]
+    read = await _read_session_skill(state, "shared-root")
+    delegate, llm = _recording_skill_delegate(state)
+    result = await delegate.execute(task="Review the material.", skills=["shared-root"],
+                                    budget={"max_steps": 1, "max_tool_calls": 1})
+    assert read.success is (optional_identity == "market-id")
+    assert result.success is (optional_identity == "market-id")
+    assert bool(llm.requests) is (optional_identity == "market-id")
+    assert (await _read_session_skill(state, "market-method")).success
+
+
+@pytest.mark.asyncio
+async def test_shared_root_ignores_owners_conflicts_outside_its_dependencies(host, tmp_path):
+    _installed_market_method(host, tmp_path, identity="market-id")
+    root = tmp_path / "user-skills"
+    for name, body, dependencies in (
+        ("shared-root", "SHARED_ROOT_BODY", "required_skills: [common-method]\n"),
+        ("common-method", "COMMON_DEPENDENCY_BODY", ""),
+    ):
+        directory = root / name
+        directory.mkdir()
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Shared method\n{dependencies}---\n{body}\n",
+        )
+    (root / "common-method/.skill-installation.json").write_text(
+        json.dumps({"source": "hub", "skillId": "common-id"}),
+    )
+    meta = _mixed_market_team()  # A/B conflict on market-method, which shared-root does not use.
+    for profile in (meta["expert_team"]["leader"], meta["expert_team"]["members"][0]):
+        profile["optionalSkills"].extend(["shared-root", "common-method"])
+        profile["skillBindings"].append({
+            "slug": "common-method", "source": "MARKET", "skillId": "common-id",
+        })
+    response = await host.new_session(cwd=str(tmp_path / "workspace"), **meta)
+    state = host._sessions[response.sessionId]
+    read = await _read_session_skill(state, "shared-root")
+    delegate, llm = _recording_skill_delegate(state)
+    result = await delegate.execute(task="Review the material using the shared method.", skills=["shared-root"],
+                                    budget={"max_steps": 1, "max_tool_calls": 1})
+    assert read.success and "SHARED_ROOT_BODY" in read.content
+    assert result.success and llm.requests
+    assert result.raw_output["resolved_skills"] == ["common-method", "shared-root"]
+    model_input = str(llm.requests)
+    assert "SHARED_ROOT_BODY" in model_input and "COMMON_DEPENDENCY_BODY" in model_input
+    assert "MARKET_BODY" not in model_input
+    assert (await _read_session_skill(state, "market-method")).success
+
+
 @pytest.mark.asyncio
 async def test_prompt_keeps_existing_selection_and_does_not_prepare_again(host, tmp_path, monkeypatch):
     response = await host.new_session(**new_params(tmp_path))

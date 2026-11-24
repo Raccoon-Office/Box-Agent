@@ -247,7 +247,8 @@ from box_agent.run_observer import (
 )
 from box_agent.experts import ExpertSessionContext, ExpertTeamValidationError
 from box_agent.expert_dependencies import (
-    ExpertDependencyError, expert_market_skill_bindings, resolve_optional_market_conflicts,
+    ExpertDependencyError, expert_dependency_market_bindings, expert_market_skill_bindings,
+    resolve_optional_market_conflicts,
     validate_expert_dependencies,
 )
 from box_agent.expert_package_format import ExpertPackageError
@@ -2331,6 +2332,7 @@ class BoxACPAgent:
                 skill_bindings_by_directory=expert_context.skill_bindings_by_directory,
                 skill_bindings_by_path=expert_context.skill_bindings_by_path,
                 market_skill_bindings=expert_market_skill_bindings(meta, expert_context),
+                dependency_market_skill_bindings=expert_dependency_market_bindings(meta, expert_context),
             )
         connector_skill_grants: set[str] = set()
         skillhub_search_tool: SkillHubSearchTool | None = None

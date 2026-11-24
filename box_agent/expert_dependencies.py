@@ -50,6 +50,16 @@ def _profiles(meta: Mapping[str, Any], context: ExpertSessionContext):
         yield profile, raw, raw.get("packageSnapshot", team.get("packageSnapshot"))
 
 
+def _market_bindings(raw: Mapping[str, Any]):
+    declared = raw.get("skillBindings")
+    for binding in declared if isinstance(declared, list) else ():
+        if (isinstance(binding, dict) and binding.get("source") == "MARKET"
+                and isinstance(binding.get("slug"), str)):
+            skill_id = binding.get("skillId")
+            # Invalid optional identities are unavailable, never same-name fallbacks.
+            yield binding["slug"], skill_id if isinstance(skill_id, str) else ""
+
+
 def expert_market_skill_bindings(
     raw_meta: Mapping[str, Any], context: ExpertSessionContext, *, required_only: bool = False,
 ) -> dict[str, frozenset[str]]:
@@ -59,15 +69,27 @@ def expert_market_skill_bindings(
         names = {*getattr(profile, "required_skills", ()), *profile.default_skills}
         if not required_only:
             names.update(getattr(profile, "optional_skills", ()))
-        declared = raw.get("skillBindings")
-        for binding in declared if isinstance(declared, list) else ():
-            if (not isinstance(binding, dict) or binding.get("source") != "MARKET"
-                    or not isinstance(binding.get("slug"), str) or binding["slug"] not in names):
-                continue
-            skill_id = binding.get("skillId")
-            # An invalid optional identity is unavailable, never a same-name fallback.
-            identities.setdefault(binding["slug"], set()).add(skill_id if isinstance(skill_id, str) else "")
+        for name, skill_id in _market_bindings(raw):
+            if name in names:
+                identities.setdefault(name, set()).add(skill_id)
     return {name: frozenset(values) for name, values in identities.items()}
+
+
+def expert_dependency_market_bindings(
+    raw_meta: Mapping[str, Any], context: ExpertSessionContext,
+) -> dict[str, dict[str, frozenset[str]]]:
+    """Retain each surviving root's original market dependency identities."""
+    identities: dict[str, dict[str, set[str]]] = {}
+    for profile, raw, _ in _profiles(raw_meta, context):
+        roots = {*getattr(profile, "required_skills", ()), *profile.default_skills,
+                 *profile.optional_skills}
+        for dependency, skill_id in _market_bindings(raw):
+            # An omitted optional binding still constrains other roots belonging
+            # to this expert; it must not become an active root again itself.
+            for root in roots - {dependency}:
+                identities.setdefault(root, {}).setdefault(dependency, set()).add(skill_id)
+    return {root: {name: frozenset(ids) for name, ids in bindings.items()}
+            for root, bindings in identities.items()}
 
 
 def resolve_optional_market_conflicts(
@@ -169,28 +191,12 @@ def _bundled_binding(
 
 
 def _check_required_skill_dependencies(
-    name: str, declared_bindings: list[Any], skill_loader: SkillLoader,
+    name: str, skill_loader: SkillLoader,
     skill_access_filter: Callable[[Skill], bool] | None,
 ) -> dict[str, str] | None:
-    """Return the first dependency failure, preserving the current profile's bindings."""
+    """Return the first failure from the prepared session catalog and access checks."""
     try:
         for dependency in resolve_required_skills(skill_loader, [name]):
-            # A binding omitted from optionalSkills may still be required
-            # transitively by this profile.
-            if dependency.name != name and any(
-                not isinstance(candidate.get("skillId"), str)
-                or not is_installed_market_skill(dependency, candidate["skillId"])
-                for candidate in declared_bindings
-                if isinstance(candidate, dict)
-                and candidate.get("source") == "MARKET"
-                and candidate.get("slug") == dependency.name
-            ):
-                return {
-                    "state": "unavailable",
-                    "reason": (f"Required Skill '{dependency.name}' does not match "
-                               "this expert's market installation identity."),
-                    "dependencyName": dependency.name,
-                }
             if skill_access_filter is not None and not skill_access_filter(dependency):
                 return {
                     "state": "unavailable",
@@ -222,6 +228,8 @@ def validate_expert_dependencies(
     Only default/required selections and their explicit bindings are checked;
     optionalSkills alone does not expand the required set. Tools are the actual
     session tools, not a list of everything the runtime could theoretically add.
+    The supplied loader is the prepared session clone, including its root-level
+    market dependency constraints. Readers and preflight use that same catalog.
     Market bindings reuse the host installation marker checked by the existing
     SkillHub install tool. Skill bodies and same-name matches are not receipts.
     """
@@ -282,7 +290,7 @@ def validate_expert_dependencies(
                         failure = {"state": state, "reason": reason}
                 if failure is None and selected is not None:
                     failure = _check_required_skill_dependencies(
-                        name, declared, skill_loader, skill_access_filter,
+                        name, skill_loader, skill_access_filter,
                     )
             if failure is not None:
                 item = {

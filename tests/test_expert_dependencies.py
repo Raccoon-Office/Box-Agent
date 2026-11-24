@@ -5,7 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from box_agent.expert_dependencies import ExpertDependencyError, validate_expert_dependencies
+from box_agent.expert_dependencies import (
+    ExpertDependencyError, expert_dependency_market_bindings, validate_expert_dependencies,
+)
 from box_agent.experts import ExpertSessionContext
 from box_agent.tools.skill_loader import RESERVED_BUILTIN_SKILL_NAMES, SkillLoader
 
@@ -293,13 +295,18 @@ def test_child_identity_and_access_errors_precede_source_changes(tmp_path, first
         json.dumps({"source": "hub", "skillId": "other-id"}),
     )
     loader = _loader((tmp_path, "user"))
-    (child / "SKILL.md").write_text("changed after discovery")
     bindings = ([{"slug": "evidence", "source": "MARKET", "skillId": "expected-id"}]
                 if first_failure == "market" else [])
     meta = _expert(["review"], optionalSkills=["evidence"], skillBindings=bindings)
+    context = ExpertSessionContext.from_meta(meta)
+    loader = loader.with_expert_skill_sources(
+        context.skill_names(),
+        dependency_market_skill_bindings=expert_dependency_market_bindings(meta, context),
+    )
+    (child / "SKILL.md").write_text("changed after discovery")
     with pytest.raises(ExpertDependencyError) as raised:
         validate_expert_dependencies(
-            meta, ExpertSessionContext.from_meta(meta), loader, [],
+            meta, context, loader, [],
             skill_access_filter=lambda skill: first_failure == "source" or skill.name != "evidence",
         )
     item = raised.value.dependencies[0]
@@ -310,7 +317,10 @@ def test_child_identity_and_access_errors_precede_source_changes(tmp_path, first
         assert "dependencyName" not in item
     else:
         assert item["dependencyName"] == "evidence"
-        assert "dependencyCode" not in item
+        if first_failure == "market":
+            assert item["dependencyCode"] == "SKILL_DEPENDENCY_IDENTITY_MISMATCH"
+        else:
+            assert "dependencyCode" not in item
         assert ("market installation identity" if first_failure == "market" else
                 "not enabled for this conversation") in item["reason"]
 
