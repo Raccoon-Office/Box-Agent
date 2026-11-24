@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 from subprocess import CalledProcessError, CompletedProcess
@@ -58,6 +59,25 @@ def test_windows_builder_uses_shared_pyinstaller_contract() -> None:
     assert "PIL.Image" in hidden
     assert "ipykernel" not in hidden
     assert "sklearn" not in collect
+
+
+@pytest.mark.parametrize("user_install", [False, True])
+def test_build_interpreter_can_import_paths_added_by_new_wheels(tmp_path, monkeypatch, user_install):
+    system_site = tmp_path / "site-packages"
+    user_site = tmp_path / "user-site"
+    wheel_site = user_site if user_install else system_site
+    library = wheel_site / "win32" / "lib"
+    library.mkdir(parents=True)
+    (library / "windows_wheel_probe.py").touch()
+    (wheel_site / "probe.pth").write_text("win32/lib\n", encoding="utf-8")
+
+    monkeypatch.setattr(build_win_runtime.sys, "path", list(build_win_runtime.sys.path))
+    monkeypatch.setattr(build_win_runtime.sysconfig, "get_path", lambda name: str(system_site))
+    monkeypatch.setattr(build_win_runtime.site, "ENABLE_USER_SITE", user_install)
+    monkeypatch.setattr(build_win_runtime.site, "getusersitepackages", lambda: str(user_site))
+    assert importlib.util.find_spec("windows_wheel_probe") is None
+    build_win_runtime._load_build_dependencies()
+    assert importlib.util.find_spec("windows_wheel_probe").origin == str(library / "windows_wheel_probe.py")
 
 
 def test_windows_legacy_bundle_remains_explicitly_available() -> None:

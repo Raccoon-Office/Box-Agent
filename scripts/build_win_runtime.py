@@ -37,8 +37,10 @@ import argparse
 import json
 import os
 import shutil
+import site
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import time
@@ -107,6 +109,15 @@ def _load_build_dependencies() -> None:
     global _install_portable_python_win
     global _install_sandbox_packages_win
     global _relativize_node_manifest
+
+    # The installer ran in a child process. Activate wheel .pth entries written
+    # since this interpreter started (pywin32 registers win32/lib this way).
+    sites = [sysconfig.get_path("purelib")]
+    if site.ENABLE_USER_SITE:
+        sites.append(site.getusersitepackages())
+    for directory in sites:
+        if Path(directory).is_dir():
+            site.addsitedir(directory)
 
     from scripts import build_runtime
     from box_agent.tools.runtime import (
