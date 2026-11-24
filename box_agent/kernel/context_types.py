@@ -105,6 +105,7 @@ class CompactionOutcome:
     summary_retries: int = 0
     head_truncated: bool = False
     error_code: str | None = None
+    summary_path: str | None = None
 
     def __post_init__(self) -> None:
         blocked = self.mode == "blocked"

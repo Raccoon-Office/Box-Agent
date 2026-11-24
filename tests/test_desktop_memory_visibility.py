@@ -378,8 +378,8 @@ async def test_failed_core_read_revokes_grant_without_blocking_ordinary_projecti
 
 
 @pytest.mark.parametrize("summary_fails", [False, True])
-# The longer history misses the recovery headroom target while leaving room
-# for the summary request's own instructions within the full model budget.
+# The longer history misses the recovery headroom target and also exceeds
+# the summary input budget once the summary instructions are included.
 @pytest.mark.parametrize("user_chars", [32_000, 56_400])
 async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_or_repeat_compaction(summary_fails, user_chars):
     from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent, ToolCallResult
@@ -434,11 +434,19 @@ async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_o
         llm=provider, tools={"memory_read": Reader()}, memory_manager=lookup, token_limit=30000, max_steps=3, logger=None,
         messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * user_chars)])]
     assert not [event.message for event in events if isinstance(event, ErrorEvent)]
-    assert provider.summary_calls == 1 and provider.normal_calls == 3
+    assert provider.normal_calls == 3
     compactions = [event for event in events if isinstance(event, SummarizationEvent)]
     assert len(compactions) == 1
-    if user_chars > 32000:
+    if user_chars > 32_000:
+        assert provider.summary_calls == 0
+        assert compactions[0].summary_path == "deterministic"
         assert 30000 - REQUEST_INPUT_HEADROOM_TOKENS < compactions[0].estimated_after <= 30000
+    elif summary_fails:
+        assert provider.summary_calls == 2
+        assert compactions[0].summary_path == "deterministic"
+    else:
+        assert provider.summary_calls == 1
+        assert compactions[0].summary_path == "shared"
     failures = [event for event in events if isinstance(event, ToolCallResult) and not event.success]
     assert len(failures) == 2 and all(event.error == "CORE_CONTEXT_TOO_LARGE" for event in failures)
     assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN

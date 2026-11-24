@@ -249,6 +249,7 @@ class SummarizationEvent:
     trigger_source: str = "none"
     summary_retries: int = 0
     head_truncated: bool = False
+    summary_path: str | None = None
 
 
 # ── Errors & completion ─────────────────────────────────────────

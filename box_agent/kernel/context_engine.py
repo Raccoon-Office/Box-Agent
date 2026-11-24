@@ -15,7 +15,7 @@ from typing import Any, Callable, Final
 from ..cache_fingerprint import sha256_fingerprint
 from ..llm.capabilities import bound_context_token_limit, image_input_support
 from ..llm.base import closing_llm_stream
-from ..llm.error_messages import classify_llm_error
+from ..llm.error_messages import structured_llm_error
 from ..llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS, cap_auxiliary_client
 from ..llm.token_estimator import estimate_text_tokens
 from ..schema import Message
@@ -37,6 +37,8 @@ TRANSIENT_IMAGE_PIXEL_TOKEN_DIVISOR: Final[int] = 600
 _LOCAL_FALLBACK_CHAR_LIMIT = 12_000
 _SUMMARY_OUTPUT_CHAR_LIMIT = 8_000
 _SUMMARY_HEAD_RETRY_LIMIT = 3
+_SUMMARY_CALL_LIMIT = 6
+_INDEPENDENT_SUMMARY_SYSTEM = "You are a helpful AI assistant tasked with summarizing conversations."
 _SUMMARY_TRUNCATION_MARKER = "[earlier conversation truncated for compaction retry]"
 _SUMMARY_TRUNCATION_NOTE = (
     "Note: part of the earlier conversation was too large to include and is NOT covered by this summary. "
@@ -222,6 +224,7 @@ async def _create_summary(
     session_log=None,
     strict_format: bool = False,
     tools: tuple[ToolDefinitionView, ...] | None = None,
+    client_is_capped: bool = False,
 ) -> str:
     """Append one instruction to the exact history so provider KV cache survives."""
 
@@ -232,7 +235,7 @@ async def _create_summary(
     # complete text before validating the required summary envelope: a partial
     # summary must never be committed as compacted history.
     summary_parts: list[str] = []
-    summary_llm = cap_auxiliary_client(llm, SMALL_TASK_MAX_OUTPUT_TOKENS)
+    summary_llm = llm if client_is_capped else cap_auxiliary_client(llm, SMALL_TASK_MAX_OUTPUT_TOKENS)
     instruction = _SUMMARY_REQUEST + (_SUMMARY_FORMAT_RETRY if strict_format else "")
     summary_messages = [*messages, Message(role="user", source="runtime", content=instruction)]
     if summary_projector is not None:
@@ -275,6 +278,8 @@ async def _create_summary(
     summary = match.group(1).strip()
     if not summary:
         raise _SummaryOutputInvalid("summary provider returned an empty <summary> block")
+    if re.search(r"</?summary>", summary):
+        raise _SummaryOutputInvalid("summary provider returned multiple summary tags")
     return summary
 
 
@@ -998,53 +1003,76 @@ async def _maybe_summarize(
         summary_projector = None
     summary_calls = 0
     head_retries = 0
-    format_retry = transient_retry = False
+    format_retry = transient_retry = independent_retry = False
     error: str | None = None
     error_type = "none"
     mode = "summary"
-    while True:
+    summary_path = "shared"
+
+    async def attempt(source: list[Message], *, strict: bool, tools: tuple[ToolDefinitionView, ...] | None) -> str:
+        nonlocal summary_calls
+        summary_calls += 1
         try:
-            if not allow_llm_summary:
-                raise RuntimeError("LLM summary disabled")
-            summary_calls += 1
-            summary = await _create_summary(
-                summary_client, attempt_source, summary_calls,
+            content = await _create_summary(
+                summary_client, source, summary_calls,
                 session_id=session_id, turn_id=turn_id, title=title,
-                **({"summary_projector": summary_projector, "session_log": session_log}
-                   if summary_projector is not None else {}),
-                **({"input_token_limit": summary_input_token_limit} if summary_input_token_limit is not None else {}),
-                **({"strict_format": True} if format_retry else {}),
-                **({"tools": summary_tools} if summary_tools else {}),
+                summary_projector=summary_projector, session_log=session_log,
+                input_token_limit=summary_input_token_limit, strict_format=strict,
+                tools=tools, client_is_capped=True,
             )
-            if not summary.strip():
+            if not content.strip():
                 raise _SummaryOutputInvalid("summary provider returned empty content")
-            break
-        except Exception as exc:
-            category = classify_llm_error(exc).category
-            budget_exceeded = isinstance(exc, _SummaryInputBudgetExceeded)
-            if budget_exceeded:
-                summary_calls -= 1
-            if (budget_exceeded or category == "context_length") and head_retries < _SUMMARY_HEAD_RETRY_LIMIT:
-                truncated = _truncate_summary_source(attempt_source, summary_client)
-                if truncated is not None:
-                    attempt_source = truncated
-                    head_retries += 1
-                    continue
-            if isinstance(exc, _SummaryOutputInvalid) and not format_retry:
-                format_retry = True
-                continue
-            # Built-in streaming clients already retry transport failures; their SDKs also
-            # retry 429/5xx responses. Bare custom clients get one bounded retry.
-            if ((isinstance(exc, (ConnectionError, TimeoutError))
-                 or category in {"timeout", "connection", "server_error", "rate_limit"})
-                    and getattr(summary_client, "retry_config", None) is None and not transient_retry):
-                transient_retry = True
-                continue
-            error = str(exc)
-            error_type = type(exc).__name__
-            break
+            return content
+        except _SummaryInputBudgetExceeded:
+            summary_calls -= 1
+            raise
+
+    try:
+        if not allow_llm_summary:
+            raise RuntimeError("LLM summary disabled")
+        summary_client = cap_auxiliary_client(summary_client, SMALL_TASK_MAX_OUTPUT_TOKENS)
+        while True:
+            try:
+                summary = await attempt(attempt_source, strict=format_retry, tools=summary_tools)
+                break
+            except Exception as exc:
+                failure = structured_llm_error(exc)
+                category = failure["category"]
+                if failure["httpStatus"] in {401, 403} or category in {"auth", "hosted_auth", "permission"}:
+                    raise
+                # Reserve the last call for the independent request.
+                if summary_calls < _SUMMARY_CALL_LIMIT - 1:
+                    if ((isinstance(exc, _SummaryInputBudgetExceeded) or category == "context_length")
+                            and head_retries < _SUMMARY_HEAD_RETRY_LIMIT):
+                        truncated = _truncate_summary_source(attempt_source, summary_client)
+                        if truncated is not None:
+                            attempt_source = truncated
+                            head_retries += 1
+                            continue
+                    if isinstance(exc, _SummaryOutputInvalid) and not format_retry:
+                        format_retry = True
+                        continue
+                    # Built-in clients and their SDKs handle transport retries.
+                    # Bare custom clients retain one bounded retry.
+                    if ((isinstance(exc, (ConnectionError, TimeoutError))
+                         or category in {"timeout", "connection", "server_error", "rate_limit"})
+                            and getattr(summary_client, "retry_config", None) is None and not transient_retry):
+                        transient_retry = True
+                        continue
+                independent_retry = True
+                independent_source = [
+                    Message(role="system", content=_INDEPENDENT_SUMMARY_SYSTEM),
+                    *(message for message in attempt_source if message.role != "system"),
+                ]
+                summary = await attempt(independent_source, strict=True, tools=None)
+                summary_path = "independent"
+                break
+    except Exception as exc:
+        error = str(exc)
+        error_type = type(exc).__name__
     if error is not None:
         mode = "fallback"
+        summary_path = "deterministic"
         _log.warning(
             "summarization failed: %s — using deterministic bounded fallback",
             error,
@@ -1119,13 +1147,14 @@ async def _maybe_summarize(
         mode = "blocked"
     _log.info(
         "context compaction session=%s mode=%s before=%d after=%d limit=%d "
-        "summary_calls=%d source_messages=%d protected_messages=%d error_type=%s",
+        "summary_calls=%d summary_path=%s source_messages=%d protected_messages=%d error_type=%s",
         session_id,
         mode,
         estimated,
         estimated_after,
         token_limit,
         summary_calls,
+        summary_path,
         len(compacted_messages),
         len(retained_messages),
         error_type,
@@ -1136,7 +1165,8 @@ async def _maybe_summarize(
         estimated_after,
         mode=mode,
         summary_calls=summary_calls,
-        summary_retries=head_retries + int(format_retry) + int(transient_retry),
+        summary_retries=head_retries + int(format_retry) + int(transient_retry) + int(independent_retry),
+        summary_path=summary_path,
         head_truncated=bool(head_retries),
         error=error,
         error_type=None if error_type == "none" else error_type,

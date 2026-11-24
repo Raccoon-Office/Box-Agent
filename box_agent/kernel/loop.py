@@ -1278,6 +1278,7 @@ async def _run_agent_loop_impl(
                         "error": result.error,
                         "summaryRetries": result.summary_retries,
                         "headTruncated": result.head_truncated,
+                        **({"summaryPath": result.summary_path} if result.summary_path is not None else {}),
                     },
                 )
                 session_log.replace_surface(
@@ -1335,6 +1336,7 @@ async def _run_agent_loop_impl(
                 trigger_source=result.trigger_source,
                 summary_retries=result.summary_retries,
                 head_truncated=result.head_truncated,
+                summary_path=result.summary_path,
             )
             # The usage counters belong to the pre-compaction request.  The
             # rebuilt surface has been re-based by the compact engine; until a

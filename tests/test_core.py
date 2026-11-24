@@ -6689,6 +6689,7 @@ async def test_create_summary_does_not_truncate_model_output():
         "preamble<summary>body</summary>",
         "<summary></summary>",
         "<summary>body</summary>trailing text",
+        "<summary>first</summary><summary>second</summary>",
     ],
 )
 async def test_create_summary_rejects_output_outside_one_nonempty_summary_block(

@@ -36,8 +36,9 @@ async def wire_llm(context_window=20_000, *, max_output_tokens=1_000):
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": '{"continue":false}'},
                              "finish_reason": "stop"}],
             })
+        last_content = payload["messages"][-1]["content"]
         response = ("<summary>kept</summary>"
-                    if payload["messages"][-1]["content"] == _SUMMARY_REQUEST else "done")
+                    if isinstance(last_content, str) and last_content.startswith(_SUMMARY_REQUEST) else "done")
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=(
             'data: {"id":"budget","object":"chat.completion.chunk","created":0,'
             '"model":"budget-model","choices":[{"index":0,"delta":{"content":' + json.dumps(response) + '},'
@@ -415,7 +416,10 @@ async def test_new_tool_schema_after_usage_is_compacted_then_blocked_locally():
         )]
     assert any(isinstance(event, SummarizationEvent) and event.mode == "blocked" for event in events)
     assert any(isinstance(event, ErrorEvent) for event in events)
-    assert requests == []  # The offered schema is too large even for the summary.
+    assert len(requests) == 1  # Only the independent summary fits without the schema.
+    assert requests[0]["messages"][-1]["content"].startswith(_SUMMARY_REQUEST)
+    assert not requests[0].get("tools")
+    assert any(isinstance(event, SummarizationEvent) and event.summary_path == "independent" for event in events)
 
 
 @pytest.mark.parametrize("binding,client_window,expected", [

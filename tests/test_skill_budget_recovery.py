@@ -253,7 +253,7 @@ def crowded_history(runtime, *, prior_read=False, summary_fits=False):
         ])
     history.append(Message(
         role="assistant", content="old execution " * (3000 if summary_fits else 18000),
-        # Provider usage triggers compaction while the tool-free summary fits.
+        # Provider usage triggers compaction while the shared summary fits.
         usage=TokenUsage(prompt_tokens=24000, total_tokens=24000) if summary_fits else None,
     ))
     history.extend(Message(role="assistant", content=f"recent result {index}") for index in range(6))
@@ -266,8 +266,7 @@ def crowded_history(runtime, *, prior_read=False, summary_fits=False):
 async def test_loop_compacts_once_and_reuses_restored_skill_text(runtime, monkeypatch):
     from box_agent.kernel import context_engine
 
-    # Force the summary-only instruction over budget independently of the
-    # evolving tool schemas, which are not sent to the summary model.
+    # Force the summary instruction over budget regardless of the current tool schemas.
     monkeypatch.setattr(context_engine, "_SUMMARY_REQUEST",
                         context_engine._SUMMARY_REQUEST + "\n" + "summary instruction " * 512)
     history = crowded_history(runtime, prior_read=True)
@@ -315,7 +314,7 @@ async def test_loop_selected_body_recovers_with_summary_or_unavailable_summary_f
     provider = Provider(summary_available=summary_available)
     events = [event async for event in run_agent_loop(llm=provider, messages=history, tools={},
         skill_engine=runtime, token_limit=24000, max_steps=1)]
-    assert provider.summary_calls == 1 and len(provider.requests) == 1
+    assert provider.summary_calls == (1 if summary_available else 2) and len(provider.requests) == 1
     compactions = [event for event in events if isinstance(event, SummarizationEvent)]
     assert len(compactions) == 1
     assert compactions[0].mode == ("summary" if summary_available else "fallback")

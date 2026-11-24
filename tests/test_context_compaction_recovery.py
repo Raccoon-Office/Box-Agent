@@ -12,6 +12,7 @@ from box_agent.kernel.context_types import ContextCompactionState
 from box_agent.schema import FunctionCall, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.session_log import SessionLog
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.engine.contracts import ToolDefinitionView
 
 
 class _ContextOverflow(Exception):
@@ -23,13 +24,19 @@ class _AuthenticationError(Exception):
     status_code = 401
 
 
+class _PermissionError(Exception):
+    status_code = 403
+
+
 class _Summary:
     def __init__(self, outcomes=()):
         self.outcomes = list(outcomes)
         self.requests = []
+        self.request_options = []
 
     async def generate_stream(self, messages, **kwargs):
         self.requests.append(messages)
+        self.request_options.append(kwargs)
         outcome = self.outcomes.pop(0) if self.outcomes else ("<summary>Retained evidence.</summary>", "stop")
         if isinstance(outcome, Exception):
             raise outcome
@@ -75,26 +82,29 @@ async def test_summary_local_preflight_trims_whole_rounds_and_notes_unseen_histo
 @pytest.mark.asyncio
 @pytest.mark.parametrize("all_fail", [False, True])
 async def test_summary_provider_overflow_is_retried_at_most_three_times(all_fail):
-    provider = _Summary([_ContextOverflow("Prompt is too long")] * (4 if all_fail else 3))
+    provider = _Summary([_ContextOverflow("Prompt is too long")] * (5 if all_fail else 3))
     history = _history(rounds=16, size=40)
     outcome = await context_engine._maybe_summarize(provider, history, 20_000, 0, False, force=True)
-    assert outcome.summary_retries == 3
+    assert outcome.summary_retries == (4 if all_fail else 3)
     assert outcome.head_truncated
-    assert outcome.summary_calls == len(provider.requests) == 4
+    assert outcome.summary_calls == len(provider.requests) == (5 if all_fail else 4)
     assert outcome.mode == ("fallback" if all_fail else "summary")
-    assert all(len(previous) > len(nxt) for previous, nxt in zip(provider.requests, provider.requests[1:]))
-    assert all(request[0] is history[0] and request[-2] is history[-1] for request in provider.requests)
+    assert outcome.summary_path == ("deterministic" if all_fail else "shared")
+    shared = provider.requests[:4]
+    assert all(len(previous) > len(nxt) for previous, nxt in zip(shared, shared[1:]))
+    assert all(request[0] is history[0] and request[-2] is history[-1] for request in shared)
     assert outcome.messages[1].earlier_user_messages[0] == "Original request 0"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", [("<summary>partial", "length"), ("wrong envelope", "stop")])
 async def test_bad_summary_output_gets_one_strict_retry(outcome):
-    provider = _Summary([outcome, outcome])
+    provider = _Summary([outcome] * 3)
     result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
     assert result.mode == "fallback"
-    assert result.summary_retries == 1
-    assert result.summary_calls == len(provider.requests) == 2
+    assert result.summary_path == "deterministic"
+    assert result.summary_retries == 2
+    assert result.summary_calls == len(provider.requests) == 3
     assert "4,000 characters" in provider.requests[1][-1].content
     assert not result.head_truncated
 
@@ -138,14 +148,74 @@ async def test_summary_retries_instead_of_accepting_latest_instruction_or_tool_c
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error, count", [
     (_AuthenticationError("Authentication failed"), 1),
-    (ConnectionError("connection reset"), 2),
+    (_PermissionError("Forbidden"), 1),
+    (_PermissionError("This model is not supported by your account"), 1),
+    (ConnectionError("connection reset"), 3),
 ])
 async def test_summary_only_retries_bare_transport_failures(error, count):
-    provider = _Summary([error, error])
+    provider = _Summary([error] * count)
     result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
     assert result.mode == "fallback"
     assert result.summary_calls == len(provider.requests) == count
     assert result.summary_retries == count - 1
+
+
+@pytest.mark.asyncio
+async def test_summary_with_sdk_retries_goes_directly_to_independent_request():
+    provider = _Summary([ConnectionError("connection reset")])
+    provider.retry_config = object()
+    result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
+    assert result.summary_path == "independent"
+    assert result.summary_calls == len(provider.requests) == 2
+    assert result.summary_retries == 1
+
+
+@pytest.mark.asyncio
+async def test_summary_caps_calls_and_keeps_the_resolved_model_for_every_layer():
+    class ReadTool(Tool):
+        name = "read_report"
+        description = "Read the report."
+        parameters = {"type": "object"}
+
+        async def execute(self):
+            pytest.fail("Compaction never executes tools")
+
+    capped = _Summary([
+        *[_ContextOverflow("Prompt is too long")] * 3,
+        ("KITE-214", "stop"), ConnectionError("connection reset"),
+    ])
+    capped.model = "fixed-summary-model"
+
+    class ResolvedSummary(_Summary):
+        model = capped.model
+        max_output_tokens = 20_000
+        clones = 0
+
+        def for_model(self, model, *, max_output_tokens):
+            assert model == self.model and max_output_tokens == 8_192
+            self.clones += 1
+            return capped
+
+    main = _Summary()
+    resolved = ResolvedSummary()
+    tools = (ToolDefinitionView.from_tool(ReadTool()),)
+    history = _history(rounds=16, size=40)
+    result = await context_engine._maybe_summarize(
+        main, history, 20_000, 0, False, force=True, summary_llm=resolved, summary_tools=tools,
+    )
+    assert resolved.clones == 1 and main.requests == resolved.requests == []
+    assert result.mode == "summary" and result.summary_path == "independent"
+    assert result.summary_calls == len(capped.requests) == 6
+    assert result.summary_retries == 5 and result.head_truncated
+    assert all(request[0] is history[0] for request in capped.requests[:-1])
+    assert all(options["tools"] == list(tools) for options in capped.request_options[:-1])
+    independent = capped.requests[-1]
+    assert [message.content for message in independent if message.role == "system"] == [
+        "You are a helpful AI assistant tasked with summarizing conversations.",
+    ]
+    assert independent[1:-1] == capped.requests[-2][1:-1]
+    assert independent[-1].content.endswith(context_engine._SUMMARY_FORMAT_RETRY)
+    assert capped.request_options[-1]["tools"] is None
 
 
 class _ReactiveProvider:
@@ -208,6 +278,8 @@ async def test_reactive_reprojects_in_same_step_and_never_retries_output(tmp_pat
             assert len(provider.summary_provider.requests) == 2
             assert all("summaryRetries" in entry["data"] and "headTruncated" in entry["data"]
                        for entry in compactions)
+            assert all(entry["data"]["summaryPath"] == "shared" for entry in compactions)
+            assert all(event.summary_path == "shared" for event in events if isinstance(event, SummarizationEvent))
             assert all("Current task" in [m.content for m in request]
                        for request in provider.main_requests)
             assert len(provider.main_requests[1]) < len(provider.main_requests[0])

@@ -584,7 +584,17 @@ async def test_routed_child_checks_full_input_against_its_selected_model_window(
         while not queue.empty():
             events.append(queue.get_nowait().event)
         if reference_repetitions == 7_000:
-            assert requests == []
+            # The independent summary fits without the large system message.
+            # A main request would still have to carry that system message.
+            assert len(requests) == 1
+            summary_request = requests[0]
+            assert summary_request["model"] == selected_model
+            assert summary_request["messages"][0] == {
+                "role": "system",
+                "content": "You are a helpful AI assistant tasked with summarizing conversations.",
+            }
+            assert all(message["content"] != reference for message in summary_request["messages"])
+            assert not summary_request.get("tools")
             assert not result.success
             assert result.raw_output["stop_reason"] == "error"
             assert any(isinstance(event, ErrorEvent)
