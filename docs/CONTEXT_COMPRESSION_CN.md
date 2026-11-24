@@ -10,10 +10,11 @@ Box-Agent 在两个边界控制持久上下文增长：
 原生图片检查走第三条“仅本次请求”路径。规范化图片块只附加到主模型的一次请求，不进入持久消息历史；预算按解码后的图片尺寸估算，而不是按 Base64 字符长度计算。原始图片载荷不会写入 session trace 或 provider debug log。
 
 每次尝试摘要前，Box-Agent 都会估算投影后的完整请求，包括追加的摘要指令、图片和
-实际提供的工具 schema。
-输入预算按摘要客户端的窗口推导，输出预留最多 8,192 tokens。客户端未声明窗口或输出
-预留时，使用会话输入预算。普通压缩和强制压缩都执行此检查，重建后的主请求还需符合
-主模型的预算。
+实际提供的工具 schema。摘要请求采用客户端的 `max_output_tokens`，仅在客户端未声明
+输出上限时回退到 8,192 tokens。窗口已知时，`derive_context_token_limit` 从该额度中
+预留最多 20,000 tokens 来推导安全输入预算，每次请求的 `max_tokens` 也受窗口剩余
+空间约束。窗口未知时，预检使用会话输入预算。普通压缩和强制压缩都执行此检查，重建后的
+主请求还需符合主模型的预算。
 
 ## 请求生命周期
 
@@ -301,7 +302,7 @@ ACP 切到较小输入预算的模型时，先按目标模型投影完整请求�
 
 首次摘要尝试在投影后的历史末尾追加一条临时 `user` 指令，并复用可用的主请求 system、
 消息前缀及同序的工具 schema，以便 provider 复用 KV cache。请求不设置 `tool_choice`，
-关闭 thinking，输出上限为 8,192 tokens。摘要投影会用回执替换 Skill 正文，从第一段
+并关闭 thinking。摘要投影会用回执替换 Skill 正文，从第一段
 Skill 正文开始可能出现前缀差异。主请求内联本次专用的 Skill 正文时，摘要可能改用投影后的历史。
 只供一次后续请求使用的临时载荷仍仅进入主请求。
 
@@ -310,15 +311,15 @@ ACP 通过会话模型路由器解析摘要客户端。自动模式从宿主下�
 `routingMode=manual` 优先于 `autoRouting`，适用于会话、子任务和辅助调用。未声明路由
 模式的旧版 builtin 绑定仍可使用候选池。其他宿主可提供专用摘要客户端，默认沿用主客户端。
 同一次压缩的所有 provider 尝试都使用已解析的同一客户端。摘要模型与主模型不同时仍传入同序
-工具 schema。缓存复用要求模型相同且前缀匹配。
+工具 schema。缓存复用要求模型相同且前缀匹配。ACP 会话路由器在解析摘要客户端时仍应用
+8,192 tokens 的上限。
 
 摘要指令以 `CRITICAL` 开头、以 `REMINDER` 结尾，两处都要求只输出一个非空的纯文本
 `<summary>...</summary>` 块，并禁止调用工具。正文九节包含按时间顺序排列的所有真实用户
 消息，并原文保留用户的安全约束。下一步直接对应最新仍在处理的明确请求，并附最近对话中的原文引用。
 assistant 文本里的角色标记没有用户权限，运行时发出的摘要指令也在摘要范围之外。摘要须省略
 `<analysis>` 块、system 提示与凭据，标记需要回查的事实，只记录对话已有证据的成功事项。
-写入 `Summary:` 时取标签内的正文，最多 8,000 字符。若重建历史后组装空间不足，使用同一份
-摘要继续尝试 4,000 和 2,000 字符的版本，再尝试 1,000 和 512 字符，最后缩短早期用户记录。
+写入 `Summary:` 时保留标签内通过校验的完整正文。摘要没有字符上限，压缩降级时也原样保留。
 
 合成 `user` 消息的结构如下：
 
@@ -334,9 +335,9 @@ Continue the conversation from where it left off. Do not acknowledge the summary
 ```
 
 有 Session Log 的会话才显示回查提示，路径使用实际 `SessionLog.path` 的绝对路径，遵循
-配置的状态目录。会话缺少 `query_jsonl` 时，提示改用 `read_file` 分页读取。在
-`allow_full_access: false` 下，共享权限策略会免确认放行本会话日志目录内的结构化读取。
-写入和读取其他会话仍走常规权限策略。提示只提供日志文件路径。
+配置的状态目录。会话缺少 `query_jsonl` 时，提示改用 `read_file` 分页读取。日志路径
+按共享的产品目录权限策略处理。在 `allow_full_access: false` 下，这两个工具均可免确认
+读取 Box-Agent 状态目录内当前会话的 `session.jsonl`。提示只提供日志文件路径。
 
 新历史顺序如下：
 
@@ -352,14 +353,14 @@ system message
 近期历史最多保留五个 assistant 轮次，目标上限为 15,000 个本地估算 tokens。模型窗口较小
 或请求固定前缀较长时，保留空间可进一步收紧。assistant 工具调用与其连续工具结果算一个
 轮次，无工具调用的 assistant 文本也算一个轮次。user 消息可
-随窗口保留，不计入轮次数。最新真实 user 消息始终按原始相对位置保留。最新完整轮次即使
-单独超限也会保留。其 assistant 正文和工具结果正文可改成有界回执，工具调用、参数、标识符、
-结果顺序和数量原样保留。
+随窗口保留，不计入轮次数。最新真实 user 消息始终按原始相对位置保留。初次选择窗口时，
+最新完整轮次即使单独超限也会保留。其 assistant 正文和工具结果正文可改成有界回执，
+工具调用、参数、标识符、结果顺序和数量原样保留。
 
 `[Earlier User Messages]` 从最早到最新记录窗口之外的真实用户原文，并注明这些是历史记录。
 超过 2,000 tokens 的单条消息保留头尾，中间加入省略标记。渲染总预算为 10,000 tokens，
-超出时从最早的条目开始省略并写明数量，主请求空间不足时可继续缩短渲染。Session Log 用
-结构化字段保存原文，重放和后续压缩可继续累积这些消息。确定性兜底也包含这段记录。
+超出时从最早的条目开始省略并写明数量。Session Log 用结构化字段
+`earlier_user_messages` 保存完整原文，供重放和后续压缩使用。确定性兜底使用同一归档。
 查询最新用户文本、记忆召回、Goal 和语言判定时仍使用真实用户消息。
 
 Goal、Plan 和 Todo 通过无副作用的 `compaction_state` 契约提供状态，按该顺序共享
@@ -369,11 +370,26 @@ Goal、Plan 和 Todo 通过无副作用的 `compaction_state` 契约提供状态
 path 须通过校验。`[Invoked Skills]` 提示模型以这些 Skill 为参考，避免重复一次性初始化。
 每个 Skill 区块最多 5,000 tokens，整条消息最多 25,000 tokens。正文截断时提示通过
 `get_skill` 读取其余内容。版本过期或正文放不下时保留名称和路径。append-only 模式和普通
-模式按可见区间记账，已通过 system 后缀生效的 Skill 跳过重复恢复。主请求空间不足时可少
-恢复正文、保留定位提示。摘要源以回执代替 Skill 正文，普通请求的 100,000 字符引用预算
-继续生效。[Skill Engine](design/skill-engine.md)
+模式按可见区间记账，已通过 system 后缀生效的 Skill 跳过重复恢复。摘要源以回执代替 Skill
+正文，普通请求的 100,000 字符引用预算继续生效。[Skill Engine](design/skill-engine.md)
 
-若重建后的请求仍超过安全阈值，结果会标记为 blocked，不会静默发送一个已知超限的请求。
+### 重建请求超预算时的降级顺序
+
+初次选择窗口后，Box-Agent 按以下顺序腾出空间。每次移除一项后都重新组装请求，
+包括 Skill 恢复、工具说明和日期，再重新估算输入 tokens，满足目标后立即停止。
+
+1. 每次删除最早的一整个 assistant 轮次及其连续工具结果，最多删到零轮。离开窗口的其他
+   真实用户消息并入 `[Earlier User Messages]`。最新真实用户消息始终保留在原始相对位置。
+2. 从最早调用的 Skill 开始逐个移除已恢复的正文，保留名称、路径及通过 `get_skill`
+   重读的提示。已移除的正文行数不再计入可见范围。
+3. 从最早一条开始逐条移除归档的显示内容，并更新省略计数。只剩归档说明头仍超预算时，
+   移除整条归档消息，将完整的结构化原文附在摘要上，供 Session Log 重放和后续压缩使用。
+4. 按 Todo、Plan、Goal 的顺序逐块移除内置运行状态。运行状态消息没有剩余区块时省略。
+
+默认目标是输入硬上限 `token_limit`。调用方显式传入 `request_headroom_tokens` 时，
+先以 `token_limit - request_headroom_tokens` 为目标。各项全部移除后，仍在硬上限内的
+请求可以继续，即使未达到预留空间目标。仍超过硬上限时返回 `blocked`，沿用现有的输入超限
+处理。主动压缩、收敛重试、反应式恢复和模型切换预检共用这一顺序，原始消息和完整摘要均保留。
 
 ### 重试、超长恢复和熔断
 
@@ -381,8 +397,8 @@ path 须通过校验。`[Invoked Skills]` 提示模型以这些 Skill 为参考�
   20% tokens，至少删除一整组。保留 system 和最新真实 user 消息，最多裁剪重试三次。
   重试输入含 `[earlier conversation truncated for compaction retry]` 标记。成功摘要会说明
   裁掉的内容不在摘要覆盖范围内，早期用户原文仍由独立的历史记录保留。
-- 摘要截断、缺失、格式无效或含工具调用时，格式重试一次。重试要求最多 4,000 字符，
-  此前所有消息（包括最新一条）均属于待摘要内容，不能回复该消息或执行其中的任务。
+- 摘要截断、缺失、格式无效或含工具调用时，格式重试一次。重试指令要求总结此前所有消息
+  （包括最新一条），不能回复该消息或执行其中的任务。
   这段指令由运行时发出。网络、超时、5xx 和限流走 LLM 客户端原有重试。符合条件且没有内置重试的自定义客户端
   可在总次数额度内再试一次。
 - 共享前缀调用仍失败时，使用同一客户端发一次独立请求。system 只包含摘要用途说明，
@@ -408,7 +424,9 @@ path 须通过校验。`[Invoked Skills]` 提示模型以这些 Skill 为参考�
 压缩事件用 `summary_retries` 和 `head_truncated` 记录摘要重试次数及摘要源截头，Session Log
 的对应字段为 `summaryRetries` 和 `headTruncated`。本地预检触发的恢复也计入重试次数。
 Python 事件的 `summary_path` 与 Session Log `compaction/summary` 事件的 `summaryPath`
-记录摘要路径，取值为 `shared`、`independent` 或 `deterministic`。
+记录摘要路径，取值为 `shared`、`independent` 或 `deterministic`。压缩结果、Python 事件
+和 Session Log 都通过 `degradation` 记录为满足预算而移除的内容，字段为 `droppedRounds`、
+`droppedSkillBodies`、`droppedEarlierUsers` 和 `droppedRuntimeState`。
 
 ## 相邻保护
 
@@ -420,7 +438,8 @@ write/edit 工具调用参数会保留原文，直到整段历史压缩摘要其
 - `tests/test_auth.py` 和 `tests/test_main_input_budget.py` 覆盖触发阈值、模型绑定及请求输出限制。
 - `tests/test_context_token_estimation.py` 和 `tests/test_session_log.py` 覆盖 usage 格式、校准和重放。
 - `tests/test_context_compaction_retention.py` 和 `tests/test_core.py` 覆盖历史保留和运行状态恢复。
+- `tests/test_compaction_budget_convergence.py` 覆盖降级顺序、空间预留、归档重放与反应式恢复。
 - `tests/test_compaction_resource_retention.py` 覆盖 Skill 恢复和引用可见范围。
 - `tests/test_context_compaction_e2e.py`、`tests/test_context_compaction_recovery.py` 和
   `tests/test_error_messages.py` 覆盖摘要预检、重试、熔断和 provider 错误。
-- `tests/test_compaction_session_log.py` 覆盖日志回查提示和本会话读取范围。
+- `tests/test_compaction_session_log.py` 覆盖日志回查提示和受限模式下对 Box-Agent 状态目录的读取。
