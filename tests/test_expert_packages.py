@@ -337,7 +337,11 @@ async def test_received_archive_must_match_declared_hash_and_size(profile_home, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", [b"not-a-zip", archive_bytes(with_index=False), archive_bytes(index_change=lambda records: {})])
+@pytest.mark.parametrize("body", [
+    pytest.param(b"not-a-zip", id="not-a-zip"),
+    pytest.param(archive_bytes(with_index=False), id="missing-index"),
+    pytest.param(archive_bytes(index_change=lambda records: {}), id="invalid-index"),
+])
 async def test_invalid_archives_and_missing_file_manifests_do_not_publish_cache(profile_home, body):
     with pytest.raises(ExpertPackageError) as error:
         await packages.prepare_expert_meta({"expert": reference(body)}, transport=transport_for(body))
@@ -351,7 +355,7 @@ async def test_invalid_archives_and_missing_file_manifests_do_not_publish_cache(
     archive_bytes(index_change=lambda records: [{**r, "sha256": "0" * 64} for r in records]),
     archive_bytes(index_change=lambda records: [{**r, "size": r["size"] + 1} for r in records]),
     archive_bytes(index_change=lambda records: [{**records[0], "path": "../outside"}]),
-])
+], ids=["checksum-mismatch", "size-mismatch", "invalid-path"])
 async def test_file_index_checksums_sizes_and_paths_are_enforced(profile_home, body):
     with pytest.raises(ExpertPackageError):
         await packages.prepare_expert_meta({"expert": reference(body)}, transport=transport_for(body))
