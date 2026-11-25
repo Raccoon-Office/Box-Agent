@@ -7,9 +7,26 @@ from acp.schema import RequestPermissionResponse
 
 from box_agent.acp.billing import BillingConfirmation
 from box_agent.run_control import RunControl
-from box_agent.tools.billing import confirmation
+from box_agent.tools.billing import confirm_billing, confirmation
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.base import ToolResult
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("approved", [False, True])
+async def test_billing_confirmation_respects_host_decision_in_each_deployment(monkeypatch, private, approved):
+    from box_agent.acp import _request_org_scope
+
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    callback = AsyncMock(return_value=approved)
+    token = confirmation.set(callback)
+    try:
+        with _request_org_scope({"org": None}):
+            assert await confirm_billing("image_generation") is approved
+    finally:
+        confirmation.reset(token)
+    callback.assert_awaited_once_with("image_generation")
 
 
 @pytest.mark.asyncio
@@ -176,7 +193,8 @@ async def test_acp_image_permission_waits_and_finishes_in_same_turn_with_full_ac
         network.assert_not_awaited()
         assert conn.request_permission.await_count == 1
         raw = conn.request_permission.call_args.kwargs['tool_call'].raw_input
-        assert set(raw) == {'scope', 'requested_scope', 'turn_id', 'invocation_id'}
+        assert set(raw) == {'scope', 'requested_scope', 'turn_id', 'invocation_id', 'org'}
+        assert raw['org'] is None
         assert raw['scope'] == 'billing'
         assert raw['turn_id'] == 'test-turn'
         if decision == "cancel_without_host_reply":

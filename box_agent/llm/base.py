@@ -9,6 +9,7 @@ import httpx
 
 from ..auth import (
     HostedAuthRequiredError,
+    current_request_org,
     ensure_hosted_auth_ready,
     read_auth_org_code,
     read_auth_token_file,
@@ -96,7 +97,10 @@ class LLMClientBase(ABC):
         )
 
         if should_attach_client_headers(self.api_base):
-            org_code = read_auth_org_code(self.auth_file)
+            headers = {key: value for key, value in headers.items() if key.lower() != "x-org-code"}
+            org_code = current_request_org()
+            if org_code is None:
+                org_code = read_auth_org_code(self.auth_file)
             if org_code:
                 headers["X-Org-Code"] = org_code
 

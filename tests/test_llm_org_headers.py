@@ -5,13 +5,15 @@ import json
 import httpx
 import pytest
 
-from box_agent.auth import HostedAuthRefreshError
+from box_agent.auth import HostedAuthRefreshError, scoped_request_org
+from box_agent.acp import _request_org_scope
 from box_agent.llm import OpenAIClient
 from box_agent.schema import Message
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("org", [None, "request-team", ""])
 @pytest.mark.parametrize("api_base,api_key,expected", [
     ("https://code-test.xiaohuanxiong.com/api/web/llm/v2", "box-agent-no-auth", "team-one"),
     ("https://xiaohuanxiong.com/api/web/llm/v2", "box-agent-auth-json", "team-one"),
@@ -23,7 +25,7 @@ from box_agent.schema import Message
     ("https://notxiaohuanxiong.com/v1", "box-agent-no-auth", None),
 ])
 async def test_llm_org_header_domain_and_custom_key_boundary(
-    tmp_path, api_base, api_key, expected, stream,
+    tmp_path, api_base, api_key, expected, stream, org,
 ):
     auth_file = tmp_path / "auth.json"
     auth_file.write_text(json.dumps({
@@ -56,13 +58,45 @@ async def test_llm_org_header_domain_and_custom_key_boundary(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         client.client = client.client.with_options(http_client=http_client)
         messages = [Message(role="user", content="hi")]
-        if stream:
-            _ = [event async for event in client.generate_stream(messages)]
-        else:
-            await client.generate(messages)
+        with scoped_request_org(org):
+            if stream:
+                _ = [event async for event in client.generate_stream(messages)]
+            else:
+                await client.generate(messages)
     assert len(requests) == 1
     assert requests[0].url.path.endswith("/chat/completions")
+    expected = (org or None) if expected is not None and org is not None else expected
     assert requests[0].headers.get("X-Org-Code") == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("meta", [{"org": "request-team"}, {"org": None}, {}, None])
+async def test_acp_org_replaces_stale_headers_without_reading_file_org(tmp_path, monkeypatch, meta, private):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    api_base = "https://tenant.example/office/v1" if private else "https://code-test.xiaohuanxiong.com/v1"
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "login-token", "office_identity": "file-team"}))
+
+    def unexpected_org_read(*args):
+        pytest.fail("ACP billing must not fall back to the login file's organization")
+
+    monkeypatch.setattr("box_agent.llm.base.read_auth_org_code", unexpected_org_read)
+    client = OpenAIClient(api_key="box-agent-auth-json", model="test",
+        api_base=api_base, auth_file=str(auth_file))
+    try:
+        with _request_org_scope(meta):
+            headers = await client._auth_headers({
+                "X-Org-Code": "stale-team", "x-org-code": "another-team", "X-Test": "kept",
+            })
+        expected = meta.get("org") if meta is not None else None
+        assert headers.get("X-Org-Code") == expected
+        assert "x-org-code" not in headers
+        assert headers["Authorization"] == "Bearer login-token"
+        assert headers["X-Test"] == "kept"
+    finally:
+        await client.client.close()
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,9 @@ import json
 import os
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,40 @@ AUTH_TOKEN_FILE_KEYS = ("token", "access_token", "auth_token")
 AUTH_HEADER_HOST_SUFFIXES = ("xiaohuanxiong.com", "10.158.136.99")
 AUTH_REFRESH_WINDOW_SECONDS = 300
 AUTH_REFRESH_TIMEOUT_SECONDS = 15.0
+
+# None is outside an ACP billing scope; "" selects personal billing.
+_REQUEST_ORG: ContextVar[str | None] = ContextVar("box_agent_request_org", default=None)
+
+
+def normalize_request_org(value: Any) -> str:
+    """Validate an explicit wire org without silently falling back to personal."""
+    if value is None:
+        return ""
+    if (not isinstance(value, str) or not value.strip() or not value.isascii()
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise ValueError("org must be null or a non-empty ASCII organization code without control characters")
+    return value.strip()
+
+
+@contextmanager
+def scoped_request_org(org: str | None) -> Generator[None, None, None]:
+    """Bind one request's billing identity, inherited by its child tasks."""
+    token = _REQUEST_ORG.set(org)
+    try:
+        yield
+    finally:
+        _REQUEST_ORG.reset(token)
+
+
+def current_request_org() -> str | None:
+    """Return the org, empty for personal, or None outside a billing scope."""
+    return _REQUEST_ORG.get()
+
+
+def resolve_request_org(fallback: str) -> str:
+    """Keep the caller's fallback only outside a request billing scope."""
+    org = current_request_org()
+    return fallback if org is None else org
 
 
 def is_private_service_url(url: str) -> bool:

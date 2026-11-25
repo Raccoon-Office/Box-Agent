@@ -8,6 +8,7 @@ from uuid import uuid4
 from acp.agent.connection import AgentSideConnection
 from acp.schema import AllowedOutcome, PermissionOption, ToolCallUpdate
 
+from box_agent.auth import current_request_org
 from box_agent.run_control import RunControl
 
 
@@ -38,6 +39,7 @@ class BillingConfirmation:
 
     async def _request_approval(self, capability: str) -> bool:
         invocation_id = uuid4().hex
+        org = current_request_org()
         try:
             response = await asyncio.wait_for(
                 self.connection.request_permission(
@@ -49,6 +51,7 @@ class BillingConfirmation:
                             "requested_scope": capability,
                             "turn_id": self.turn_id,
                             "invocation_id": invocation_id,
+                            **({"org": org or None} if org is not None else {}),
                         },
                     ),
                     options=[

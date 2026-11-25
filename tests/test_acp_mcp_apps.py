@@ -559,13 +559,38 @@ async def test_cancel_only_the_named_app_interaction_without_cancelling_conversa
         pending = asyncio.create_task(host.ext_method('mcp/apps/call', params))
         await asyncio.wait_for(entered.wait(), 2)
         assert await host.ext_method('mcp/apps/cancel', {'sessionId': session_id, 'interactionId': 'other'}) == {'cancelled': False}
-        assert await host.ext_method('mcp/apps/cancel', {'sessionId': session_id, 'interactionId': 'wait-1'}) == {'cancelled': True}
+        assert await host.ext_method('mcp/apps/cancel', {
+            'sessionId': session_id, 'interactionId': 'wait-1', '_meta': {'org': []},
+        }) == {'cancelled': True}
         with pytest.raises(RequestError, match='MCP_APP_OUTCOME_UNKNOWN'):
             await pending
         assert not host._sessions[session_id].cancelled
         with pytest.raises(RequestError, match='MCP_APP_OUTCOME_UNKNOWN'):
             await host.ext_method('mcp/apps/call', params)
         assert len(calls(record)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("meta", [{"org": "app-team"}, {"org": None}, {}])
+async def test_app_tool_execution_uses_request_org_and_defaults_to_personal(tmp_path, monkeypatch, meta):
+    from box_agent.auth import current_request_org
+
+    async with environment(tmp_path, monkeypatch) as (host, _, _, _, session_id, record):
+        snapshot = await host.ext_method('mcp/apps/snapshot', request(session_id))
+        seen = []
+        original = mcp_loader.call_mcp_app_tool
+
+        async def invoke(*args, **kwargs):
+            seen.append(current_request_org())
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(mcp_loader, 'call_mcp_app_tool', invoke)
+        await host.ext_method('mcp/apps/call', request(session_id,
+            bindingId=snapshot['bindingId'], interactionId='org-test', name='refresh_flights',
+            arguments={'previous': 1}, _meta=meta))
+        assert seen == [meta.get('org') or '']
+        assert len(calls(record)) == 2
+        assert current_request_org() is None
 
 
 @pytest.mark.asyncio

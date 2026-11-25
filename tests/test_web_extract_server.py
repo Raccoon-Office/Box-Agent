@@ -16,6 +16,40 @@ from box_agent.tools.mcp_loader import MCPTool
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("private", [False, True])
+async def test_local_mcp_metadata_carries_org_to_summary_http_request(tmp_path, monkeypatch, private):
+    from box_agent.acp import _request_org_scope
+    from tests.test_acp_org_billing import wire_agent
+
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    api_base = "https://tenant.example/office/v1" if private else "https://code-test.xiaohuanxiong.com/v1"
+    class Extractor(web_extract_server.WebExtractTool):
+        async def execute(self, **kwargs):
+            summary, error = await self._summarize(
+                url="https://example.com", content="page", requested_model=None,
+                requested_max_output_tokens=None)
+            return ToolResult(success=error is None, content=summary or "", error=error)
+
+    async with wire_agent(tmp_path, api_base=api_base) as (_, host, requests, _):
+        extractor = Extractor(host._llm)
+        monkeypatch.setattr(web_extract_server, "_extractor", lambda: extractor)
+        # Both MCP background tasks start before any org is bound to the caller.
+        async with create_connected_server_and_client_session(web_extract_server.mcp) as session:
+            listed = (await session.list_tools()).tools[0]
+            tool = MCPTool(name=listed.name, description=listed.description or "",
+                parameters=listed.inputSchema, session=session, server_name="box-agent-web-extract")
+            for meta in ({"org": "team-a"}, {"org": None}, {"org": "team-b"}, {}, None):
+                count = len(requests)
+                with _request_org_scope(meta):
+                    result = await tool.invoke({"url": "https://example.com"})
+                assert result.success, result.error
+                assert len(requests) == count + 1
+                expected = meta.get("org") if meta is not None else None
+                assert requests[-1].headers.get("X-Org-Code") == expected
+
+
+@pytest.mark.asyncio
 async def test_advertised_parameters_have_explicit_types_in_both_provider_formats():
     listed = await web_extract_server.mcp.list_tools()
     assert len(listed) == 1
