@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.tools.skill_loader import SkillLoader
-from box_agent.tools.skillhub_install_tool import SkillHubInstallTool
+from box_agent.tools.skillhub_install_tool import SkillHubInstallTool, is_installed_market_skill
 
 
 CANDIDATE = {
@@ -172,9 +173,33 @@ async def test_exact_manual_market_install_skips_redundant_confirmation(tmp_path
     assert calls == []
 
 
+@pytest.mark.parametrize("source", ["user", "builtin", "connector", "expert"])
+def test_matching_market_marker_only_identifies_user_installations(tmp_path: Path, source: str) -> None:
+    skill_dir = tmp_path / "edge-tts"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: edge-tts\ndescription: Generate speech audio.\n---\n",
+        encoding="utf-8",
+    )
+    (skill_dir / ".skill-installation.json").write_text(
+        json.dumps({"source": "hub", "skillId": CANDIDATE["id"]}), encoding="utf-8",
+    )
+    loader = SkillLoader(sources=[(tmp_path, source)])
+    loader.discover_skills()
+
+    assert is_installed_market_skill(loader.get_skill("edge-tts"), CANDIDATE["id"]) is (source == "user")
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("marker", [
+    None,
+    {"source": "hub", "skillId": "another-market-id"},
+    {"source": "other", "skillId": CANDIDATE["id"]},
+    [],
+    "invalid-json",
+])
 async def test_same_slug_without_matching_market_marker_still_requires_confirmation(
-    tmp_path: Path,
+    tmp_path: Path, marker,
 ) -> None:
     user_skills = tmp_path / "skills"
     skill_dir = user_skills / "edge-tts"
@@ -183,10 +208,11 @@ async def test_same_slug_without_matching_market_marker_still_requires_confirmat
         "---\nname: edge-tts\ndescription: Unrelated local skill.\n---\n",
         encoding="utf-8",
     )
-    (skill_dir / ".skill-installation.json").write_text(
-        '{"source":"hub","skillId":"another-market-id"}',
-        encoding="utf-8",
-    )
+    if marker is not None:
+        (skill_dir / ".skill-installation.json").write_text(
+            marker if isinstance(marker, str) else json.dumps(marker),
+            encoding="utf-8",
+        )
     loader = SkillLoader(sources=[(user_skills, "user")])
     loader.discover_skills()
 

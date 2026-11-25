@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
@@ -71,10 +72,16 @@ class MessageInjection:
             raise ValueError("injection source does not match its type")
         object.__setattr__(self, "source", expected)
 
+    def model_content(self) -> str:
+        if self.input_facts is not None:
+            return self.content
+        return _PROMPT_FORMATTERS[self.kind](
+            project_input_context(self.content, self.input_context or {}),
+        )
+
     def apply(self, messages: list[Message]) -> InjectedMessageEvent:
         """Append the model message and return its matching host event."""
-        formatted = (self.content if self.input_facts is not None else
-                     _PROMPT_FORMATTERS[self.kind](project_input_context(self.content, self.input_context or {})))
+        formatted = self.model_content()
         from_user = self.kind is InjectionKind.USER_SUPPLEMENT
         messages.append(Message(
             role="user", source=self.source, content=formatted, input_facts=deepcopy(self.input_facts),
@@ -174,6 +181,23 @@ class InjectionManager(asyncio.Queue[Any]):
         self._committing: set[str] = set()
         self._run_finished = False
         self.prepare_input = None
+        self.request_injections: Callable[[list[Message]], Iterable[MessageInjection]] | None = None
+        self.model_response_receipts: Callable[[list[Message]], dict[str, dict[str, int]]] | None = None
+        self.on_model_commit: Callable[[dict[str, dict[str, int]]], None] | None = None
+
+    def prepare_request_context(
+        self, history: list[Message],
+    ) -> tuple[list[Message], list[InjectedMessageEvent]]:
+        """Project trusted runtime injections into one model request, outside history."""
+        messages: list[Message] = []
+        events: list[InjectedMessageEvent] = []
+        if self.request_injections is not None:
+            for injection in self.request_injections(history):
+                if injection.kind is not InjectionKind.RUNTIME_STATE or injection.user_visible:
+                    raise ValueError("request-only injection must be internal runtime state")
+                events.append(injection.apply(messages))
+        return messages, events
+
 
     def status(self, injection_id: str) -> InjectionStatus | None:
         return self._statuses.get(injection_id)

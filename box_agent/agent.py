@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from .events import (
     AgentEvent,
@@ -461,6 +461,54 @@ class _GoalWriteTool(Tool):
         return ToolResult(success=False, error=f"Unknown action: {action}")
 
 
+def _agent_tool_registrations(
+    *, enable_builtin_tools: bool = True, tool_interface_version: int = 1,
+) -> tuple[dict[str, Callable[..., Tool]], dict[str, Callable[..., Tool]]]:
+    """Select lazy native factories in their two existing initialization phases.
+
+    Factories receive the Agent, MCP catalog and connector grants provider only
+    during construction. Reading the definitions does not create an Agent or
+    an execution resource.
+    """
+    if not enable_builtin_tools:
+        return {}, {}
+    discovery_tools = {
+        "tool_search": lambda agent, catalog, allowed_connectors: ToolSearchTool(
+            catalog,
+            agent.activated_mcp_tools,
+            protected_names_provider=lambda: frozenset(
+                build_tool_name_index(
+                    tool for tool in agent.tools.values()
+                    if getattr(tool, "mcp_tool_id", None) is None
+                )
+            ),
+            local_tools_provider=agent.local_tool_exposure.candidate_tools,
+            activated_local_tools=agent.activated_local_tools,
+            allowed_connector_ids_provider=allowed_connectors,
+            connector_discovery=agent.connector_discovery,
+        ),
+    }
+    if tool_interface_version == 2:
+        from .tools.tool_call_tool import CallTool
+        discovery_tools["call_tool"] = lambda agent, catalog, allowed_connectors: CallTool()
+    state_tools = {
+        "goal_read": lambda agent, catalog, allowed_connectors: _GoalReadTool(agent),
+        "goal_write": lambda agent, catalog, allowed_connectors: _GoalWriteTool(agent),
+    }
+    return discovery_tools, state_tools
+
+
+def resolve_agent_tool_availability(
+    *, enable_builtin_tools: bool = True, tool_interface_version: int = 1,
+) -> frozenset[str]:
+    """Read the same native definitions used by Agent construction."""
+    discovery_tools, state_tools = _agent_tool_registrations(
+        enable_builtin_tools=enable_builtin_tools,
+        tool_interface_version=tool_interface_version,
+    )
+    return frozenset((*discovery_tools, *state_tools))
+
+
 class Agent:
     """Single agent with basic tools and MCP support."""
 
@@ -534,6 +582,11 @@ class Agent:
             active_skills_provider=lambda: self.skill_runtime.current_active_names,
         )
         self.mcp_tool_exposure: MCPToolExposureManager | None = None
+        discovery_tools, state_tools = _agent_tool_registrations(
+            enable_builtin_tools=enable_builtin_tools,
+            tool_interface_version=self.tool_interface_version,
+        )
+        catalog = None
         if enable_builtin_tools:
             # Eager MCP remains eager. Its local discovery uses an isolated empty
             # catalog so a process-global deferred server cannot leak into this mode.
@@ -546,23 +599,9 @@ class Agent:
                 deferred_mcp=deferred_mcp_loading_enabled,
                 allowed_connector_ids_provider=allowed_connector_ids_provider,
             )
-            self.tools["tool_search"] = ToolSearchTool(
-                catalog,
-                self.activated_mcp_tools,
-                protected_names_provider=lambda: frozenset(
-                    build_tool_name_index(
-                        tool for tool in self.tools.values()
-                        if getattr(tool, "mcp_tool_id", None) is None
-                    )
-                ),
-                local_tools_provider=self.local_tool_exposure.candidate_tools,
-                activated_local_tools=self.activated_local_tools,
-                allowed_connector_ids_provider=allowed_connector_ids_provider,
-                connector_discovery=self.connector_discovery,
-            )
+            for name, create_tool in discovery_tools.items():
+                self.tools[name] = create_tool(self, catalog, allowed_connector_ids_provider)
             if self.stable_prefix:
-                from .tools.tool_call_tool import CallTool
-                self.tools["call_tool"] = CallTool()
                 self.mcp_tool_exposure.enable_stable_prefix(self.tools["tool_search"])
                 self.mcp_tool_exposure._live_candidates = lambda tools=self.tools: tools
             else:
@@ -687,9 +726,8 @@ class Agent:
         self._streaming_active: bool = False  # Track if streaming output needs trailing newline
         self.last_stop_reason: str | None = None
         self.goal: GoalState | None = None
-        if enable_builtin_tools:
-            self.tools["goal_read"] = _GoalReadTool(self)
-            self.tools["goal_write"] = _GoalWriteTool(self)
+        for name, create_tool in state_tools.items():
+            self.tools[name] = create_tool(self, catalog, allowed_connector_ids_provider)
         self.session_log = session_log
         self.image_context = ImageContext(session_log, image_context, restore=False)
         self._pending_skill_restore: list[dict[str, Any]] = []
@@ -971,7 +1009,8 @@ class Agent:
     async def aadd_user_message(self, content, *, image_content: list[dict[str, Any]] | None = None,
                                 image_source: str = "user_upload", image_context_eligible: bool = True,
                                 host_connector_status: str | None = None,
-                                input_facts: dict[str, Any] | None = None) -> None:
+                                input_facts: dict[str, Any] | None = None,
+                                input_source: Literal["user", "runtime"] = "user") -> None:
         from .api.input import UserInput
         from .input_preparation import prepare_user_input
         value = UserInput.text(content) if isinstance(content, str) else content
@@ -987,6 +1026,7 @@ class Agent:
                 self.session_log, self.add_user_message, content, image_content=image_content,
                 image_source=image_source, image_context_eligible=image_context_eligible,
                 host_connector_status=host_connector_status, input_facts=input_facts,
+                **({"input_source": input_source} if input_source != "user" else {}),
             )
 
     async def _prepare_input_attachments(self, record, images):
@@ -1024,7 +1064,8 @@ class Agent:
     def add_user_message(self, content, *, image_content: list[dict[str, Any]] | None = None,
                          image_source: str = "user_upload", image_context_eligible: bool = True,
                          host_connector_status: str | None = None,
-                         input_facts: dict[str, Any] | None = None) -> None:
+                         input_facts: dict[str, Any] | None = None,
+                         input_source: Literal["user", "runtime"] = "user") -> None:
         """Add a user message and materialize selected Skills beside it."""
         self._restore_session_surface_after_replay_failure()
         from .api.input import UserInput
@@ -1046,7 +1087,7 @@ class Agent:
         # ContextEngine does not need to rediscover Skill bodies per request.
         materialize = getattr(self.skill_runtime, "materialize_selected_messages", None)
         materialized = materialize(self.messages) if callable(materialize) and not self.stable_prefix else ()
-        user_message = Message(role="user", content=content, host_connector_status=host_connector_status,
+        user_message = Message(role="user", source=input_source, content=content, host_connector_status=host_connector_status,
                                input_facts=input_facts)
         if image_content:
             refs = self.image_context.register(user_message, image_content, source=image_source,

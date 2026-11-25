@@ -23,6 +23,7 @@ from box_agent.core import (
     text_requests_plan_start,
 )
 from box_agent.core import FINAL_SUMMARY_TOOL_CALL_THRESHOLD as _FS_THRESHOLD
+from box_agent.injections import InjectionManager
 from box_agent.loop_guards import repeated_stream_pattern
 from box_agent.runtime import run_agent_loop
 from box_agent.events import (
@@ -138,6 +139,7 @@ class MockLLM:
             finish_reason=resp.finish_reason,
             usage=resp.usage,
             tool_calls=resp.tool_calls,
+            raw_finish_reason=resp.raw_finish_reason,
         )
 
 
@@ -5350,6 +5352,42 @@ async def test_llm_error():
 
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert done[0].stop_reason == StopReason.ERROR
+
+
+@pytest.mark.asyncio
+async def test_content_filter_does_not_execute_buffered_tool_calls():
+    llm = MockLLM([
+        LLMResponse(
+            content="Partial answer.",
+            finish_reason="tool_calls",
+            raw_finish_reason="content_filter",
+            tool_calls=_echo_tool_calls(1),
+        ),
+        LLMResponse(content="Follow-up answer.", finish_reason="stop"),
+    ])
+    echo = CountingEchoTool()
+    messages = _msgs()
+    consumed = []
+    injections = InjectionManager()
+    injections.model_response_receipts = lambda _: {"device": {"child-turn": 1}}
+    injections.on_model_commit = consumed.append
+    events = await collect(run_agent_loop(
+        llm=llm, messages=messages, tools={"echo": echo}, max_steps=2,
+        inject_queue=injections,
+    ))
+
+    assert consumed == []
+    assert echo.calls == 0
+    assert llm._idx == 1
+    output = next(e for e in events if isinstance(e, LLMOutputEvent))
+    assert output.finish_reason == "content_filter"
+    assert output.tool_calls is None
+    error = next(e for e in events if isinstance(e, ErrorEvent))
+    assert error.error_code == error.error_category == "content_filter"
+    assert events[-1] == DoneEvent(stop_reason=StopReason.ERROR, final_content="Partial answer.")
+    assert messages[-1].role == "assistant"
+    assert messages[-1].content == "Partial answer."
+    assert not messages[-1].tool_calls
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,15 @@ def normalize_execution_profile(value: object) -> ExecutionProfile:
     return DEFAULT_EXECUTION_PROFILE
 
 
+def blocked_skills_for_profile(
+    profile: str | None, blocked_skill_names: Collection[str] = (),
+) -> frozenset[str]:
+    """Combine reader restrictions with the session's execution policy."""
+    return frozenset(blocked_skill_names) | (
+        FAST_OPTIONAL_SKILLS if profile == "fast" else frozenset()
+    )
+
+
 def is_skill_blocked(
     name: str,
     blocked_skill_names: Collection[str],
