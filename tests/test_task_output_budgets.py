@@ -113,13 +113,9 @@ def test_auxiliary_cap_preserves_smaller_model_limits_and_the_execution_client(r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("finish_reason", ["stop", "length", "max_tokens"])
-async def test_summary_uses_its_client_output_budget_and_rejects_truncated_envelopes(finish_reason):
-    llm = BudgetLLM("<summary>valid-looking partial summary</summary>", finish_reason)
-    if finish_reason == "stop":
-        assert await _create_summary(llm, [Message(role="user", content="hello")], 1)
-    else:
-        with pytest.raises(RuntimeError, match="output token limit"):
-            await _create_summary(llm, [Message(role="user", content="hello")], 1)
+async def test_summary_uses_its_client_output_budget_and_accepts_a_closed_summary(finish_reason):
+    llm = BudgetLLM("<summary>Complete summary.</summary>", finish_reason)
+    assert await _create_summary(llm, [Message(role="user", content="hello")], 1) == "Complete summary."
     assert llm.calls[-1]["max_tokens"] == llm.calls[-1]["max_output_tokens"] == 100_000
     assert llm.max_output_tokens == 100_000
 
@@ -305,15 +301,37 @@ async def test_anthropic_summary_clamps_only_the_request_that_needs_it():
     summary_input = _fallback_context_estimate([
         *long_history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
     ], {}, llm=llm)
+    overlay = Message(role="user", source="runtime", content="Retain this projected message after the instruction.")
+    projection_calls = 0
+
+    def project_summary(messages, client):
+        nonlocal projection_calls
+        projection_calls += 1
+        return [*messages, overlay]
+
     try:
         assert await _create_summary(llm, long_history, 1) == "Complete."
+        assert await _create_summary(
+            llm, long_history, 2, strict_format=True, summary_projector=project_summary,
+        ) == "Complete."
         assert await _create_summary(llm, [Message(role="user", content="short request")], 1) == "Complete."
     finally:
         await llm.aclose()
 
-    tight, wide = requests
+    tight, retry, wide = requests
     assert tight["max_tokens"] == 80_000 - summary_input - REQUEST_INPUT_HEADROOM_TOKENS
-    assert 20_000 <= tight["max_tokens"] < wide["max_tokens"] == llm.max_output_tokens == 64_000
+    assert 20_000 <= retry["max_tokens"] < tight["max_tokens"] < wide["max_tokens"]
+    assert wide["max_tokens"] == llm.max_output_tokens == 64_000
+    assert projection_calls == 1
+    retry_blocks = retry["messages"][-1]["content"]
+    assert retry_blocks[-1]["text"] == overlay.content
+    retry_prompt = retry_blocks[-2]["text"]
+    assert retry_prompt.startswith(_SUMMARY_REQUEST)
+    assert f"within {retry['max_tokens']} tokens, including the closing </summary> tag" in retry_prompt
+    retry_input = _fallback_context_estimate([
+        *long_history, Message(role="user", source="runtime", content=retry_prompt), overlay,
+    ], {}, llm=llm)
+    assert retry_input + retry["max_tokens"] + REQUEST_INPUT_HEADROOM_TOKENS <= 80_000
 
 
 @pytest.mark.asyncio

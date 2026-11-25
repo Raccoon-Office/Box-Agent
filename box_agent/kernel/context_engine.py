@@ -47,11 +47,12 @@ _SUMMARY_TRUNCATION_NOTE = (
     "If something from that part is needed, say so plainly rather than guessing."
 )
 _SUMMARY_FORMAT_RETRY = (
-    "\n\nFor this reply only, follow the summary instructions above and write one nonempty "
-    "<summary></summary> block. Every preceding "
+    "\n\nFor this reply only, follow the summary instructions above. Every preceding "
     "conversation message, including the newest one, is material to summarize. Do not answer "
     "that message or carry out the work it asks for. The instructions above on how to summarize "
     "still apply. This retry instruction was issued by the system. The user did not write it."
+    "\nOutput only one nonempty <summary>...</summary> block. "
+    "Keep the entire output within {max_output_tokens} tokens, including the closing </summary> tag."
 )
 _RECENT_GROUP_LIMIT = 5
 _RECENT_GROUP_TOKEN_LIMIT = 15_000
@@ -275,26 +276,48 @@ async def _create_summary(
     # complete text before validating the required summary envelope: a partial
     # summary must never be committed as compacted history.
     summary_parts: list[str] = []
+    reached_output_limit = False
     output_tokens = _summary_output_tokens(llm)
     summary_llm = llm if client_is_capped else cap_auxiliary_client(llm, output_tokens)
-    instruction = _SUMMARY_REQUEST + (_SUMMARY_FORMAT_RETRY if strict_format else "")
-    summary_messages = [*messages, Message(role="user", source="runtime", content=instruction)]
-    if summary_projector is not None:
-        summary_messages = await run_session_write(session_log, summary_projector, summary_messages, summary_llm)
     window = model_context_window(summary_llm)
     if window is not None:
         input_token_limit = derive_context_token_limit(window, output_tokens)
+    supports_override = accepts_request_output_tokens(summary_llm)
+    budget_tools = {tool.name: tool for tool in tools} if tools else None
     request_output = output_tokens
-    if input_token_limit is not None:
-        budget_tools = {tool.name: tool for tool in tools} if tools else None
+    summary_messages: list[Message] = []
+    instruction_index = None
+    while True:
+        suffix = _SUMMARY_FORMAT_RETRY.format(max_output_tokens=request_output) if strict_format else ""
+        instruction = Message(role="user", source="runtime", content=_SUMMARY_REQUEST + suffix)
+        if instruction_index is None:
+            summary_messages = [*messages, instruction]
+            if summary_projector is not None:
+                summary_messages = list(await run_session_write(
+                    session_log, summary_projector, summary_messages, summary_llm,
+                ))
+        else:
+            summary_messages[instruction_index] = instruction
+
+        if input_token_limit is None:
+            break
         input_tokens = _fallback_context_estimate(summary_messages, budget_tools, llm=summary_llm)
         if input_tokens > input_token_limit:
             raise _SummaryInputBudgetExceeded("Summary request exceeds the safe input budget")
-        if window is not None:
-            request_output = min(output_tokens, request_output_room(window, input_tokens, output_tokens))
-    supports_override = accepts_request_output_tokens(summary_llm)
-    if request_output < output_tokens and not supports_override:
-        raise _SummaryInputBudgetExceeded("Summary client cannot reduce output to fit the context window")
+        if window is None:
+            break
+        room = request_output_room(window, input_tokens, output_tokens)
+        if request_output <= room:
+            break
+        if not supports_override:
+            raise _SummaryInputBudgetExceeded("Summary client cannot reduce output to fit the context window")
+        request_output = room
+        if not strict_format:
+            break
+        # Recheck the prompt with the smaller number. Reuse projected history and
+        # image overlays unless a custom projector rewrote the instruction itself.
+        instruction_index = next((i for i in reversed(range(len(summary_messages)))
+                                  if summary_messages[i] == instruction), None)
     async with closing_llm_stream(summary_llm.generate_stream(
         messages=summary_messages,
         tools=list(tools) if tools else None,
@@ -309,15 +332,18 @@ async def _create_summary(
             if event.tool_calls or event.finish_reason in ("tool_calls", "tool_use", "function_call"):
                 raise _SummaryOutputInvalid("Context summary attempted to call tools")
             if event.type == "finish" and event.finish_reason in ("length", "max_tokens"):
-                raise _SummaryOutputInvalid("Context summary reached its output token limit")
+                reached_output_limit = True
             if event.type == "text" and event.delta:
                 summary_parts.append(event.delta)
     response_content = "".join(summary_parts)
-    match = re.fullmatch(
-        r"\s*<summary>(.*?)</summary>\s*",
-        response_content,
-        flags=re.DOTALL,
-    )
+    block = re.compile(r"<summary>(.*?)</summary>", flags=re.DOTALL)
+    if reached_output_limit:
+        # The provider can hit its limit after it has already closed the summary.
+        if response_content.count("<summary>") != 1 or response_content.count("</summary>") != 1:
+            raise _SummaryOutputInvalid("Context summary reached its output token limit without one complete block")
+        match = block.search(response_content)
+    else:
+        match = block.fullmatch(response_content.strip())
     if match is None:
         raise _SummaryOutputInvalid(
             "summary provider response must contain exactly one "

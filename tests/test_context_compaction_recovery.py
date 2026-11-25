@@ -97,9 +97,36 @@ async def test_summary_provider_overflow_is_retried_at_most_three_times(all_fail
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", [("<summary>partial</summary>", "length"), ("wrong envelope", "stop")])
+@pytest.mark.parametrize(("content", "finish"), [
+    ("<summary>First detail.\nSecond detail.</summary>", "length"),
+    ("Preamble.\n<summary>First detail.\nSecond detail.</summary>\nUnfinished postscript", "max_tokens"),
+])
+async def test_output_limit_keeps_one_complete_summary_without_retry(content, finish):
+    provider = _Summary([(content, finish)])
+    result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
+    assert result.mode == "summary"
+    assert result.summary_calls == len(provider.requests) == 1
+    assert result.summary_retries == 0
+    summary = next(message for message in result.messages if context_engine._is_summary_marker(message))
+    assert summary.content == (
+        context_engine._SUMMARY_MESSAGE_PREFIX
+        + "First detail.\nSecond detail."
+        + context_engine._SUMMARY_MESSAGE_SUFFIX
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [
+    ("<summary>partial", "length"),
+    ("partial</summary>", "max_tokens"),
+    ("<summary>  </summary>", "length"),
+    ("<summary>first</summary><summary>second</summary>", "max_tokens"),
+    ("<summary>first</summary><summary>partial", "length"),
+    ("wrong envelope", "stop"),
+])
 async def test_bad_summary_output_gets_one_strict_retry(outcome):
     provider = _Summary([outcome] * 3)
+    provider.max_output_tokens = 2_048
     result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
     assert result.mode == "fallback"
     assert result.summary_path == "deterministic"
@@ -108,9 +135,11 @@ async def test_bad_summary_output_gets_one_strict_retry(outcome):
     first, retry, independent = provider.requests
     assert first[-1].content == context_engine._SUMMARY_REQUEST
     assert retry[:-1] == first[:-1]
-    assert retry[-1].content == independent[-1].content == (
-        context_engine._SUMMARY_REQUEST + context_engine._SUMMARY_FORMAT_RETRY
-    )
+    assert retry[-1].content == independent[-1].content
+    assert retry[-1].content.startswith(first[-1].content)
+    retry_suffix = retry[-1].content[len(first[-1].content):]
+    assert "Keep the entire output within 2048 tokens, including the closing </summary> tag." in retry_suffix
+    assert all(options["max_output_tokens"] == 2_048 for options in provider.request_options)
     assert "characters" not in retry[-1].content
     assert independent[0].content != first[0].content
     assert not result.head_truncated
@@ -133,6 +162,9 @@ def test_summary_instruction_distinguishes_user_turns_and_preserves_security_rul
 @pytest.mark.parametrize("first_response", [
     ("KITE-214", "stop"),
     ("<summary>Tool response.</summary>", "stop", ToolCall(
+        id="read-attempt", type="function", function=FunctionCall(name="read", arguments={}),
+    )),
+    ("<summary>Tool response.</summary>", "length", ToolCall(
         id="read-attempt", type="function", function=FunctionCall(name="read", arguments={}),
     )),
 ])
@@ -223,7 +255,7 @@ async def test_summary_caps_calls_and_keeps_the_resolved_model_for_every_layer()
         "You are a helpful AI assistant tasked with summarizing conversations.",
     ]
     assert independent[1:-1] == capped.requests[-2][1:-1]
-    assert independent[-1].content.endswith(context_engine._SUMMARY_FORMAT_RETRY)
+    assert "within 20000 tokens, including the closing </summary> tag" in independent[-1].content
     assert capped.request_options[-1]["tools"] is None
 
 

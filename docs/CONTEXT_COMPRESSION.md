@@ -606,11 +606,17 @@ order. The source messages and the complete summary body stay intact.
   compaction retry]` after the system message. A successful summary notes that the trimmed part is
   outside its coverage. Earlier user text remains available through the separate
   history record.
-- A truncated, missing, or malformed summary, or a response with a tool call,
-  gets one format retry. The retry directs the model to summarize every
-  preceding message, including the newest, without
-  answering it or doing the work it requests. This instruction comes from the
-  runtime. Transient network, timeout,
+- If the provider reports `length` or `max_tokens`, Box-Agent accepts one
+  complete, nonempty `<summary>...</summary>` block and discards any surrounding
+  text. A missing, unclosed, empty, or malformed block, extra summary tags, or a
+  tool call triggers one format retry. On a normal finish the block must occupy
+  the entire reply apart from whitespace. The first format retry keeps the
+  conversation and appends a reminder to the original summary instruction. The
+  reminder gives the request's effective output limit as a token count and asks
+  for exactly one nonempty summary block that fits within it, including the
+  closing tag. It directs the model to summarize every preceding message,
+  including the newest, without answering it or doing the work it requests.
+  Transient network, timeout,
   upstream, and rate-limit failures retain the client's retry policy. An eligible
   custom client without that policy can retry within the same attempt budget.
 - If the shared request still fails, Box-Agent makes one independent request on
