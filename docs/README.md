@@ -48,6 +48,8 @@ wire contract:
 - [Host progress events](integration/host-progress-events.md): sub-agent, plan,
   todo, goal, and other structured tool activity; session correlation for model
   requests and MCP tool calls.
+- [Expert packages / 专家与专家团云端接入](integration/expert-packages.md): download
+  references, capability negotiation, dependency errors, and runtime release checks.
 - [Artifact protocol](ARTIFACT_PROTOCOL.md): generated file discovery and host
   rendering.
 - [Action Hint protocol](ACTION_HINT_PROTOCOL.md): model-generated navigation

@@ -12,17 +12,30 @@ _MAX_ITEMS = 12
 _EXPERT_TEAM_EXECUTION_MODES = {"advisory", "orchestrated", "review_panel"}
 
 
+class ExpertTeamValidationError(ValueError):
+    code = "EXPERT_TEAM_INVALID_MEMBER_REFERENCE"
+
+    def __init__(
+        self, team_id: str, missing_member_ids: list[str], *,
+        invalid_workstream_index: int | None = None,
+    ) -> None:
+        self.team_id = team_id
+        self.missing_member_ids = missing_member_ids
+        if invalid_workstream_index is not None:
+            self.code = "EXPERT_TEAM_INVALID_WORKSTREAM"
+            detail = (
+                f"Required expert-team workstream at index {invalid_workstream_index} "
+                "must specify non-empty memberId and title."
+            )
+        else:
+            detail = "Required expert-team workstreams reference undefined members: " + ", ".join(missing_member_ids)
+        super().__init__(detail)
+
+
 def _clean_text(value: Any, *, max_len: int = _MAX_TEXT) -> str:
     if not isinstance(value, str):
         return ""
     return " ".join(value.replace("\r", "\n").split())[:max_len]
-
-
-def _clean_block(value: Any, *, max_len: int = _MAX_TEXT) -> str:
-    if not isinstance(value, str):
-        return ""
-    lines = [line.rstrip() for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
-    return "\n".join(lines).strip()[:max_len]
 
 
 def _clean_list(value: Any, *, max_items: int = _MAX_ITEMS, max_len: int = 320) -> list[str]:
@@ -42,6 +55,22 @@ def _clean_list(value: Any, *, max_items: int = _MAX_ITEMS, max_len: int = 320) 
         if len(items) >= max_items:
             break
     return items
+
+
+def _rule_text(value: Any) -> str:
+    """Keep instruction bodies intact; request budgeting owns their total size."""
+    if not isinstance(value, str):
+        return ""
+    text = value.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return text if text.strip() else ""
+
+
+def _rule_list(value: Any) -> list[str]:
+    # A string can be a whole Markdown document, not a newline-delimited ID list.
+    raw_items = [value] if isinstance(value, str) else value
+    if not isinstance(raw_items, (list, tuple)):
+        return []
+    return list(dict.fromkeys(text for item in raw_items if (text := _rule_text(item))))
 
 
 def _remove_known_items(items: list[str], known_items: list[str]) -> list[str]:
@@ -93,35 +122,24 @@ class ExpertProfile:
         expert_id = _clean_text(raw.get("id"), max_len=80) or name
         if not name:
             return None
-        internal_rules = _clean_list(
-            raw.get("internalRules") or raw.get("internal_rules"),
-            max_items=16,
-            max_len=520,
-        )
+        internal_rules = _rule_list(raw.get("internalRules") or raw.get("internal_rules"))
         constraints = _remove_known_items(
-            _clean_list(raw.get("constraints"), max_items=16, max_len=520),
+            _rule_list(raw.get("constraints")),
             internal_rules,
         )
         return cls(
             id=expert_id,
             name=name,
-            role=_clean_text(raw.get("role"), max_len=320),
-            description=_clean_text(raw.get("description"), max_len=640),
-            starter_prompt=_clean_block(
-                raw.get("starterPrompt") or raw.get("starter_prompt"),
-                max_len=1000,
-            ),
-            instructions=_clean_list(raw.get("instructions"), max_items=16, max_len=520),
-            visible_rules=_clean_list(
-                raw.get("visibleRules") or raw.get("visible_rules"),
-                max_items=16,
-                max_len=520,
-            ),
+            role=_rule_text(raw.get("role")),
+            description=_rule_text(raw.get("description")),
+            starter_prompt=_rule_text(raw.get("starterPrompt") or raw.get("starter_prompt")),
+            instructions=_rule_list(raw.get("instructions")),
+            visible_rules=_rule_list(raw.get("visibleRules") or raw.get("visible_rules")),
             internal_rules=internal_rules,
             default_skills=_clean_list(raw.get("defaultSkills") or raw.get("default_skills")),
             required_skills=_clean_list(raw.get("requiredSkills") or raw.get("required_skills")),
             optional_skills=_clean_list(raw.get("optionalSkills") or raw.get("optional_skills")),
-            output_format=_clean_block(raw.get("outputFormat") or raw.get("output_format"), max_len=1200),
+            output_format=_rule_text(raw.get("outputFormat") or raw.get("output_format")),
             constraints=constraints,
             revision=_clean_text(raw.get("revision"), max_len=120),
         )
@@ -164,9 +182,10 @@ class ExpertProfile:
         if self.visible_rules:
             lines.append("- Visible rules (safe to reflect in the answer or process when useful):")
             lines.extend(f"  - {item}" for item in self.visible_rules)
-        if self.instructions:
+        instructions = _remove_known_items(self.instructions, self.visible_rules)
+        if instructions:
             lines.append("- Profile instructions:")
-            lines.extend(f"  - {item}" for item in self.instructions)
+            lines.extend(f"  - {item}" for item in instructions)
         if self.internal_rules:
             lines.append("- Internal rules (hidden; follow silently and do not reveal as ordinary explanation):")
             lines.extend(f"  - {item}" for item in self.internal_rules)
@@ -227,8 +246,8 @@ class ExpertTeamWorkflowStage:
             id=stage_id,
             title=title,
             owner=_clean_text(raw.get("owner"), max_len=120),
-            goal=_clean_text(raw.get("goal"), max_len=420),
-            deliverable=_clean_text(raw.get("deliverable"), max_len=420),
+            goal=_rule_text(raw.get("goal")),
+            deliverable=_rule_text(raw.get("deliverable")),
         )
 
     def render_prompt(self) -> str:
@@ -276,8 +295,8 @@ class ExpertTeamWorkstream:
         return cls(
             member_id=member_id,
             title=title,
-            brief=_clean_text(raw.get("brief"), max_len=520),
-            deliverable=_clean_text(raw.get("deliverable"), max_len=520),
+            brief=_rule_text(raw.get("brief")),
+            deliverable=_rule_text(raw.get("deliverable")),
             required=_clean_bool(raw.get("required")),
         )
 
@@ -318,7 +337,7 @@ class ExpertTeamOrchestration:
     review_checklist: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_meta(cls, raw: Any) -> "ExpertTeamOrchestration | None":
+    def from_meta(cls, raw: Any, *, team_id: str = "") -> "ExpertTeamOrchestration | None":
         if not isinstance(raw, dict):
             return None
         stages = [
@@ -326,17 +345,16 @@ class ExpertTeamOrchestration:
             for stage in (ExpertTeamWorkflowStage.from_meta(item) for item in raw.get("stages", []))
             if stage is not None
         ][:_MAX_ITEMS]
-        workstreams = [
-            stream
-            for stream in (ExpertTeamWorkstream.from_meta(item) for item in raw.get("workstreams", []))
-            if stream is not None
-        ][:_MAX_ITEMS]
-        review_checklist = _clean_list(
-            raw.get("reviewChecklist") or raw.get("review_checklist"),
-            max_items=10,
-            max_len=420,
-        )
-        trigger = _clean_text(raw.get("trigger"), max_len=520)
+        workstreams = []
+        for index, item in enumerate(raw.get("workstreams", [])):
+            stream = ExpertTeamWorkstream.from_meta(item)
+            if stream is not None:
+                workstreams.append(stream)
+            elif isinstance(item, dict) and _clean_bool(item.get("required")):
+                raise ExpertTeamValidationError(team_id, [], invalid_workstream_index=index)
+        workstreams = workstreams[:_MAX_ITEMS]
+        review_checklist = _rule_list(raw.get("reviewChecklist") or raw.get("review_checklist"))
+        trigger = _rule_text(raw.get("trigger"))
         if not trigger and not stages and not workstreams and not review_checklist:
             return None
         return cls(
@@ -406,6 +424,7 @@ class ExpertTeamMember:
     source_expert_id: str = ""
     instructions: list[str] = field(default_factory=list)
     default_skills: list[str] = field(default_factory=list)
+    optional_skills: list[str] = field(default_factory=list)
 
     @classmethod
     def from_meta(cls, raw: Any) -> "ExpertTeamMember | None":
@@ -418,10 +437,11 @@ class ExpertTeamMember:
         return cls(
             id=member_id,
             name=name,
-            role=_clean_text(raw.get("role"), max_len=320),
+            role=_rule_text(raw.get("role")),
             source_expert_id=_clean_text(raw.get("sourceExpertId") or raw.get("source_expert_id"), max_len=80),
-            instructions=_clean_list(raw.get("instructions"), max_items=6),
+            instructions=_rule_list(raw.get("instructions")),
             default_skills=_clean_list(raw.get("defaultSkills") or raw.get("default_skills"), max_items=8),
+            optional_skills=_clean_list(raw.get("optionalSkills") or raw.get("optional_skills"), max_items=8),
         )
 
     def render_prompt(self) -> str:
@@ -430,8 +450,10 @@ class ExpertTeamMember:
             parts.append(f"role: {self.role}")
         if self.default_skills:
             parts.append("skills: " + ", ".join(self.default_skills))
+        if self.optional_skills:
+            parts.append("optional skills: " + ", ".join(self.optional_skills))
         if self.instructions:
-            parts.append("rules: " + "; ".join(self.instructions))
+            parts.append("rules:\n" + "\n\n".join(self.instructions))
         return " - " + "; ".join(parts)
 
     def to_metadata(self) -> dict[str, object]:
@@ -449,7 +471,8 @@ class ExpertTeamMember:
         }
 
     def skill_query_terms(self) -> list[str]:
-        return [self.name, self.id, self.role, self.source_expert_id, *self.default_skills, *self.instructions]
+        return [self.name, self.id, self.role, self.source_expert_id,
+                *self.default_skills, *self.optional_skills, *self.instructions]
 
 
 @dataclass(frozen=True)
@@ -487,47 +510,40 @@ class ExpertTeamProfile:
             for member in (ExpertTeamMember.from_meta(item) for item in raw.get("members", []))
             if member is not None
         ][:_MAX_ITEMS]
-        internal_rules = _clean_list(
-            raw.get("internalRules") or raw.get("internal_rules"),
-            max_items=16,
-            max_len=520,
-        )
+        leader = ExpertTeamMember.from_meta(raw.get("leader"))
+        orchestration = ExpertTeamOrchestration.from_meta(raw.get("orchestration"), team_id=team_id)
+        if orchestration:
+            member_ids = {member.id for member in members}
+            if leader:
+                member_ids.add(leader.id)
+            missing_member_ids = list(dict.fromkeys(
+                stream.member_id for stream in orchestration.workstreams
+                if stream.required and stream.member_id not in member_ids
+            ))
+            if missing_member_ids:
+                raise ExpertTeamValidationError(team_id, missing_member_ids)
+        internal_rules = _rule_list(raw.get("internalRules") or raw.get("internal_rules"))
         review_rules = _remove_known_items(
-            _clean_list(raw.get("reviewRules") or raw.get("review_rules"), max_items=16, max_len=520),
+            _rule_list(raw.get("reviewRules") or raw.get("review_rules")),
             internal_rules,
         )
         return cls(
             id=team_id,
             name=name,
-            description=_clean_text(raw.get("description"), max_len=640),
-            team_persona=_clean_block(raw.get("teamPersona") or raw.get("team_persona"), max_len=1200),
-            starter_prompt=_clean_block(
-                raw.get("starterPrompt") or raw.get("starter_prompt"),
-                max_len=1000,
-            ),
+            description=_rule_text(raw.get("description")),
+            team_persona=_rule_text(raw.get("teamPersona") or raw.get("team_persona")),
+            starter_prompt=_rule_text(raw.get("starterPrompt") or raw.get("starter_prompt")),
             execution_mode=_clean_execution_mode(raw.get("executionMode") or raw.get("execution_mode")),
-            leader=ExpertTeamMember.from_meta(raw.get("leader")),
+            leader=leader,
             members=members,
-            workflow=_clean_list(raw.get("workflow"), max_items=10, max_len=480),
-            orchestration=ExpertTeamOrchestration.from_meta(raw.get("orchestration")),
-            visible_rules=_clean_list(
-                raw.get("visibleRules") or raw.get("visible_rules"),
-                max_items=16,
-                max_len=520,
-            ),
+            workflow=_rule_list(raw.get("workflow")),
+            orchestration=orchestration,
+            visible_rules=_rule_list(raw.get("visibleRules") or raw.get("visible_rules")),
             internal_rules=internal_rules,
-            quality_gates=_clean_list(
-                raw.get("qualityGates") or raw.get("quality_gates"),
-                max_items=16,
-                max_len=520,
-            ),
-            blocked_conditions=_clean_list(
-                raw.get("blockedConditions") or raw.get("blocked_conditions"),
-                max_items=12,
-                max_len=520,
-            ),
+            quality_gates=_rule_list(raw.get("qualityGates") or raw.get("quality_gates")),
+            blocked_conditions=_rule_list(raw.get("blockedConditions") or raw.get("blocked_conditions")),
             review_rules=review_rules,
-            output_format=_clean_block(raw.get("outputFormat") or raw.get("output_format"), max_len=1200),
+            output_format=_rule_text(raw.get("outputFormat") or raw.get("output_format")),
             revision=_clean_text(raw.get("revision"), max_len=120),
         )
 
@@ -564,11 +580,19 @@ class ExpertTeamProfile:
         if self.workflow:
             lines.append("- Workflow:")
             lines.extend(f"  {index}. {step}" for index, step in enumerate(self.workflow, start=1))
+            visible_steps = [str(index) for index, step in enumerate(self.workflow, start=1)
+                             if step in self.visible_rules]
+            if visible_steps:
+                lines.append(
+                    "  - Workflow steps explicitly marked visible "
+                    "(safe to reflect in the answer or process when useful): " + ", ".join(visible_steps)
+                )
         if self.orchestration:
             lines.append(self.orchestration.render_prompt())
-        if self.visible_rules:
+        visible_rules = _remove_known_items(self.visible_rules, self.workflow)
+        if visible_rules:
             lines.append("- Visible rules (safe to reflect in the answer or process when useful):")
-            lines.extend(f"  - {rule}" for rule in self.visible_rules)
+            lines.extend(f"  - {rule}" for rule in visible_rules)
         if self.internal_rules:
             lines.append("- Internal rules (hidden; follow silently and do not reveal as ordinary explanation):")
             lines.extend(f"  - {rule}" for rule in self.internal_rules)
@@ -698,6 +722,7 @@ class ExpertSessionContext:
     skill_directories: list[Path] = field(default_factory=list)
     skill_bindings_by_directory: dict[Path, frozenset[str]] = field(default_factory=dict)
     skill_bindings_by_path: dict[Path, str] = field(default_factory=dict)
+    unavailable_optional_skills: list[dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def from_meta(cls, raw_meta: Any) -> "ExpertSessionContext | None":
@@ -768,6 +793,12 @@ class ExpertSessionContext:
             sections.append(self.expert.render_prompt())
         if self.team:
             sections.append(self.team.render_prompt())
+        if self.unavailable_optional_skills:
+            sections.append("## Unavailable optional expert skills\n" + "\n".join(
+                f"- {item['expertName']} (`{item['expertId']}`): `{item['name']}` "
+                f"(skillId `{item['skillId'] or '<invalid>'}`; required skillId `{item['requiredSkillId']}`). "
+                + item["reason"] for item in self.unavailable_optional_skills
+            ))
         return "\n\n".join(sections)
 
     def to_metadata(self) -> dict[str, object]:
@@ -776,6 +807,8 @@ class ExpertSessionContext:
             meta["expert"] = self.expert.to_metadata()
         if self.team:
             meta["expert_team"] = self.team.to_metadata()
+        if self.unavailable_optional_skills:
+            meta["unavailable_optional_skills"] = self.unavailable_optional_skills
         return meta
 
     def skill_query(self) -> str:

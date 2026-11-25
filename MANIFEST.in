@@ -5,6 +5,8 @@ include box_agent/skills/README.md
 include box_agent/skills/THIRD_PARTY_NOTICES.md
 include box_agent/skills/agent_skills_spec.md
 
+prune box_agent/experts
+
 recursive-include box_agent/config *
 recursive-include box_agent/mcp_servers/native *.swift
 include box_agent/config/config-example.yaml

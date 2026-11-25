@@ -323,6 +323,7 @@ class _SkillCatalog:
     sources: List[_SourceEntry]
     parse_errors: List[Tuple[Path, str]]
     settings_signature: tuple[str, int, int] | None = None
+    dependency_errors: dict[str, SkillDependencyError] = field(default_factory=dict)
 
     def get_skill(self, name: str, *, include_disabled: bool = False) -> Optional[Skill]:
         pool = (self.all_skills or self.enabled) if include_disabled else self.enabled
@@ -386,6 +387,8 @@ class SkillLoader:
         self.validation_timeout_seconds = SKILL_VALIDATION_TIMEOUT_SECONDS
         self._last_validated: dict[str, SkillReferenceSnapshot | SkillDependencyError] = {}
         self._force_reload = False
+        self._market_skill_bindings: dict[str, frozenset[str]] = {}
+        self._dependency_market_skill_bindings: dict[str, dict[str, frozenset[str]]] = {}
         self._sources = [
             _SourceEntry(directory=Path(d).expanduser(), source=s) for d, s in sources
         ]
@@ -403,6 +406,10 @@ class SkillLoader:
         self.parse_errors: List[Tuple[Path, str]] = []
 
     # Keep the existing catalog API; discovery publishes all fields together.
+    @property
+    def dependency_errors(self) -> dict[str, SkillDependencyError]:
+        return self._catalog.dependency_errors
+
     @property
     def loaded_skills(self) -> Dict[str, Skill]:
         return self._catalog.enabled
@@ -653,29 +660,39 @@ class SkillLoader:
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
         skill_bindings_by_path: Mapping[Path, str] | None = None,
+        market_skill_bindings: Mapping[str, Collection[str]] | None = None,
+        dependency_market_skill_bindings: Mapping[str, Mapping[str, Collection[str]]] | None = None,
     ) -> "SkillLoader":
         with self._reload_lock:
             return self._with_expert_skill_sources(
                 skill_names, skill_directories=skill_directories,
                 skill_bindings_by_directory=skill_bindings_by_directory,
                 skill_bindings_by_path=skill_bindings_by_path,
+                market_skill_bindings=market_skill_bindings,
+                dependency_market_skill_bindings=dependency_market_skill_bindings,
             )
 
     async def awith_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
         skill_bindings_by_path: Mapping[Path, str] | None = None,
+        market_skill_bindings: Mapping[str, Collection[str]] | None = None,
+        dependency_market_skill_bindings: Mapping[str, Mapping[str, Collection[str]]] | None = None,
     ) -> "SkillLoader":
         return await asyncio.to_thread(
             self.with_expert_skill_sources, skill_names, skill_directories=skill_directories,
             skill_bindings_by_directory=skill_bindings_by_directory,
             skill_bindings_by_path=skill_bindings_by_path,
+            market_skill_bindings=market_skill_bindings,
+            dependency_market_skill_bindings=dependency_market_skill_bindings,
         )
 
     def _with_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
         skill_bindings_by_path: Mapping[Path, str] | None = None,
+        market_skill_bindings: Mapping[str, Collection[str]] | None = None,
+        dependency_market_skill_bindings: Mapping[str, Mapping[str, Collection[str]]] | None = None,
     ) -> "SkillLoader":
         """Clone this loader with session-local expert skills.
 
@@ -685,12 +702,17 @@ class SkillLoader:
         Explicit package bindings may replace protected builtins in this session;
         reserved runtime names and execution-profile policies remain protected.
         """
+        update_dependency_bindings = (
+            dependency_market_skill_bindings is not None
+            and dependency_market_skill_bindings != self._dependency_market_skill_bindings
+        )
         requested_names = [
             name.strip()
             for name in skill_names
             if isinstance(name, str) and _SKILL_NAME_RE.match(name.strip())
         ]
-        if not requested_names and not skill_directories:
+        if (not requested_names and not skill_directories and not market_skill_bindings
+                and not update_dependency_bindings):
             return self
 
         extra_sources: List[Tuple[Path, SkillSource]] = []
@@ -712,7 +734,8 @@ class SkillLoader:
                     break
 
         package_directories = [Path(directory).resolve() for directory in skill_directories or []]
-        if not extra_sources and not package_directories:
+        if (not extra_sources and not package_directories and not market_skill_bindings
+                and not update_dependency_bindings):
             return self
 
         # 仅调整会话副本的顺序；普通会话仍使用原加载器和原优先级。
@@ -724,6 +747,17 @@ class SkillLoader:
             ],
             skill_settings_path=self._skill_settings_path,
         )
+        loader._market_skill_bindings = (
+            dict(self._market_skill_bindings) if market_skill_bindings is None
+            else {name: frozenset(ids) for name, ids in market_skill_bindings.items()}
+        )
+        dependency_bindings = (self._dependency_market_skill_bindings
+                               if dependency_market_skill_bindings is None
+                               else dependency_market_skill_bindings)
+        loader._dependency_market_skill_bindings = {
+            root: {name: frozenset(ids) for name, ids in bindings.items()}
+            for root, bindings in dependency_bindings.items()
+        }
         for entry in loader._sources[:len(package_directories)]:
             entry.containment_root = entry.directory
             entry.bound_skill_names = frozenset(
@@ -1077,8 +1111,44 @@ class SkillLoader:
             entry.signature = signature
             entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
 
-        self._catalog = _SkillCatalog(loaded, all_skills, sources, self.parse_errors,
-                                     settings_signature)
+        if self._market_skill_bindings:
+            from .skillhub_install_tool import is_installed_market_skill
+
+            for name, identities in self._market_skill_bindings.items():
+                skill = all_skills.get(name)
+                if skill is not None and not all(is_installed_market_skill(skill, identity) for identity in identities):
+                    # Keep the existing source precedence and diagnostic entry; do
+                    # not let any reader or restore path consume a same-name package.
+                    unavailable = replace(skill, content="", broken=True,
+                                          broken_reason="Skill does not match the expert's market installation identity.")
+                    all_skills[name] = unavailable
+                    if name in loaded:
+                        loaded[name] = unavailable
+
+        catalog = _SkillCatalog(loaded, all_skills, sources, self.parse_errors, settings_signature)
+        dependency_errors: dict[str, SkillDependencyError] = {}
+        if self._dependency_market_skill_bindings:
+            from .skillhub_install_tool import is_installed_market_skill
+
+            # Resolve against one candidate catalog before publishing any root
+            # errors. Disk identity checks stay inside the discovery worker.
+            for root, bindings in self._dependency_market_skill_bindings.items():
+                try:
+                    dependencies = resolve_required_skills(catalog, [root])
+                except SkillDependencyError:
+                    continue  # Preserve existing missing/disabled/broken/cycle diagnostics.
+                for dependency in dependencies:
+                    if dependency.name == root:
+                        continue
+                    if not all(is_installed_market_skill(dependency, identity)
+                               for identity in bindings.get(dependency.name, ())):
+                        dependency_errors[root] = SkillDependencyError(
+                            "SKILL_DEPENDENCY_IDENTITY_MISMATCH",
+                            f"Required Skill '{dependency.name}' does not match this expert's market installation identity.",
+                            {"skill": dependency.name, "rootSkill": root},
+                        )
+                        break
+        self._catalog = replace(catalog, dependency_errors=dependency_errors)
         discovered = list(loaded.values())
 
         # Aggregate diagnostics: one line total, not one per broken file. The
@@ -1319,6 +1389,9 @@ class SkillLoader:
             candidates.extend(self._iter_skill_files(entry))
 
         candidates.extend(entry.bound_skill_paths)
+        if (self._market_skill_bindings or self._dependency_market_skill_bindings) and entry.source == "user":
+            candidates.extend(path.parent / ".skill-installation.json"
+                              for path in tuple(candidates) if path.name == "SKILL.md")
         signatures = []
         for path in dict.fromkeys(candidates):
             if entry.containment_root is not None:
