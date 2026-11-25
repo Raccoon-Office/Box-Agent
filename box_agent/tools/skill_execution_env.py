@@ -139,6 +139,8 @@ def build_skill_execution_env(
         "NPM_CONFIG_CACHE": str(skill_tools_root / "npm-cache"),
         "PYTHONUSERBASE": str(python_user_base),
         "PYTHONPATH": separator.join(python_path),
+        # Imports must not write bytecode into shared Skill packages.
+        "PYTHONDONTWRITEBYTECODE": "1",
         "PLAYWRIGHT_BROWSERS_PATH": browser_cache,
     }
     if is_windows:

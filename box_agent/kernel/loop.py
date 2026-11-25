@@ -85,7 +85,7 @@ from .tool_messages import (
 )
 from ..logger import AgentLogger
 from ..payload_privacy import redact_diagnostic_text
-from ..session_log import SessionLogReplayError, run_session_write
+from ..session_log import SessionLogReplayError, run_session_write, session_write_lock
 from ..llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from ..loop_guards import (
     EMPTY_ARGS_LIMIT,
@@ -688,7 +688,8 @@ async def _run_agent_loop_impl(
     Args:
         _services: Immutable resolved capability implementations.
         messages: Message history (mutated in-place).
-        max_steps: Maximum LLM call iterations.
+        max_steps: Maximum work iterations, followed by at most one wrap-up
+            summary request if exhausted. The stop reason remains MAX_STEPS.
         tool_limits: Typed limits for search, wrap-up, and delegated runs.
         max_tool_calls: Optional hard cap across all tool executions in this loop.
         max_delegated_tool_calls: Optional aggregate cap for tool calls reported by
@@ -1033,20 +1034,38 @@ async def _run_agent_loop_impl(
         )
         session_log.flush()
 
-    def commit_model_response(message: Message) -> None:
+    receipt_response: Message | None = None
+    model_receipts: dict[str, dict[str, int]] = {}
+
+    async def commit_model_response(message: Message) -> None:
         if not (message.content or message.thinking or message.tool_calls):
             return
-        commit_response = getattr(context_engine, "commit_response", None)
-        if callable(commit_response):
-            commit_response(message)
-        if message.usage is not None and message.usage._request_snapshot is not None:
-            for previous in reversed(messages):
-                if previous.usage is not None and previous.usage._request_snapshot is not None:
-                    previous.usage._request_snapshot = None
-                    break
-        messages.append(message)
-        if session_log is not None and session_turn is not None:
-            checkpoint_messages(step + 1)
+        receipts = model_receipts if message is receipt_response else {}
+        committed = False
+
+        def persist_response() -> None:
+            nonlocal committed
+            commit_response = getattr(context_engine, "commit_response", None)
+            if callable(commit_response):
+                commit_response(message)
+            if message.usage is not None and message.usage._request_snapshot is not None:
+                for previous in reversed(messages):
+                    if previous.usage is not None and previous.usage._request_snapshot is not None:
+                        previous.usage._request_snapshot = None
+                        break
+            messages.append(message)
+            if session_log is not None and session_turn is not None:
+                if receipts:
+                    session_log.mark_runtime_input_receipts(message, receipts)
+                checkpoint_messages(step + 1)
+            committed = True
+
+        try:
+            await run_session_write(session_log, persist_response)
+        finally:
+            # A cancelled await can still have committed on the worker.
+            if committed and receipts and isinstance(inject_queue, InjectionManager) and inject_queue.on_model_commit is not None:
+                inject_queue.on_model_commit(receipts)
 
     def validate_followup(result, tool, pending):
         accepted, blocks, tokens = _validate_transient_followup_result(
@@ -1307,7 +1326,9 @@ async def _run_agent_loop_impl(
         )
         return result, await run_session_write(session_log, commit_compaction, result)
 
-    for step in range(max_steps):
+    # One extra iteration lets the model answer the step-budget wrap-up notice.
+    for step in range(max_steps + 1):
+        step_budget_exhausted = step == max_steps
         if resource_ledger is not None:
             invalidated = resource_ledger.reconcile(messages)
             if invalidated:
@@ -1447,6 +1468,12 @@ async def _run_agent_loop_impl(
             if message is not None
         ]
         request_context_messages.extend(correction_messages)
+        if isinstance(inject_queue, InjectionManager) and inject_queue.request_injections is not None:
+            async with session_write_lock(session_log):
+                runtime_messages, runtime_events = inject_queue.prepare_request_context(messages)
+            request_context_messages.extend(runtime_messages)
+            for event in runtime_events:
+                yield event
         transient_message = (
             Message(
                 role="user",
@@ -1473,7 +1500,7 @@ async def _run_agent_loop_impl(
         # Reserve the final few steps for synthesis: stop further
         # research and force a self-contained answer from gathered
         # material before the step budget is exhausted.
-        if (
+        if step_budget_exhausted or (
             not wrapup_injected
             and max_steps > wrapup_remaining_steps
             and step >= max_steps - wrapup_remaining_steps
@@ -1501,12 +1528,12 @@ async def _run_agent_loop_impl(
             ).apply(messages)
 
         # ── Step start ──────────────────────────────────────
-        yield StepStart(step=step + 1, max_steps=max_steps)
+        yield StepStart(step=step + 1, max_steps=max_steps + int(step_budget_exhausted))
         if cancelled():
             yield await cancellation_done_event()
             return
         if hook_mgr.hooks:
-            await hook_mgr.fire_step_start(step=step + 1, max_steps=max_steps)
+            await hook_mgr.fire_step_start(step=step + 1, max_steps=max_steps + int(step_budget_exhausted))
         if cancelled():
             yield await cancellation_done_event()
             return
@@ -1993,12 +2020,18 @@ async def _run_agent_loop_impl(
                 yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                 return
 
+            # A provider refusal takes precedence over local tool recovery.
+            finish_reason = (
+                "content_filter"
+                if finish_event.raw_finish_reason == "content_filter"
+                else finish_event.finish_reason or "stop"
+            )
             # Build LLMResponse equivalent from streamed data
             response = LLMResponse(
                 content=text_content,
                 thinking=thinking_content if thinking_content else None,
-                tool_calls=finish_event.tool_calls,
-                finish_reason=finish_event.finish_reason or "stop",
+                tool_calls=None if finish_reason == "content_filter" else finish_event.tool_calls,
+                finish_reason=finish_reason,
                 usage=finish_event.usage,
                 provider_response_id=finish_event.provider_response_id,
                 truncated_tool_calls=finish_event.truncated_tool_calls,
@@ -2066,8 +2099,7 @@ async def _run_agent_loop_impl(
                 partial_text = exc.partial_text or ""
                 partial_thinking = exc.partial_thinking or ""
                 if partial_text or partial_thinking:
-                    await run_session_write(
-                        session_log, commit_model_response,
+                    await commit_model_response(
                         Message(
                             role="assistant",
                             content=partial_text,
@@ -2230,11 +2262,18 @@ async def _run_agent_loop_impl(
         # back to the model just teaches it to keep producing them. Build the
         # message here, then append only in the branches that keep it.
         invalid_tool_ids = not valid_tool_call_ids(response.tool_calls or ())
-        if (callable(on_response_received) and not invalid_tool_ids
-                and response.finish_reason not in {"provider_stale", "length", "max_tokens"}
+        receipt_response = None
+        model_receipts = {}
+        if (not invalid_tool_ids
+                and response.finish_reason not in {"provider_stale", "length", "max_tokens", "content_filter"}
                 and not (response.truncated_tool_calls or response.stream_dropped_mid_tool or response.oversized_tool_calls)
                 and ((response.content or "").strip() or response.tool_calls)):
-            on_response_received()
+            if callable(on_response_received):
+                on_response_received()
+            if (isinstance(inject_queue, InjectionManager)
+                    and inject_queue.model_response_receipts is not None
+                    and response.finish_reason not in {"error", "cancelled"}):
+                model_receipts = inject_queue.model_response_receipts(provider_request_messages)
 
         assistant_usage = response.usage
         if (assistant_usage is not None and request_usage_snapshot is not None
@@ -2253,6 +2292,24 @@ async def _run_agent_loop_impl(
                 else None
             ),
         )
+
+        if response.finish_reason == "content_filter":
+            await commit_model_response(assistant_msg)
+            msg = "模型输出触发内容安全拦截，本轮未完成。"
+            if hook_mgr.hooks:
+                await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=response.content)
+            yield ErrorEvent(
+                message=msg,
+                is_fatal=True,
+                error_code="content_filter",
+                error_category="content_filter",
+            )
+            yield DoneEvent(stop_reason=StopReason.ERROR, final_content=response.content)
+            return
+
+        if model_receipts:
+            receipt_response = assistant_msg
 
         # Raw image blocks are a one-shot request overlay. Retain them only
         # when an empty provider-stale response will be retried verbatim.
@@ -2277,7 +2334,7 @@ async def _run_agent_loop_impl(
                 if not has_partial_content:
                     provider_stale_retries += 1
                 if has_partial_content:
-                    await run_session_write(session_log, commit_model_response, assistant_msg)
+                    await commit_model_response(assistant_msg)
                     recovery_text = (
                         "模型服务在上一轮已经输出部分内容、但尚未完成动作时长时间没有返回"
                         "新数据。请从未完成的动作继续，不要重复已经输出的说明，也不要把"
@@ -2338,7 +2395,7 @@ async def _run_agent_loop_impl(
                 for item in details
             ) or "unknown tool"
             if response.content.strip():
-                await run_session_write(session_log, commit_model_response, assistant_msg)
+                await commit_model_response(assistant_msg)
             if oversized_tool_argument_retries < 1:
                 oversized_tool_argument_retries += 1
                 repair_text = (
@@ -2483,7 +2540,7 @@ async def _run_agent_loop_impl(
             # No tool attempt: preserve the existing text continuation and
             # empty-response retry behavior.
             if visible_text and truncation_continuations < max_truncation_continuations:
-                await run_session_write(session_log, commit_model_response, assistant_msg)
+                await commit_model_response(assistant_msg)
                 truncation_continuations += 1
                 tail = response.content.rstrip()[-40:]
                 cont_text = truncation_continuation_text(tail)
@@ -2555,7 +2612,7 @@ async def _run_agent_loop_impl(
 
             # Retries / continuations exhausted — persist plain text and
             # surface the error.
-            await run_session_write(session_log, commit_model_response, assistant_msg)
+            await commit_model_response(assistant_msg)
             usage = response.usage
             diag_parts: list[str] = []
             if usage is not None:
@@ -2594,8 +2651,18 @@ async def _run_agent_loop_impl(
             yield DoneEvent(stop_reason=StopReason.MAX_TOKENS, final_content=msg)
             return
 
+        if step_budget_exhausted and not response.tool_calls and not response.content.strip():
+            # A wrap-up without a visible answer (whitespace or thinking only)
+            # is not saved; fall back to the exhausted-loop notice below.
+            elapsed = perf_counter() - step_start
+            total = perf_counter() - run_start
+            if hook_mgr.hooks:
+                await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            break
+
         # ── Append assistant message (non-truncated path) ───
-        await run_session_write(session_log, commit_model_response, assistant_msg)
+        await commit_model_response(assistant_msg)
 
         # Reset the retry counter now that a clean turn landed — a future
         # truncation on a later step should get its own fresh budget.
@@ -2608,6 +2675,7 @@ async def _run_agent_loop_impl(
         if not response.tool_calls:
             if (
                 force_plan_for_turn
+                and not step_budget_exhausted
                 and not plan_write_succeeded
                 and not forced_plan_retry_injected
             ):
@@ -2652,6 +2720,7 @@ async def _run_agent_loop_impl(
             # short replies (legitimately end without punctuation).
             if (
                 truncation_continuation_enabled
+                and not step_budget_exhausted
                 and truncation_continuations < max_truncation_continuations
                 and response.finish_reason in (None, "stop", "end_turn")
                 and response.content.strip()
@@ -2749,7 +2818,7 @@ async def _run_agent_loop_impl(
                         ),
                     ),
                     finish_reason=response.finish_reason,
-                    tools_available=bool(tool_list),
+                    tools_available=bool(tool_list) and not step_budget_exhausted,
                     thinking_enabled=thinking_enabled,
                     step=step,
                     max_steps=max_steps,
@@ -2835,7 +2904,8 @@ async def _run_agent_loop_impl(
 
             # Capability checks are deterministic and cannot be waived by the
             # model judge, a completion claim, or a serialized tool result.
-            completion_issues = await completion_checks.check()
+            # A budget wrap-up reports partial work; it does not claim completion.
+            completion_issues = [] if step_budget_exhausted else await completion_checks.check()
             if cancelled() or (inject_queue is not None and not inject_queue.empty()):
                 continue
             if completion_issues:
@@ -2863,9 +2933,10 @@ async def _run_agent_loop_impl(
 
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
+            stop_reason = StopReason.MAX_STEPS if step_budget_exhausted else StopReason.END_TURN
             if hook_mgr.hooks:
                 await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-                await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=response.content)
+                await hook_mgr.fire_done(stop_reason=stop_reason, final_content=response.content)
             # Extract memory at agent loop end (background)
             if memory_extractor:
                 asyncio.create_task(
@@ -2879,7 +2950,7 @@ async def _run_agent_loop_impl(
             proposal = await _build_proposal_event_with_plan()
             if proposal is not None:
                 yield proposal
-            yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=response.content)
+            yield DoneEvent(stop_reason=stop_reason, final_content=response.content)
             return
 
         # ── Cancellation check (before tools) ──────────────
@@ -2945,8 +3016,10 @@ async def _run_agent_loop_impl(
 
         control = ToolStepControl(
             step=step + 1,
-            allowed_names=frozenset({"plan_write"}) if plan_approval_gate_active else None,
-            blocked_reason=_PLAN_APPROVAL_SKIP_MESSAGE,
+            allowed_names=(frozenset() if step_budget_exhausted else
+                           frozenset({"plan_write"}) if plan_approval_gate_active else None),
+            blocked_reason=(near_limit_wrapup_text(step, max_steps) if step_budget_exhausted
+                            else _PLAN_APPROVAL_SKIP_MESSAGE),
             result_transform=decorate_control_result,
             pending_followup_tokens=pending_transient_followup_tokens,
         )

@@ -418,15 +418,17 @@ def _execute_with_kernel_write_guard(
     code: str,
     timeout: int,
     reference_policy=None,
+    scratch_dir: str | None = None,
 ) -> tuple[str, list[str], Optional[str]]:
     from .python_mutation_guard import PythonMutationGuard
 
     guard = PythonMutationGuard({**os.environ, "BOX_AGENT_WORKSPACE_DIR": str(session.workspace.resolve())})
     try:
-        setup_result = session.execute(
-            _kernel_write_guard_setup_code(session.workspace, reference_policy, guard.kernel_setup_code()),
-            timeout=min(timeout, 10),
-        )
+        setup = _kernel_write_guard_setup_code(session.workspace, reference_policy, guard.kernel_setup_code())
+        if scratch_dir is not None and scratch_dir != session.sandbox_env.runtime_env.get(SKILL_SCRATCH_ENV):
+            # A cleanup handoff can retire the directory inherited at kernel startup.
+            setup += f"\n_box_guard_os.environ[{SKILL_SCRATCH_ENV!r}] = {scratch_dir!r}\n"
+        setup_result = session.execute(setup, timeout=min(timeout, 10))
         if setup_result[2] is not None:
             return setup_result
         return session.execute(code, timeout)
@@ -937,6 +939,7 @@ class SandboxEnvironment:
             "argv": [
                 str(self.python_path),
                 *(["-E"] if self._explicit_python else []),
+                "-B",  # Kernel imports must not write into shared Skill packages.
                 "-m", "ipykernel_launcher",
                 "-f", "{connection_file}",
             ],
@@ -1799,15 +1802,16 @@ class JupyterSandboxTool(Tool):
             raw_output={"phase": "environment_prepare", "timeout_seconds": _SANDBOX_PREPARE_TIMEOUT_SECONDS},
         )
 
-    @staticmethod
     def _execute_session_code(
+        self,
         session: "JupyterKernelSession | InProcessKernelSession",
         code: str,
         timeout: int,
         reference_policy=None,
     ) -> tuple[str, list[str], Optional[str]]:
         if isinstance(session, JupyterKernelSession):
-            return _execute_with_kernel_write_guard(session, code, timeout, reference_policy)
+            scratch_dir = self.runtime_env.get(SKILL_SCRATCH_ENV) if self._skill_scratch_dir is not None else None
+            return _execute_with_kernel_write_guard(session, code, timeout, reference_policy, scratch_dir)
         if reference_policy and reference_policy[0]:
             return "", [], "CHAT_REFERENCE_PROTECTED: an isolated kernel is required when chat references are active"
         return session.execute(code, timeout)

@@ -1,14 +1,45 @@
 from __future__ import annotations
 
+import pytest
+
 from box_agent.agent import Agent, Colors as AgentColors
 from box_agent.cli_renderer import CliRenderer, Colors, _format_size
 from box_agent.events import (
     ContentEvent,
     DoneEvent,
+    StepEnd,
+    StepStart,
     StopReason,
     ToolCallResult,
     ToolCallStart,
 )
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_step_limit_does_not_repeat_rendered_summary(capsys, streaming) -> None:
+    renderer = CliRenderer()
+    summary = "Saved partial results; two checks remain."
+    renderer.render(ContentEvent(summary, _streaming=streaming))
+    renderer.render(StepEnd(step=2, elapsed_seconds=1, total_elapsed_seconds=2))
+    renderer.render(DoneEvent(StopReason.MAX_STEPS, summary))
+
+    output = capsys.readouterr().out
+    assert output.count(summary) == 1
+    assert "Step limit reached" in output
+
+
+@pytest.mark.parametrize("boundary", [StepStart(step=2, max_steps=2), DoneEvent(StopReason.END_TURN, "earlier")])
+def test_step_limit_preserves_fallback_after_earlier_output(capsys, boundary) -> None:
+    renderer = CliRenderer()
+    renderer.render(ContentEvent("earlier"))
+    renderer.render(boundary)
+    renderer.render(ContentEvent("", _streaming=True, _header=True))
+    fallback = "Task couldn't be completed after 1 steps."
+    renderer.render(DoneEvent(StopReason.MAX_STEPS, fallback))
+
+    output = capsys.readouterr().out
+    assert output.count(fallback) == 1
+    assert "Step limit reached" not in output
 
 
 def test_cli_renderer_preserves_basic_content_and_cancellation_output(capsys) -> None:

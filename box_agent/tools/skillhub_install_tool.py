@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from .base import Tool, ToolResult
-from .skill_loader import SkillLoader
+from .skill_loader import Skill, SkillLoader
 
 SKILLHUB_INSTALLATION_TYPE = "skillhub_installation"
 SKILLHUB_INSTALL_METHOD = "session/skillhub_install"
@@ -21,6 +21,20 @@ SkillHubInstaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 def _text(value: object, *, limit: int) -> str:
     return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def is_installed_market_skill(skill: Skill | None, skill_id: str) -> bool:
+    """Recognize the host's existing market installation identity."""
+    if skill is None or skill.source != "user" or skill.skill_path is None or not skill_id:
+        return False
+    try:
+        marker = json.loads(
+            (skill.skill_path.parent / ".skill-installation.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        return False
+    return (isinstance(marker, dict) and marker.get("source") == "hub"
+            and marker.get("skillId") == skill_id)
 
 
 class SkillHubInstallTool(Tool):
@@ -230,20 +244,9 @@ class SkillHubInstallTool(Tool):
         try:
             self._skill_loader.discover_skills()
             skill = self._skill_loader.get_skill(slug)
-            if skill is None or skill.source != "user" or skill.skill_path is None:
-                return ""
-            marker = json.loads(
-                (skill.skill_path.parent / ".skill-installation.json").read_text(
-                    encoding="utf-8"
-                )
-            )
         except (OSError, ValueError, TypeError):
             return ""
-        if not isinstance(marker, dict):
-            return ""
-        if marker.get("source") == "hub" and marker.get("skillId") == skill_id:
-            return slug
-        return ""
+        return slug if is_installed_market_skill(skill, skill_id) else ""
 
     @staticmethod
     def _successful_result(

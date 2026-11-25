@@ -38,14 +38,14 @@ import os
 import re
 import signal
 import sys
-from contextlib import AsyncExitStack, aclosing, contextmanager, suppress
+from contextlib import AsyncExitStack, aclosing, nullcontext, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4, uuid5
 
 from acp import (
@@ -101,6 +101,7 @@ from box_agent.agent import (
     goal_autopilot_prompt,
     goal_autopilot_progress_signature,
     goal_payload,
+    resolve_agent_tool_availability,
     should_continue_goal_autopilot,
 )
 from box_agent.tools.setup import (
@@ -112,6 +113,7 @@ from box_agent.tools.setup import (
     build_sandbox_info_prompt,
     initialize_base_tools,
     render_system_prompt_template,
+    resolve_workspace_tool_availability,
     # Retained as module-level compatibility hooks; MCP reconciliation now
     # delegates through ``MCPRuntimeController`` below.
     sync_mcp_tool_list,
@@ -199,6 +201,7 @@ from box_agent.session_trace import (
 from box_agent.session_log import (
     SessionLog, SessionLogCorrupted, SessionLogDurabilityError, SessionLogInUseError,
     SessionLogReplayError, SessionLogWorkspaceMismatch, TOOL_OUTCOME_UNKNOWN, run_session_io, run_session_write,
+    session_write_lock,
 )
 from box_agent.windows_session_lock import ERROR_ACCESS_DENIED
 from box_agent.api.input import UserInput
@@ -245,22 +248,33 @@ from box_agent.run_observer import (
     RunObserver,
     cleanup_turn_resources,
 )
-from box_agent.experts import ExpertSessionContext
+from box_agent.experts import ExpertSessionContext, ExpertTeamValidationError
+from box_agent.expert_dependencies import (
+    ExpertDependencyError, expert_dependency_market_bindings, expert_market_skill_bindings,
+    resolve_optional_market_conflicts,
+    validate_expert_dependencies,
+)
+from box_agent.expert_package_format import ExpertPackageError
+from box_agent.expert_packages import prepare_expert_meta
 from box_agent.llm.reasoning import (
     normalize_raccoon_thinking,
     parse_raccoon_thinking_level,
     parse_reasoning_effort,
 )
 from box_agent.execution_profile import (
-    FAST_OPTIONAL_SKILLS,
     ExecutionProfile,
+    blocked_skills_for_profile,
+    is_skill_blocked,
     normalize_execution_profile,
 )
 from box_agent.memory import MemoryManager, memory_identity, memory_user_turn, uses_local_memory
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.retry import StreamInterrupted
 from box_agent.schema import LLMProvider, Message
-from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
+from box_agent.tools.permissions import (
+    CapabilityPolicy, GrantStore, PermissionEngine, approval_turn_id,
+    exact_approvals_enabled, exact_filesystem_target, scoped_exact_approvals,
+)
 from box_agent.skill_paths import managed_builtin_skills_dir
 from box_agent.tools.mcp_loader import get_mcp_connector_server_names, get_mcp_status
 from box_agent.tools.runtime import (
@@ -279,6 +293,9 @@ from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryErr
 from .debug_logger import acp_logger as log
 
 from box_agent.user_paths import browser_cache_path, configured_box_agent_home, state_path
+
+if TYPE_CHECKING:
+    from box_agent.device_delegation import DeviceDelegations
 
 # Keep stdlib logger for backward compat with existing log calls
 logger = logging.getLogger(__name__)
@@ -626,21 +643,14 @@ def _user_decision_response_from_meta(meta: Any) -> dict[str, str] | None:
     """Normalize the host response to a public ``request_user_decision`` call."""
     if not isinstance(meta, dict):
         return None
-    raw = meta.get("userDecision") or meta.get("user_decision")
-    if not isinstance(raw, dict):
-        return None
+    from box_agent.tools.request_user_decision_tool import decision_response_fields
 
-    request_id = str(raw.get("request_id") or raw.get("requestId") or "").strip()
-    decision_kind = str(
-        raw.get("decision_kind") or raw.get("decisionKind") or ""
-    ).strip()
-    option_id = str(
-        raw.get("selected_option_id") or raw.get("selectedOptionId") or ""
-    ).strip()
-    option_label = str(
-        raw.get("selected_option_label") or raw.get("selectedOptionLabel") or ""
-    ).strip()
-    custom_text = str(raw.get("custom_text") or raw.get("customText") or "").strip()
+    raw = decision_response_fields(meta.get("userDecision") or meta.get("user_decision"))
+    request_id = str(raw.get("request_id") or "").strip()
+    decision_kind = str(raw.get("decision_kind") or "").strip()
+    option_id = str(raw.get("selected_option_id") or "").strip()
+    option_label = str(raw.get("selected_option_label") or "").strip()
+    custom_text = str(raw.get("custom_text") or "").strip()
     trigger = str(raw.get("trigger") or "user").strip().lower()
     if not request_id or not decision_kind or not (option_id or custom_text):
         return None
@@ -1012,6 +1022,10 @@ def _tool_result_raw_output(
     }
 
 
+_DEVICE_RUNTIME_INPUT_KINDS = {"device_wake", "device_delegation"}
+_DEVICE_INPUT_KINDS = _DEVICE_RUNTIME_INPUT_KINDS | {"device_delegation_continuation"}
+
+
 def _session_busy_error(session_id: str | None, *, rebinding: bool = False) -> RequestError:
     data = {"code": "SESSION_BUSY"}
     if session_id is not None:
@@ -1128,6 +1142,11 @@ class SessionState(AgentSession):
     _history_restore_failed: bool = field(default=False, init=False, repr=False)
     _mcp_apps_closing: bool = field(default=False, init=False, repr=False)
     _mcp_apps_nonce: str = field(default_factory=lambda: uuid4().hex, init=False, repr=False)
+    device_delegations: DeviceDelegations | None = None
+    device_wake_task: asyncio.Task[None] | None = None
+    device_wake_closed: bool = False
+    prompt_target_turn: str = ""
+    prompt_stop_requested: bool = False
     trace_writer: SessionTraceWriter | None = None
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None
@@ -1149,12 +1168,18 @@ class SessionState(AgentSession):
     mcp_runtime_updates_requested: bool = False
 
     async def aclose(self) -> None:
+        self.device_wake_closed = True
         task = self.follow_up_suggestions_task
         if task is not None:
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self.follow_up_suggestions_task = None
+        if self.device_wake_task is not None:
+            self.device_wake_task.cancel()
+            await asyncio.gather(self.device_wake_task, return_exceptions=True)
+        if self.device_delegations is not None:
+            await self.device_delegations.aclose()
         await super().aclose()
 
 
@@ -1409,6 +1434,7 @@ class BoxACPAgent:
         self._session_replays: dict[str, _SessionReplay] = {}
         self._closing = False
         self._close_lock = asyncio.Lock()
+        self._device_delegation_receiver = False
         self._client_info: ClientInfo | None = None
         self._memory = memory_manager
         self._hooks = hooks
@@ -1847,6 +1873,11 @@ class BoxACPAgent:
         client_info: Implementation | None = None, **meta: Any,
     ) -> InitializeResponse:
         log.info("initialize", message="ACP initialize request received")
+        receiver = meta.get("deviceDelegationReceiver")
+        self._device_delegation_receiver = (
+            isinstance(receiver, dict) and type(receiver.get("version")) is int
+            and receiver["version"] == 1
+        )
         if isinstance(meta, dict):
             self._client_info = ClientInfo.from_meta(meta.get("host_client_info"))
         self._default_llm_binding = _normalize_llm_binding(meta)
@@ -1861,6 +1892,7 @@ class BoxACPAgent:
         )
         skills = self._skills_meta()
         response_meta: dict[str, Any] = {
+            "expert_package_download": 1,
             "raccoon_thinking": {"protocol_version": 1},
             "connector_discovery": {"versions": [1]},
             "session_replay": {"protocol_version": 1},
@@ -2076,7 +2108,21 @@ class BoxACPAgent:
                     and raw_skillhub_install == SKILLHUB_INSTALL_CAPABILITY_VERSION
                 )
             env_context = EnvContext.from_meta(meta.get("env_context"))
-            expert_context = ExpertSessionContext.from_meta(meta)
+            try:
+                meta = await prepare_expert_meta(meta)
+                expert_context = ExpertSessionContext.from_meta(meta)
+                if expert_context is not None:
+                    expert_context = resolve_optional_market_conflicts(meta, expert_context)
+                params.field_meta = meta
+            except ExpertTeamValidationError as exc:
+                raise RequestError(-32602, "Invalid expert team", {
+                    "code": exc.code, "detail": str(exc),
+                    "teamId": exc.team_id, "missingMemberIds": exc.missing_member_ids,
+                }) from None
+            except ExpertPackageError as exc:
+                raise RequestError(-32602, "Invalid expert selection", {
+                    "code": exc.code, "detail": str(exc),
+                }) from None
             initial_task_id = normalize_task_id(
                 meta.get("task_id") or meta.get("taskId")
             ) or ""
@@ -2319,10 +2365,20 @@ class BoxACPAgent:
             tools.append(runtime_environment_tool)
         session_skill_loader = self._skill_loader
         if expert_context is not None and session_skill_loader is not None:
+            # Uploads can finish after process startup. Prepare from a current
+            # catalog before deriving the expert loader or retiring a live session.
+            validation = await session_skill_loader.avalidate_references((), allow_stale=False)
+            if validation.timed_out:
+                raise RequestError(-32602, "Expert Skill catalog refresh timed out", {
+                    "code": "SKILL_VALIDATION_TIMEOUT",
+                    "detail": "Skill catalog refresh did not finish; retry expert preparation later.",
+                })
             session_skill_loader = await session_skill_loader.awith_expert_skill_sources(
                 expert_context.skill_names(), skill_directories=expert_context.skill_directories,
                 skill_bindings_by_directory=expert_context.skill_bindings_by_directory,
                 skill_bindings_by_path=expert_context.skill_bindings_by_path,
+                market_skill_bindings=expert_market_skill_bindings(meta, expert_context),
+                dependency_market_skill_bindings=expert_dependency_market_bindings(meta, expert_context),
             )
         connector_skill_grants: set[str] = set()
         skillhub_search_tool: SkillHubSearchTool | None = None
@@ -2349,6 +2405,96 @@ class BoxACPAgent:
                         skill_loader=session_skill_loader,
                     )
                 )
+
+        from box_agent.tools.connector_discovery import (
+            ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
+        )
+
+        def prepare_connector_discovery(session_log, *, new_session):
+            configured_tool_version = self._config.agent.tool_interface_version
+            discovery_mode = resolve_discovery_mode(
+                session_log,
+                requested=connector_discovery_requested and not utility,
+                new_session=new_session,
+                tool_version=(
+                    session_log.resolve_tool_interface_version(configured_tool_version)
+                    if session_log is not None else configured_tool_version
+                ),
+            )
+            if discovery_mode and connector_discovery_requested and not utility:
+                discovery = ConnectorDiscovery(lambda: selected_connector_ids)
+                discovery.update(meta.get("connector_discovery"))
+                return discovery
+            return None
+
+        connector_discovery = None
+
+        def skill_access_filter(skill):
+            return _connector_skill_is_granted(
+                skill, connector_skill_grants, connector_discovery
+            ) and (connector_discovery is None or _connector_skill_is_available(
+                skill, selected_connector_ids, connector_discovery
+            ))
+
+        process_owner_id = f"acp-runtime-{uuid4().hex}"
+
+        def preflight_expert_dependencies(session_log: SessionLog | None):
+            if expert_context is None:
+                return
+            expert_tools = set()
+            if not utility:
+                expert_tools.update(tool.name for tool in [*self._base_tools, *tools])
+                runtime_context = build_skill_runtime_context(
+                    sandbox_mode=session_sandbox_mode, env_context=env_context,
+                )
+                expert_tools.update(resolve_workspace_tool_availability(
+                    self._config, sandbox_mode=session_sandbox_mode,
+                    session_mode=session_mode, llm=session_llm,
+                    runtime_env=runtime_context.env(), process_owner_id=process_owner_id,
+                ))
+                # Restored logs pin the same interface used by Agent registration.
+                tool_version = self._config.agent.tool_interface_version
+                if session_log is not None:
+                    tool_version = session_log.resolve_tool_interface_version(tool_version)
+                expert_tools.update(resolve_agent_tool_availability(
+                    tool_interface_version=tool_version,
+                ))
+            from box_agent.tools.skill_tool import GetSkillTool
+
+            reader = next((tool for tool in reversed([*self._base_tools, *tools])
+                           if isinstance(tool, GetSkillTool)), None)
+            allowed_skills = getattr(reader, "allowed_skill_names", None)
+            blocked_skills = blocked_skills_for_profile(
+                execution_profile, getattr(reader, "blocked_skill_names", ()),
+            )
+
+            def dependency_is_available(skill):
+                # Read grants are restored/matched later. Preparation checks the
+                # host's current selection and readiness, without granting access.
+                return (
+                    _connector_skill_is_available(skill, selected_connector_ids, connector_discovery)
+                    and (allowed_skills is None or skill.name in allowed_skills)
+                    and not is_skill_blocked(skill.name, blocked_skills)
+                )
+
+            try:
+                validate_expert_dependencies(
+                    meta, expert_context, session_skill_loader, expert_tools,
+                    skill_access_filter=dependency_is_available,
+                )
+            except ExpertDependencyError as exc:
+                raise RequestError(-32602, "Expert dependencies are not ready", {
+                    "code": exc.code, "dependencies": exc.dependencies,
+                }) from None
+
+        # Existing logs pin connector mode. Preflight before retiring their live
+        # session; cold sessions use the real opened log below, including resume.
+        bound_state = next((state for handle, state in self._sessions.items()
+                            if state.upstream_session_id == upstream_session_id or handle == session_id), None)
+        expert_preflight_complete = expert_context is not None and bound_state is not None
+        if expert_preflight_complete:
+            connector_discovery = prepare_connector_discovery(bound_state.agent.session_log, new_session=False)
+            await asyncio.to_thread(preflight_expert_dependencies, bound_state.agent.session_log)
 
         recovery_prompt = (
             _RECOVERY_PROMPT if upstream_session_id and _RECOVERY_SESSION_ID.fullmatch(upstream_session_id) else None
@@ -2453,24 +2599,9 @@ class BoxACPAgent:
         # the historical direct ``Agent(...)`` call and its test hook.
         state = None
         try:
-            from box_agent.tools.connector_discovery import (
-                ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
-            )
-
-            configured_tool_version = self._config.agent.tool_interface_version
-            discovery_mode = resolve_discovery_mode(
-                session_log,
-                requested=connector_discovery_requested and not utility,
-                new_session=not resumed,
-                tool_version=(
-                    session_log.resolve_tool_interface_version(configured_tool_version)
-                    if session_log is not None else configured_tool_version
-                ),
-            )
-            connector_discovery = None
-            if discovery_mode and connector_discovery_requested and not utility:
-                connector_discovery = ConnectorDiscovery(lambda: selected_connector_ids)
-                connector_discovery.update(meta.get("connector_discovery"))
+            if not expert_preflight_complete:
+                connector_discovery = prepare_connector_discovery(session_log, new_session=not resumed)
+                await asyncio.to_thread(preflight_expert_dependencies, session_log)
             state = await SessionState.open(
                 config=self._config,
                 runtime=self._plugin_runtime,
@@ -2481,7 +2612,7 @@ class BoxACPAgent:
                     memory_user_id=memory_meta.get("user_id"),
                     session_mode=session_mode, allow_full_access=session_allow_full_access,
                     permission_mode=permission_mode, effective_policy=effective_policy,
-                    process_owner_id=f"acp-runtime-{uuid4().hex}",
+                    process_owner_id=process_owner_id,
                     workspace_layout=_normalize_workspace_layout(meta.get("workspace_layout") or meta.get("workspaceLayout") if isinstance(meta, dict) else None),
                     follow_up_suggestions_enabled=follow_up_suggestions_enabled,
                 ),
@@ -2493,11 +2624,7 @@ class BoxACPAgent:
                     skill_task=self._skill_task, session_log=session_log,
                     workspace_tools_factory=add_workspace_tools,
                     capability_state_provider=self._sub_agent_capability_state,
-                    skill_access_filter=lambda skill: _connector_skill_is_granted(
-                        skill, connector_skill_grants, connector_discovery
-                    ) and (connector_discovery is None or _connector_skill_is_available(
-                        skill, selected_connector_ids, connector_discovery
-                    )),
+                    skill_access_filter=skill_access_filter,
                     skill_catalog_filter=lambda skill: _connector_skill_is_available(
                         skill, selected_connector_ids, connector_discovery
                     ),
@@ -2549,6 +2676,34 @@ class BoxACPAgent:
                 )
             agent = state.agent
             session_skill_loader = state.skill_loader
+            device_meta = meta.get("device") if isinstance(meta, dict) else None
+            if (
+                isinstance(device_meta, dict)
+                and type(device_meta.get("version")) is int
+                and device_meta["version"] == 1
+            ):
+                from box_agent.device_delegation import DeviceDelegations, DeviceTool, OPERATIONS
+                state.device_delegations = DeviceDelegations(
+                    session_id, self._conn.ext_method,
+                    lambda: state.current_turn_id if state.turn_active and not state.cancelled else "",
+                    agent.session_log, artifact_upload=device_meta.get("artifactUpload") is True,
+                )
+                if agent.session_log is not None:
+                    for event in reversed(agent.session_log._active_events()):
+                        if event["type"] == "surface/reset":
+                            break
+                        if event["type"] == "turn/end":
+                            state.waiting_for_user_input = (
+                                event["data"].get("reason", {}).get("kind") == StopReason.WAITING_FOR_USER.value
+                            )
+                            break
+                state.inject_queue.request_injections = state.device_delegations.request_injections
+                state.inject_queue.model_response_receipts = state.device_delegations.response_receipts
+                state.inject_queue.on_model_commit = state.device_delegations.confirm_receipts
+                actions = (*OPERATIONS, "artifact.upload") if state.device_delegations.artifact_upload else OPERATIONS
+                for action in actions:
+                    tool = DeviceTool(state.device_delegations, action)
+                    agent.tools[tool.name] = tool
             tools = list(agent.tools.values())
             if runtime_environment_tool is not None:
                 from box_agent.tools.jupyter_tool import JupyterSandboxTool
@@ -2691,6 +2846,10 @@ class BoxACPAgent:
                 raise _session_storage_error(error, "workspace") from error
             raise
         self._sessions[session_id] = state
+        if not load_existing:
+            if state.device_delegations is not None:
+                state.device_delegations.retry_stopped_cancellations()
+            self._schedule_device_wake(session_id, state)
         return response
 
     async def _restore_session(
@@ -2742,6 +2901,11 @@ class BoxACPAgent:
         response = await self._restore_session(cwd, session_id, mcp_servers, additional_directories, **meta)
         if replay_from is not None:
             await self._replay_session_history(session_id, replay_from_turn_id=replay_from)
+        state = self._sessions[session_id]
+        if state.device_delegations is not None:
+            state.device_delegations.retry_stopped_cancellations()
+            self._schedule_device_wake(session_id, state)
+        if replay_from is not None:
             return ResumeSessionResponse(field_meta={
                 **(response.field_meta or {}), "replayed": True, "replayFromTurnId": replay_from,
             })
@@ -2789,6 +2953,7 @@ class BoxACPAgent:
         """Send retained history using the same wire format for load and resume."""
         state = self._sessions[session_id]
         state._prompt_in_progress = True
+        replay_device_inputs = state.device_delegations is not None or self._device_delegation_receiver
         started = perf_counter()
 
         def checkpoint() -> None:
@@ -2803,8 +2968,11 @@ class BoxACPAgent:
                 # Resolve against effective display history, not physical log records:
                 # revised/reset turns must never become valid replay anchors again.
                 starts = [index for index, (_, message, _) in enumerate(history)
-                          if message.role == "user" and message.source == "user"
-                          and message.input_facts
+                          if message.role == "user" and message.input_facts
+                          and (message.source == "user" or (
+                              replay_device_inputs
+                              and message.input_facts.get("kind") in _DEVICE_INPUT_KINDS
+                          ))
                           and message.input_facts.get("kind") != "user_supplement"
                           and message.input_facts.get("id") == replay_from_turn_id]
                 if len(starts) != 1:
@@ -2833,7 +3001,11 @@ class BoxACPAgent:
                 if message.input_facts and message.input_facts.get("kind") != "user_supplement":
                     replay_turn_id = message.input_facts["id"]
                 updates = []
-                if message.role == "user" and message.source == "user":
+                record = message.input_facts or {}
+                origin_kind = record.get("kind") if replay_device_inputs else None
+                if message.role == "user" and (
+                    message.source == "user" or origin_kind in _DEVICE_INPUT_KINDS
+                ):
                     record = message.input_facts
                     blocks = record["blocks"] if record else [{"type": "text", "text": str(message.content)}]
                     for block in blocks:
@@ -2883,6 +3055,11 @@ class BoxACPAgent:
                         update.field_meta["toolOutcomeUnknown"] = True
                     if message.input_facts and message.input_facts.get("kind") == "user_supplement":
                         update.field_meta.update(inputKind="user_supplement", inputId=message.input_facts["id"])
+                    elif origin_kind in _DEVICE_INPUT_KINDS:
+                        update.field_meta.update(inputKind=origin_kind, inputSource=message.source,
+                                                 inputId=message.input_facts["id"])
+                        if origin_kind != "device_wake":
+                            update.field_meta["deviceDelegation"] = message.input_facts["deviceDelegation"]
                     call_id = getattr(update, "tool_call_id", None)
                     if isinstance(call_id, str):
                         app_marker = self._mcp_apps.marker(state, call_id)
@@ -2979,13 +3156,38 @@ class BoxACPAgent:
     async def prompt(
         self, session_id: str, prompt: list[Any], **meta: Any,
     ) -> PromptResponse:
+        return await self._submit_prompt(session_id, prompt, meta)
+
+    async def _submit_prompt(
+        self, session_id: str, prompt: list[Any], meta: dict[str, Any],
+        *, wake_turn: str | None = None,
+    ) -> PromptResponse:
         self._require_accepting_requests()
+        provenance = None
+        device_origin = None
+        continuation_response = None
+        if wake_turn is not None:
+            provenance = {"kind": "device_wake"}
+        elif "deviceDelegation" in meta:
+            from box_agent.device_delegation import validate_delegation_input
+            if not self._device_delegation_receiver:
+                raise RequestError(-32602, "DEVICE_DELEGATION_RECEIVER_REQUIRED")
+            device_origin = validate_delegation_input(
+                meta["deviceDelegation"], _meta_string(meta, "turn_id", "turnId"),
+            )
+            kind = "device_delegation"
+            if "continuationOfTurnId" in device_origin:
+                kind = "device_delegation_continuation"
+                continuation_response = meta.get("userDecision") or meta.get("user_decision")
+            provenance = {"kind": kind, "deviceDelegation": device_origin}
         params = PromptRequest(session_id=session_id, prompt=prompt, field_meta=meta or None)
         context = normalize_input_context(meta)
         if any(session_id in handles for handles in self._session_bindings_in_progress.values()):
             raise _session_busy_error(session_id, rebinding=True)
         state = self._sessions.get(session_id)
         if not state:
+            if device_origin is not None and "continuationOfTurnId" in device_origin:
+                raise RequestError(-32602, "DEVICE_DELEGATION_CONTINUATION_MISMATCH")
             # Auto-create session if not found (compatibility with clients that skip newSession)
             log.warn("session/prompt", session_id=session_id, message="Session not found, auto-creating")
             new_session = await self.new_session(
@@ -3005,6 +3207,8 @@ class BoxACPAgent:
                 "code": "HISTORY_EDIT_UNSUPPORTED_CONTINUATION",
             })
         edit = meta.get("history_edit")
+        if edit is not None and device_origin is not None:
+            raise RequestError(-32602, "DEVICE_DELEGATION_HISTORY_EDIT_UNSUPPORTED")
         if state._history_edit_in_progress:
             raise _session_busy_error(session_id)
         # Validate references before cancelling an edited turn, revising history,
@@ -3015,14 +3219,25 @@ class BoxACPAgent:
                 "", state.agent.workspace_dir,
                 ui_language=_meta_string(meta, "ui_language", "uiLanguage").lower(),
             )), *params.prompt]
-        input_value = UserInput(tuple(params.prompt), context,
-                                _meta_string(meta, "turn_id", "turnId") or None)
+        requested_turn_id = _meta_string(meta, "turn_id", "turnId")
+        if state.device_delegations is not None and not requested_turn_id:
+            # The session log can contain Stop records from earlier ACP bindings.
+            requested_turn_id = f"{session_id}-turn-{uuid4().hex}"
+        input_value = UserInput(tuple(params.prompt), context, requested_turn_id or None)
+        input_fingerprint = input_value.fingerprint()
+        if provenance is not None:
+            input_fingerprint = sha256(
+                _json.dumps(
+                    [input_fingerprint, provenance] if continuation_response is None
+                    else [input_fingerprint, provenance, continuation_response], sort_keys=True,
+                ).encode(),
+            ).hexdigest()
         if input_value.input_id and state.agent.session_log is not None:
             previous = state.agent.session_log.turn_binding(input_value.input_id)
             if (previous is not None and "input_fingerprint" in previous
-                    and (previous["input_fingerprint"] != input_value.fingerprint()
+                    and (previous["input_fingerprint"] != input_fingerprint
                          or state.agent.session_log.has_committed_input(input_value.input_id))):
-                error = ("TURN_ALREADY_ACCEPTED" if previous["input_fingerprint"] == input_value.fingerprint()
+                error = ("TURN_ALREADY_ACCEPTED" if previous["input_fingerprint"] == input_fingerprint
                          else "TURN_IDEMPOTENCY_CONFLICT")
                 if edit is not None:
                     if error == "TURN_IDEMPOTENCY_CONFLICT":
@@ -3031,6 +3246,8 @@ class BoxACPAgent:
                         "history_revision_id": state.agent.session_log.current_revision()})
                 raise ValueError(error)
         prepared_input, _ = prepare_user_input(input_value, state.agent.workspace_dir, state.permission_engine)
+        if provenance is not None:
+            prepared_input.update(provenance, fingerprint=input_fingerprint)
         context = prepared_input["context"]
         if edit is not None:
             try:
@@ -3053,16 +3270,23 @@ class BoxACPAgent:
         state._prompt_in_progress = True
         finished = asyncio.get_running_loop().create_future()
         state._prompt_finished = finished
+        state.prompt_target_turn = requested_turn_id
+        state.prompt_stop_requested = False
         trace_token = None
         try:
             log_store = state.agent.session_log
-            turn_id = _meta_string(meta, "turn_id", "turnId")
+            turn_id = state.prompt_target_turn
+            delegated_turn = None
+            if device_origin is not None:
+                from box_agent.device_delegation import delegated_approval_turn
+
+                delegated_turn = delegated_approval_turn(log_store, device_origin, turn_id, continuation_response)
             if log_store is not None and (turn_id or context):
                 def bind_input():
                     if turn_id:
                         binding = log_store.turn_binding(turn_id)
                         if binding is not None:
-                            if binding.get("input_fingerprint", input_value.fingerprint()) != input_value.fingerprint():
+                            if binding.get("input_fingerprint", input_fingerprint) != input_fingerprint:
                                 raise ValueError("TURN_IDEMPOTENCY_CONFLICT")
                             if "input_fingerprint" not in binding or log_store.has_committed_input(turn_id):
                                 raise ValueError("TURN_ALREADY_ACCEPTED")
@@ -3070,20 +3294,23 @@ class BoxACPAgent:
                             log_store.append("turn/binding", {
                                 "turn_id": turn_id,
                                 "prompt_fingerprint": prompt_fingerprint(params.prompt, context),
-                                "input_fingerprint": input_value.fingerprint(),
+                                "input_fingerprint": input_fingerprint,
+                                **({"deviceDelegation": device_origin} if device_origin is not None else {}),
                             })
                             log_store.flush()
                     if context:
                         log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
 
                 await run_session_write(log_store, bind_input)
+            if state.device_delegations is not None and turn_id in state.device_delegations.wakes:
+                await self._notify_device_turn(session_id, turn_id, "started")
             # Routing, memory refresh and final QA handoff run outside the
             # main model iterator. Their tasks inherit this prompt's writer.
             turn_id = turn_id or f"{session_id}-turn-{state.turn_counter + 1}"
             if state.trace_writer is not None:
                 trace_token = set_session_trace_writer(state.trace_writer, turn_id=turn_id)
             config = state.config or self._config
-            with private_payload_scope(config.agent.memory_backend_type == "desktop"):
+            with scoped_exact_approvals(delegated_turn), private_payload_scope(config.agent.memory_backend_type == "desktop"):
                 return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
         except SessionLogDurabilityError as exc:
             raise _session_storage_error(exc, "prompt") from exc
@@ -3099,8 +3326,74 @@ class BoxACPAgent:
             if trace_token is not None:
                 reset_session_trace_writer(trace_token)
             state._prompt_in_progress = False
+            state.prompt_target_turn = ""
+            state.prompt_stop_requested = False
             if not finished.done():
                 finished.set_result(None)
+            self._schedule_device_wake(session_id, state)
+
+    def _schedule_device_wake(self, session_id: str, state: SessionState) -> None:
+        broker = state.device_delegations
+        if broker is None or state.device_wake_task is not None:
+            return
+
+        def ready() -> bool:
+            return not (
+                state.device_wake_closed or self._closing or state._prompt_in_progress
+                or state._history_edit_in_progress or state._history_restore_failed
+                or state.waiting_for_user_input or state.run_handle.is_active
+            )
+
+        if not ready():
+            return
+
+        async def run() -> None:
+            try:
+                while ready():
+                    async with session_write_lock(broker.log):
+                        turn = broker.next_wake() if ready() else None
+                    if turn is None:
+                        return
+                    try:
+                        broker.attempted_wakes.add(turn)
+                        instruction = (
+                            "Reconcile unread device results after restart. Use retained tool outcomes, "
+                            "including unknown outcomes. Do not repeat prior tool actions."
+                            if turn.startswith("device-wake-recovery-") else
+                            "Review the device delegation updates and continue the existing task as needed."
+                        )
+                        response = await self._submit_prompt(
+                            session_id, [text_block(instruction)], {"turnId": turn}, wake_turn=turn,
+                        )
+                    except asyncio.CancelledError:
+                        await self._notify_device_turn(session_id, turn, "finished", result={"stopReason": "cancelled"})
+                        raise
+                    except Exception as exc:
+                        error = exc if isinstance(exc, RequestError) else RequestError.internal_error()
+                        await self._notify_device_turn(session_id, turn, "finished", error=error.to_error_obj())
+                        raise
+                    await self._notify_device_turn(session_id, turn, "finished", result=response.model_dump(
+                        mode="json", by_alias=True, exclude_none=True, exclude_unset=True,
+                    ))
+            except Exception as exc:
+                log.error("device/wake_failed", session_id=session_id, error=str(exc))
+            finally:
+                state.device_wake_task = None
+
+        state.device_wake_task = asyncio.create_task(run(), name=f"device-wake:{session_id}")
+
+    async def _notify_device_turn(
+        self, session_id: str, turn: str, phase: str, **outcome: dict[str, Any],
+    ) -> None:
+        notify = getattr(self._conn, "ext_notification", None)
+        if notify is None:
+            return
+        try:
+            await asyncio.wait_for(notify("device/turn", {
+                "version": 1, "sessionId": session_id, "turnId": turn, "phase": phase, **outcome,
+            }), timeout=self._SESSION_UPDATE_TIMEOUT_SECONDS)
+        except Exception as exc:
+            log.warn("device/turn_notification_failed", session_id=session_id, error=str(exc))
 
     async def _revise_session_history(
         self, params: PromptRequest, state: SessionState, edit: Any, context: dict[str, Any],
@@ -3148,9 +3441,14 @@ class BoxACPAgent:
                 if callable(shutdown) and getattr(tool, "process_owner_id", ""):
                     await shutdown()
             state._history_restore_failed = True
-            await revise_agent_history(
-                state.agent, checked_revision(), cancelled=lambda: state._history_cancel_requested,
-            )
+            try:
+                await revise_agent_history(
+                    state.agent, checked_revision(), cancelled=lambda: state._history_cancel_requested,
+                )
+            finally:
+                if state.device_delegations is not None:
+                    async with session_write_lock(state.device_delegations.log):
+                        state.device_delegations.reconcile_history()
             state.source_text = ""
             state.pending_plan_approval = None
             state.waiting_for_user_input = False
@@ -3170,6 +3468,7 @@ class BoxACPAgent:
             raise
         finally:
             state._history_edit_in_progress = False
+            self._schedule_device_wake(params.session_id, state)
 
     async def _prompt_for_session(
         self, params: PromptRequest, session_id: str, state: SessionState, turn_id: str, context: dict[str, Any],
@@ -3187,7 +3486,7 @@ class BoxACPAgent:
         if pending_suggestions is not None and not pending_suggestions.done():
             pending_suggestions.cancel()
         state.follow_up_suggestions_task = None
-        state.cancelled = False
+        state.cancelled = state.prompt_stop_requested
         state.wrap_up_requested = False
         prompt_images = _prompt_image_blocks(params.prompt)
         user_text = "\n".join(
@@ -3410,7 +3709,7 @@ class BoxACPAgent:
                     )
             state.continuation_applied = True
         state.turn_counter += 1
-        provided_turn_id = _meta_string(prompt_meta, "turn_id", "turnId")
+        provided_turn_id = state.prompt_target_turn or _meta_string(prompt_meta, "turn_id", "turnId")
         provided_task_id = normalize_task_id(
             prompt_meta.get("task_id") or prompt_meta.get("taskId")
         )
@@ -3734,6 +4033,14 @@ class BoxACPAgent:
             }
             if image_content else {}
         )
+        input_kind = prepared_input.get("kind")
+        runtime_input = (
+            input_kind in _DEVICE_RUNTIME_INPUT_KINDS
+            or (input_kind == "device_delegation_continuation" and user_decision_response is not None
+                and user_decision_response["trigger"] == "timeout")
+        )
+        if runtime_input:
+            image_kwargs["input_source"] = "runtime"
         await state.agent.aadd_user_message(
             input_value, input_facts=prepared_input,
             host_connector_status=host_connector_status, **image_kwargs,
@@ -3760,7 +4067,8 @@ class BoxACPAgent:
             skillhub_search_tool.reset_turn()
 
         state.mcp_runtime_updates_requested = False
-        state.turn_active = True
+        cancelled_during_preparation = state.prompt_stop_requested
+        state.turn_active = not cancelled_during_preparation
         meter_token = start_token_meter()
         turn_meter = get_token_meter()
         if turn_meter is not None:
@@ -3787,58 +4095,23 @@ class BoxACPAgent:
             no_progress_limit=state.config.agent.goal_autopilot_no_progress_turns,
         )
         try:
-            async with memory_user_turn(
-                state, user_text=plan_detection_text,
-                logged_user_text=user_text,
-                input_context=context,
-                user_message=next((message for message in reversed(state.agent.messages)
-                                   if message.role == "user" and message.source == "user"), None),
-                session_id=state.upstream_session_id or session_id, turn_id=turn_id,
-            ):
-                stop_reason = await self._run_turn(
-                    state,
-                    session_id,
-                    message_display=message_display,
-                    task_context=task_context,
-                    turn_id=turn_id,
-                    billing_session_id=billing_session_id,
-                    force_plan_start=force_plan_start,
-                    require_plan_approval=require_plan_approval,
-                    plan_approval=plan_approval,
-                    plan_start_text=plan_detection_text,
-                    explicitly_selected_skill_names=explicitly_selected_skill_names,
-                    ui_language=ui_language,
-                    clear_prompt_grants=False,
-                    pending_llm=pending_llm,
-                    pending_summary_llm=pending_summary_llm,
-                    initial_context_transition=initial_context_transition,
-                    max_tool_calls=0 if cloud_handoff else None,
-                    completion_checks_enabled=not cloud_handoff,
-                )
-                while (
-                    auto_enabled
-                    and not state.wrap_up_requested
-                    and state.pending_plan_approval is None
-                    and should_continue_goal_autopilot(state.agent, stop_reason)
-                ):
-                    if autopilot.budget_exhausted_at(perf_counter()):
-                        break
-                    if state.cancelled or state.agent.goal is None:
-                        break
-                    autopilot.begin_continuation()
-                    continuation = goal_autopilot_prompt(
-                        state.agent.goal,
-                        autopilot.continuations,
-                        state.config.agent.goal_autopilot_max_turns,
+            if cancelled_during_preparation:
+                stop_reason = StopReason.CANCELLED.value
+            else:
+                memory_scope = nullcontext()
+                if not runtime_input:
+                    input_id = prepared_input["id"]
+                    current_input = next((
+                        message for message in reversed(state.agent.messages)
+                        if message.role == "user" and message.source == "user"
+                        and (message.input_facts or {}).get("id") == input_id
+                    ), None)
+                    memory_scope = memory_user_turn(
+                        state, user_text=plan_detection_text, logged_user_text=user_text,
+                        input_context=context, user_message=current_input,
+                        session_id=state.upstream_session_id or session_id, turn_id=turn_id,
                     )
-                    log.info(
-                        "goal_autopilot/continue",
-                        session_id=session_id,
-                        continuation=autopilot.continuations,
-                        max_continuations=state.config.agent.goal_autopilot_max_turns,
-                    )
-                    await state.agent.aadd_user_message(continuation)
-                    before_signature = goal_autopilot_progress_signature(state.agent.goal)
+                async with memory_scope:
                     stop_reason = await self._run_turn(
                         state,
                         session_id,
@@ -3846,13 +4119,57 @@ class BoxACPAgent:
                         task_context=task_context,
                         turn_id=turn_id,
                         billing_session_id=billing_session_id,
+                        force_plan_start=force_plan_start,
+                        require_plan_approval=require_plan_approval,
+                        plan_approval=plan_approval,
                         plan_start_text=plan_detection_text,
+                        explicitly_selected_skill_names=explicitly_selected_skill_names,
+                        ui_language=ui_language,
                         clear_prompt_grants=False,
+                        pending_llm=pending_llm,
+                        pending_summary_llm=pending_summary_llm,
+                        initial_context_transition=initial_context_transition,
+                        max_tool_calls=0 if cloud_handoff else None,
+                        completion_checks_enabled=not cloud_handoff,
                     )
-                    after_signature = goal_autopilot_progress_signature(state.agent.goal)
-                    if should_continue_goal_autopilot(state.agent, stop_reason):
-                        if autopilot.record_progress(before_signature, after_signature):
+                    while (
+                        auto_enabled
+                        and not state.wrap_up_requested
+                        and state.pending_plan_approval is None
+                        and should_continue_goal_autopilot(state.agent, stop_reason)
+                    ):
+                        if autopilot.budget_exhausted_at(perf_counter()):
                             break
+                        if state.cancelled or state.agent.goal is None:
+                            break
+                        autopilot.begin_continuation()
+                        continuation = goal_autopilot_prompt(
+                            state.agent.goal,
+                            autopilot.continuations,
+                            state.config.agent.goal_autopilot_max_turns,
+                        )
+                        log.info(
+                            "goal_autopilot/continue",
+                            session_id=session_id,
+                            continuation=autopilot.continuations,
+                            max_continuations=state.config.agent.goal_autopilot_max_turns,
+                        )
+                        await state.agent.aadd_user_message(continuation)
+                        before_signature = goal_autopilot_progress_signature(state.agent.goal)
+                        stop_reason = await self._run_turn(
+                            state,
+                            session_id,
+                            message_display=message_display,
+                            task_context=task_context,
+                            turn_id=turn_id,
+                            billing_session_id=billing_session_id,
+                            plan_start_text=plan_detection_text,
+                            clear_prompt_grants=False,
+                        )
+                        after_signature = goal_autopilot_progress_signature(state.agent.goal)
+                        if should_continue_goal_autopilot(state.agent, stop_reason):
+                            if autopilot.record_progress(before_signature, after_signature):
+                                break
         except asyncio.CancelledError as exc:
             if state.trace_writer is not None:
                 state.trace_writer.write(
@@ -3967,14 +4284,17 @@ class BoxACPAgent:
             else:
                 cloud_handoff_ready = True
         waiting_for_user = stop_reason == StopReason.WAITING_FOR_USER.value
-        state.waiting_for_user_input = waiting_for_user
+        if not cancelled_during_preparation:
+            state.waiting_for_user_input = waiting_for_user
         wrap_up_incomplete = bool(
             state.wrap_up_requested
             and state.agent.goal is not None
             and state.agent.goal.status != "complete"
         )
         execution_status = (
-            "waiting_for_user"
+            "cancelled"
+            if cancelled_during_preparation
+            else "waiting_for_user"
             if waiting_for_user
             else "error"
             if stop_reason in {StopReason.ERROR.value, StopReason.INTERRUPTED.value}
@@ -4048,7 +4368,9 @@ class BoxACPAgent:
             "error": "end_turn",
         }
         acp_stop_reason = _ACP_STOP_REASON_MAP.get(stop_reason, "end_turn")
-        if (
+        if stop_reason == StopReason.ERROR.value and state.last_error_category == "content_filter":
+            acp_stop_reason = "refusal"
+        elif (
             (autopilot.budget_exhausted or autopilot.no_progress_exhausted)
             and state.agent.goal is not None
             and state.agent.goal.status == "active"
@@ -4076,7 +4398,9 @@ class BoxACPAgent:
             ),
             "lastStopReason": stop_reason,
             "runStatus": (
-                "waiting_for_user"
+                "cancelled"
+                if cancelled_during_preparation
+                else "waiting_for_user"
                 if waiting_for_user
                 else "error"
                 if failed
@@ -4086,6 +4410,7 @@ class BoxACPAgent:
             ),
             "completed": (
                 not failed
+                and not cancelled_during_preparation
                 and not waiting_for_user
                 and not wrap_up_incomplete
             ),
@@ -4148,6 +4473,12 @@ class BoxACPAgent:
         # memory extraction) for host-side telemetry. Best-effort: fire-and-
         # forget memory extractions that finish after this point are not
         # reflected. See box_agent.llm.token_meter.
+        if (
+            state.device_delegations is not None and not state.cancelled
+            and not failed and not waiting_for_user and acp_stop_reason == "end_turn"
+        ):
+            async with session_write_lock(state.device_delegations.log):
+                state.device_delegations.end(turn_id)
         return PromptResponse(
             stop_reason=acp_stop_reason,
             field_meta=response_meta,
@@ -4155,19 +4486,41 @@ class BoxACPAgent:
 
     async def cancel(self, session_id: str, **meta: Any) -> None:
         state = self._sessions.get(session_id)
-        if state:
-            if state._history_edit_in_progress:
-                state._history_cancel_requested = True
-            if state.trace_writer is not None:
-                state.trace_writer.write(
-                    "turn.cancel_requested",
-                    turn_id=state.current_turn_id,
-                )
-            state.request_cancel()
-            pending_suggestions = state.follow_up_suggestions_task
-            if pending_suggestions is not None and not pending_suggestions.done():
-                pending_suggestions.cancel()
-            log.info("session/cancel", session_id=session_id, message="Cancel requested")
+        if state is None:
+            return
+        targeted_cancel = state.device_delegations is not None or self._device_delegation_receiver
+        target = _meta_string(meta, "turnId", "turn_id") if targeted_cancel else ""
+        if targeted_cancel and not target and ("turnId" in meta or "turn_id" in meta):
+            return
+        await self._cancel_turn(state, session_id, target, targeted_cancel=targeted_cancel)
+
+    async def _cancel_turn(
+        self, state: SessionState, session_id: str, target: str, *, targeted_cancel: bool,
+    ) -> bool:
+        active_turn = state.prompt_target_turn if state._prompt_in_progress else ""
+        if not active_turn and state.turn_active:
+            active_turn = state.current_turn_id
+        if target and target != active_turn:
+            return False
+        if targeted_cancel and state._prompt_in_progress:
+            state.prompt_stop_requested = True
+        if state._history_edit_in_progress:
+            state._history_cancel_requested = True
+        if state.trace_writer is not None:
+            state.trace_writer.write(
+                "turn.cancel_requested",
+                turn_id=active_turn if targeted_cancel else state.current_turn_id,
+            )
+        state.request_cancel()
+        pending_suggestions = state.follow_up_suggestions_task
+        if pending_suggestions is not None and not pending_suggestions.done():
+            pending_suggestions.cancel()
+        if state.device_delegations is not None and active_turn:
+            state.device_delegations.interrupt_waits(active_turn)
+            async with session_write_lock(state.device_delegations.log):
+                state.device_delegations.stop(active_turn)
+        log.info("session/cancel", session_id=session_id, message="Cancel requested")
+        return True
 
     def _apply_goal_action(self, agent: Agent, params: dict[str, Any]) -> dict[str, Any]:
         action = str(params.get("action") or "get").strip().lower()
@@ -4270,6 +4623,29 @@ class BoxACPAgent:
                 with _request_org_scope(params.get("_meta")):
                     return await self._mcp_apps.dispatch(method, params)
             return await self._mcp_apps.dispatch(method, params)
+        if method == "device/cancel_turn":
+            sid, turn = params.get("sessionId"), params.get("turnId")
+            if not isinstance(sid, str) or not isinstance(turn, str) or not turn.strip():
+                raise ValueError("sessionId and target turnId are required")
+            state = self._sessions.get(sid)
+            if state is None or (state.device_delegations is None and not self._device_delegation_receiver):
+                return {"accepted": False}
+            return {"accepted": await self._cancel_turn(state, sid, turn, targeted_cancel=True)}
+        if method == "device/event":
+            sid = params.get("sessionId", "")
+            if not isinstance(sid, str):
+                raise ValueError("invalid device sessionId")
+            if any(sid in handles for handles in self._session_bindings_in_progress.values()):
+                raise _session_busy_error(sid, rebinding=True)
+            state = self._sessions.get(sid)
+            if state is None or state.device_delegations is None:
+                raise ValueError("device capability is not enabled for this session")
+            async with session_write_lock(state.device_delegations.log):
+                if state.device_wake_closed:
+                    raise _session_busy_error(sid, rebinding=True)
+                receipt = state.device_delegations.event(params)
+            self._schedule_device_wake(sid, state)
+            return receipt
         if method == "request_wrap_up":
             state = self._sessions.get(params.get("sessionId", ""))
             if state is None:
@@ -5981,7 +6357,9 @@ class BoxACPAgent:
                                     "error_details": error_details,
                                 },
                             )
-                            await self._send(session_id, update_agent_message(text_block(f"Error: {msg}")))
+                            # The refusal is reported in the terminal metadata.
+                            if error_category != "content_filter":
+                                await self._send(session_id, update_agent_message(text_block(f"Error: {msg}")))
                             # Don't return yet — let the loop consume the subsequent DoneEvent
                             # so the async generator is properly exhausted.
 
@@ -6333,7 +6711,7 @@ class _PermissionNegotiator:
 
     async def negotiate(self, permission_request: dict) -> bool:
         """Coalesce identical requests and serialize host approval prompts."""
-        if permission_request.get("scope") == "safety":
+        if exact_approvals_enabled() or permission_request.get("scope") == "safety":
             async with self._prompt_lock:
                 return await self._negotiate_once(permission_request.copy())
 
@@ -6397,12 +6775,19 @@ class _PermissionNegotiator:
         requested_scope = permission_request.get("requested_scope", "")
         path_hint = permission_request.get("path", "")
         is_safety_request = scope == "safety"
+        exact = exact_approvals_enabled()
+        if exact and not (
+            scope == "filesystem" and requested_scope == "user_home"
+            and exact_filesystem_target(permission_request) is not None
+        ):
+            # Other capabilities and full commands require their existing local flow.
+            return False
 
         # Dedup: filesystem requests check the directory grant table; other
         # capabilities (memory) use the legacy (scope, requested_scope) key.
         # Safety requests are intentionally never cached: every dangerous
         # command needs an explicit one-shot decision.
-        if scope == "filesystem" and path_hint:
+        if not exact and scope == "filesystem" and path_hint:
             try:
                 target = Path(path_hint).expanduser().resolve()
             except (OSError, RuntimeError):
@@ -6415,7 +6800,7 @@ class _PermissionNegotiator:
                     message="Filesystem dir grant hit — skipping RPC",
                 )
                 return True
-        elif not is_safety_request and self._store.has_grant(scope, requested_scope):
+        elif not exact and not is_safety_request and self._store.has_grant(scope, requested_scope):
             log.info(
                 "permission/grant_hit",
                 scope=scope,
@@ -6434,10 +6819,11 @@ class _PermissionNegotiator:
         reason = permission_request.get("reason", "")
         description = reason + (f": {path_hint}" if path_hint else "")
         temporary_supported = permission_request.get("temporary_supported", True) is not False
-        persistent_supported = permission_request.get("persistent_supported", True) is not False
+        persistent_supported = not exact and permission_request.get("persistent_supported", True) is not False
         tool_call = ToolCallUpdate(
             tool_call_id=f"perm-{scope}-{requested_scope}",
-            raw_input=permission_request,
+            raw_input={**permission_request, "deviceApprovalTurnId": approval_turn_id()}
+            if exact else permission_request,
         )
         options = []
         if temporary_supported:
@@ -6495,12 +6881,13 @@ class _PermissionNegotiator:
             grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.option_id)
             if grant_scope is None:
                 return False
-            granted = self._store.apply_permission_grant(permission_request, grant_scope)
+            granted = (response.outcome.option_id == "approve" and temporary_supported
+                       if exact else self._store.apply_permission_grant(permission_request, grant_scope))
             log.info(
                 "permission/granted" if granted else "permission/denied",
                 scope=scope,
                 requested_scope=requested_scope,
-                grant_scope="one_shot" if is_safety_request else grant_scope,
+                grant_scope="one_shot" if exact or is_safety_request else grant_scope,
             )
             return granted
 

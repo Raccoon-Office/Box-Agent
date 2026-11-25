@@ -11,6 +11,8 @@ from box_agent.acp import BoxACPAgent
 from box_agent.acp.stdio_compat import StdioTransport
 from box_agent.config import DesktopMemoryConfig
 from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+from box_agent.tools.memory_tool import create_memory_tools
+from box_agent.tools.todo_tool import TodoStore, TodoWriteTool
 from tests.test_acp import DoneLLM
 from tests.test_agent_session import session_config
 from tests.test_desktop_memory_backend import backend, host
@@ -18,12 +20,13 @@ from tests.test_input_context import facts
 
 
 @asynccontextmanager
-async def wire_session(tmp_path, host, llm=None, tools=()):
+async def wire_session(tmp_path, host, llm=None, tools=(), *, include_memory_tools=False):
     config = session_config(tmp_path)
     config.agent.memory_backend_type = "desktop"
     config.agent.memory_desktop = DesktopMemoryConfig(
         bootstrap_file=str(host.path), identity_epoch=host.bootstrap["identity_epoch"])
     process = backend(host)
+    base_tools = [*tools, *create_memory_tools(process)] if include_memory_tools else list(tools)
     reader, writes = asyncio.StreamReader(), asyncio.Queue()
 
     class Writer:
@@ -35,7 +38,7 @@ async def wire_session(tmp_path, host, llm=None, tools=()):
 
     def create(conn):
         nonlocal adapter
-        adapter = BoxACPAgent(conn, config, llm or DoneLLM(), list(tools), "system", memory_manager=process)
+        adapter = BoxACPAgent(conn, config, llm or DoneLLM(), base_tools, "system", memory_manager=process)
         return adapter
 
     adapter = None
@@ -72,6 +75,49 @@ async def wire_session(tmp_path, host, llm=None, tools=()):
         await process.aclose()
         reader.feed_eof()
         await connection.close()
+
+
+async def test_acp_finishes_after_reading_core_memory_and_writing_a_todo(tmp_path, host):
+    actions = [
+        ("memory_read", {"path": "memory.md"}),
+        ("todo_write", {"action": "set", "todos": [{"task": "Check result", "status": "in_progress"}]}),
+    ]
+
+    class ReadThenTodo(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                call = FunctionCall(name="tool_search", arguments={"tool_names": [name for name, _ in actions]})
+            elif self.calls in (2, 3):
+                name, arguments = actions[self.calls - 2]
+                search = next(m for m in messages if m.role == "tool" and m.tool_call_id == "step-1")
+                hit = next(hit for hit in json.loads(search.content)["activated"] if hit["name"] == name)
+                call = FunctionCall(name="call_tool", arguments={
+                    "tool_ref": hit["tool_ref"], "arguments_json": json.dumps(arguments),
+                })
+            else:
+                yield StreamEvent(type="text", delta="Finished")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                ToolCall(id=f"step-{self.calls}", type="function", function=call),
+            ])
+
+    async with wire_session(tmp_path, host, ReadThenTodo(), [TodoWriteTool(TodoStore())],
+                            include_memory_tools=True) as (request, state, session_id):
+        state.agent.max_steps = 4
+        response = await request("session/prompt", {
+            "sessionId": session_id, "prompt": [{"type": "text", "text": "Read memory then create a todo"}],
+        })
+        assert "error" not in response, response
+        assert response["result"]["stopReason"] == "end_turn"
+        assert state.agent.messages[-1].content == "Finished"
+        assert state.agent.session_log.replay().todos[0]["task"] == "Check result"
+
+    delivery = [(op, body["model_request_id"]) for op, body in host.calls
+                if op.startswith("visibility/") and body["model_request_id"]]
+    assert [op for op, _ in delivery] == ["visibility/commit", "visibility/revoke", "visibility/commit"]
+    assert delivery[0][1] != delivery[1][1] == delivery[2][1]
 
 
 @pytest.mark.parametrize("kind", ["plain", "reference", "selection", "appshot", "file"])

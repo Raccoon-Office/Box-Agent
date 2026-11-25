@@ -101,7 +101,8 @@ def copy_runtime_resources(project_root: Path, runtime_dir: Path) -> None:
             return omitted
 
         shutil.copytree(source, runtime_dir / name, ignore=ignored)
-    required_files = ("skills/_manifest.json", *(f"config/{name}" for name in sorted(_RUNTIME_CONFIG_FILES)))
+    required_files = ("skills/_manifest.json",
+                      *(f"config/{name}" for name in sorted(_RUNTIME_CONFIG_FILES)))
     for required in required_files:
         if not (runtime_dir / required).is_file():
             raise RuntimeError(f"Runtime resource is missing: {required}")
@@ -738,7 +739,7 @@ def build_runtime(
 
     entry_point = project_root / "box_agent" / "acp" / "runtime_entry.py"
 
-    # Skills and config are published as external resources beside bin/.
+    # Skills and config are external resources beside bin/.
     hidden_imports = pyinstaller_hidden_imports(
         external_python_sandbox=external_python_sandbox
     )

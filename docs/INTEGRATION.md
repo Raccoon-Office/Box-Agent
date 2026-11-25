@@ -17,6 +17,7 @@ SDK 0.12.1 与配套 Lab 的接口、生命周期约束和回归矩阵见
 | 协议                  | 方向        | 入口                                  | 文档                                                             | 用途                                                                              |
 | --------------------- | ----------- | ------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------- |
 | **Structured Input** | 前端 → 后端 | `session/prompt._meta` + `_inject._meta` | [ACP SDK 0.12 对接](integration/acp-sdk-0.12.md#2a输入事实与-agent-职责) | 结构化输入事实、选区策略、数据库上下文及幂等边界 |
+| **Expert Packages** | 双向 | `initialize._meta` + `session/new/load/resume._meta` | [专家与专家团云端接入](integration/expert-packages.md) | 下载引用、能力协商、依赖错误处理和 runtime 发布验收 |
 | **Action Hint**       | 后端 → 前端 | 模型 markdown 围栏块                  | [ACTION_HINT_PROTOCOL.md](./ACTION_HINT_PROTOCOL.md)             | 模型在合适场景输出 `action_hint` 块，前端解析为可点击设置入口                     |
 | **Memory Match**      | 后端 → 前端 | `update_tool_call.rawOutput`          | [MEMORY_MATCH_PROTOCOL.md](./MEMORY_MATCH_PROTOCOL.md)           | 宿主展示本轮 `memory_search` 或后端自动匹配到的上下文记忆                         |
 | **Memory Proposal**   | 双向        | `session/memory_proposal` + extension methods | [MEMORY_PROPOSAL_PROTOCOL.md](./MEMORY_PROPOSAL_PROTOCOL.md) | 记忆晋升提案的 push、list、apply 流程 |
@@ -250,8 +251,12 @@ Bash 和 Python 沙箱照常执行，`BOX_AGENT_SCRATCH_DIR` 保持指向已校�
 视频读取必须使用临时目录，失败时同样返回该工具错误。ACP 连接继续处理会话请求。
 
 临时目录的准备、诊断和清理各自在独立守护线程中运行，互不占用，也不阻塞进程退出。准备最多等待 5 秒，
-诊断 2 秒，清理 10 秒；清理超时记 `skill_scratch/cleanup_timeout`，本轮照常结束，上一次清理未结束时不再叠加
-（`skill_scratch/cleanup_skipped`），残留文件在之后的清理中回收。
+诊断 2 秒，清理 10 秒。清理会先把可丢弃的文件或目录移入本次清理的私有目录，再从那里删除。
+超时记 `skill_scratch/cleanup_timeout`，本轮照常结束。超时和取消都会停止领取其他文件。
+若此时文件系统仍在移动某个条目，下次工具调用会使用新的会话临时目录，旧目录中剩余的文件会在后续清理时重新检查。
+若延迟的移动带走了预览，而原路径又已被占用，新写入的内容保留在原处。可按
+`skill_scratch/cleanup_restore_failed` 日志中的 `isolated` 路径找回之前的预览。
+正在删除已隔离文件时，下一轮可直接复用原路径。上一次清理未结束时跳过重复清理（`skill_scratch/cleanup_skipped`）。
 
 失败原因只记日志：ACP 写到 stderr，CLI 写到 `~/.box-agent/log/skill_scratch_<pid>.log`，每个会话同一原因只记一次，
 恢复后记一条 `skill_scratch/recovered`。`skill_scratch/unavailable` 行包含 `error_type`、`winerror`、`errno`、

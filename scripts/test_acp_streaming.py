@@ -8,9 +8,19 @@ Usage:
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import json
+from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import time
+
+# Reuse the repository's ACP framing instead of asyncio's limited readline().
+_EVAL_SRC = Path(__file__).resolve().parents[1] / "test_workspace/acp_eval/src"
+if str(_EVAL_SRC) not in sys.path:
+    sys.path.insert(0, str(_EVAL_SRC))
+from acp_eval.protocol import ProtocolRecorder
+from acp_eval.transport import _ACPStdoutReader
 
 
 async def send(proc, obj):
@@ -20,12 +30,12 @@ async def send(proc, obj):
     await proc.stdin.drain()
 
 
-async def read_line(proc, timeout=60):
-    """Read one newline-delimited JSON-RPC message."""
-    line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
-    if not line:
-        return None
-    return json.loads(line.decode().strip())
+async def read_line(reader: _ACPStdoutReader, timeout: float = 60) -> dict | None:
+    """Read a complete JSONL frame, retaining partial bytes across timeouts."""
+    eof, message = await reader.read_frame(deadline=time.monotonic() + timeout)
+    if reader.protocol.parse_errors:
+        raise ValueError(f"Invalid ACP stdout frame: {reader.protocol.parse_errors[-1].error}")
+    return None if eof else message
 
 
 async def main():
@@ -35,6 +45,12 @@ async def main():
     parser.add_argument("--timeout", type=int, default=120, help="max wait seconds for response")
     args = parser.parse_args()
 
+    # The shared reader captures frames; keep diagnostics temporary and local.
+    with TemporaryDirectory(prefix="acp-streaming-") as capture_dir:
+        await run_session(args, Path(capture_dir))
+
+
+async def run_session(args: argparse.Namespace, capture_dir: Path) -> None:
     print(f"[test] Starting box-agent-acp subprocess...")
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "box_agent.acp.server",
@@ -44,6 +60,11 @@ async def main():
     )
 
     try:
+        protocol = ProtocolRecorder(
+            capture_dir, lambda: datetime.now(timezone.utc), time.monotonic_ns
+        )
+        reader = _ACPStdoutReader(proc.stdout, protocol)
+
         # 1. Initialize
         print(f"[test] Sending initialize...")
         await send(proc, {
@@ -55,7 +76,7 @@ async def main():
                 "protocolVersion": 1,
             },
         })
-        resp = await read_line(proc, timeout=10)
+        resp = await read_line(reader, timeout=10)
         print(f"[test] initialize response: {json.dumps(resp, ensure_ascii=False)[:200]}")
 
         # 2. New session
@@ -70,7 +91,7 @@ async def main():
             "method": "session/new",
             "params": session_params,
         })
-        resp = await read_line(proc, timeout=30)
+        resp = await read_line(reader, timeout=30)
         print(f"[test] session/new response: {json.dumps(resp, ensure_ascii=False)[:200]}")
 
         session_id = resp.get("result", {}).get("sessionId", "")
@@ -92,31 +113,29 @@ async def main():
         })
 
         # 4. Read all events until we get the prompt response (id=3)
-        start = time.time()
+        start = time.monotonic()
         event_count = 0
         first_event_at = None
         last_event_at = None
 
         while True:
-            elapsed = time.time() - start
+            elapsed = time.monotonic() - start
             if elapsed > args.timeout:
                 print(f"\n[test] TIMEOUT after {args.timeout}s")
                 break
 
             try:
-                msg = await read_line(proc, timeout=5)
+                msg = await read_line(reader, timeout=min(5, args.timeout - elapsed))
             except asyncio.TimeoutError:
-                # No message for 5s, check if we already got the final response
-                if event_count > 0 and (time.time() - last_event_at) > 10:
-                    print(f"\n[test] No events for 10s, assuming done")
-                    break
+                # A quiet interval or a partial frame does not end the turn.
+                # Only the matching response, EOF, or --timeout ends this loop.
                 continue
 
             if msg is None:
                 print(f"\n[test] EOF from subprocess")
                 break
 
-            now = time.time()
+            now = time.monotonic()
             if first_event_at is None:
                 first_event_at = now
             last_event_at = now
@@ -172,7 +191,8 @@ async def main():
         print(f"[test] Streaming: {'YES ✅' if event_count > 3 else 'NO ❌ (too few events, likely batched)'}")
 
     finally:
-        proc.terminate()
+        if proc.returncode is None:
+            proc.terminate()
         await proc.wait()
 
 

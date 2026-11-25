@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import shutil
 import stat
+import sys
+import tempfile
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from contextvars import copy_context
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +20,7 @@ from typing import TypeVar
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
+from ..artifact_metadata import write_retention
 from ..artifact_publication import ChatReferenceScanError, retained_chat_file_in
 
 
@@ -70,6 +75,7 @@ class SkillScratchDirectory:
     device: int
     inode: int
     _protected_references: set[Path] = field(default_factory=set, init=False, repr=False, compare=False)
+    _cleanup_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
 
 _active_scratch_dirs: WeakValueDictionary[Path, SkillScratchDirectory] = WeakValueDictionary()
@@ -181,6 +187,7 @@ class SessionSkillScratch:
         self.prepared: SkillScratchDirectory | None = None
         self._preparing: asyncio.Task[SkillScratchDirectory | SkillScratchUnavailable] | None = None
         self._cleanup: asyncio.Future[list[str]] | None = None
+        self._retired: list[SkillScratchDirectory] = []
         # Log each distinct failure once per session, then recovery once.
         self._logged_failure: tuple[object, ...] | None = None
 
@@ -346,11 +353,95 @@ def _prepared_scratch(scratch: SkillScratchDirectory | SessionSkillScratch) -> S
     return scratch.prepared if isinstance(scratch, SessionSkillScratch) else scratch
 
 
+class _CleanupLease:
+    """The waiter can revoke live-path moves without waiting for filesystem I/O."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+        self._lock = threading.Lock()
+        self._moving_from: Path | None = None
+
+    def revoke(self) -> Path | None:
+        with self._lock:
+            self.stopped = True
+            return self._moving_from
+
+    def clean(self, prepared: SkillScratchDirectory) -> list[str]:
+        if not prepared._cleanup_lock.acquire(blocking=False):
+            return []
+        try:
+            return _clean_prepared_scratch(prepared, self)
+        finally:
+            prepared._cleanup_lock.release()
+
+    def detach(self, entry: Path, isolated: Path) -> bool:
+        # Order the handoff against the live rename without holding the lock
+        # across the filesystem call. The event loop can always revoke it.
+        with self._lock:
+            if self.stopped:
+                return False
+            self._moving_from = entry.parent
+        try:
+            entry.rename(isolated)
+        finally:
+            with self._lock:
+                self._moving_from = None
+                expired = self.stopped
+        if expired:
+            # A late move might have claimed an explicitly reused absolute path.
+            try:
+                _restore_scratch_entry(isolated, entry)
+            except OSError:
+                # Protect the private directory as a unit, including isolated symlinks.
+                recovery_dir = isolated.parent
+                protect_scratch_reference(recovery_dir)
+                _log.warning("skill_scratch/cleanup_restore_failed path=%r isolated=%r",
+                             str(entry), str(isolated), exc_info=True)
+                try:
+                    write_retention(recovery_dir)
+                except OSError:
+                    _log.warning("skill_scratch/cleanup_retention_failed path=%r",
+                                 str(recovery_dir), exc_info=True)
+        return not expired
+
+
+def _rename_directory_no_replace(source: Path, target: Path) -> None:
+    """Use the native exclusive rename when restoring a POSIX directory."""
+    import ctypes
+
+    if sys.platform == "darwin":
+        symbol, at_fdcwd, flags = "renameatx_np", -2, 0x4  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        symbol, at_fdcwd, flags = "renameat2", -100, 1  # RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "Exclusive directory rename unavailable", str(target))
+    rename = getattr(ctypes.CDLL(None, use_errno=True), symbol, None)
+    if rename is None:
+        raise OSError(errno.ENOTSUP, "Exclusive directory rename unavailable", str(target))
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    if rename(at_fdcwd, os.fsencode(source), at_fdcwd, os.fsencode(target), flags):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(target))
+
+
+def _restore_scratch_entry(isolated: Path, entry: Path) -> None:
+    """Restore an isolated entry, raising if its original path is occupied."""
+    if os.name == "nt":
+        isolated.rename(entry)
+    elif stat.S_ISDIR(isolated.lstat().st_mode):
+        _rename_directory_no_replace(isolated, entry)
+    else:
+        os.link(isolated, entry, follow_symlinks=False)
+        isolated.unlink()
+
+
 def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> list[str]:
-    """Remove disposable entries from the reserved scratch root."""
+    """Detach disposable entries before deleting them, preserving their public paths for reuse."""
     prepared = _prepared_scratch(scratch)
-    if prepared is None:
-        return []
+    return _CleanupLease().clean(prepared) if prepared is not None else []
+
+
+def _clean_prepared_scratch(prepared: SkillScratchDirectory, lease: _CleanupLease) -> list[str]:
     scratch_dir = prepared.path
     try:
         stats = scratch_dir.lstat()
@@ -366,10 +457,13 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScrat
 
     references = prepared._protected_references
     for path in tuple(references):
+        if lease.stopped:
+            return []
         try:
             path.stat()
         except (FileNotFoundError, NotADirectoryError):
-            references.discard(path)
+            if not lease.stopped:
+                references.discard(path)
         except OSError:
             # An inaccessible preview must stay protected for later cleanups.
             continue
@@ -379,49 +473,96 @@ def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScrat
         return []
     protected_entries = {path.relative_to(scratch_dir).parts[0] for path in protected}
     removed: list[str] = []
-    for entry in scratch_dir.iterdir():
-        if entry.name in protected_entries:
-            continue
-        try:
-            retained = retained_chat_file_in(entry)
-        except ChatReferenceScanError:
-            continue
-        if retained is not None:
-            continue
-        entry_mode = entry.lstat().st_mode
-        if stat.S_ISDIR(entry_mode) and not stat.S_ISLNK(entry_mode):
-            shutil.rmtree(entry)
-        else:
-            entry.unlink()
-        removed.append(str(entry))
+    quarantine = None
+    try:
+        for entry in scratch_dir.iterdir():
+            if lease.stopped:
+                break
+            if entry == quarantine or entry.name in protected_entries:
+                continue
+            try:
+                retained = retained_chat_file_in(entry)
+            except ChatReferenceScanError:
+                continue
+            if retained is not None or lease.stopped:
+                continue
+            if quarantine is None:
+                quarantine = Path(tempfile.mkdtemp(prefix=".cleanup-", dir=scratch_dir))
+            isolated = quarantine / entry.name
+            if not lease.detach(entry, isolated):
+                break
+            try:
+                entry_mode = isolated.lstat().st_mode
+                if stat.S_ISDIR(entry_mode) and not stat.S_ISLNK(entry_mode):
+                    shutil.rmtree(isolated)
+                else:
+                    isolated.unlink()
+            except OSError:
+                if not lease.stopped:
+                    # This entry was confirmed disposable. A later cleanup can retry it.
+                    with suppress(FileExistsError):
+                        _restore_scratch_entry(isolated, entry)
+                raise
+            removed.append(str(entry))
+    finally:
+        if quarantine is not None:
+            # A failed deletion leaves its private entry for a later cleanup.
+            try:
+                quarantine.rmdir()
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    raise
     return removed
 
 
 async def acleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> list[str]:
     """Clean scratch off the event loop, waiting at most ``_CLEANUP_TIMEOUT_SECONDS``.
 
-    Leftover files are harmless and are retried on the next cleanup, so a
-    stuck file system must never hold a turn or session close open.
+    A timed-out or cancelled waiter revokes further moves from the live directory.
     """
     prepared = _prepared_scratch(scratch)
-    if prepared is None:
-        return []
     session = scratch if isinstance(scratch, SessionSkillScratch) else None
+    directories = [prepared] if prepared is not None else []
+    if session is not None:
+        directories.extend(session._retired)
+    if not directories:
+        return []
     if session is not None and session._cleanup is not None and not session._cleanup.done():
         _log.warning("skill_scratch/cleanup_skipped reason='previous cleanup still running' path=%r",
-                     str(prepared.path))
+                     str(directories[0].path))
         return []
-    task = asyncio.ensure_future(_run_scratch_io(cleanup_skill_scratch_dir, prepared))
+    lease = _CleanupLease()
+
+    async def clean_directories() -> list[str]:
+        removed = []
+        for directory in directories:
+            if lease.stopped:
+                break
+            removed.extend(await _run_scratch_io(lease.clean, directory))
+            if session is not None and directory in session._retired and not lease.stopped:
+                session._retired.remove(directory)
+        return removed
+
+    task = asyncio.create_task(clean_directories())
     if session is not None:
         session._cleanup = task
     try:
         return await asyncio.wait_for(asyncio.shield(task), _CLEANUP_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         _log.warning("skill_scratch/cleanup_timeout timeout_seconds=%s path=%r",
-                     _CLEANUP_TIMEOUT_SECONDS, str(prepared.path))
-        # Retrieve a late failure so it is not reported as never retrieved.
-        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+                     _CLEANUP_TIMEOUT_SECONDS, str(directories[0].path))
         return []
+    finally:
+        moving_from = lease.revoke()
+        if session is not None and prepared is not None and moving_from == prepared.path:
+            # An already-issued rename cannot be cancelled on a stuck file
+            # system. New tools must never reuse its source namespace.
+            session._retired.append(prepared)
+            session._path = session._path.with_name(uuid4().hex)
+            session.prepared = None
+            session._preparing = None
+        if not task.done():
+            task.add_done_callback(lambda done: done.cancelled() or done.exception())
 
 
 async def close_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> None:

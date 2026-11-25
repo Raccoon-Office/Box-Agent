@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from collections.abc import Collection
+from collections.abc import Callable, Collection, Iterator
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Mapping, Optional
@@ -61,7 +61,7 @@ from box_agent.tools.memory_tool import (
     MemoryWriteCorrectionTool,
     MemoryWriteTool,
 )
-from box_agent.tools.obsidian_tool import create_obsidian_tools
+from box_agent.tools.obsidian_tool import obsidian_tool_registrations
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
 from box_agent.tools.publish_artifact_tool import PublishArtifactTool
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
@@ -268,6 +268,28 @@ def image_generation_service_configured(
     image_config = getattr(config, "image_generation", None)
     configured_endpoint = getattr(image_config, "endpoint", "") or None
     return bool(resolve_image_generation_endpoint(configured_endpoint, env))
+
+
+def image_generation_tool_settings(
+    config: Config,
+    llm: Any | None = None,
+) -> tuple[bool, str | None, str]:
+    """Resolve registration settings without constructing workspace tools."""
+    image_generation_config = getattr(config, "image_generation", None)
+    image_configured = image_generation_service_configured(config)
+    image_unavailable_reason = "no image_generation.endpoint configured"
+    image_endpoint = getattr(image_generation_config, "endpoint", "") or None
+    if image_configured and getattr(getattr(config, "officev3", None), "use_default_image_generation_preset", False):
+        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+            image_endpoint = resolve_image_generation_endpoint(image_endpoint)
+        image_endpoint = align_hosted_image_endpoint(
+            image_endpoint or "", getattr(llm, "api_base", "") or "",
+        )
+        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true" and not image_endpoint:
+            # Do not let GenerateImageTool fall back to an old environment endpoint.
+            image_configured = False
+            image_unavailable_reason = "private managed image endpoint is outside the service boundary"
+    return image_configured, image_endpoint, image_unavailable_reason
 
 
 def build_image_generation_prompt(
@@ -678,6 +700,305 @@ def sync_mcp_tool_list(
     base_tools[:] = list(tool_map.values())
 
 
+def resolve_workspace_tool_availability(
+    config: Config,
+    *,
+    sandbox_mode: bool = False,
+    session_mode: str | None = None,
+    llm: Any | None = None,
+    runtime_env: Mapping[str, str] | None = None,
+    process_owner_id: str | None = None,
+) -> frozenset[str]:
+    """List the selected registrations without constructing their tools."""
+    return frozenset(name for name, _ in _workspace_tool_registrations(
+        config, sandbox_mode=sandbox_mode, session_mode=session_mode, llm=llm,
+        runtime_env=runtime_env, process_owner_id=process_owner_id,
+    ))
+
+
+def _workspace_tool_registrations(
+    config: Config,
+    *,
+    sandbox_mode: bool = False,
+    session_mode: str | None = None,
+    llm: Any | None = None,
+    runtime_env: Mapping[str, str] | None = None,
+    process_owner_id: str | None = None,
+    workspace_dir: Path | None = None,
+    allow_full_access: bool = True,
+    non_interactive: bool = False,
+    output=None,
+    permission_engine: PermissionEngine | None = None,
+    runtime_context: SkillRuntimeContext | None = None,
+    skill_scratch_dir: SessionSkillScratch | None = None,
+    builtin_skills_dir: Path | None = None,
+    skill_loader=None,
+    capability_state_provider=None,
+    skill_access_filter=None,
+    env_context=None,
+    bypass_dangerous_command_approval: bool = False,
+    tools: List[Tool] | None = None,
+) -> Iterator[tuple[str, Callable[[], Tool]]]:
+    """One ordered declaration for both preflight and actual registration.
+
+    Only factories use construction inputs (workspace, scratch, stores, etc.).
+    Preflight can therefore enumerate the same definitions without preparing
+    execution resources. Registration invokes each factory before advancing.
+    """
+    _out = output or (lambda _: None)
+    relative_root = workspace_dir
+    yield "publish_artifact", lambda: PublishArtifactTool(
+        workspace_dir, permission_engine=permission_engine, builtin_skills_dir=builtin_skills_dir,
+    )
+
+    if config.tools.enable_bash:
+        def create_bash():
+            sandbox_venv_path = None
+            if sandbox_mode and not getattr(sys, "frozen", False):
+                sandbox_venv_path = str(SandboxEnvironment().venv_dir)
+            return BashTool(
+                workspace_dir=str(relative_root),
+                scope_root_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                non_interactive=non_interactive,
+                sandbox_venv_path=sandbox_venv_path,
+                permission_engine=permission_engine,
+                runtime_env=runtime_env,
+                skill_scratch_dir=skill_scratch_dir,
+                builtin_skills_dir=builtin_skills_dir,
+                pptx_sync_script_provider=(
+                    lambda: (
+                        skill_loader.get_trusted_skill_resource if builtin_skills_dir is not None
+                        else skill_loader.get_bound_expert_resource
+                    )(
+                        "pptx", "scripts/sync_image_manifest_status.js"
+                    )
+                ) if skill_loader is not None else None,
+                process_owner_id=process_owner_id,
+                bypass_dangerous_command_approval=bypass_dangerous_command_approval,
+                default_timeout_seconds=config.tools.bash_default_timeout_seconds,
+                max_timeout_seconds=config.tools.bash_max_timeout_seconds,
+            )
+
+        yield "bash", create_bash
+        if process_owner_id is not None:
+            # Session-scoped tools override their process-global base instances.
+            yield "bash_output", lambda: BashOutputTool(process_owner_id=process_owner_id)
+            yield "bash_kill", lambda: BashKillTool(process_owner_id=process_owner_id)
+        _out(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {relative_root}){Colors.RESET}")
+
+    # File tools retain workspace scope and resolve relative paths from cwd.
+    if config.tools.enable_file_tools:
+        yield "extract_email_attachment", lambda: ExtractEmailAttachmentTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            builtin_skills_dir=builtin_skills_dir,
+            relative_root_dir=str(relative_root),
+        )
+        yield "read_email", lambda: ReadEmailTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            relative_root_dir=str(relative_root),
+        )
+        yield "read_file", lambda: ReadTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            builtin_skills_dir=builtin_skills_dir,
+            relative_root_dir=str(relative_root),
+        )
+        yield "query_jsonl", lambda: JsonlQueryTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            relative_root_dir=str(relative_root),
+        )
+        yield "validate_table", lambda: ValidateTableTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            relative_root_dir=str(relative_root),
+        )
+        yield "search_files", lambda: SearchFilesTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            relative_root_dir=str(relative_root),
+        )
+        yield "write_file", lambda: WriteTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            builtin_skills_dir=builtin_skills_dir,
+            relative_root_dir=str(relative_root),
+        )
+        yield "append_file", lambda: AppendTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            builtin_skills_dir=builtin_skills_dir,
+            relative_root_dir=str(relative_root),
+        )
+        yield "edit_file", lambda: EditTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            builtin_skills_dir=builtin_skills_dir,
+            relative_root_dir=str(relative_root),
+        )
+        rg_executable = resolve_ripgrep_executable(runtime_env) if session_mode == "code_agent" else None
+        if rg_executable:
+            search_kwargs = {
+                "workspace_dir": str(workspace_dir),
+                "executable": rg_executable,
+                "allow_full_access": allow_full_access,
+                "permission_engine": permission_engine,
+                "relative_root_dir": str(relative_root),
+            }
+            yield "grep", lambda: GrepTool(**search_kwargs)
+            yield "glob", lambda: GlobTool(**search_kwargs)
+        _out(
+            f"{Colors.GREEN}✅ Loaded file operation tools "
+            f"(relative root: {relative_root}, scope: {workspace_dir}){Colors.RESET}"
+        )
+        if session_mode == "code_agent":
+            if rg_executable:
+                _out(f"{Colors.GREEN}✅ Loaded code search tools (grep, glob){Colors.RESET}")
+            else:
+                _out(f"{Colors.DIM}⏭️  ripgrep unavailable; using search_files fallback{Colors.RESET}")
+
+    if config.tools.enable_todo:
+        todo_store = None
+
+        def create_todo_write():
+            nonlocal todo_store
+            todo_store = TodoStore()
+            return TodoWriteTool(todo_store)
+
+        yield "todo_write", create_todo_write
+        yield "todo_read", lambda: TodoReadTool(todo_store)
+        _out(f"{Colors.GREEN}✅ Loaded todo tools (todo_write, todo_read){Colors.RESET}")
+
+    if getattr(config.tools, "enable_plan", True):
+        plan_store = None
+
+        def create_plan_write():
+            nonlocal plan_store
+            plan_store = PlanStore()
+            return PlanWriteTool(plan_store)
+
+        yield "plan_write", create_plan_write
+        yield "plan_read", lambda: PlanReadTool(plan_store)
+        _out(f"{Colors.GREEN}✅ Loaded plan tools (plan_write, plan_read){Colors.RESET}")
+
+    yield "request_user_input", RequestUserInputTool
+    _out(f"{Colors.GREEN}✅ Loaded user-input request tool{Colors.RESET}")
+    yield "request_user_decision", RequestUserDecisionTool
+    _out(f"{Colors.GREEN}✅ Loaded user-decision request tool{Colors.RESET}")
+
+    def create_receipt():
+        receipt = ReportExecutionResultTool()
+        receipt._model_exposure_direct = process_owner_id is not None
+        return receipt
+
+    yield "report_execution_result", create_receipt
+    _out(f"{Colors.GREEN}✅ Loaded execution result reporting tool{Colors.RESET}")
+
+    if sandbox_mode:
+        sandbox_tool = None
+
+        def create_sandbox():
+            nonlocal sandbox_tool
+            sandbox_runtime_env = runtime_context.env()
+            sandbox_runtime_env["PYTHONDONTWRITEBYTECODE"] = "1"
+            sandbox_tool = JupyterSandboxTool(
+                workspace_dir=str(workspace_dir),
+                runtime_env=sandbox_runtime_env,
+                process_owner_id=process_owner_id,
+                skill_scratch_dir=skill_scratch_dir,
+            )
+            return sandbox_tool
+
+        yield "execute_code", create_sandbox
+        yield "sandbox_status", lambda: SandboxStatusTool(sandbox_tool)
+        _out(f"{Colors.GREEN}✅ Loaded Jupyter sandbox tool (execute_code){Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded sandbox status tool{Colors.RESET}")
+
+    image_llm = _image_capable_llm(llm)
+    if image_llm is not None:
+        yield "inspect_images", lambda: ImageInspectionTool(
+            llm=image_llm,
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            relative_root_dir=str(relative_root),
+            native_supported=(image_llm is llm and image_input_support(llm) is not False),
+            native_capability_llm=llm,
+            proxy_llm_resolver=lambda: _image_capable_llm(llm),
+        )
+        _out(f"{Colors.GREEN}✅ Loaded image inspection tool (inspect_images){Colors.RESET}")
+
+    yield "read_video", lambda: ReadVideoTool(
+        llm=llm, workspace_dir=str(workspace_dir),
+        allow_full_access=allow_full_access, permission_engine=permission_engine,
+        relative_root_dir=str(relative_root),
+        proxy_llm_resolver=lambda: _image_capable_llm(llm),
+        # Skill runtime values are overrides, not a complete host environment.
+        runtime_env={**os.environ, **runtime_env}, scratch_dir=skill_scratch_dir,
+    )
+    _out(f"{Colors.GREEN}✅ Loaded video reading tool (read_video){Colors.RESET}")
+
+    image_generation_config = getattr(config, "image_generation", None)
+    image_configured, image_endpoint, image_unavailable_reason = image_generation_tool_settings(config, llm)
+    if image_configured:
+        yield "generate_image", lambda: GenerateImageTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            endpoint=image_endpoint,
+            api_key=getattr(image_generation_config, "api_key", "") or None,
+            model=getattr(image_generation_config, "model", "") or None,
+            auth_file=(
+                getattr(image_generation_config, "auth_file", "")
+                or getattr(getattr(config, "llm", None), "auth_file", "")
+            ),
+            timeout=getattr(image_generation_config, "timeout", None),
+            max_dimension=getattr(image_generation_config, "max_dimension", None),
+        )
+        _out(f"{Colors.GREEN}✅ Loaded image generation tool (generate_image){Colors.RESET}")
+    else:
+        _out(f"{Colors.DIM}⏭️  Skipped image generation tool ({image_unavailable_reason}){Colors.RESET}")
+
+    yield from obsidian_tool_registrations(env_context=env_context)
+    _out(f"{Colors.GREEN}✅ Loaded Obsidian tools (obsidian_create_note, obsidian_update_note, obsidian_daily_note){Colors.RESET}")
+
+    # Last: the child tool must see all earlier parent tools.
+    if config.tools.enable_sub_agent and llm is not None:
+        def create_sub_agent():
+            sub_agent_tool = SubAgentTool(
+                llm=llm,
+                parent_tools={t.name: t for t in tools},
+                workspace_dir=str(workspace_dir),
+                tool_limits=getattr(config, "tool_limits", ToolLimitsConfig()),
+                token_limit=config.agent.sub_agent_token_limit,
+                batch_synthesis_timeout_seconds=config.agent.sub_agent_batch_synthesis_timeout_seconds,
+                artifact_detection_enabled=True,
+                provider_stale_seconds=config.agent.provider_stale_seconds,
+            )
+            if skill_loader is not None:
+                sub_agent_tool.set_skill_provider(lambda: skill_loader)
+            if skill_access_filter is not None:
+                sub_agent_tool.set_skill_access_filter(skill_access_filter)
+            if capability_state_provider is not None:
+                sub_agent_tool.set_capability_state_provider(capability_state_provider)
+            return sub_agent_tool
+
+        yield "sub_agent", create_sub_agent
+        _out(f"{Colors.GREEN}✅ Loaded sub-agent tool (sub_agent){Colors.RESET}")
+
+
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,
                         allow_full_access: bool = True, non_interactive: bool = False, output=None,
                         llm=None, permission_engine: PermissionEngine | None = None,
@@ -713,295 +1034,22 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             an explicitly trusted full-access session.
         session_mode: Optional mode used to expose mode-specific tools.
     """
-    _out = output or print
-    # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    relative_root = workspace_dir
-    # A managed source adds protection only; existing user directories are never moved.
-    builtin_skills_dir = managed_builtin_skills_dir(config)
-    tools.append(PublishArtifactTool(
-        workspace_dir, permission_engine=permission_engine, builtin_skills_dir=builtin_skills_dir,
-    ))
-
-    # Relative tool paths always use the stable session cwd.
     runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
     runtime_env = build_skill_execution_env(runtime_context)
     # Each tool set owns its cleanup boundary, including CLI sessions without
     # a process owner. Other sessions may keep using the same workspace.
     skill_scratch_dir = SessionSkillScratch(workspace_dir)
-    if config.tools.enable_bash:
-        sandbox_venv_path = None
-        if sandbox_mode and not getattr(sys, "frozen", False):
-            sandbox_venv_path = str(SandboxEnvironment().venv_dir)
-        bash_tool = BashTool(
-            workspace_dir=str(relative_root),
-            scope_root_dir=str(workspace_dir),
-            allow_full_access=allow_full_access,
-            non_interactive=non_interactive,
-            sandbox_venv_path=sandbox_venv_path,
-            permission_engine=permission_engine,
-            runtime_env=runtime_env,
-            skill_scratch_dir=skill_scratch_dir,
-            builtin_skills_dir=builtin_skills_dir,
-            pptx_sync_script_provider=(
-                lambda: (
-                    skill_loader.get_trusted_skill_resource if builtin_skills_dir is not None
-                    else skill_loader.get_bound_expert_resource
-                )(
-                    "pptx", "scripts/sync_image_manifest_status.js"
-                )
-            ) if skill_loader is not None else None,
-            process_owner_id=process_owner_id,
-            bypass_dangerous_command_approval=bypass_dangerous_command_approval,
-            default_timeout_seconds=config.tools.bash_default_timeout_seconds,
-            max_timeout_seconds=config.tools.bash_max_timeout_seconds,
-        )
-        tools.append(bash_tool)
-        if process_owner_id is not None:
-            # These session-scoped instances intentionally override the
-            # process-global base tools when Agent builds its name map.
-            tools.append(BashOutputTool(process_owner_id=process_owner_id))
-            tools.append(BashKillTool(process_owner_id=process_owner_id))
-        _out(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {relative_root}){Colors.RESET}")
-
-    # File tools resolve relative paths from relative_root and retain workspace scope.
-    if config.tools.enable_file_tools:
-        file_tools: list[Tool] = [
-            ExtractEmailAttachmentTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                builtin_skills_dir=builtin_skills_dir,
-                relative_root_dir=str(relative_root),
-            ),
-            ReadEmailTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                relative_root_dir=str(relative_root),
-            ),
-            ReadTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                builtin_skills_dir=builtin_skills_dir,
-                relative_root_dir=str(relative_root),
-            ),
-            JsonlQueryTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                relative_root_dir=str(relative_root),
-            ),
-            ValidateTableTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                relative_root_dir=str(relative_root),
-            ),
-            SearchFilesTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                relative_root_dir=str(relative_root),
-            ),
-            WriteTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                builtin_skills_dir=builtin_skills_dir,
-                relative_root_dir=str(relative_root),
-            ),
-            AppendTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                builtin_skills_dir=builtin_skills_dir,
-                relative_root_dir=str(relative_root),
-            ),
-            EditTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                builtin_skills_dir=builtin_skills_dir,
-                relative_root_dir=str(relative_root),
-            ),
-        ]
-        rg_executable = (
-            resolve_ripgrep_executable(runtime_env)
-            if session_mode == "code_agent"
-            else None
-        )
-        if rg_executable:
-            search_kwargs = {
-                "workspace_dir": str(workspace_dir),
-                "executable": rg_executable,
-                "allow_full_access": allow_full_access,
-                "permission_engine": permission_engine,
-                "relative_root_dir": str(relative_root),
-            }
-            file_tools.extend([GrepTool(**search_kwargs), GlobTool(**search_kwargs)])
-        tools.extend(file_tools)
-        _out(
-            f"{Colors.GREEN}✅ Loaded file operation tools "
-            f"(relative root: {relative_root}, scope: {workspace_dir}){Colors.RESET}"
-        )
-        if session_mode == "code_agent":
-            if rg_executable:
-                _out(f"{Colors.GREEN}✅ Loaded code search tools (grep, glob){Colors.RESET}")
-            else:
-                _out(
-                    f"{Colors.DIM}⏭️  ripgrep unavailable; using search_files fallback"
-                    f"{Colors.RESET}"
-                )
-
-    # Todo tool - task tracking for multi-step workflows
-    if config.tools.enable_todo:
-        store = TodoStore()
-        tools.append(TodoWriteTool(store))
-        tools.append(TodoReadTool(store))
-        _out(f"{Colors.GREEN}✅ Loaded todo tools (todo_write, todo_read){Colors.RESET}")
-
-    # Plan tool - user-visible approach/scope/verification snapshots
-    if getattr(config.tools, "enable_plan", True):
-        store = PlanStore()
-        tools.append(PlanWriteTool(store))
-        tools.append(PlanReadTool(store))
-        _out(f"{Colors.GREEN}✅ Loaded plan tools (plan_write, plan_read){Colors.RESET}")
-
-    # Structured clarification pause. The core completion gate recognizes this
-    # tool as a resumable wait state instead of forcing the model to fabricate
-    # missing facts or abandon an in-progress artifact workflow.
-    tools.append(RequestUserInputTool())
-    _out(f"{Colors.GREEN}✅ Loaded user-input request tool{Colors.RESET}")
-
-    # Public declarative decision surface for built-in and user-provided Skills.
-    # The host owns rendering; this trusted tool validates any requested timeout.
-    tools.append(RequestUserDecisionTool())
-    _out(f"{Colors.GREEN}✅ Loaded user-decision request tool{Colors.RESET}")
-
-    # Host-neutral execution receipt. External workflow identity, task context,
-    # versions, and submission remain the host's responsibility.
-    receipt_tool = ReportExecutionResultTool()
-    receipt_tool._model_exposure_direct = process_owner_id is not None
-    tools.append(receipt_tool)
-    _out(f"{Colors.GREEN}✅ Loaded execution result reporting tool{Colors.RESET}")
-
-    # Jupyter sandbox tool - Python code execution environment
-    if sandbox_mode:
-        sandbox_tool = JupyterSandboxTool(
-            workspace_dir=str(workspace_dir),
-            runtime_env=runtime_context.env(),
-            process_owner_id=process_owner_id,
-            skill_scratch_dir=skill_scratch_dir,
-        )
-        tools.append(sandbox_tool)
-        # Also add sandbox status tool
-        status_tool = SandboxStatusTool(sandbox_tool)
-        tools.append(status_tool)
-        _out(f"{Colors.GREEN}✅ Loaded Jupyter sandbox tool (execute_code){Colors.RESET}")
-        _out(f"{Colors.GREEN}✅ Loaded sandbox status tool{Colors.RESET}")
-
-    # Image inspection tool — only expose it when the bound model can actually
-    # accept image blocks. Known text-only endpoints otherwise invite costly,
-    # futile resize/retry loops during visual inspection.
-    image_llm = _image_capable_llm(llm)
-    if image_llm is not None:
-        tools.append(
-            ImageInspectionTool(
-                llm=image_llm,
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                relative_root_dir=str(relative_root),
-                native_supported=(
-                    image_llm is llm and image_input_support(llm) is not False
-                ),
-                native_capability_llm=llm,
-                proxy_llm_resolver=lambda: _image_capable_llm(llm),
-            )
-        )
-        _out(f"{Colors.GREEN}✅ Loaded image inspection tool (inspect_images){Colors.RESET}")
-
-    tools.append(ReadVideoTool(
-        llm=llm, workspace_dir=str(workspace_dir),
-        allow_full_access=allow_full_access, permission_engine=permission_engine,
-        relative_root_dir=str(relative_root),
-        proxy_llm_resolver=lambda: _image_capable_llm(llm),
-        # Skill runtime values are overrides, not a complete host environment.
-        runtime_env={**os.environ, **runtime_env}, scratch_dir=skill_scratch_dir,
-    ))
-    _out(f"{Colors.GREEN}✅ Loaded video reading tool (read_video){Colors.RESET}")
-
-    # Image generation tool — standard Box-Agent capability shared by CLI and ACP.
-    # Only register when an endpoint is configured (via config or env): an
-    # unconfigured generate_image can only fail on every call and wastes steps.
-    image_generation_config = getattr(config, "image_generation", None)
-    image_configured = image_generation_service_configured(config)
-    image_unavailable_reason = "no image_generation.endpoint configured"
-    image_endpoint = getattr(image_generation_config, "endpoint", "") or None
-    if image_configured and getattr(getattr(config, "officev3", None), "use_default_image_generation_preset", False):
-        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
-            image_endpoint = resolve_image_generation_endpoint(image_endpoint)
-        image_endpoint = align_hosted_image_endpoint(
-            image_endpoint or "", getattr(llm, "api_base", "") or "",
-        )
-        if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true" and not image_endpoint:
-            # Do not let GenerateImageTool fall back to an old environment endpoint.
-            image_configured = False
-            image_unavailable_reason = "private managed image endpoint is outside the service boundary"
-    if image_configured:
-        tools.append(
-            GenerateImageTool(
-                workspace_dir=str(workspace_dir),
-                allow_full_access=allow_full_access,
-                permission_engine=permission_engine,
-                endpoint=image_endpoint,
-                api_key=getattr(image_generation_config, "api_key", "") or None,
-                model=getattr(image_generation_config, "model", "") or None,
-                auth_file=(
-                    getattr(image_generation_config, "auth_file", "")
-                    or getattr(getattr(config, "llm", None), "auth_file", "")
-                ),
-                timeout=getattr(image_generation_config, "timeout", None),
-                max_dimension=getattr(image_generation_config, "max_dimension", None),
-            )
-        )
-        _out(f"{Colors.GREEN}✅ Loaded image generation tool (generate_image){Colors.RESET}")
-    else:
-        _out(
-            f"{Colors.DIM}⏭️  Skipped image generation tool ({image_unavailable_reason}){Colors.RESET}"
-        )
-
-    # Obsidian tools — host/Vault dependent, so register with workspace tools
-    # before sub-agent so child agents inherit the native Obsidian capability.
-    obsidian_tools = create_obsidian_tools(env_context=env_context)
-    tools.extend(obsidian_tools)
-    _out(f"{Colors.GREEN}✅ Loaded Obsidian tools (obsidian_create_note, obsidian_update_note, obsidian_daily_note){Colors.RESET}")
-
-    # Sub-agent tool — must be registered last so it can reference all other tools
-    if config.tools.enable_sub_agent and llm is not None:
-        parent_tools = {t.name: t for t in tools}
-        tool_limits = getattr(config, "tool_limits", ToolLimitsConfig())
-        sub_agent_tool = SubAgentTool(
-            llm=llm,
-            parent_tools=parent_tools,
-            workspace_dir=str(workspace_dir),
-            tool_limits=tool_limits,
-            token_limit=config.agent.sub_agent_token_limit,
-            batch_synthesis_timeout_seconds=(
-                config.agent.sub_agent_batch_synthesis_timeout_seconds
-            ),
-            artifact_detection_enabled=True,
-            provider_stale_seconds=config.agent.provider_stale_seconds,
-        )
-        if skill_loader is not None:
-            sub_agent_tool.set_skill_provider(lambda: skill_loader)
-        if skill_access_filter is not None:
-            sub_agent_tool.set_skill_access_filter(skill_access_filter)
-        if capability_state_provider is not None:
-            sub_agent_tool.set_capability_state_provider(capability_state_provider)
-        tools.append(sub_agent_tool)
-        _out(f"{Colors.GREEN}✅ Loaded sub-agent tool (sub_agent){Colors.RESET}")
-
+    for _, create in _workspace_tool_registrations(
+        config, sandbox_mode=sandbox_mode, session_mode=session_mode, llm=llm,
+        runtime_env=runtime_env, process_owner_id=process_owner_id,
+        workspace_dir=workspace_dir, allow_full_access=allow_full_access,
+        non_interactive=non_interactive, output=output or print,
+        permission_engine=permission_engine, runtime_context=runtime_context,
+        skill_scratch_dir=skill_scratch_dir, builtin_skills_dir=managed_builtin_skills_dir(config),
+        skill_loader=skill_loader, capability_state_provider=capability_state_provider,
+        skill_access_filter=skill_access_filter, env_context=env_context,
+        bypass_dangerous_command_approval=bypass_dangerous_command_approval, tools=tools,
+    ):
+        tools.append(create())
     return skill_scratch_dir

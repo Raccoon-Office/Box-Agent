@@ -11,13 +11,14 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar
 from uuid import uuid4
@@ -30,16 +31,38 @@ from .windows_session_lock import WINDOWS_LOCK_CONTENTION, WindowsSessionLock
 
 _log = logging.getLogger(__name__)
 _session_io_pool = ThreadPoolExecutor(thread_name_prefix="session-io")
+_session_io_worker = threading.local()
 _T = TypeVar("_T")
+
+
+def run_on_session_loop(callback: Callable[..., _T], /, *args: Any) -> _T:
+    """Run a synchronous, loop-owned callback at the same point in a session write."""
+    loop = getattr(_session_io_worker, "loop", None)
+    if loop is None:
+        return callback(*args)
+
+    async def invoke() -> _T:
+        return callback(*args)
+
+    # The caller is a disk worker. The owner loop awaits it asynchronously and
+    # remains free to run the callback, including during cancellation cleanup.
+    return asyncio.run_coroutine_threadsafe(invoke(), loop).result()
 
 
 async def run_session_io(operation: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
     """Settle file work before cancellation can release its session ownership."""
+    loop = asyncio.get_running_loop()
+
+    def run() -> _T:
+        _session_io_worker.loop = loop
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            del _session_io_worker.loop
+
     # Windows stdout uses the loop's default executor. Slow disk work must not
     # consume the threads needed to deliver a different session's notifications.
-    worker = asyncio.get_running_loop().run_in_executor(
-        _session_io_pool, copy_context().run, partial(operation, *args, **kwargs),
-    )
+    worker = loop.run_in_executor(_session_io_pool, copy_context().run, run)
     cancellation: asyncio.CancelledError | None = None
     while True:
         try:
@@ -62,12 +85,22 @@ async def run_session_io(operation: Callable[..., _T], /, *args: Any, **kwargs: 
     return result
 
 
+@asynccontextmanager
+async def session_write_lock(store: object) -> AsyncIterator[None]:
+    """Serialize a log transaction with its worker writes."""
+    if isinstance(store, SessionLog):
+        async with store._write_lock:
+            yield
+    else:
+        yield
+
+
 async def run_session_write(store: object, operation: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
     """Run file work in order for this log and wait for its durability barrier."""
     if not isinstance(store, SessionLog):
         # Custom synchronous stores keep their original calling convention.
         return operation(*args, **kwargs)
-    async with store._write_lock:
+    async with session_write_lock(store):
         return await run_session_io(operation, *args, **kwargs)
 
 
@@ -849,6 +882,14 @@ class SessionLog:
         if isinstance(round_number, bool) or not isinstance(round_number, int) or round_number < 0:
             raise ValueError("model round must be a nonnegative integer")
         self._message_metadata(message)["modelRound"] = round_number
+
+    def mark_runtime_input_receipts(
+        self, message: Message, receipts: dict[str, dict[str, int]],
+    ) -> None:
+        """Commit request receipts in the same log record as the assistant response."""
+        if message.role != "assistant":
+            raise ValueError("runtime input receipts require an assistant message")
+        self._message_metadata(message)["runtimeInputReceipts"] = deepcopy(receipts)
 
     def _append_message_event(
         self, event_type: str, data: dict[str, Any], *, message: Message,

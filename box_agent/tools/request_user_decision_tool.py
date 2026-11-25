@@ -30,6 +30,22 @@ _FORBIDDEN_AUTO_SUBMIT_KINDS = frozenset(
 )
 
 
+def decision_response_fields(raw: Any, *, strict: bool = False) -> dict[str, Any]:
+    """Read the two ACP spellings without coercing authorization inputs."""
+    if not isinstance(raw, dict):
+        return {}
+    fields = {"trigger": raw.get("trigger")}
+    for key in ("request_id", "decision_kind", "tool_call_id", "request_type",
+                "selected_option_id", "selected_option_label", "custom_text", "missing_fields"):
+        first, *parts = key.split("_")
+        alias = first + "".join(part.title() for part in parts)
+        if strict and key in raw and alias in raw and raw[key] != raw[alias]:
+            return {}
+        if key in raw or alias in raw:
+            fields[key] = raw.get(key, raw.get(alias)) if strict else raw.get(key) or raw.get(alias)
+    return fields
+
+
 class RequestUserDecisionTool(Tool):
     """Pause for one user-visible execution decision without losing task state."""
 
