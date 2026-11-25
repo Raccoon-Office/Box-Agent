@@ -939,6 +939,7 @@ class SandboxEnvironment:
             "argv": [
                 str(self.python_path),
                 *(["-E"] if self._explicit_python else []),
+                "-B",  # Kernel imports must not write into shared Skill packages.
                 "-m", "ipykernel_launcher",
                 "-f", "{connection_file}",
             ],

@@ -99,6 +99,7 @@ from box_agent.agent import (
     goal_autopilot_prompt,
     goal_autopilot_progress_signature,
     goal_payload,
+    resolve_agent_tool_availability,
     should_continue_goal_autopilot,
 )
 from box_agent.tools.setup import (
@@ -110,6 +111,7 @@ from box_agent.tools.setup import (
     build_sandbox_info_prompt,
     initialize_base_tools,
     render_system_prompt_template,
+    resolve_workspace_tool_availability,
     # Retained as module-level compatibility hooks; MCP reconciliation now
     # delegates through ``MCPRuntimeController`` below.
     sync_mcp_tool_list,
@@ -244,15 +246,23 @@ from box_agent.run_observer import (
     RunObserver,
     cleanup_turn_resources,
 )
-from box_agent.experts import ExpertSessionContext
+from box_agent.experts import ExpertSessionContext, ExpertTeamValidationError
+from box_agent.expert_dependencies import (
+    ExpertDependencyError, expert_dependency_market_bindings, expert_market_skill_bindings,
+    resolve_optional_market_conflicts,
+    validate_expert_dependencies,
+)
+from box_agent.expert_package_format import ExpertPackageError
+from box_agent.expert_packages import prepare_expert_meta
 from box_agent.llm.reasoning import (
     normalize_raccoon_thinking,
     parse_raccoon_thinking_level,
     parse_reasoning_effort,
 )
 from box_agent.execution_profile import (
-    FAST_OPTIONAL_SKILLS,
     ExecutionProfile,
+    blocked_skills_for_profile,
+    is_skill_blocked,
     normalize_execution_profile,
 )
 from box_agent.memory import MemoryManager, memory_identity, memory_user_turn, uses_local_memory
@@ -1858,6 +1868,7 @@ class BoxACPAgent:
         )
         skills = self._skills_meta()
         response_meta: dict[str, Any] = {
+            "expert_package_download": 1,
             "raccoon_thinking": {"protocol_version": 1},
             "connector_discovery": {"versions": [1]},
             "session_replay": {"protocol_version": 1},
@@ -2072,7 +2083,21 @@ class BoxACPAgent:
                     and raw_skillhub_install == SKILLHUB_INSTALL_CAPABILITY_VERSION
                 )
             env_context = EnvContext.from_meta(meta.get("env_context"))
-            expert_context = ExpertSessionContext.from_meta(meta)
+            try:
+                meta = await prepare_expert_meta(meta)
+                expert_context = ExpertSessionContext.from_meta(meta)
+                if expert_context is not None:
+                    expert_context = resolve_optional_market_conflicts(meta, expert_context)
+                params.field_meta = meta
+            except ExpertTeamValidationError as exc:
+                raise RequestError(-32602, "Invalid expert team", {
+                    "code": exc.code, "detail": str(exc),
+                    "teamId": exc.team_id, "missingMemberIds": exc.missing_member_ids,
+                }) from None
+            except ExpertPackageError as exc:
+                raise RequestError(-32602, "Invalid expert selection", {
+                    "code": exc.code, "detail": str(exc),
+                }) from None
             initial_task_id = normalize_task_id(
                 meta.get("task_id") or meta.get("taskId")
             ) or ""
@@ -2315,10 +2340,20 @@ class BoxACPAgent:
             tools.append(runtime_environment_tool)
         session_skill_loader = self._skill_loader
         if expert_context is not None and session_skill_loader is not None:
+            # Uploads can finish after process startup. Prepare from a current
+            # catalog before deriving the expert loader or retiring a live session.
+            validation = await session_skill_loader.avalidate_references((), allow_stale=False)
+            if validation.timed_out:
+                raise RequestError(-32602, "Expert Skill catalog refresh timed out", {
+                    "code": "SKILL_VALIDATION_TIMEOUT",
+                    "detail": "Skill catalog refresh did not finish; retry expert preparation later.",
+                })
             session_skill_loader = await session_skill_loader.awith_expert_skill_sources(
                 expert_context.skill_names(), skill_directories=expert_context.skill_directories,
                 skill_bindings_by_directory=expert_context.skill_bindings_by_directory,
                 skill_bindings_by_path=expert_context.skill_bindings_by_path,
+                market_skill_bindings=expert_market_skill_bindings(meta, expert_context),
+                dependency_market_skill_bindings=expert_dependency_market_bindings(meta, expert_context),
             )
         connector_skill_grants: set[str] = set()
         skillhub_search_tool: SkillHubSearchTool | None = None
@@ -2345,6 +2380,96 @@ class BoxACPAgent:
                         skill_loader=session_skill_loader,
                     )
                 )
+
+        from box_agent.tools.connector_discovery import (
+            ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
+        )
+
+        def prepare_connector_discovery(session_log, *, new_session):
+            configured_tool_version = self._config.agent.tool_interface_version
+            discovery_mode = resolve_discovery_mode(
+                session_log,
+                requested=connector_discovery_requested and not utility,
+                new_session=new_session,
+                tool_version=(
+                    session_log.resolve_tool_interface_version(configured_tool_version)
+                    if session_log is not None else configured_tool_version
+                ),
+            )
+            if discovery_mode and connector_discovery_requested and not utility:
+                discovery = ConnectorDiscovery(lambda: selected_connector_ids)
+                discovery.update(meta.get("connector_discovery"))
+                return discovery
+            return None
+
+        connector_discovery = None
+
+        def skill_access_filter(skill):
+            return _connector_skill_is_granted(
+                skill, connector_skill_grants, connector_discovery
+            ) and (connector_discovery is None or _connector_skill_is_available(
+                skill, selected_connector_ids, connector_discovery
+            ))
+
+        process_owner_id = f"acp-runtime-{uuid4().hex}"
+
+        def preflight_expert_dependencies(session_log: SessionLog | None):
+            if expert_context is None:
+                return
+            expert_tools = set()
+            if not utility:
+                expert_tools.update(tool.name for tool in [*self._base_tools, *tools])
+                runtime_context = build_skill_runtime_context(
+                    sandbox_mode=session_sandbox_mode, env_context=env_context,
+                )
+                expert_tools.update(resolve_workspace_tool_availability(
+                    self._config, sandbox_mode=session_sandbox_mode,
+                    session_mode=session_mode, llm=session_llm,
+                    runtime_env=runtime_context.env(), process_owner_id=process_owner_id,
+                ))
+                # Restored logs pin the same interface used by Agent registration.
+                tool_version = self._config.agent.tool_interface_version
+                if session_log is not None:
+                    tool_version = session_log.resolve_tool_interface_version(tool_version)
+                expert_tools.update(resolve_agent_tool_availability(
+                    tool_interface_version=tool_version,
+                ))
+            from box_agent.tools.skill_tool import GetSkillTool
+
+            reader = next((tool for tool in reversed([*self._base_tools, *tools])
+                           if isinstance(tool, GetSkillTool)), None)
+            allowed_skills = getattr(reader, "allowed_skill_names", None)
+            blocked_skills = blocked_skills_for_profile(
+                execution_profile, getattr(reader, "blocked_skill_names", ()),
+            )
+
+            def dependency_is_available(skill):
+                # Read grants are restored/matched later. Preparation checks the
+                # host's current selection and readiness, without granting access.
+                return (
+                    _connector_skill_is_available(skill, selected_connector_ids, connector_discovery)
+                    and (allowed_skills is None or skill.name in allowed_skills)
+                    and not is_skill_blocked(skill.name, blocked_skills)
+                )
+
+            try:
+                validate_expert_dependencies(
+                    meta, expert_context, session_skill_loader, expert_tools,
+                    skill_access_filter=dependency_is_available,
+                )
+            except ExpertDependencyError as exc:
+                raise RequestError(-32602, "Expert dependencies are not ready", {
+                    "code": exc.code, "dependencies": exc.dependencies,
+                }) from None
+
+        # Existing logs pin connector mode. Preflight before retiring their live
+        # session; cold sessions use the real opened log below, including resume.
+        bound_state = next((state for handle, state in self._sessions.items()
+                            if state.upstream_session_id == upstream_session_id or handle == session_id), None)
+        expert_preflight_complete = expert_context is not None and bound_state is not None
+        if expert_preflight_complete:
+            connector_discovery = prepare_connector_discovery(bound_state.agent.session_log, new_session=False)
+            await asyncio.to_thread(preflight_expert_dependencies, bound_state.agent.session_log)
 
         recovery_prompt = (
             _RECOVERY_PROMPT if upstream_session_id and _RECOVERY_SESSION_ID.fullmatch(upstream_session_id) else None
@@ -2449,24 +2574,9 @@ class BoxACPAgent:
         # the historical direct ``Agent(...)`` call and its test hook.
         state = None
         try:
-            from box_agent.tools.connector_discovery import (
-                ConnectorDiscovery, bind_discovery_mode, resolve_discovery_mode,
-            )
-
-            configured_tool_version = self._config.agent.tool_interface_version
-            discovery_mode = resolve_discovery_mode(
-                session_log,
-                requested=connector_discovery_requested and not utility,
-                new_session=not resumed,
-                tool_version=(
-                    session_log.resolve_tool_interface_version(configured_tool_version)
-                    if session_log is not None else configured_tool_version
-                ),
-            )
-            connector_discovery = None
-            if discovery_mode and connector_discovery_requested and not utility:
-                connector_discovery = ConnectorDiscovery(lambda: selected_connector_ids)
-                connector_discovery.update(meta.get("connector_discovery"))
+            if not expert_preflight_complete:
+                connector_discovery = prepare_connector_discovery(session_log, new_session=not resumed)
+                await asyncio.to_thread(preflight_expert_dependencies, session_log)
             state = await SessionState.open(
                 config=self._config,
                 runtime=self._plugin_runtime,
@@ -2477,7 +2587,7 @@ class BoxACPAgent:
                     memory_user_id=memory_meta.get("user_id"),
                     session_mode=session_mode, allow_full_access=session_allow_full_access,
                     permission_mode=permission_mode, effective_policy=effective_policy,
-                    process_owner_id=f"acp-runtime-{uuid4().hex}",
+                    process_owner_id=process_owner_id,
                     workspace_layout=_normalize_workspace_layout(meta.get("workspace_layout") or meta.get("workspaceLayout") if isinstance(meta, dict) else None),
                     follow_up_suggestions_enabled=follow_up_suggestions_enabled,
                 ),
@@ -2489,11 +2599,7 @@ class BoxACPAgent:
                     skill_task=self._skill_task, session_log=session_log,
                     workspace_tools_factory=add_workspace_tools,
                     capability_state_provider=self._sub_agent_capability_state,
-                    skill_access_filter=lambda skill: _connector_skill_is_granted(
-                        skill, connector_skill_grants, connector_discovery
-                    ) and (connector_discovery is None or _connector_skill_is_available(
-                        skill, selected_connector_ids, connector_discovery
-                    )),
+                    skill_access_filter=skill_access_filter,
                     skill_catalog_filter=lambda skill: _connector_skill_is_available(
                         skill, selected_connector_ids, connector_discovery
                     ),

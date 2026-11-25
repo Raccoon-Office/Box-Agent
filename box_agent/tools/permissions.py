@@ -365,7 +365,7 @@ class PermissionEngine:
         except (OSError, RuntimeError, ValueError):
             return PermissionDecision(allowed=False, reason=f"Access denied: cannot resolve {path}")
 
-        if operation == "write" and self._builtin_skills_dir:
+        if operation == "write":
             if error := builtin_skill_write_error(resolved, self._builtin_skills_dir):
                 return PermissionDecision(allowed=False, reason=error)
 
@@ -496,13 +496,9 @@ class PermissionEngine:
         if any(self._is_inside(resolved, root) for root in self._product_dirs):
             return True
 
-        # Packaged built-in skills are executable product resources rather
-        # than user data. Bash may read them, but never write them.
-        if (
-            operation == "read"
-            and self._builtin_skills_dir is not None
-            and self._is_inside(resolved, self._builtin_skills_dir)
-        ):
+        # Packaged Skills are readable product data, never task output.
+        # Downloaded expert caches already belong to BOX_AGENT_HOME above.
+        if operation == "read" and self._builtin_skills_dir is not None and self._is_inside(resolved, self._builtin_skills_dir):
             return True
 
         # Box-Agent scratch files are allowed under OS temp roots without

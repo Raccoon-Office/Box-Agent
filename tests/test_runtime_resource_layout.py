@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from subprocess import CompletedProcess
+import shutil
 import sys
 import tarfile
 
@@ -30,6 +31,17 @@ def source_tree(root: Path) -> Path:
         "example/__pycache__/helper.pyc", "example/helper.pyo", ".DS_Store",
     ):
         path = skills / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture " + relative)
+    experts = root / "box_agent/experts"
+    experts.mkdir()
+    (experts / "catalog.json").write_text('{"schemaVersion": 1, "experts": []}')
+    for relative in ("example/package/agents/lead.md", "example/package/skills/skill-0/SKILL.md",
+                     "example/package/skills/skill-0/references/example.txt",
+                     "example/package/skills/skill-0/scripts/helper.py",
+                     "example/package/node_modules/dependency/private.txt",
+                     "example/package/__pycache__/helper.pyc"):
+        path = experts / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture " + relative)
     return root
@@ -59,6 +71,8 @@ def test_resource_copy_preserves_skill_assets_without_local_dependencies_or_cred
     assert "skills/example/lib/renderer.cjs" in copied
     assert "skills/example/scripts/helper.py" in copied
     assert "skills/example/references/input.txt" in copied
+    assert not (runtime / "experts").exists()
+    assert (project / "box_agent/experts/example/package/agents/lead.md").is_file()
     assert not any("node_modules" in path or "__pycache__" in path for path in copied)
     assert not any(path.endswith((".pyc", ".pyo", ".DS_Store")) for path in copied)
     assert set(p.name for p in (runtime / "config").iterdir()) == build_runtime._RUNTIME_CONFIG_FILES
@@ -107,9 +121,10 @@ def test_linux_assembly_keeps_resources_beside_bin_and_mcp_inside_the_frozen_pac
         names = handle.getnames()
     assert "box-agent-runtime/skills/example/scripts/helper.py" in names
     assert "box-agent-runtime/config/system_prompt.md" in names
+    assert not any(name.startswith("box-agent-runtime/experts") for name in names)
     assert "box-agent-runtime/bin/_internal/box_agent/mcp_servers/native/panel_keyboard.swift" in names
     assert not any("node_modules" in name or "__pycache__" in name for name in names)
-    assert not any("bin/_internal/box_agent/skills" in name or "bin/_internal/box_agent/config" in name for name in names)
+    assert not any("bin/_internal/box_agent/skills" in name or "bin/_internal/box_agent/config" in name or "bin/_internal/box_agent/experts" in name for name in names)
 
 
 @pytest.mark.parametrize("missing", ["config/config-example.yaml", "skills/_manifest.json"])
@@ -129,11 +144,12 @@ def test_linux_verifier_rejects_duplicate_internal_resources(tmp_path, name):
 
 
 @pytest.mark.parametrize("exe_only", [True, False])
-def test_windows_install_rejects_missing_resources_before_touching_destination(tmp_path, exe_only):
+@pytest.mark.parametrize("missing", ["skills/_manifest.json", "config/config-example.yaml"])
+def test_windows_install_rejects_missing_resources_before_touching_destination(tmp_path, exe_only, missing):
     source = payload(tmp_path / "source", "new")
     target = payload(tmp_path / "target", "old")
     before = files(target)
-    (source / "skills/_manifest.json").unlink()
+    (source / missing).unlink()
     with pytest.raises(ValueError, match="Incomplete runtime payload"):
         build_win_runtime._install_to(source, target, exe_only)
     assert files(target) == before
@@ -147,6 +163,8 @@ def test_windows_exe_only_replaces_bin_and_resources_together_and_keeps_stable_t
     tool.parent.mkdir(parents=True)
     tool.write_bytes(b"stable Python")
     (target / "skills/stale.md").write_text("old-only Skill")
+    (target / "experts").mkdir()
+    (target / "experts/stale.md").write_text("unrelated old resource")
     if old_layout == "internal":
         internal = target / "bin/_internal/box_agent"
         internal.mkdir(parents=True)
@@ -159,6 +177,7 @@ def test_windows_exe_only_replaces_bin_and_resources_together_and_keeps_stable_t
     assert (target / "skills/_manifest.json").read_text() == "new"
     assert (target / "config/config-example.yaml").read_text() == "new"
     assert not (target / "skills/stale.md").exists()
+    assert (target / "experts/stale.md").read_text() == "unrelated old resource"
     assert not (target / "bin/_internal/box_agent/skills").exists()
     assert json.loads((target / "manifest.json").read_text())["version"] == "new"
     assert tool.read_bytes() == b"stable Python"
@@ -301,3 +320,82 @@ def test_windows_exe_only_staging_failure_keeps_old_payload_and_cleans_temporary
         build_win_runtime._replace_exe_only_payload(source, target)
     assert files(target) == before
     assert not list(tmp_path.glob(".box-agent-payload-*"))
+
+
+@pytest.mark.parametrize("expert_source", ["absent", "shadow_module"])
+def test_resource_copy_does_not_require_expert_source_tree(tmp_path, expert_source):
+    project = source_tree(tmp_path / "source")
+    experts = project / "box_agent/experts"
+    if expert_source == "absent":
+        shutil.rmtree(experts)
+    else:
+        (experts / "catalog.json").unlink()
+        (experts / "__init__.py").write_text("raise RuntimeError('shadow')")
+    runtime = tmp_path / "runtime"
+    build_runtime.copy_runtime_resources(project, runtime)
+    assert not (runtime / "experts").exists()
+    assert (runtime / "skills/_manifest.json").is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="source links require developer-mode privileges")
+def test_unpublished_expert_snapshot_is_not_traversed(tmp_path):
+    project = source_tree(tmp_path / "source")
+    foreign = tmp_path / "private.txt"
+    foreign.write_text("must not be published")
+    (project / "box_agent/experts/external.txt").symlink_to(foreign)
+    runtime = tmp_path / "runtime"
+    build_runtime.copy_runtime_resources(project, runtime)
+    assert not (runtime / "experts").exists()
+    assert foreign.read_text() == "must not be published"
+
+
+@pytest.mark.parametrize("hide_stdlib_toml", [False, True])
+def test_wheel_omits_expert_snapshots_and_keeps_expert_module(tmp_path, monkeypatch, hide_stdlib_toml):
+    from setuptools import Distribution, find_namespace_packages
+    from setuptools.command.build_py import build_py
+    from setuptools.config.pyprojecttoml import load_file
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    if hide_stdlib_toml:
+        # Initialize setuptools' version-compatible backend, then prohibit a
+        # direct stdlib import by the caller (Python 3.10 has no tomllib).
+        load_file(pyproject)
+        monkeypatch.setitem(sys.modules, "tomllib", None)
+    config = load_file(pyproject)
+    options = config["tool"]["setuptools"]
+    package = tmp_path / "source/box_agent"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "experts.py").write_text("EXPERT_MODULE = True\n")
+    snapshots = (
+        "experts/catalog.json",
+        "experts/example/package/.box-agent-plugin/plugin.json",
+        "experts/example/package/skills/method/references/example.txt",
+        "experts/example/package/skills/method/scripts/helper.py",
+    )
+    expected = ("skills/example/SKILL.md", "config/config-example.yaml")
+    for relative in (*snapshots, *expected, "experts/example/package/__pycache__/helper.pyc"):
+        target = package / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(relative)
+    discovery = options["packages"]["find"]
+    packages = find_namespace_packages(
+        where=str(package.parent), include=discovery["include"], exclude=discovery["exclude"],
+    )
+    assert not any(name == "box_agent.experts" or name.startswith("box_agent.experts.") for name in packages)
+    distribution = Distribution({
+        "packages": packages, "package_dir": {"": str(package.parent)},
+        "package_data": options["package-data"],
+        "exclude_package_data": options["exclude-package-data"],
+        "include_package_data": False,
+    })
+    distribution.script_name = str(package.parent / "setup.py")
+    command = build_py(distribution)
+    command.build_lib = str(tmp_path / "build")
+    command.ensure_finalized()
+    command.run()
+    built = Path(command.build_lib) / "box_agent"
+    for relative in expected:
+        assert (built / relative).read_text() == relative
+    assert (built / "experts.py").is_file()
+    assert not (built / "experts").exists()
