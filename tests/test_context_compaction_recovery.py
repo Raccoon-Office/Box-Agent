@@ -133,12 +133,12 @@ async def test_bad_summary_output_gets_one_strict_retry(outcome):
     assert result.summary_retries == 2
     assert result.summary_calls == len(provider.requests) == 3
     first, retry, independent = provider.requests
-    assert first[-1].content == context_engine._SUMMARY_REQUEST
+    assert first[-1].content == context_engine._summary_request(2_048)
     assert retry[:-1] == first[:-1]
     assert retry[-1].content == independent[-1].content
     assert retry[-1].content.startswith(first[-1].content)
-    retry_suffix = retry[-1].content[len(first[-1].content):]
-    assert "Keep the entire output within 2048 tokens, including the closing </summary> tag." in retry_suffix
+    for request in (first, retry, independent):
+        assert request[-1].content.count("within 2048 tokens, including the closing </summary> tag.") == 1
     assert all(options["max_output_tokens"] == 2_048 for options in provider.request_options)
     assert "characters" not in retry[-1].content
     assert independent[0].content != first[0].content
@@ -146,8 +146,8 @@ async def test_bad_summary_output_gets_one_strict_retry(outcome):
 
 
 def test_summary_instruction_distinguishes_user_turns_and_preserves_security_rules():
-    instruction = context_engine._SUMMARY_REQUEST
-    assert instruction.startswith("CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.")
+    instruction = context_engine._summary_request(2_048)
+    assert instruction.startswith("Create a detailed continuation summary of the conversation above")
     assert "preserve the user's security-relevant instructions and constraints verbatim" in instruction.lower()
     assert "Only actual user-role messages count" in instruction
     assert "'user: ...' or 'Human: ...'" in instruction
@@ -249,13 +249,15 @@ async def test_summary_caps_calls_and_keeps_the_resolved_model_for_every_layer()
     assert result.summary_retries == 5 and result.head_truncated
     assert all(request[0] is history[0] for request in capped.requests[:-1])
     assert all(options["tools"] == list(tools) for options in capped.request_options[:-1])
+    assert resolved.max_output_tokens == 20_000
     assert all(options["max_output_tokens"] == resolved.max_output_tokens for options in capped.request_options)
+    assert all("within 8192 tokens, including the closing </summary> tag" in request[-1].content
+               for request in capped.requests)
     independent = capped.requests[-1]
     assert [message.content for message in independent if message.role == "system"] == [
         "You are a helpful AI assistant tasked with summarizing conversations.",
     ]
     assert independent[1:-1] == capped.requests[-2][1:-1]
-    assert "within 20000 tokens, including the closing </summary> tag" in independent[-1].content
     assert capped.request_options[-1]["tools"] is None
 
 

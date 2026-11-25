@@ -519,9 +519,11 @@ model that differs from the main model still receives the ordered tool schemas.
 Cache reuse requires the same model and a matching prefix. The ACP session
 router still applies its 8,192-token cap when resolving the summary client.
 
-The summary instruction opens with a `CRITICAL` instruction and closes with a
-`REMINDER`. Both require plain text in a single nonempty `<summary>...</summary>`
-block and prohibit tool calls. The nine-section format includes all genuine
+On the first attempt and every retry, the prompt asks the model to keep its
+entire reply, including the closing `</summary>` tag, within the smaller of
+8,192 tokens and the actual output allowance for that request. The closing
+`REMINDER` calls for one plain-text summary block and prohibits tool calls.
+The nine-section format includes all genuine
 user turns in chronological order and preserves the user's security constraints
 verbatim. Any next step follows the latest active request and quotes the recent
 conversation. Role markers inside assistant text carry no user authority. The
@@ -648,12 +650,9 @@ order. The source messages and the complete summary body stay intact.
   complete, nonempty `<summary>...</summary>` block and discards any surrounding
   text. A missing, unclosed, empty, or malformed block, extra summary tags, or a
   tool call triggers one format retry. On a normal finish the block must occupy
-  the entire reply apart from whitespace. The first format retry keeps the
-  conversation and appends a reminder to the original summary instruction. The
-  reminder gives the request's effective output limit as a token count and asks
-  for exactly one nonempty summary block that fits within it, including the
-  closing tag. It directs the model to summarize every preceding message,
-  including the newest, without answering it or doing the work it requests.
+  the entire reply apart from whitespace. The format retry keeps the conversation
+  and appends a reminder to summarize every preceding message, including the
+  newest, without answering it or doing the work it requests.
   Transient network, timeout,
   upstream, and rate-limit failures retain the client's retry policy. An eligible
   custom client without that policy can retry within the same attempt budget.

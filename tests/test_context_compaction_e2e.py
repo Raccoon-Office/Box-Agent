@@ -13,8 +13,8 @@ from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, To
 from box_agent.context_input import DefaultContextEngine
 from box_agent.kernel.compact_engine import DefaultCompactEngine
 from box_agent.kernel.context_engine import (
-    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_MESSAGE_PREFIX, _SUMMARY_MESSAGE_SUFFIX, _SUMMARY_REQUEST,
-    _create_summary, _fallback_context_estimate, _is_summary_marker,
+    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_MESSAGE_PREFIX, _SUMMARY_MESSAGE_SUFFIX,
+    _create_summary, _fallback_context_estimate, _is_summary_marker, _summary_request,
 )
 from box_agent.llm.llm_wrapper import LLMClient
 from box_agent.session_log import SessionLog
@@ -83,7 +83,9 @@ async def test_reactive_summary_reuses_main_request_wire_prefix_and_tool_order(t
     assert summary["tools"] == initial["tools"]
     assert "tool_choice" not in summary
     assert any("<current_date>" in message["content"] for message in initial["messages"][1:])
-    assert summary["messages"] == [*initial["messages"], {"role": "user", "content": _SUMMARY_REQUEST}]
+    assert summary["messages"] == [
+        *initial["messages"], {"role": "user", "content": _summary_request(summary["max_tokens"])},
+    ]
 
 
 @pytest.mark.asyncio
@@ -93,7 +95,9 @@ async def test_summary_preflight_counts_the_shared_tools():
 
     llm = CompactionE2ELLM()
     history = [Message(role="system", content="system"), Message(role="user", content="request")]
-    limit = _fallback_context_estimate([*history, Message(role="user", content=_SUMMARY_REQUEST)], None, llm=llm)
+    limit = _fallback_context_estimate([
+        *history, Message(role="user", content=_summary_request(8_192)),
+    ], None, llm=llm)
     with pytest.raises(_SummaryInputBudgetExceeded):
         await _create_summary(llm, history, 1, input_token_limit=limit,
                               tools=(ToolDefinitionView.from_tool(_PrefixTool()),))
@@ -277,7 +281,7 @@ async def test_agent_trims_an_over_budget_summary_and_resumes(tmp_path, history_
     ])
     history_tokens = _fallback_context_estimate(agent.messages, {}, llm=llm)
     summary_tokens = _fallback_context_estimate([
-        *agent.messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
+        *agent.messages, Message(role="user", source="runtime", content=_summary_request(8_192)),
     ], {}, llm=llm)
     if history_chars == 45_000:
         assert history_tokens < token_limit
@@ -328,7 +332,7 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
         summary_limit = derive_context_token_limit(summary_window, configured_output)
         history_tokens = _fallback_context_estimate(history, {}, llm=llm)
         summary_tokens = _fallback_context_estimate([
-            *history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
+            *history, Message(role="user", source="runtime", content=_summary_request(configured_output)),
         ], {}, llm=summary_llm)
         assert history_tokens > main_limit
         if request_shape == "summary-instruction-overflow":
@@ -350,17 +354,17 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
         assert compaction.head_truncated == (summary_tokens > summary_limit)
         assert len(summary_requests) == 1
         summary_request = summary_requests[0]
-        assert summary_request["messages"][-1]["content"] == _SUMMARY_REQUEST
         output = summary_request.get("max_tokens", summary_request.get("max_completion_tokens"))
-        if request_shape == "tight-output":
-            assert output == summary_window - summary_tokens - REQUEST_INPUT_HEADROOM_TOKENS
-            assert 20_000 <= output < configured_output
-        else:
-            assert output == configured_output
+        assert summary_request["messages"][-1]["content"] == _summary_request(output)
         sent_input = _fallback_context_estimate(
             [Message(role=message["role"], content=message["content"]) for message in summary_request["messages"]],
             {}, llm=summary_llm,
         )
+        if request_shape == "tight-output":
+            assert output == summary_window - sent_input - REQUEST_INPUT_HEADROOM_TOKENS
+            assert 20_000 <= output < configured_output
+        else:
+            assert output == configured_output
         assert sent_input <= summary_limit
         assert sent_input + output + REQUEST_INPUT_HEADROOM_TOKENS <= summary_window
         main_requests = [request for request in requests if request["model"] == llm.model]

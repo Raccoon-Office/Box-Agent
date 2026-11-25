@@ -13,7 +13,7 @@ from box_agent.acp import BoxACPAgent
 from box_agent.config import derive_context_token_limit
 from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
 from box_agent.kernel.context_engine import (
-    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_REQUEST, _fallback_context_estimate,
+    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_REQUEST, _fallback_context_estimate, _summary_request,
     capture_request_usage, request_input_tokens,
 )
 from box_agent.llm import LLMClient, SessionBoundLLM
@@ -97,8 +97,9 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
             original.agent.add_user_message("Retain the saved decision.")
             old_detail = "old investigation detail. " * 24_000
             original.agent.messages.append(Message(role="assistant", content=old_detail))
+            summary_prompt = _summary_request(8_192)
             summary_estimate = _fallback_context_estimate([
-                *original.agent.messages, Message(role="user", content=_SUMMARY_REQUEST),
+                *original.agent.messages, Message(role="user", content=summary_prompt),
             ], {}, llm=llm)
             assert derive_context_token_limit(180_000, 8_192) < summary_estimate
             assert summary_estimate < derive_context_token_limit(256_000, 8_192)
@@ -112,7 +113,7 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
             result = await adapter.prompt(created.session_id, [{"type": "text", "text": "Continue."}])
 
             assert result.field_meta["ok"] is True
-            summary_requests = [r for r in requests if r["messages"][-1]["content"] == _SUMMARY_REQUEST]
+            summary_requests = [r for r in requests if r["messages"][-1]["content"] == summary_prompt]
             assert len(summary_requests) == 1
             assert summary_requests[0]["model"] == llm.model
             assert any(m.get("content") == old_detail for m in summary_requests[0]["messages"])

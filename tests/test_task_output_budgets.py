@@ -13,7 +13,7 @@ import pytest
 from box_agent.cli import _probe_llm_api
 from box_agent.config import AgentConfig
 from box_agent.kernel.context_engine import (
-    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_REQUEST, _create_summary, _fallback_context_estimate,
+    REQUEST_INPUT_HEADROOM_TOKENS, _create_summary, _fallback_context_estimate, _summary_request,
 )
 from box_agent.llm.lightweight import LightweightPromptError, run_lightweight_prompt
 from box_agent.llm.model_routing import resolve_model_client
@@ -127,6 +127,7 @@ async def test_summary_uses_default_output_budget_when_client_has_no_declared_ma
     class UndeclaredBudget:
         async def generate_stream(self, messages, *, max_output_tokens, **kwargs):
             outputs.append(max_output_tokens)
+            assert messages[-1].content == _summary_request(max_output_tokens)
             yield StreamEvent(type="text", delta="<summary>Complete.</summary>")
             yield StreamEvent(type="finish", finish_reason="stop")
 
@@ -270,7 +271,8 @@ async def test_anthropic_auxiliary_wire_budget_preserves_native_thinking_and_mai
 
 
 @pytest.mark.asyncio
-async def test_anthropic_summary_clamps_only_the_request_that_needs_it():
+@pytest.mark.parametrize("model_limit, prompt_limit", [(4_096, 4_096), (64_000, 8_192)])
+async def test_anthropic_summary_limits_prompt_and_preserves_wire_output_budget(model_limit, prompt_limit):
     requests = []
 
     def respond(request):
@@ -292,15 +294,12 @@ async def test_anthropic_summary_clamps_only_the_request_that_needs_it():
         ))
 
     llm = LLMClient(api_key="test", provider="anthropic", model="claude-test",
-                    max_output_tokens=64_000, context_window=80_000)
+                    max_output_tokens=model_limit, context_window=80_000)
     await llm.aclose()
     llm._client.client = anthropic.AsyncAnthropic(
         api_key="test", max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     long_history = [Message(role="user", content="中" * 28_000)]
-    summary_input = _fallback_context_estimate([
-        *long_history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
-    ], {}, llm=llm)
     overlay = Message(role="user", source="runtime", content="Retain this projected message after the instruction.")
     projection_calls = 0
 
@@ -319,19 +318,28 @@ async def test_anthropic_summary_clamps_only_the_request_that_needs_it():
         await llm.aclose()
 
     tight, retry, wide = requests
-    assert tight["max_tokens"] == 80_000 - summary_input - REQUEST_INPUT_HEADROOM_TOKENS
-    assert 20_000 <= retry["max_tokens"] < tight["max_tokens"] < wide["max_tokens"]
-    assert wide["max_tokens"] == llm.max_output_tokens == 64_000
+    assert wide["max_tokens"] == llm.max_output_tokens == model_limit
     assert projection_calls == 1
     retry_blocks = retry["messages"][-1]["content"]
     assert retry_blocks[-1]["text"] == overlay.content
     retry_prompt = retry_blocks[-2]["text"]
-    assert retry_prompt.startswith(_SUMMARY_REQUEST)
-    assert f"within {retry['max_tokens']} tokens, including the closing </summary> tag" in retry_prompt
+    tight_prompt = tight["messages"][-1]["content"][-1]["text"]
+    wide_prompt = wide["messages"][-1]["content"][-1]["text"]
+    assert tight_prompt == wide_prompt == _summary_request(model_limit)
+    assert retry_prompt.startswith(tight_prompt)
+    for prompt in (wide_prompt, tight_prompt, retry_prompt):
+        assert f"within {prompt_limit} tokens, including the closing </summary> tag" in prompt
+        assert prompt.count("including the closing </summary> tag") == 1
+    summary_input = _fallback_context_estimate([
+        *long_history, Message(role="user", source="runtime", content=tight_prompt),
+    ], {}, llm=llm)
     retry_input = _fallback_context_estimate([
         *long_history, Message(role="user", source="runtime", content=retry_prompt), overlay,
     ], {}, llm=llm)
-    assert retry_input + retry["max_tokens"] + REQUEST_INPUT_HEADROOM_TOKENS <= 80_000
+    assert tight["max_tokens"] == min(model_limit, llm.context_window - summary_input - REQUEST_INPUT_HEADROOM_TOKENS)
+    assert retry["max_tokens"] == min(model_limit, llm.context_window - retry_input - REQUEST_INPUT_HEADROOM_TOKENS)
+    if model_limit > prompt_limit:
+        assert prompt_limit < retry["max_tokens"] < tight["max_tokens"] < wide["max_tokens"]
 
 
 @pytest.mark.asyncio

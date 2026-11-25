@@ -6608,7 +6608,7 @@ class _FakeSummaryLLM:
 @pytest.mark.asyncio
 async def test_create_summary_passes_thinking_disabled_and_no_tools():
     """Summary appends one instruction to the exact history for KV-cache reuse."""
-    from box_agent.core import _create_summary, _SUMMARY_REQUEST
+    from box_agent.core import _create_summary
 
     original = [
         Message(role="system", content="system"),
@@ -6625,12 +6625,13 @@ async def test_create_summary_passes_thinking_disabled_and_no_tools():
     assert len(sent) == len(original) + 1
     assert all(sent[index] is message for index, message in enumerate(original))
     assert sent[-1].role == "user"
-    assert sent[-1].content == _SUMMARY_REQUEST
-    assert "list all user messages that are not tool results" in _SUMMARY_REQUEST
-    assert "<summary>...</summary>" in _SUMMARY_REQUEST
-    assert "characters" not in _SUMMARY_REQUEST
-    assert "<analysis>" in _SUMMARY_REQUEST
-    example = _SUMMARY_REQUEST.split("<example>", 1)[1].split("</example>", 1)[0]
+    instruction = sent[-1].content
+    assert "within 8192 tokens" in instruction
+    assert "list all user messages that are not tool results" in instruction
+    assert "<summary>...</summary>" in instruction
+    assert "characters" not in instruction
+    assert "<analysis>" in instruction
+    example = instruction.split("<example>", 1)[1].split("</example>", 1)[0]
     assert "<analysis>" not in example
     assert example.strip().startswith("<summary>")
     assert example.strip().endswith("</summary>")
@@ -6926,7 +6927,8 @@ async def test_maybe_summarize_large_history_uses_one_original_prefix_call():
 
 @pytest.mark.asyncio
 async def test_create_summary_does_not_serialize_or_chunk_original_messages():
-    from box_agent.core import _create_summary, _SUMMARY_REQUEST
+    from box_agent.core import _create_summary
+    from box_agent.kernel.context_engine import _summary_request
 
     msgs = [
         Message(
@@ -6944,7 +6946,7 @@ async def test_create_summary_does_not_serialize_or_chunk_original_messages():
     sent = llm.calls[0]["messages"]
     assert len(sent) == len(msgs) + 1
     assert all(sent[index] is message for index, message in enumerate(msgs))
-    assert sent[-1].content == _SUMMARY_REQUEST
+    assert sent[-1].content == _summary_request(8_192)
 
 
 @pytest.mark.asyncio
