@@ -8,6 +8,7 @@ from functools import lru_cache
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.tools import Tool as MCPFunctionTool
 
+from box_agent.auth import normalize_request_org, scoped_request_org
 from box_agent.config import Config
 from box_agent.llm import LLMClient
 from box_agent.llm.llm_wrapper import SessionBoundLLM
@@ -57,21 +58,26 @@ async def web_extract(
 ) -> str:
     """Fetch one URL and return extracted text or an LLM summary."""
     extractor = _extractor()
+    org = None
     if ctx is not None:
         try:
             meta = ctx.request_context.meta
         except ValueError:
             meta = None
+        if meta is not None and hasattr(meta, "box_agent_org"):
+            value = meta.box_agent_org
+            org = normalize_request_org(None if value == "" else value)
         session_id = getattr(meta, "box_agent_session_id", None)
         if isinstance(session_id, str) and session_id.strip():
             extractor = copy(extractor)
             extractor.llm = SessionBoundLLM(extractor.llm)
             extractor.llm.set_request_context(session_id=session_id)
-    result = await extractor.execute(
-        url=url,
-        model=model,
-        max_output_tokens=max_output_tokens,
-    )
+    with scoped_request_org(org):
+        result = await extractor.execute(
+            url=url,
+            model=model,
+            max_output_tokens=max_output_tokens,
+        )
     if not result.success:
         raise ValueError(result.error or "Web extraction failed")
     return result.content or ""

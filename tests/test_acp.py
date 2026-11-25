@@ -8025,7 +8025,7 @@ async def test_acp_can_cancel_pending_injected_message(tmp_path):
     )
     cancelled = await agent.ext_method(
         "cancel_inject",
-        {"sessionId": session.sessionId, "injectionId": "inj-2"},
+        {"sessionId": session.sessionId, "injectionId": "inj-2", "_meta": {"org": 123}},
     )
 
     assert injected == {"ok": True, "injectionId": "inj-2", "status": "pending"}

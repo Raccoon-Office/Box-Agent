@@ -66,15 +66,49 @@ The local web-extract MCP receives session correlation through request metadata
 and forwards it to its model requests. These changes require an updated
 Box-Agent runtime and a restarted web-extract MCP process.
 
-Both streaming and non-streaming OpenAI-compatible and Anthropic requests use
-this domain restriction. Third-party hosts, personal servers, localhost, and IP
+In public deployments, both streaming and non-streaming OpenAI-compatible and
+Anthropic requests use this domain restriction. Third-party hosts, personal servers, localhost, and IP
 addresses (including `10.158.136.99`) receive neither `X-RACCOON-*` correlation
 headers nor `x-client-*` metadata. On allowed Raccoon domains, requests using the
 hosted-login API-key placeholders (rather than a user-configured API key) also
-send `X-Org-Code` when `auth.json` contains a safe, non-personal ASCII
-`office_identity` team code. The header is omitted for missing or personal team
-identity and for custom API keys, third-party hosts, personal servers, and IP
-addresses. Standard SDK headers and provider authentication
+send `X-Org-Code` from the current ACP request's `_meta.org`. A non-empty ASCII
+code selects an organization; `null`, an omitted `org`, or an omitted `_meta`
+selects personal billing and removes any organization header even when
+`auth.json.office_identity` contains a team code. Organization billing therefore
+requires the host to send the code on each execution request, including
+`session/prompt` and `_llm/prompt`. It is not stored on the session: after the
+host stops the old task and changes login identity, existing conversations use
+the next request's selection. Child and
+auxiliary model calls, images, and retries inherit the initiating request's org.
+An injection does not change the running turn's payer. Explicit invalid org
+values on execution requests fail with request error `-32602` and data code
+`INVALID_ORG` before execution. Cancellation, queries, and other control
+operations do not validate org; missing or malformed org cannot block a cancel.
+
+ACP requests never fall back to the login file's organization. Non-ACP callers
+retain their existing login-file behavior. Trusted remote MCP tool calls and
+the local web-extract summarizer carry the request identity through per-call
+metadata (`box_agent_org`, empty string for personal), so shared background
+transports do not mix callers. Image billing permission requests include `org`
+in `toolCall.rawInput`; hosts must distinguish payers when reusing consent.
+
+With `RACCOON_PRIVATE_DEPLOYMENT=true`, the configured private service boundary
+uses the same org validation and forwarding rules, including model, image, and
+MCP requests. Missing or null org clears the organization header. The private
+deployment's no-charge policy belongs to the server: forwarding org does not
+enable billing, and `org=null` is not a switch to disable billing. Existing
+authentication and billing confirmation flows remain in place. Automatic remote
+MCP session correlation stays disabled independently of org forwarding.
+
+On redirects to an untrusted MCP target, both `X-Org-Code` and the internal
+`box_agent_org` field in a preserved tool-call body are removed. Tool arguments
+and other metadata are preserved. Trusted GET and other non-tool requests keep
+their configured organization header; per-call org overrides apply only to
+`tools/call`.
+
+For model requests the header is still omitted for custom API keys and targets
+outside the allowed public domains or configured private service boundary.
+Standard SDK headers and provider authentication
 remain in place. For a hosted-login placeholder, Box-Agent verifies the hosted
 login before sending the model request. Missing usable login information fails
 locally with a login prompt rather than sending an unauthenticated request;

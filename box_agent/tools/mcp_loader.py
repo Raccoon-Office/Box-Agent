@@ -89,7 +89,9 @@ except ImportError:
     from mcp.shared._httpx_utils import create_mcp_http_client
 
 from box_agent.auth import (
+    current_request_org,
     is_private_service_url,
+    normalize_request_org,
     read_hosted_auth_snapshot,
     request_auth_headers,
     resolve_auth_token,
@@ -1303,6 +1305,14 @@ class MCPTool(Tool):
                     (is_web_extract and not self._server_url) or self._session_header_enabled
                 ):
                     call_options["meta"] = {"box_agent_session_id": model_context.session_id}
+                org = current_request_org()
+                if org is not None and (
+                    (is_web_extract and not self._server_url)
+                    or should_attach_client_headers(self._server_url or "")
+                ):
+                    # The MCP sender runs outside the caller's ContextVars.
+                    # Empty string preserves explicit personal through exclude_none serialization.
+                    call_options.setdefault("meta", {})["box_agent_org"] = org
                 if is_web_extract:
                     if model_context is not None:
                         call_arguments["model"] = model_context.model
@@ -1568,6 +1578,7 @@ def _private_mcp_http_client(
     client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
     client.follow_redirects = False
     client.event_hooks["request"].append(check_url)
+    client.event_hooks["request"].append(_attach_mcp_session_header)
     return client
 
 
@@ -1579,10 +1590,13 @@ def _should_attach_mcp_session_header(url: str) -> bool:
 
 
 async def _attach_mcp_session_header(request) -> None:
-    """Read correlation from the message, since MCP sends in a background task."""
+    """Read correlation and billing from the message, not the background sender."""
     header = "X-RACCOON-Session-ID"
     request.headers.pop(header, None)
-    if not _should_attach_mcp_session_header(str(request.url)) or request.method != "POST":
+    trusted = should_attach_client_headers(str(request.url))
+    if not trusted:
+        request.headers.pop("X-Org-Code", None)
+    if request.method != "POST":
         return
     try:
         payload = json.loads(await request.aread())
@@ -1592,11 +1606,28 @@ async def _attach_mcp_session_header(request) -> None:
         return
     params = payload.get("params")
     meta = params.get("_meta") if isinstance(params, dict) else None
+    if not trusted:
+        if isinstance(meta, dict) and "box_agent_org" in meta:
+            # Redirects retain the POST body, including internal billing metadata.
+            del meta["box_agent_org"]
+            sanitized = type(request)(request.method, request.url, json=payload)
+            # Keep HTTPX's cached content and the actual outgoing stream in sync.
+            request._content = sanitized.content
+            request.stream = sanitized.stream
+            request.headers["Content-Length"] = sanitized.headers["Content-Length"]
+            request.headers.pop("Transfer-Encoding", None)
+        return
     session_id = meta.get("box_agent_session_id") if isinstance(meta, dict) else None
-    if isinstance(session_id, str):
+    if isinstance(session_id, str) and _should_attach_mcp_session_header(str(request.url)):
         session_id = session_id.strip()
         if session_id and session_id.isascii() and all(32 <= ord(c) < 127 for c in session_id):
             request.headers[header] = session_id
+    if isinstance(meta, dict) and "box_agent_org" in meta:
+        request.headers.pop("X-Org-Code", None)
+        value = meta["box_agent_org"]
+        org = normalize_request_org(None if value == "" else value)
+        if org:
+            request.headers["X-Org-Code"] = org
 
 
 def _session_mcp_http_client(**kwargs):
@@ -1662,7 +1693,7 @@ async def _open_streamable_http(
         http_client = await exit_stack.enter_async_context(http_client_context)
         if is_private_service_url(url or ""):
             http_client.follow_redirects = False
-        if _should_attach_mcp_session_header(url or ""):
+        if should_attach_client_headers(url or ""):
             http_client.event_hooks.setdefault("request", []).append(_attach_mcp_session_header)
         streams = await exit_stack.enter_async_context(
             streamable_http_client(url=url, http_client=http_client)

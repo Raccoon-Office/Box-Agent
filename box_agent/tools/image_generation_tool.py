@@ -24,6 +24,7 @@ from box_agent.auth import (
     ensure_hosted_auth_ready,
     is_private_service_url,
     read_hosted_auth_snapshot,
+    resolve_request_org,
     refresh_hosted_auth_token_if_needed,
     should_attach_auth_header,
 )
@@ -882,7 +883,7 @@ class GenerateImageTool(Tool):
             or current.request_token != token
         ):
             raise HostedAuthRequiredError("登录账号或组织已变更，请重新发起操作")
-        org_code = current.org_code
+        org_code = resolve_request_org(current.org_code)
         if org_code:
             headers["X-Org-Code"] = org_code
         headers = bearer_auth_headers(token, headers, url=endpoint)
