@@ -2294,7 +2294,7 @@ async def _run_agent_loop_impl(
         )
 
         if response.finish_reason == "content_filter":
-            await run_session_write(session_log, commit_model_response, assistant_msg)
+            await commit_model_response(assistant_msg)
             msg = "模型输出触发内容安全拦截，本轮未完成。"
             if hook_mgr.hooks:
                 await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
