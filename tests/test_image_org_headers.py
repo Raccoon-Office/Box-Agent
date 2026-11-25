@@ -6,11 +6,64 @@ import httpx
 import pytest
 
 from box_agent import auth
+from box_agent.acp import _request_org_scope
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.billing import confirmation
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nimage-bytes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("meta", [{"org": "request-team"}, {"org": None}, {}, None])
+async def test_image_request_org_overrides_login_identity_and_reaches_billing_confirmation(
+    tmp_path, monkeypatch, edit, meta, private,
+):
+    from types import SimpleNamespace
+    from acp.schema import RequestPermissionResponse
+    from box_agent.acp.billing import BillingConfirmation
+    from box_agent.run_control import RunControl
+
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    origin = "https://tenant.example/office" if private else "https://image.xiaohuanxiong.com"
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "login-token", "office_identity": "legacy-team"}))
+    requests, approvals = [], []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
+
+    async def approve(**kwargs):
+        approvals.append(kwargs["tool_call"].raw_input)
+        return RequestPermissionResponse.model_validate({"outcome": {"outcome": "selected", "optionId": "approve"}})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(
+        transport=httpx.MockTransport(handler), **kwargs))
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), auth_file=str(auth_file),
+        endpoint=f"{origin}/v1/images/generations", api_key="")
+    (tmp_path / "reference.png").write_bytes(PNG_BYTES)
+    token = confirmation.set(BillingConfirmation(SimpleNamespace(request_permission=approve),
+        "session", "turn", lambda: True, control=RunControl()))
+    try:
+        with _request_org_scope(meta):
+            assert tool.may_require_user_input
+            assert tool.invocation_may_require_user_input({"reference_images": ["reference.png"]})
+            result = await tool.execute(prompt="draw", output_path="result.png", watermark=False,
+                image_mode="image_to_image" if edit else "text_to_image",
+                reference_images=["reference.png"] if edit else None)
+    finally:
+        confirmation.reset(token)
+    assert result.success, result.error
+    assert len(requests) == 1 and len(approvals) == 1
+    org = meta.get("org") if meta is not None else None
+    assert approvals[0]["org"] == org
+    assert requests[0].headers.get("X-Org-Code") == org
+    assert requests[0].headers["Authorization"] == "Bearer login-token"
 
 
 @pytest.mark.asyncio

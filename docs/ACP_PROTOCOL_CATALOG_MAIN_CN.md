@@ -99,8 +99,18 @@ Session Log 的有效 user/message 同时保存原文字段和 `input_facts`：s
 
 入口缩写：I=initialize，N=session/new，P=session/prompt，J=_inject，L=_llm/prompt。session/load 复用会话配置读取，但不在 _meta 传 session_id（见2.2）。私有请求的 `_meta` 是 params 内显式对象。下面是当前业务使用范围，不代表把所有字段塞到所有入口都有效。精确读取位置、别名和默认值见[附录第 1 节](ACP_PROTOCOL_SOURCE_APPENDIX_CN.md)。
 
+计费身份通过请求的 `_meta.org` 传入：非空 ASCII 组织代码表示组织；`null`、省略 `org` 或省略整个 `_meta` 均表示个人。
+组织通过实际计费 HTTP 请求的 `X-Org-Code` 传递；个人请求清除该头，不回退到 `auth.json.office_identity`。组织计费调用方必须明确传组织代码。
+身份仅作用于本次请求及其派生调用，不保存为会话默认值；客户端停止旧任务、切换登录身份后，已有会话下一次 prompt 使用新请求的 org。
+主模型、辅助模型、子任务、图片和受信 MCP 调用继承当前请求身份，重试保持相同 org。
+`_inject` 不改变已运行轮次的身份。取消、查询及其他纯控制操作不校验 org；组织字段缺失或非法不阻止取消。
+执行入口显式传入空字符串、非字符串且非 null、非 ASCII 或含控制字符的值，返回请求级 `-32602 / INVALID_ORG`，不触发个人计费回退。
+现有个人 token 鉴权、非 ACP 调用的登录文件读取、服务地址和自定义 API Key 边界保持不变；后端负责组织权限和额度校验。
+私有部署在已配置的私有服务边界内同样校验和传递 org，缺省或 null 时清除组织头。私有部署不计费由服务端策略决定，传递 org 不代表启用计费，`org=null` 也不是免计费开关。Agent 不新增跳过原有费用确认的分支；远程 MCP 会话追踪头继续沿用私有部署不自动添加的规则。
+
 | 方向 / 入口 | 功能 | 当前参数 | 示例 `_meta` 片段 | 应使用参数 / 状态 |
 |---|---|---|---|---|
+| U / I,N,P,L、load/resume、mcp/apps/call | 请求计费身份 | `org:string\|null` | `{"org":"team-a"}` / `{"org":null}` | 缺省或 null 均为个人；不继承登录文件或历史会话组织 |
 | U / I,N,L | 宿主身份 | `host_client_info:{name,platform,version,os_version/osVersion,channel,device_id/deviceId}` | `{"host_client_info":{"name":"raccoon-lab","platform":"windows","version":"1.0.0"}}` | 保留新名；旧 `client_info` 已被替换，标准 `clientInfo` 是另一字段 |
 | U / I,N,P,L | 模型绑定 | `llm_binding/llmBinding`：`source:builtin/profile,model,version?,profileId/profile_id?,profileRevision/profile_revision?,routingMode/routing_mode?,maxTokens/max_tokens?,contextWindow/context_window?,autoRouting/auto_routing?` | `{"llm_binding":{"source":"builtin","model":"model-name"}}` | 保留；profile 要求 version=2、profileId、profileRevision 和 routingMode:auto/manual。不得改用未实现的标准 set_config_option |
 | U / N | 产品会话身份 | `session_id:string` | `{"session_id":"chat-a"}` | 迁移为稳定 ACP ID 映射及 load；这是日志身份，不是 prompt 的 ACP句柄 |

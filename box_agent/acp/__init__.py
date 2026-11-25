@@ -38,8 +38,9 @@ import os
 import re
 import signal
 import sys
-from contextlib import AsyncExitStack, aclosing, suppress
+from contextlib import AsyncExitStack, aclosing, contextmanager, suppress
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
@@ -68,6 +69,7 @@ from acp.schema import LoadSessionResponse, UserMessageChunk
 from acp.schema import ResumeSessionResponse, SessionCapabilities, SessionResumeCapabilities
 
 from box_agent import __version__
+from box_agent.auth import current_request_org, normalize_request_org, scoped_request_org
 from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
 from box_agent.cloud_handoff import cloud_handoff_instruction, validate_cloud_handoff
@@ -500,6 +502,27 @@ def _meta_string_list(meta: Any, *keys: str, limit: int = 8) -> list[str]:
                 break
         return result
     return []
+
+
+@contextmanager
+def _request_org_scope(meta: Any):
+    org = ""  # Missing org and explicit null both select personal billing.
+    if isinstance(meta, dict) and "org" in meta:
+        try:
+            org = normalize_request_org(meta["org"])
+        except ValueError as exc:
+            raise RequestError(-32602, "Invalid org", {"code": "INVALID_ORG", "detail": str(exc)}) from exc
+    with scoped_request_org(org):
+        yield
+
+
+def _with_request_org(method):
+    """Scope the SDK's expanded _meta before any work or child task starts."""
+    @wraps(method)
+    async def wrapped(self, *args, **meta):
+        with _request_org_scope(meta):
+            return await method(self, *args, **meta)
+    return wrapped
 
 
 def _normalize_llm_binding(meta: Any) -> dict[str, Any] | None:
@@ -1818,6 +1841,7 @@ class BoxACPAgent:
 
         self._memory_bootstrap_task = asyncio.create_task(bootstrap(), name="memory-bootstrap")
 
+    @_with_request_org
     async def initialize(
         self, protocol_version: int, client_capabilities: Any = None,
         client_info: Implementation | None = None, **meta: Any,
@@ -1857,6 +1881,7 @@ class BoxACPAgent:
         log.info("initialize", message=f"Initialized box-agent v{__version__}, skills={len(skills) if skills else 0}")
         return resp
 
+    @_with_request_org
     async def new_session(
         self, cwd: str, mcp_servers: list[Any] | None = None,
         additional_directories: list[str] | None = None, **meta: Any,
@@ -2704,6 +2729,7 @@ class BoxACPAgent:
                     "SESSION_LOG_CORRUPTED")
             raise RequestError(-32012, code, {"code": code}) from exc
 
+    @_with_request_org
     async def resume_session(
         self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,
     ) -> ResumeSessionResponse:
@@ -2721,6 +2747,7 @@ class BoxACPAgent:
             })
         return ResumeSessionResponse(field_meta=response.field_meta)
 
+    @_with_request_org
     async def load_session(
         self, cwd: str, session_id: str, mcp_servers=None, additional_directories=None, **meta: Any,
     ) -> LoadSessionResponse:
@@ -2948,6 +2975,7 @@ class BoxACPAgent:
             allow_full_access=getattr(state.agent, "_input_allow_full_access", False),
             permission_negotiator=negotiator, on_start=started, on_result=finished)
 
+    @_with_request_org
     async def prompt(
         self, session_id: str, prompt: list[Any], **meta: Any,
     ) -> PromptResponse:
@@ -2962,6 +2990,7 @@ class BoxACPAgent:
             log.warn("session/prompt", session_id=session_id, message="Session not found, auto-creating")
             new_session = await self.new_session(
                 cwd=self._config.agent.workspace_dir or ".", mcp_servers=[],
+                org=current_request_org() or None,
             )
             session_id = new_session.session_id  # use the NEW session id from here on
             state = self._sessions.get(session_id)
@@ -4237,6 +4266,9 @@ class BoxACPAgent:
             return {"settled": True}
         if method.startswith("mcp/apps/"):
             self._require_accepting_requests()
+            if method == "mcp/apps/call":
+                with _request_org_scope(params.get("_meta")):
+                    return await self._mcp_apps.dispatch(method, params)
             return await self._mcp_apps.dispatch(method, params)
         if method == "request_wrap_up":
             state = self._sessions.get(params.get("sessionId", ""))
@@ -4633,7 +4665,8 @@ class BoxACPAgent:
         return injected
 
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
-        with private_payload_scope(self._config.agent.memory_backend_type == "desktop"):
+        with (_request_org_scope(params.get("_meta")),
+              private_payload_scope(self._config.agent.memory_backend_type == "desktop")):
             return await self._run_llm_prompt(params)
 
     async def _run_llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
