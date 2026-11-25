@@ -1176,9 +1176,12 @@ class SessionLog:
         surface_op: str | dict[str, Any],
         source_event_seqs: list[int] | None = None,
         surface_derived: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = message.model_dump(mode="json", exclude_none=True)
-        metadata = {"surfaceDerived": True} if surface_derived else {}
+        metadata = dict(metadata or {})
+        if surface_derived:
+            metadata["surfaceDerived"] = True
         if message.role == "user":
             payload["source"] = message.source
             return self._append_message_event(
@@ -1205,6 +1208,30 @@ class SessionLog:
                 source_event_seqs=source_event_seqs,
             )
         raise ValueError(f"role {message.role!r} cannot enter the Session Surface")
+
+    def replace_surface_message(
+        self, index: int, message: Message, *, turn: int, step: int, edit: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replace one replay-visible node while keeping the original in host history."""
+        nodes = [node for node in self._surface_nodes() if not _is_legacy_workflow_context(node[1])]
+        if type(index) is not int or not 0 <= index < len(nodes):
+            raise SessionLogCorrupted(f"surface edit index {index!r} is outside the active surface")
+        seq, previous = nodes[index]
+        original = self._events[seq]
+        event_types = {"user": "user/message", "assistant": "assistant/message", "tool": "tool/result"}
+        if (original["type"] != event_types.get(message.role) or previous.role != message.role
+                or previous.tool_call_id != message.tool_call_id or previous.name != message.name):
+            raise SessionLogCorrupted(f"surface edit at index {index} does not match node {seq}")
+        # Images and context measurements belong to the message. Execution
+        # facts such as raw results and accepted model rounds stay on their
+        # original event, where replay processes each occurrence exactly once.
+        data = original["data"]
+        metadata = {key: data[key] for key in ("images", "contextUsage") if key in data}
+        return self._append_surface_message(
+            message, turn=turn, step=step,
+            surface_op={"op": "replace", "start": seq, "end": seq}, source_event_seqs=[seq],
+            surface_derived=True, metadata={**metadata, "edit": edit},
+        )
 
     def replace_surface(
         self,

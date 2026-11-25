@@ -125,8 +125,10 @@ class SessionStorePort(Protocol):
     *optional* native capability: the kernel feature-detects it and, when a
     third-party Store does not provide it, keeps the validated post-compaction
     in-memory surface instead (docs/design/skill-engine.md §6). It is
-    intentionally NOT part of the required Protocol so custom Stores are not
-    forced to implement it.
+    intentionally outside the required Protocol so custom Stores can omit it.
+    The optional ``replace_surface_message(index, message, *, turn, step, edit)``
+    capability appends one derived edit at a replay-visible message index.
+    The kernel probes it with ``getattr`` and uses ``replace_surface`` when absent.
     """
 
     def append(
