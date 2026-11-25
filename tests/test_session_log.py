@@ -976,7 +976,7 @@ def test_live_surface_rewrite_is_reconciled_without_failing_the_task(
         ),
     ]
 
-    with caplog.at_level("WARNING", logger="box_agent.session_log"):
+    with caplog.at_level("ERROR", logger="box_agent.session_log"):
         replacement = log.append_unlogged_messages(
             rewritten_messages,
             turn=1,

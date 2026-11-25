@@ -1037,14 +1037,14 @@ class SessionLog:
         ]
         if live_payloads[: len(persisted_payloads)] != persisted_payloads:
             if not messages:
-                _log.warning(
+                _log.error(
                     "session_log/surface_diverged session_id=%s persisted=%d live=0 "
                     "action=retain_persisted",
                     self.header.get("id"),
                     len(persisted_payloads),
                 )
                 return []
-            _log.warning(
+            _log.error(
                 "session_log/surface_diverged session_id=%s persisted=%d live=%d "
                 "action=replace_surface",
                 self.header.get("id"),

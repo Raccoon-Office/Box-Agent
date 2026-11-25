@@ -1458,12 +1458,9 @@ async def _run_agent_loop_impl(
             ).apply(messages)
 
         # ── Fresh tool-result aggregate budget (Layer 1) ───
-        # This runs immediately before the next LLM request. Decisions are
-        # frozen by tool_use_id so later turns keep the same cache prefix.
-        budget_outcome = result_storage.enforce_fresh_budget(
-            messages,
-            tools=tools,
-            session_id=session_id,
+        budget_outcome = await run_session_write(
+            session_log, tool_messages.apply_fresh_budget, result_storage,
+            tools=tools, session_id=session_id, step=step + 1,
         )
         if budget_outcome.persisted_count:
             _log.info(

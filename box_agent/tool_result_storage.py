@@ -6,7 +6,7 @@ import json
 import hashlib
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 from uuid import uuid4
@@ -117,6 +117,7 @@ class ToolResultBudgetOutcome:
     persisted_count: int = 0
     original_chars: int = 0
     remaining_chars: int = 0
+    edits: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
 def generate_preview(
@@ -448,14 +449,17 @@ class ToolResultStorage:
 
         if persistence_content is not None:
             self._seen_ids.add(message.tool_call_id)
-            replacement = self._persist_content(
+            persisted = self._persist_content(
                 persistence_content,
                 message.tool_call_id,
                 session_id=session_id,
                 model_content=model_content,
             )
-            if replacement is None:
+            if persisted is None:
                 return message
+            replacement = build_persisted_output(
+                persisted, preview_label="Tool-bounded output" if _content_text(model_content) is not None else None,
+            )
             self._replacements[message.tool_call_id] = replacement
             return message.model_copy(update={"content": replacement})
 
@@ -472,13 +476,14 @@ class ToolResultStorage:
         if _content_size(model_content) <= threshold:
             return message
 
-        replacement = self._persist_content(
+        persisted = self._persist_content(
             model_content,
             message.tool_call_id,
             session_id=session_id,
         )
-        if replacement is None:
+        if persisted is None:
             return message
+        replacement = build_persisted_output(persisted)
         self._replacements[message.tool_call_id] = replacement
         return message.model_copy(update={"content": replacement})
 
@@ -513,66 +518,59 @@ class ToolResultStorage:
 
         original_chars = sum(size for size, _, _ in candidates)
         remaining_chars = original_chars
-        persisted_count = 0
+        edits: dict[int, dict[str, Any]] = {}
         for size, index, message in sorted(candidates, key=lambda item: -item[0]):
             if remaining_chars <= self.aggregate_budget:
                 break
             required_reduction = remaining_chars - self.aggregate_budget
             target_replacement_size = max(1, size - required_reduction)
-            preview_limit = PREVIEW_SIZE_CHARS
-
-            def build_replacement(limit: int) -> str | None:
-                value = self._persist_content(
-                    message.content,
-                    message.tool_call_id or "tool-result",
-                    session_id=session_id,
-                    preview_max_chars=limit,
-                )
-                if value is not None and message.name == "read_file":
-                    value += (
-                        "\nRe-read the original path from the matching read_file call with "
-                        "a smaller offset/limit to recover exact content."
-                    )
-                if value is not None and message.name == "read_email":
-                    value += (
-                        "\nThis email page is incomplete in this preview. Do not advance next_offset "
-                        "until the full page is recovered. Re-read the original email at the same "
-                        "offset with a smaller limit and expected_sha256 from the matching call/result, "
-                        "or read the complete persisted output."
-                    )
-                return value
-
-            replacement = build_replacement(preview_limit)
-            if replacement is None:
+            persisted = self._persist_content(
+                message.content, message.tool_call_id or "tool-result", session_id=session_id,
+            )
+            if persisted is None:
                 continue
+            recovery = ""
+            if message.name == "read_file":
+                recovery = (
+                    "\nRe-read the original path from the matching read_file call with "
+                    "a smaller offset/limit to recover exact content."
+                )
+            elif message.name == "read_email":
+                recovery = (
+                    "\nThis email page is incomplete in this preview. Do not advance next_offset "
+                    "until the full page is recovered. Re-read the original email at the same "
+                    "offset with a smaller limit and expected_sha256 from the matching call/result, "
+                    "or read the complete persisted output."
+                )
+            replacement = build_persisted_output(persisted) + recovery
             if len(replacement) > target_replacement_size:
-                serialized = _content_text(message.content)
-                current_preview_size = (
-                    len(generate_preview(serialized[0], preview_limit)[0])
-                    if serialized is not None
-                    else preview_limit
-                )
                 preview_limit = max(
-                    1,
-                    current_preview_size
-                    - (len(replacement) - target_replacement_size),
+                    1, len(persisted.preview) - (len(replacement) - target_replacement_size),
                 )
-                replacement = build_replacement(preview_limit)
-                if replacement is None:
-                    continue
+                serialized = _content_text(message.content)
+                assert serialized is not None  # Persisted above.
+                preview, has_more = generate_preview(serialized[0], preview_limit)
+                replacement = build_persisted_output(
+                    replace(persisted, preview=preview, has_more=has_more),
+                    preview_label=f"Preview (head + tail, up to {_format_size(preview_limit)})",
+                ) + recovery
             replacement_size = len(replacement)
             if replacement_size >= size:
                 continue
             self._replacements[message.tool_call_id or ""] = replacement
             messages[index] = message.model_copy(update={"content": replacement})
             remaining_chars += replacement_size - size
-            persisted_count += 1
+            edits[index] = {
+                "reason": "tool_result_budget", "persistedPath": str(persisted.path),
+                "originalChars": size,
+            }
 
         return ToolResultBudgetOutcome(
             fresh_count=len(candidates),
-            persisted_count=persisted_count,
+            persisted_count=len(edits),
             original_chars=original_chars,
             remaining_chars=remaining_chars,
+            edits=edits,
         )
 
     def _persist_content(
@@ -582,8 +580,7 @@ class ToolResultStorage:
         *,
         session_id: str,
         model_content: str | list[dict[str, Any]] | None = None,
-        preview_max_chars: int = PREVIEW_SIZE_CHARS,
-    ) -> str | None:
+    ) -> PersistedToolResult | None:
         serialized = _content_text(content)
         if serialized is None:
             return None
@@ -624,38 +621,12 @@ class ToolResultStorage:
                             return None
         except OSError:
             return None
-        preview_label = None
-        if model_content is None:
-            preview, has_more = generate_preview(
-                content_text,
-                max_chars=preview_max_chars,
-            )
-            preview_label = (
-                "Preview (head + tail, up to "
-                f"{_format_size(preview_max_chars)})"
-            )
+        projected = _content_text(model_content) if model_content is not None else None
+        if projected is None:
+            preview, has_more = generate_preview(content_text)
         else:
-            serialized_model_content = _content_text(model_content)
-            if serialized_model_content is None:
-                preview, has_more = generate_preview(
-                    content_text,
-                    max_chars=preview_max_chars,
-                )
-                preview_label = (
-                    "Preview (head + tail, up to "
-                    f"{_format_size(preview_max_chars)})"
-                )
-            else:
-                preview = serialized_model_content[0]
-                has_more = False
-                preview_label = "Tool-bounded output"
-        return build_persisted_output(
-            PersistedToolResult(
-                path=path,
-                original_size=len(content_text),
-                is_json=is_json,
-                preview=preview,
-                has_more=has_more,
-            ),
-            preview_label=preview_label,
+            preview, has_more = projected[0], False
+        return PersistedToolResult(
+            path=path, original_size=len(content_text), is_json=is_json,
+            preview=preview, has_more=has_more,
         )
