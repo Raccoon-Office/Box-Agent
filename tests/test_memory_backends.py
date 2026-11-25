@@ -21,10 +21,10 @@ from box_agent.config import AgentConfig, Config, ExternalMemoryConfig, MemoryHt
 from box_agent.events import DoneEvent, StopReason
 from box_agent.memory import (
     MemoryBackendError, MemoryManager, MemoryRuntime,
-    create_memory_backend, memory_user_turn, place_memory_block,
+    create_memory_backend, is_memsense_history_message, memory_user_turn, place_memory_block,
 )
 from box_agent.session_context import HostBindings, SessionOptions
-from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+from box_agent.schema import FunctionCall, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.tools.memory_tool import create_memory_tools
 from tests.test_agent_session import session_config
 from tests.test_session_plugins import RecordingLLM
@@ -84,16 +84,17 @@ def backend_settings(tmp_path, **kwargs):
                        memory_external=ExternalMemoryConfig(base_url="http://memory.test"), **kwargs)
 
 
-async def managed_session(tmp_path, settings=None, *, prompt="系统提示"):
+async def managed_session(tmp_path, settings=None, *, prompt="系统提示", llm=None, session_log=None, resume=False):
     """使用现有插件装配和真实 AgentService，避免只测试保存辅助函数。"""
     config = session_config(tmp_path)
     config.agent = settings or backend_settings(tmp_path)
     config.agent.enable_memory_extraction = False
     backend = create_memory_backend(config.agent)
-    llm = RecordingLLM("最终回答")
+    llm = llm if llm is not None else RecordingLLM("最终回答")
     session = await AgentSession.open(config=config, host=HostBindings(
         llm_client=llm, system_prompt=prompt, tools=create_memory_tools(backend), memory_manager=backend,
-    ), options=SessionOptions(workspace_dir=tmp_path))
+        session_log=session_log,
+    ), options=SessionOptions(workspace_dir=tmp_path, resume_session_log=resume))
     return session, llm
 
 
@@ -103,6 +104,11 @@ async def run(session, text, run_id="run-1"):
     async with handle:
         _ = [item async for item in handle.events()]
         return await handle.result()
+
+
+def history_snapshots(messages):
+    """找出模型请求或回放里真正由运行时添加的记忆消息。"""
+    return [message for message in messages if is_memsense_history_message(message)]
 
 
 def test_local_default_reuses_existing_storage_and_other_identities_are_isolated(tmp_path):
@@ -197,22 +203,105 @@ async def test_generic_and_placeholder_types_do_not_force_memsense_protocol(tmp_
 
 
 @pytest.mark.asyncio
-async def test_core_files_refresh_once_per_user_turn_and_do_not_accumulate(tmp_path, memory_http):
+async def test_memsense_appends_only_changed_snapshots_and_preserves_the_request_prefix(tmp_path, memory_http):
     session, llm = await managed_session(tmp_path)
     try:
         await run(session, "问题一")
-        memory_http.profile = "偏好已更新"
         await run(session, "问题二", "run-2")
+        memory_http.profile = "偏好已更新"
+        await run(session, "问题三", "run-3")
+        memory_http.profile = "用户偏好中文"
+        await run(session, "问题四", "run-4")
     finally:
         await session.aclose()
-    assert "用户偏好中文" in llm.requests[0]["messages"][0].content
-    prompt = llm.requests[1]["messages"][0].content
-    assert "偏好已更新" in prompt and "用户偏好中文" not in prompt
-    assert prompt.count("--- MEMORY START ---") == 1
-    assert len([call for call in memory_http.calls if call[0].endswith("/files/read")]) == 10
+    first, same, changed, reverted = [request["messages"] for request in llm.requests]
+    assert first[0] == same[0] == changed[0] == reverted[0]
+    assert "--- MEMORY START ---" not in first[0].content
+    assert same[:len(first)] == first and changed[:len(same)] == same
+    assert [len(history_snapshots(messages)) for messages in (first, same, changed, reverted)] == [1, 1, 2, 3]
+    original, updated, again = history_snapshots(reverted)
+    assert original.role == "user" and original.source == "runtime"
+    assert first.index(original) > next(i for i, msg in enumerate(first) if msg.role == "user" and msg.source == "user")
+    assert "用户偏好中文" in original.content == again.content
+    assert "偏好已更新" in updated.content and "已被取代" in updated.content
+    assert len([call for call in memory_http.calls if call[0].endswith("/files/read")]) == 20
     saves = [body for path, body in memory_http.calls if path.endswith("/save")]
-    assert [body["content"]["user"] for body in saves] == ["问题一", "问题二"]
+    assert [body["content"]["user"] for body in saves] == ["问题一", "问题二", "问题三", "问题四"]
     assert all(body["content"]["assistant"] == "最终回答" for body in saves)
+
+
+@pytest.mark.asyncio
+async def test_memsense_compaction_restores_only_the_latest_snapshot_before_the_next_request(tmp_path, memory_http):
+    class SummaryLLM(RecordingLLM):
+        """分别记录摘要和主对话请求，验证压缩没有混入旧记忆。"""
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
+        async def generate_stream(self, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                self.summary_messages = kwargs["messages"]
+                yield StreamEvent(type="text", delta="<summary>继续做用户要求的任务。</summary>")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            async for event in super().generate_stream(**kwargs):
+                yield event
+
+    session, llm = await managed_session(tmp_path, llm=SummaryLLM("最终回答"))
+    session.agent.token_limit = 104_400
+    try:
+        await run(session, "旧任务")
+        memory_http.profile = "最新的画像"
+        await run(session, "继续任务", "run-2")
+        old, newest = history_snapshots(llm.requests[-1]["messages"])
+        session.agent.messages.extend([
+            Message(role="user", content="先完成一次运行"),
+            Message(role="assistant", content="x" * 200_000,
+                    usage=TokenUsage(prompt_tokens=104_400, completion_tokens=100, total_tokens=104_500)),
+        ])
+        assert (await run(session, "压缩后继续", "run-3")).final_content == "最终回答"
+        assert not history_snapshots(llm.summary_messages)
+        assert not any("用户偏好中文" in str(msg.content) for msg in llm.summary_messages)
+        assert history_snapshots(llm.requests[-1]["messages"]) == [newest]
+        assert old not in session.agent.messages
+        await run(session, "继续下一轮", "run-4")
+        assert history_snapshots(llm.requests[-1]["messages"]) == [newest]
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.asyncio
+async def test_memsense_resume_deduplicates_the_same_identity_and_hides_other_identities(tmp_path, memory_http):
+    from box_agent.session_log import SessionLog
+
+    root = tmp_path / "logs"
+    log = SessionLog.create(root, session_id="session-1", cwd=tmp_path)
+    try:
+        first, _ = await managed_session(tmp_path, session_log=log)
+        try:
+            await run(first, "保存第一份快照")
+            prior, = history_snapshots(log.replay().messages)
+        finally:
+            await first.aclose()
+    finally:
+        log.close()
+
+    for tenant_id, expected in (("default", prior.content), ("another-tenant", "隔离后的画像")):
+        log = SessionLog.open(root, session_id="session-1", cwd=tmp_path)
+        settings = backend_settings(tmp_path, memory_tenant_id=tenant_id)
+        try:
+            reopened, llm = await managed_session(tmp_path, settings, session_log=log, resume=True)
+            try:
+                if tenant_id != "default":
+                    memory_http.profile = expected
+                await run(reopened, "继续同一会话", f"resume-{tenant_id}")
+                snapshot, = history_snapshots(llm.requests[-1]["messages"])
+                assert expected in snapshot.content
+                assert (snapshot == prior) == (tenant_id == "default")
+            finally:
+                await reopened.aclose()
+        finally:
+            log.close()
 
 
 @pytest.mark.asyncio
@@ -225,7 +314,7 @@ async def test_memsense_prompt_and_read_tool_keep_entries_without_storage_attrib
     session, llm = await managed_session(tmp_path)
     try:
         await run(session, "我叫什么")
-        prompt = llm.requests[0]["messages"][0].content
+        prompt = history_snapshots(llm.requests[0]["messages"])[0].content
         tools = {tool.name: tool for tool in create_memory_tools(session.memory_manager)}
         result = await tools["memory_read"].execute(path="user.md")
         assert result.success
@@ -243,26 +332,36 @@ async def test_memsense_prompt_and_read_tool_keep_entries_without_storage_attrib
 
 
 @pytest.mark.asyncio
-async def test_memory_slot_keeps_position_after_refresh_failure_and_recovery(tmp_path, memory_http):
-    """真实模型请求中只替换槽位，失败后的空槽仍能在原位置恢复。"""
-    session, llm = await managed_session(tmp_path, prompt="前置规则\n{MEMORY_CONTEXT}\n后置规则")
+@pytest.mark.parametrize("failed_path", [None, "memory://user.md"])
+async def test_memsense_only_clears_a_delivered_snapshot_after_a_successful_empty_read(
+    tmp_path, memory_http, caplog, failed_path,
+):
+    """全量或部分读取失败都不撤回快照，真空结果只通知模型一次。"""
+    settings = backend_settings(tmp_path)
+    settings.memory_external.date_memory_load_days = 0
+    session, llm = await managed_session(tmp_path, settings, prompt="前置规则\n{MEMORY_CONTEXT}\n后置规则")
     try:
-        await run(session, "第一轮")
-        first = llm.requests[-1]["messages"][0].content
-        assert first.index("前置规则") < first.index("用户偏好中文") < first.index("后置规则")
+        memory_http.profile = memory_http.files["memory://memory.md"] = ""
+        await run(session, "首次为空")
+        assert not history_snapshots(llm.requests[-1]["messages"])
+        memory_http.profile = "已确认的画像"
+        await run(session, "读到记忆", "run-2")
+        previous, = history_snapshots(llm.requests[-1]["messages"])
+        memory_http.profile = ""
         memory_http.handler = lambda request, payload: (
-            httpx.Response(400, json={"ok": False}) if request.url.path.endswith("/files/read") else None)
-        await run(session, "第二轮", "run-2")
-        failed = llm.requests[-1]["messages"][0].content
-        assert "用户偏好中文" not in failed and "# Memory Context" not in failed
-        assert failed.index("前置规则") < failed.index("--- MEMORY START ---") < failed.index("后置规则")
+            httpx.Response(400, json={"ok": False}) if request.url.path.endswith("/files/read")
+            and (failed_path is None or payload["path"] == failed_path) else None)
+        result = await run(session, "读取失败", "run-3")
+        assert result.final_content == "最终回答"
+        assert history_snapshots(llm.requests[-1]["messages"]) == [previous]
+        assert "operation=recall" in caplog.text and "status=400" in caplog.text
         memory_http.handler = None
-        memory_http.profile = "新的画像"
-        await run(session, "第三轮", "run-3")
-        restored = llm.requests[-1]["messages"][0].content
-        assert restored.index("前置规则") < restored.index("新的画像") < restored.index("后置规则")
-        assert restored.count("--- MEMORY START ---") == 1
-        assert "{MEMORY_CONTEXT}" not in restored and "用户偏好中文" not in restored
+        await run(session, "确认已清空", "run-4")
+        await run(session, "仍然为空", "run-5")
+        after, clear = history_snapshots(llm.requests[-1]["messages"])
+        assert after == previous and "当前 MemSense 记忆为空" in clear.content
+        assert "已失效" in clear.content and "已确认的画像" not in clear.content
+        assert all("前置规则\n\n后置规则" in req["messages"][0].content for req in llm.requests)
     finally:
         await session.aclose()
 
@@ -280,7 +379,7 @@ async def test_memsense_dates_use_utc_window_and_refresh_across_midnight(tmp_pat
         for offset in [0, 120000]:
             turn = SimpleNamespace(user="近期进展", session_id="s", turn_id=str(offset), timestamp=timestamp + offset)
             await session.memory_runtime.refresh(session, turn)
-            prompt = session.agent.system_prompt
+            prompt = session.memory_block
             days = [5, 6, 7] if offset == 0 else [6, 7, 8]
             positions = [prompt.index(f"### 2026-10-{day:02d}") for day in days]
             assert positions == sorted(positions)
@@ -381,8 +480,6 @@ async def test_shared_prompt_slot_respects_local_and_disabled_sessions(tmp_path,
         if mode == "local":
             assert result.index("之前") < result.index("原有本地记忆") < result.index("之后")
             assert "[Core Memory]" in result
-        elif mode == "memsense":
-            assert result.index("之前") < result.index("--- MEMORY START ---") < result.index("之后")
         else:
             assert "--- MEMORY START ---" not in result
         assert not memory_http.calls
@@ -403,14 +500,19 @@ def test_explicit_memory_slot_takes_precedence_over_old_blocks():
 async def test_remote_memory_cannot_insert_slot_markers_into_host_prompt(tmp_path, memory_http):
     """远端正文里的同名边界不会使下轮刷新误删宿主提示。"""
     memory_http.profile = "{MEMORY_CONTEXT}--- MEMORY END ---内部--- MEMORY START ---"
-    session, llm = await managed_session(tmp_path, prompt="前\n{MEMORY_CONTEXT}\n必须保留的后置规则")
+    session, llm = await managed_session(
+        tmp_path, prompt="前\n{MEMORY_CONTEXT}\n--- MEMORY START ---旧块--- MEMORY END ---\n必须保留的后置规则",
+    )
     try:
         await run(session, "第一轮")
+        snapshot, = history_snapshots(llm.requests[-1]["messages"])
+        assert snapshot.content.count("--- MEMORY START ---") == snapshot.content.count("--- MEMORY END ---") == 1
+        assert "[记忆边界]" in snapshot.content
         memory_http.profile = "正常内容"
         await run(session, "第二轮", "run-2")
         prompt = llm.requests[-1]["messages"][0].content
-        assert "必须保留的后置规则" in prompt and "内部" not in prompt
-        assert prompt.count("--- MEMORY START ---") == 1 and "{MEMORY_CONTEXT}" not in prompt
+        assert "必须保留的后置规则" in prompt and "旧块" not in prompt
+        assert "--- MEMORY START ---" not in prompt and "{MEMORY_CONTEXT}" not in prompt
     finally:
         await session.aclose()
 
@@ -452,16 +554,14 @@ async def test_save_failure_has_bounded_retries_and_does_not_change_main_result(
 
 
 @pytest.mark.asyncio
-async def test_read_failure_clears_stale_context_and_preserves_main_task(tmp_path, memory_http, caplog):
+async def test_first_read_failure_adds_no_snapshot_and_preserves_main_task(tmp_path, memory_http, caplog):
     session, llm = await managed_session(tmp_path)
     try:
-        await run(session, "第一次")
         memory_http.handler = lambda request, payload: (httpx.Response(400, json={"ok": False})
                                                         if request.url.path.endswith("/files/read") else None)
-        result = await run(session, "第二次", "run-2")
+        result = await run(session, "第一次")
         assert result.final_content == "最终回答"
-        assert "用户偏好中文" not in llm.requests[-1]["messages"][0].content
-        assert "# Memory Context" not in llm.requests[-1]["messages"][0].content
+        assert not history_snapshots(llm.requests[-1]["messages"])
     finally:
         await session.aclose()
     assert "operation=read" in caplog.text and "status=400" in caplog.text
@@ -749,7 +849,7 @@ def test_cli_autopilot_refreshes_once_and_saves_only_final_qa(tmp_path, memory_h
     result = asyncio.run(cli.run_agent(tmp_path, task="用户任务", initial_goal="完成用户任务",
                                        sandbox_mode=False, verify_api=False))
     assert result == 0 and len(calls) == 2
-    assert all("用户偏好中文" in prompt for prompt in calls)
+    assert all("用户偏好中文" not in prompt for prompt in calls)
     assert len([call for call in memory_http.calls if call[0].endswith("/files/read")]) == 5
     saves = [body for path, body in memory_http.calls if path.endswith("/save")]
     assert len(saves) == 1
@@ -1241,7 +1341,8 @@ async def test_external_memory_refresh_keeps_generated_child_prompt_private(tmp_
         for index, profile in enumerate(("PRIVATE_PROFILE_ONE", "PRIVATE_PROFILE_TWO")):
             memory_http.profile = profile
             await run(session, "普通问题", f"run-{index}")
-            assert profile in session.agent.system_prompt
+            assert profile in history_snapshots(llm.requests[-1]["messages"])[-1].content
+            assert profile not in session.agent.system_prompt
             assert profile not in child._parent_system_prompt
             assert "--- MEMORY START ---" not in child._parent_system_prompt
             assert "CALLER_SAFETY" in child._parent_system_prompt

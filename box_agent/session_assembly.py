@@ -357,6 +357,9 @@ async def _prepare_memory_prompt(resources: SessionResources, prompt: str) -> st
     manager = resources.memory_manager
     if resources.context.options.utility or manager is None:
         return prompt.replace(MEMORY_CONTEXT_SLOT, "")
+    if getattr(manager, "memsense_history", None) is not None:
+        # 迁移宿主传入的旧记忆块，避免其留在固定系统前缀中。
+        return place_memory_block(prompt, "")
     external = isinstance(manager, ExternalMemoryBackend)
     if _prepared(resources) and not external and MEMORY_CONTEXT_SLOT not in prompt:
         # 已装配宿主继续拥有本地提示，仅在显式给出新槽位时填充。
@@ -870,6 +873,8 @@ def build_session_prompt(
     # 统一装配器使用后端已有的槽位规则，避免各入口重复召回或追加记忆。
     if utility or (memory is None and not memory_block):
         prompt = prompt.replace(MEMORY_CONTEXT_SLOT, "")
+    elif getattr(memory, "memsense_history", None) is not None:
+        prompt = place_memory_block(prompt, "")
     else:
         prompt = place_memory_block(
             prompt, memory_block or "", reserve=isinstance(memory, ExternalMemoryBackend),

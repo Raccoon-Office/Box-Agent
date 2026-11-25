@@ -105,6 +105,7 @@ class DefaultContextEngine:
         self.thinking_enabled = thinking_enabled
         self.initial_context_transition = initial_context_transition
         self._memory_lookup = None
+        self._memsense_history = None
         self._input_guard: ModelInputGuard | None = None
         self.references: SkillReferenceContext | None = None
         self.prepared_tools: PreparedTools | None = None
@@ -170,6 +171,7 @@ class DefaultContextEngine:
     def bind_memory(self, memory_lookup: Any) -> None:
         """Bind optional memory after run capabilities have been resolved."""
         self._memory_lookup = memory_lookup
+        self._memsense_history = getattr(memory_lookup, "memsense_history", None)
         guard = getattr(memory_lookup, "model_input_guard", None)
         self._input_guard = guard if isinstance(guard, ModelInputGuard) else None
         if self._input_guard is not None:
@@ -196,9 +198,15 @@ class DefaultContextEngine:
 
     def project_history(self, messages: list[Message]) -> list[Message]:
         """Effective rules for budgeting/compaction, without reference delivery."""
+        from .memory import is_memsense_history_message
+
+        # 关闭记忆或切换账号后，保留日志原样，但不把旧身份的快照发给模型。
+        memory_name = self._memsense_history.name if self._memsense_history is not None else None
+        visible = [message for message in messages
+                   if not is_memsense_history_message(message) or message.name == memory_name]
         suffix = verified_system_suffixes(self.references.runtime) if self.references is not None else ()
         return restore_connector_status(
-            project_legacy_system([project_user_message(message) for message in messages], suffix, self._system_prompt_projector),
+            project_legacy_system([project_user_message(message) for message in visible], suffix, self._system_prompt_projector),
         )
 
     @property
@@ -207,6 +215,9 @@ class DefaultContextEngine:
 
     def compact_history(self, original: list[Message], compacted: list[Message]) -> list[Message]:
         """Apply resource retention only after the existing compaction decision."""
+        from .memory import is_memsense_history_message
+
+        compacted = [message for message in compacted if not is_memsense_history_message(message)]
         if self.references is not None:
             definitions = self.prepared_tools.definitions if self.prepared_tools is not None else ()
             budget = skill_reference_budget_chars(compacted, definitions, self._token_limit,
@@ -214,11 +225,17 @@ class DefaultContextEngine:
             compacted = self.references.compact_history(original, compacted, budget_chars=budget)
         latest_date = _latest_current_date(original)
         if latest_date is not None and _latest_current_date(compacted) != latest_date:
-            return [*compacted, latest_date]
+            compacted = [*compacted, latest_date]
+        if self._memsense_history is not None:
+            compacted = self._memsense_history.restore(original, compacted)
         return compacted
 
     def compaction_source(self, messages: list[Message]) -> list[Message]:
         """Keep method bodies out of both generated and deterministic summaries."""
+        from .memory import is_memsense_history_message
+
+        # 记忆由原后端重新供给，不能混进无法撤回的对话摘要。
+        messages = [message for message in messages if not is_memsense_history_message(message)]
         return self.references.compaction_source(messages) if self.references is not None else messages
 
 
@@ -325,6 +342,8 @@ class DefaultContextEngine:
         self._pending_followup_blocks = []
         self.prepared_tools = prepared_tools
         history_updates = _current_date_update(messages)
+        if self._memsense_history is not None:
+            history_updates += self._memsense_history.updates(messages)
         history = [*messages, *history_updates] if history_updates else messages
         request_tail = (transient_message,) if transient_message is not None else ()
         from .correction import prepare_correction_context
