@@ -9,9 +9,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from copy import deepcopy
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 from .schema import Message
+
+
+def mark_submitted_tool_results(newest_first: Iterable[Message]) -> None:
+    """Close the pending tool batch at a main request, even without an assistant reply."""
+    for message in newest_first:
+        if message.role == "assistant":
+            break
+        if message.role == "tool":
+            message._tool_result_submitted = True
 
 
 @dataclass(frozen=True, slots=True, init=False)

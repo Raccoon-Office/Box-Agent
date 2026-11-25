@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from box_agent.schema import Message
@@ -73,7 +74,7 @@ def test_context_limit_scales_default_budgets_but_not_explicit_overrides(
     assert explicit.aggregate_budget == 54_321
 
 
-def test_immediate_large_string_is_written_once_and_replaced(tmp_path: Path) -> None:
+def test_immediate_large_results_with_reused_id_keep_their_own_files(tmp_path: Path) -> None:
     storage = ToolResultStorage(tmp_path, default_result_limit=10)
     original = _message("HEAD_FACT\n" + "x" * 2_500 + "\nTAIL_FACT")
 
@@ -86,10 +87,14 @@ def test_immediate_large_string_is_written_once_and_replaced(tmp_path: Path) -> 
     assert "TAIL_FACT" in first.content
     assert "middle omitted from preview" in first.content
 
-    path.write_text("sentinel", encoding="utf-8")
-    second = storage.process_message(original, tool=_Tool(), session_id="session-a")
-    assert path.read_text(encoding="utf-8") == "sentinel"
-    assert second.content == first.content
+    new_payload = _message("a different payload for the same id")
+    second = storage.process_message(new_payload, tool=_Tool(), session_id="session-a")
+    second_path = Path(second.content.split("Full output saved to: ", 1)[1].splitlines()[0])
+    assert second_path != path
+    assert second_path.read_text(encoding="utf-8") == new_payload.content
+    assert path.read_text(encoding="utf-8") == original.content
+    assert new_payload.content in second.content
+    assert "HEAD_FACT" not in second.content
 
 
 def test_complete_tool_payload_is_persisted_instead_of_bounded_host_view(
@@ -130,14 +135,14 @@ def test_processed_model_context_is_not_persisted_or_reprocessed(
         session_id="session-a",
         content_already_processed=True,
     )
-    messages = [immediate]
+    messages = [Message.model_validate_json(immediate.model_dump_json())]
     aggregate = storage.enforce_fresh_budget(
         messages,
         tools={"bash": _Tool()},
         session_id="session-a",
     )
 
-    assert immediate is processed
+    assert immediate.content == processed.content
     assert aggregate.fresh_count == 0
     assert messages[0].content == "compact semantic context"
     assert not (tmp_path / "session-a" / "tool-results").exists()
@@ -178,7 +183,7 @@ def test_persistence_failure_keeps_original(tmp_path: Path) -> None:
     assert storage.process_message(original, tool=_Tool(), session_id="s") is original
 
 
-def test_fresh_aggregate_budget_persists_largest_then_freezes_ids(tmp_path: Path) -> None:
+def test_fresh_budget_persists_largest_results_and_preserves_sent_history(tmp_path: Path) -> None:
     storage = ToolResultStorage(
         tmp_path,
         default_result_limit=1_000,
@@ -201,13 +206,23 @@ def test_fresh_aggregate_budget_persists_largest_then_freezes_ids(tmp_path: Path
     assert "Preview (head + tail" in messages[0].content
     assert "Preview (head + tail" in messages[1].content
 
-    cached_third = messages[2].content
-    third_was_persisted = "<persisted-output>" in str(cached_third)
-    messages[2] = _message("c" * 900, "c")
+    sent = tuple(message.model_dump_json() for message in messages)
+    for index, edit in first.edits.items():
+        assert edit["originalChars"] == (600, 500, 400)[index]
+        assert edit["reason"] == "tool_result_budget"
+        assert Path(edit["persistedPath"]).read_text() == "abc"[index] * edit["originalChars"]
+        assert edit["persistedPath"] in messages[index].content
+    assert len(first.edits) == first.persisted_count
+    assert len(list((tmp_path / "s" / "tool-results").iterdir())) == first.persisted_count
+
+    messages.append(Message(role="assistant", content="received"))
+    messages.append(_message("another call using a" * 100, "a"))
     second = storage.enforce_fresh_budget(messages, tools=tools, session_id="s")
-    assert second.fresh_count == 0
-    assert second.persisted_count == 0
-    assert messages[2].content == (cached_third if third_was_persisted else "c" * 900)
+    assert second.fresh_count == 1
+    assert second.persisted_count == 1
+    assert second.edits[4]["persistedPath"] != first.edits[0]["persistedPath"]
+    assert "another call using a" in messages[-1].content
+    assert tuple(message.model_dump_json() for message in messages[:3]) == sent
 
 
 def test_default_aggregate_budget_counts_actual_persisted_wrappers(tmp_path: Path) -> None:
@@ -271,6 +286,15 @@ def test_empty_session_ids_use_isolated_storage_namespaces(tmp_path: Path) -> No
     assert second_path.read_text(encoding="utf-8") == "second payload"
 
 
+def test_literal_storage_tag_in_raw_output_does_not_exempt_it_from_the_budget(tmp_path):
+    storage = ToolResultStorage(tmp_path, aggregate_budget=1_000)
+    raw = "<persisted-output> raw transcript " + "x" * 5_000
+    messages = [_message(raw)]
+    outcome = storage.enforce_fresh_budget(messages, tools={})
+    assert outcome.persisted_count == 1
+    assert Path(outcome.edits[0]["persistedPath"]).read_text() == raw
+
+
 def test_explicit_session_collision_never_points_at_stale_content(tmp_path: Path) -> None:
     first_storage = ToolResultStorage(tmp_path, default_result_limit=5)
     second_storage = ToolResultStorage(tmp_path, default_result_limit=5)
@@ -289,6 +313,37 @@ def test_explicit_session_collision_never_points_at_stale_content(tmp_path: Path
     second_path = Path(str(second.content).split("Full output saved to: ", 1)[1].splitlines()[0])
     assert second_path.name.startswith("call-1-")
     assert second_path.read_text(encoding="utf-8") == "second payload"
+
+
+def test_concurrent_reuse_of_a_call_id_shares_only_complete_identical_files(tmp_path: Path) -> None:
+    storage = ToolResultStorage(tmp_path, default_result_limit=1)
+    prefix = "保存\r\n" * 4_000
+    payloads = (prefix, prefix + "more", prefix + "more", prefix)
+
+    def save(payload: str) -> Path:
+        result = storage.process_message(_message(payload), tool=None, session_id="shared")
+        return Path(result.content.split("Full output saved to: ", 1)[1].splitlines()[0])
+
+    with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+        paths = list(pool.map(save, payloads))
+
+    assert [path.read_bytes() for path in paths] == [text.encode("utf-8") for text in payloads]
+    assert paths[0] == paths[3] and paths[1] == paths[2]
+    assert len(set(paths)) == 2
+
+
+def test_persisted_receipt_references_complete_file_on_volumes_without_hard_links(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    def unavailable(*args):
+        raise OSError("hard links unsupported on this volume")
+
+    monkeypatch.setattr(Path, "hardlink_to", unavailable)
+    storage = ToolResultStorage(tmp_path, default_result_limit=1)
+    message = _message("preserve this file")
+    receipt = storage.process_message(message, tool=None, session_id="s")
+    path = Path(receipt.content.split("Full output saved to: ", 1)[1].splitlines()[0])
+    assert path.read_text() == message.content
 
 
 def test_aggregate_budget_persists_read_results_when_batch_exceeds_limit(
@@ -315,17 +370,26 @@ def test_aggregate_budget_persists_read_results_when_batch_exceeds_limit(
     ).read_text(encoding="utf-8") == "x" * 10_000
 
 
-def test_existing_history_is_frozen_when_conversation_state_is_initialized(tmp_path: Path) -> None:
-    storage = ToolResultStorage(tmp_path, aggregate_budget=10)
-    historical = _message("x" * 1_000, "old")
-    messages = [historical]
+def test_resume_budgets_only_unsent_results_across_a_user_injection(tmp_path: Path) -> None:
+    storage = ToolResultStorage(tmp_path, aggregate_budget=500)
+    historical = _message("historical" * 1_000, "old")
+    unsent = _message("still pending" * 1_000, "old")
+    messages = [
+        historical, Message(role="assistant", content="calling again"), unsent,
+        Message(role="user", content="one more thing"),
+    ]
     storage.initialize_history(messages)
 
-    outcome = storage.enforce_fresh_budget(
-        messages,
-        tools={"bash": _Tool()},
-        session_id="s",
-    )
+    outcome = storage.enforce_fresh_budget(messages, tools={"bash": _Tool()}, session_id="s")
 
-    assert outcome.fresh_count == 0
+    assert outcome.fresh_count == outcome.persisted_count == 1
+    assert set(outcome.edits) == {2}
     assert messages[0] is historical
+    assert "still pending" in messages[2].content
+    assert messages[-1].content == "one more thing"
+
+    # A retry before the next assistant response sees the same stored receipt.
+    retry = ToolResultStorage(tmp_path, aggregate_budget=500)
+    retry.initialize_history(messages)
+    assert retry.enforce_fresh_budget(messages, tools={}).persisted_count == 0
+    assert Path(outcome.edits[2]["persistedPath"]).read_text() == unsent.content

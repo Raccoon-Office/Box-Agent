@@ -133,6 +133,12 @@ class Message(BaseModel):
     tool_call_id: str | None = None
     name: str | None = None  # For tool role
     usage: TokenUsage | None = None
+    # Semantic tool projections and delivery diagnostics have already been
+    # bounded. Preserve their first-send budget decision across Session Log replay.
+    tool_result_budget_exempt: bool | None = None
+    # Reconstructed from the main request/header sequence on replay. A provider
+    # may have received this result even when no assistant reply was committed.
+    _tool_result_submitted: bool = PrivateAttr(default=False)
     # Estimated request-only input included in this response's provider usage
     # but intentionally absent from the next durable request. Persist the
     # numeric adjustment so context estimation remains correct after resume.

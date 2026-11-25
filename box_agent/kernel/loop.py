@@ -94,6 +94,7 @@ from .tool_messages import (
 from ..logger import AgentLogger
 from ..payload_privacy import redact_diagnostic_text
 from ..session_log import SessionLogReplayError, run_session_write
+from ..session_projection import mark_submitted_tool_results
 from ..llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from ..loop_guards import (
     EMPTY_ARGS_LIMIT,
@@ -1914,6 +1915,7 @@ async def _run_agent_loop_impl(
                     session_log.flush()
 
                 await run_session_write(session_log, record_request_context)
+            mark_submitted_tool_results(reversed(messages))
 
             cache_fingerprint = build_cache_fingerprint(
                 messages=request_messages,

@@ -551,11 +551,11 @@ def test_invalid_event_metadata_becomes_a_small_serializable_tool_reply(tmp_path
     assert outcome.tool_message.tool_call_id == request.tool_call_id
 
 
-def test_failure_reply_survives_cached_history_and_does_not_retry_storage(tmp_path, monkeypatch):
-    storage = ToolResultStorage(tmp_path)
+def test_failure_reply_survives_fresh_budget_and_does_not_retry_storage(tmp_path, monkeypatch):
+    storage = ToolResultStorage(tmp_path, aggregate_budget=1)
     request = replace(_pipeline(tmp_path, ToolResult(success=True, content="HEAD" + "x" * 100_000 + "TAIL")), result_storage=storage)
     # Model-side persistence succeeds first, then all final formatting/storage
-    # fails. The failure reply must replace the cached success receipt.
+    # fails. Even under budget pressure, retain the committed failure notice.
     def fail_delivery(*args, **kwargs):
         monkeypatch.setattr(Path, "open", lambda *args, **kwargs: pytest.fail("fallback must not write files"))
         raise OSError("formatter storage failed")

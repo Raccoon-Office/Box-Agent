@@ -24,7 +24,7 @@ from uuid import uuid4
 
 from .schema import Message
 from .schema.schema import RequestUsageSnapshot
-from .session_projection import SessionProjection
+from .session_projection import SessionProjection, mark_submitted_tool_results
 from .windows_session_lock import WINDOWS_LOCK_CONTENTION, WindowsSessionLock
 
 
@@ -1246,6 +1246,13 @@ class SessionLog:
             raise ValueError("replacement Surface must not be empty")
         old_nodes = self._surface_nodes()
         appended: list[dict[str, Any]] = []
+        # Match durable fields. Submission markers and restored usage estimates
+        # are private, and may differ between a live message and its log node.
+        old_payloads = [(msg.source, msg.model_dump()) for _, msg in old_nodes]
+
+        def retained(message: Message) -> bool:
+            return (message.source, message.model_dump()) in old_payloads
+
         if old_nodes:
             source_seqs = [seq for seq, _ in old_nodes]
             appended.append(
@@ -1259,7 +1266,7 @@ class SessionLog:
                         "end": source_seqs[-1],
                     },
                     source_event_seqs=source_seqs,
-                    surface_derived=any(messages[0] == previous for _, previous in old_nodes),
+                    surface_derived=retained(messages[0]),
                 )
             )
             remaining = messages[1:]
@@ -1272,7 +1279,7 @@ class SessionLog:
                     turn=turn,
                     step=step,
                     surface_op="append",
-                    surface_derived=any(message == previous for _, previous in old_nodes),
+                    surface_derived=retained(message),
                 )
             )
         return appended
@@ -1314,6 +1321,9 @@ class SessionLog:
                 surface.clear()
                 images.clear()
                 latest_image_request = None
+                continue
+            if event_type == "request/header":
+                mark_submitted_tool_results(message for _, message in reversed(surface))
                 continue
             if event_type in {"user/message", "tool/result"}:
                 references = data.get("images")
