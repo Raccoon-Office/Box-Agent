@@ -21,6 +21,7 @@ from box_agent.desktop_memory.transport import MemoryProxyError
 from box_agent.memory import _MemoryTurn, create_memory_backend, memory_user_turn, uses_local_memory
 from box_agent.schema import Message, StreamEvent, FunctionCall, ToolCall
 from box_agent.session_context import HostBindings, SessionOptions
+from box_agent.session_log import SessionLog, run_session_write
 from box_agent.tools.engine.preparation import prepare_tools
 from box_agent.tools.memory_tool import create_memory_tools
 from tests.test_agent_session import session_config
@@ -372,6 +373,61 @@ async def test_read_capacity_failure_and_model_compaction_revoke_host_grant(host
         assert not any(operation == "core/mutate" for operation, _ in host.calls)
     finally:
         await manager.aclose()
+
+
+@pytest.mark.parametrize("keep_full_read", [True, False], ids=["full-read", "summary-only"])
+async def test_desktop_read_authorization_survives_request_preparation_with_session_log(host, tmp_path, keep_full_read):
+    manager = backend(host)
+    log = SessionLog.create(tmp_path / "sessions", session_id="session-1", cwd=tmp_path)
+    engine = DefaultContextEngine()
+    engine.configure_run(session_store=log)
+    engine.bind_memory(manager)
+    arguments = dict(prepared_tools=prepare_tools(create_memory_tools(manager)), token_limit=20000)
+    history = [Message(role="user", content="Update my long-term memory")]
+    path = "memory.md"
+    original = host.files[path]
+
+    try:
+        await manager.load_context(query=history[0].content, session_id="session-1", turn_id="turn-1")
+        await engine.aprepare_request(history, **arguments)
+        read = await manager.read_core_memory(path)
+        reply = Message(role="tool", name="memory_read", tool_call_id="read-1", content=model_json(read))
+        request = await engine.aprepare_request([*history, reply], **arguments)
+        await run_session_write(log, request.on_committed)
+        request.on_response()
+        await manager.model_input_guard.require(path)
+        assert read["read_id"] in host.active
+
+        # 模拟后续请求保留完整结果，或压缩后只保留摘要。
+        if keep_full_read:
+            next_request = await engine.aprepare_request([*history, reply], **arguments)
+        else:
+            summary = Message(role="assistant", content="The prior step read the memory file.")
+            next_request = await engine.apreview_request([*history, summary], **arguments)
+        assert next_request.blocked_reason is None
+        await run_session_write(log, next_request.on_committed)
+        next_request.on_response()
+
+        if keep_full_read:
+            await manager.edit_core_memory(path, old_text="", new_text="<mem>新记忆</mem>")
+            assert "新记忆" in host.files[path]
+        else:
+            with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+                await manager.edit_core_memory(path, old_text="", new_text="<mem>新记忆</mem>")
+            assert host.files[path] == original
+    finally:
+        log.close()
+        await manager.aclose()
+
+    operations = [operation for operation, _ in host.calls]
+    commit = operations.index("visibility/commit")
+    revoke = operations.index("visibility/revoke", commit + 1)
+    assert operations.count("core/read") == 1
+    if keep_full_read:
+        assert operations.index("visibility/commit", revoke + 1) < operations.index("core/mutate")
+    else:
+        assert "visibility/commit" not in operations[revoke + 1:] and "core/mutate" not in operations
+    assert not host.active
 
 
 async def test_repeated_core_reads_keep_only_current_path_records(host):
