@@ -22,7 +22,8 @@ Box-Agent 在两个边界控制持久上下文增长：
 工具执行完成
   -> 检查单个结果
   -> 追加 tool messages
-  -> 下一次 LLM 请求前检查 fresh 结果总预算
+  -> 在下一次主模型请求前对尚未发送的工具结果检查总预算
+  -> 将改写事件刷入 Session Log，再更新内存历史
   -> 从文本历史上限中预留本次图片预算
   -> 估算下一次请求大小
   -> 达到阈值才压缩历史
@@ -134,7 +135,7 @@ Session Log 恢复后也执行相同检查。
 
 ## 超长工具结果落盘
 
-`box_agent/tool_result_storage.py` 中的 `ToolResultStorage` 统一负责持久化、预览生成和会话内去重。共享执行循环同时用于串行和并行工具；CLI 与 ACP 不复制这套策略。
+`box_agent/tool_result_storage.py` 中的 `ToolResultStorage` 负责写入完整工具结果并生成预览。CLI 与 ACP 共用执行循环，将串行或并行工具最终选定的文本提交到会话历史。
 
 ### 单结果即时检查
 
@@ -142,7 +143,7 @@ Session Log 恢复后也执行相同检查。
 
 以下结果不会再做二次压缩：
 
-- 已实际采用工具 `model_context` 的结果会按 `tool_use_id` 冻结；
+- 已实际采用工具 `model_context` 的结果在消息上记录预算豁免；
 - `read_file`、`query_jsonl`、`search_files` 通过 Infinity 明确退出，它们分别依赖行/字符分页、cursor/结构化摘要、结果数/字符分页；
 - `bash`、`bash_output` 也通过 Infinity 退出，因为工具内部已经执行一次 50,000 字符的 40% head + 60% tail 截断。
 
@@ -152,13 +153,12 @@ Session Log 恢复后也执行相同检查。
 
 - 字符串保存为 `.txt`；
 - 只含 text block 的数组格式化序列化后保存为 `.json`；
-- 文件路径为 `~/.box-agent/sessions/<session>/tool-results/<tool_use_id>.<ext>`；
-- 使用独占创建模式 `x`（等价于 `wx`），已有文件不会被覆盖；
+- 文件保存在会话的 `tool-results/` 目录，默认位于 `~/.box-agent/sessions/<session>/` 下；
 - 模型侧结果替换为稳定的 `<persisted-output>` head + tail 预览。
 
 以下情况保留原结果：未超过阈值、包含图片或任何非 text block、持久化失败。空输出规范化为 `(<工具名> completed with no output)`，Bash 对应 `(Bash completed with no output)`。
 
-每个 `tool_use_id` 只做一次决策。成功落盘后的替换文本会被缓存，后续循环直接复用，不会重复写文件。恢复会话时已经存在的结果会被冻结，不会被追溯外置。
+即使 provider 复用了工具调用 ID，每次调用也根据本次输出独立处理。存储层先写完带唯一名称的文件，再为它建立惯用的 `<tool_use_id>.<ext>` 文件名。同名文件内容不同时使用带内容哈希后缀的名称。如果文件系统无法建立硬链接，预览会直接指向已写完的唯一文件。
 
 工具仍可自行保留有界输出；此时通过 `ToolResult.persistence_content` 把完整可落盘文本交给统一边界，真正的写入仍只由 `ToolResultStorage` 完成。Bash 的成功和失败命令都使用这条路径：完整输出保存到磁盘，模型继续看到工具已经生成的 head/tail，并额外得到完整输出路径，不会再被替换成通用的 2,000 字符 head 预览。工具提供的语义化 `model_context` 属于另一层职责，一旦采用也不会被即时检查或 fresh 总预算重复处理。
 
@@ -184,15 +184,15 @@ Preview (head + tail, up to 2.0KB):
 
 ### fresh 结果总预算
 
-每次 LLM 请求前，对本会话首次出现的工具结果执行动态总预算检查：`max(50,000, context_token_limit * 0.50)` 字符。
+在准备下一次主模型请求前，内核检查当前投影中最后一条 assistant 消息之后可参与预算的工具结果。中途注入的 user 消息不会截断这一批结果。如果工具执行后会话被取消、达到步数上限或由工具结束本轮，下轮或恢复会话后的首个请求仍会检查这些尚未发送的结果。新的 assistant 消息一旦提交，之前的批次就退出检查范围。
 
-1. 只处理 fresh `tool_use_id`；
-2. 排除已经采用 `model_context` 的结果，但仍统计单结果声明为 Infinity 的自处理工具；Infinity 只关闭即时单结果落盘，不代表并行批次可绕过聚合预算；
-3. 按可落盘结果大小从大到小排序；
-4. 总预算路径保留可按结果份数自动收紧的 head + tail 预览和恢复路径，并按包装后的模型侧实际长度记账；
-5. 依次持久化并替换最大结果，直到实际剩余 fresh 内容不超过预算。
+如果主请求已经记账、assistant 回复尚未提交就中断，恢复时会根据 `request/header` 的事件序号识别该请求已经包含的工具消息。即便磁盘恢复可写，或下次请求使用了更小的预算，这些消息的正文也保持原样。纯内存会话在已提交请求的工具消息上保留同样的标记。
 
-不支持的 block 和落盘失败结果保持不变。检查时 ID 会被标记为已见，因此后续请求不会反复处理。这条路径专门覆盖并行工具调用：单个结果都没有超限，但合计内容过大。
+消息上的持久字段 `tool_result_budget_exempt` 保护已采用的语义投影、已提供完整载荷的工具自限长结果，以及投递阶段生成的最终通知。此字段只用于会话历史，provider 请求中不携带它。恢复时也能识别已有的 `<persisted-output>` 回执，包括 `Error: <persisted-output>` 形式。旧日志可能缺少豁免字段，其中仍处于未发送批次的无标记语义结果会按普通文本参与预算。
+
+总预算默认为 `max(50,000, context_token_limit * 0.50)` 字符。并行返回的每一页都符合单条限制，合计仍可能超额。存储层从最大的可落盘文本开始，保存完整内容，按含回查路径的预览实际长度计费，达到预算或没有可选结果时停止。多媒体结果和写入失败的结果保留当前正文。
+
+对于有日志的会话，模型使用的持久历史以 Session Log 为准。每次预算改写都在请求前追加一条派生的 `tool/result`。它的 `surfaceOp` 为 `{"op":"replace","start":seq,"end":seq}`，`sourceEventSeqs` 为 `[seq]`，其中 `seq` 取自该消息位置的当前有效节点。事件记录新的 `data.message`、值为 `true` 的 `data.surfaceDerived`，以及值为 `tool_result_budget` 的 `data.edit.reason`。默认存储还在 `data.edit` 中记录 `persistedPath` 和 `originalChars`。刷盘后内核才更新内存消息。重放得到预览，宿主聊天记录只显示一次最初提交的工具消息。旧日志中已经存在的重复记录维持原状。缺少单条替换接口的第三方会话存储可提交整个投影。纯内存会话直接更新消息列表。
 
 ## 上下文限制压缩
 
@@ -357,6 +357,8 @@ system message
 最新完整轮次即使单独超限也会保留。其 assistant 正文和工具结果正文可改成有界回执，
 工具调用、参数、标识符、结果顺序和数量原样保留。
 
+压缩后的首个主模型请求使用这段新历史作为持久前缀。后续步骤在其后追加消息，已保留的工具回执在下次压缩前逐字节稳定，重开日志也能恢复同一投影。对提示缓存而言，压缩会从第一条改写的消息起改变请求前缀。后续请求若使用同一模型、system 提示、工具 schema 和临时覆盖层，provider 可以复用重建后的前缀。恢复会话时重新组装 system 提示也可能改变缓存键。
+
 `[Earlier User Messages]` 从最早到最新记录窗口之外的真实用户原文，并注明这些是历史记录。
 超过 2,000 tokens 的单条消息保留头尾，中间加入省略标记。渲染总预算为 10,000 tokens，
 超出时从最早的条目开始省略并写明数量。Session Log 用结构化字段
@@ -438,7 +440,8 @@ write/edit 工具调用参数会保留原文，直到整段历史压缩摘要其
 
 ## 验证
 
-- `tests/test_tool_result_storage.py`：类型处理、独占写入、预览、Read 单结果豁免、失败保留、去重和总预算排序；
+- `tests/test_tool_result_storage.py` 覆盖类型处理、独占写入、预览、Read 单结果豁免、失败保留、重复调用 ID 和总预算排序。
+- `tests/test_tool_result_surface.py` 覆盖压缩和重开日志后的请求前缀稳定性，以及 ACP 回放中的原始工具结果。
 - `tests/test_auth.py` 和 `tests/test_main_input_budget.py` 覆盖触发阈值、模型绑定及请求输出限制。
 - `tests/test_context_token_estimation.py` 和 `tests/test_session_log.py` 覆盖 usage 格式、校准和重放。
 - `tests/test_context_compaction_retention.py` 和 `tests/test_core.py` 覆盖历史保留和运行状态恢复。

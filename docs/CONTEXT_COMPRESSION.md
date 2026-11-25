@@ -50,7 +50,8 @@ compaction path with the supplied model.
 tool finishes
   -> persist its result and any session-owned image attachments
   -> append tool messages and attachment references
-  -> before the next LLM request, enforce the fresh-result aggregate budget
+  -> before the next main request, apply the aggregate budget to unsent results
+  -> flush any resulting edits to the Session Log and update live history
   -> select retained images and enforce image/request-body budgets
   -> reserve the request-only image cost from the text-history limit
   -> compact conversation history when necessary
@@ -222,7 +223,7 @@ and waiting for user input are not evidence of completed data processing.
 
 ## Oversized tool-result storage
 
-`ToolResultStorage` in `box_agent/tool_result_storage.py` owns persistence, preview rendering, and per-conversation deduplication. The shared loop invokes it for both sequential and parallel tools; CLI and ACP do not duplicate this policy.
+`ToolResultStorage` in `box_agent/tool_result_storage.py` writes full results and builds previews. The shared CLI and ACP loop commits the chosen text to conversation history for both sequential and parallel tools.
 
 ### Immediate per-result check
 
@@ -230,7 +231,7 @@ The minimum shared model-facing result limit is 20,000 characters and scales wit
 
 The following results are not processed a second time:
 
-- a tool result whose `model_context` projection was actually selected is frozen by `tool_use_id`;
+- a tool result whose `model_context` projection was selected carries its budget exemption on the message itself;
 - `read_file`, `query_jsonl`, and `search_files` declare infinity and rely on line/character pagination, cursor/structured summarization, and result-count/character pagination respectively;
 - `bash` and `bash_output` also declare infinity because they already apply one 50,000-character 40% head + 60% tail truncation inside the tool.
 
@@ -240,13 +241,12 @@ When an eligible result exceeds the limit:
 
 - a string is saved as `.txt`;
 - an array containing only text blocks is serialized as formatted JSON and saved as `.json`;
-- files live under `~/.box-agent/sessions/<session>/tool-results/<tool_use_id>.<ext>`;
-- exclusive-create (`x`, equivalent to `wx`) prevents overwriting an existing result;
+- files live in the session's `tool-results/` directory, normally under `~/.box-agent/sessions/<session>/`;
 - a stable `<persisted-output>` head-and-tail preview replaces the model-facing content.
 
 The original result is preserved when it is below the limit, contains an image or any other non-text block, or cannot be persisted. Empty output is normalized to `(<Tool name> completed with no output)`; for Bash this is `(Bash completed with no output)`.
 
-Each `tool_use_id` receives one decision. A persisted replacement is cached and reused in later loop iterations, so the result is not written repeatedly. Results already present when a session is resumed are frozen and are not retroactively externalized.
+Each invocation starts with its own result, even when a provider reuses a tool call ID. The writer finishes a uniquely named file before publishing the usual `<tool_use_id>.<ext>` name. A collision with different bytes uses a content-hash suffix. If the filesystem cannot create the hard link, the preview points to the completed file under its unique name.
 
 Tools may still bound their own output for operational reasons. When they do, they pass the complete persistable text through `ToolResult.persistence_content`; only `ToolResultStorage` writes it. Bash uses this path for both successful and failed commands: the complete output is saved, while the model keeps the tool-generated head/tail plus the saved path instead of receiving a second generic 2,000-character head preview. Semantic `model_context` projections remain a separate tool concern; once selected, neither the immediate check nor the fresh aggregate budget processes them again.
 
@@ -274,15 +274,44 @@ For a self-bounded tool that supplies `persistence_content`, the body is labeled
 
 ### Aggregate fresh-result budget
 
-Before every LLM request, results first seen during the current conversation are checked against a contextual aggregate budget of `max(50,000, context_token_limit * 0.50)` characters. The pass:
+Before preparing the next main request, the kernel budgets eligible tool results
+after the last assistant message in the current projection. An injected user
+message leaves those results eligible. If cancellation, a step limit, or an
+ends-turn tool stops the loop after tool execution, the next turn or resumed
+session checks that same tail. A subsequent assistant message closes the batch.
+If a main request was already recorded and processing stopped before its
+assistant reply, replay uses the `request/header` sequence to recognize the
+tool messages already covered by that request. Their text stays stable even
+if disk writes recover or the budget shrinks on retry. In-memory sessions
+carry the same boundary on the submitted messages.
 
-1. Considers only fresh `tool_use_id` values.
-2. Excludes selected `model_context` projections, but still counts self-bounded tools whose per-result declaration is infinity. Infinity disables immediate per-result persistence; it does not exempt a parallel batch from the aggregate budget.
-3. Sorts eligible results from largest to smallest.
-4. Keeps a head-and-tail preview plus the recovery path, shrinking each preview according to the batch budget, and counts the wrapper's actual model-facing length.
-5. Persists and replaces the largest results until the actual remaining fresh content is at or below the budget.
+The durable `tool_result_budget_exempt` flag preserves selected semantic
+projections, tool-bounded results supplied with a complete payload, and final
+delivery notices. It stays in message metadata and is omitted from provider
+payloads. Existing `<persisted-output>` receipts, including the
+`Error: <persisted-output>` form, are also recognized on restore. Older logs can lack the flag.
+An unmarked semantic result in their unsent tail may receive the same budget
+check as ordinary text.
 
-Unsupported blocks and persistence failures remain unchanged. Since IDs are marked seen during the pass, later requests do not reconsider the same results. This handles a batch of parallel tool calls whose individual results are below the per-result limit but are too large together.
+The default aggregate budget is `max(50,000, context_token_limit * 0.50)`
+characters. A parallel batch can exceed it even when each page fits individually.
+The store takes the largest eligible text results first, persists their complete
+contents and counts each preview's actual length, including its recovery path.
+It stops when the batch fits or it exhausts the candidates. Multimedia results
+and results whose write fails retain their current content.
+
+For a logged session, the Session Log is the source of durable model history.
+Each budget rewrite appends one derived `tool/result` before the request.
+Its `surfaceOp` is `{"op":"replace","start":seq,"end":seq}` and
+`sourceEventSeqs` is `[seq]`, where `seq` identifies the active node at that
+message position. The event carries the new `data.message`, `data.surfaceDerived`
+set to `true`, and `data.edit.reason` set to `tool_result_budget`. The default
+store also records `persistedPath` and `originalChars` in `data.edit`.
+After flushing the edit, the kernel updates the live message. Replay yields the
+preview, while host history displays the original committed tool message once.
+Existing duplicate records in older logs are retained. A third-party session
+store can commit the full surface if it lacks single-message replacement. An
+in-memory run applies the same budget directly to its message list.
 
 ## Context-limit compaction
 
@@ -544,6 +573,15 @@ keeps the newest complete round even when it exceeds the token cap. Its
 assistant and tool-result bodies can be replaced by bounded receipts while
 calls, arguments, identifiers, result order, and result count are preserved.
 
+Compaction establishes a new durable prefix for the first main request that
+uses this history. A retained tool receipt remains byte-for-byte the same on
+later requests until the next compaction. The loop appends new messages to
+that prefix and resumes from the same projection after reopening the log.
+For prompt caching, compaction changes the prefix at the first rewritten
+message. Subsequent steps can reuse the rebuilt prefix when the model, system
+prompt, tool schemas and request-only overlays also match. Rebuilding the
+system prompt on resume can change the provider's cache key.
+
 Earlier real user text appears oldest first, introduced as a historical record.
 An entry over 2,000 tokens keeps its beginning and end with an omission marker.
 The rendered record fits within 10,000 tokens by leaving out the oldest entries
@@ -669,7 +707,8 @@ Write/edit tool-call arguments remain verbatim until whole-history compaction su
 
 Direct regression coverage lives in:
 
-- `tests/test_tool_result_storage.py` for type handling, exclusive writes, previews, Read single-result opt-out, failures, deduplication, and aggregate ordering;
+- `tests/test_tool_result_storage.py` for type handling, exclusive writes, previews, Read single-result opt-out, failures, reused IDs, and aggregate ordering.
+- `tests/test_tool_result_surface.py` for stable request prefixes across compaction and reopen, and original tool results in ACP history.
 - `tests/test_auth.py` and `tests/test_main_input_budget.py` for the derived threshold, model binding, and request output limits.
 - `tests/test_context_token_estimation.py` and `tests/test_session_log.py` for usage shapes, calibration, and replay.
 - `tests/test_context_compaction_retention.py` and `tests/test_core.py` for retention and runtime-state restoration.
