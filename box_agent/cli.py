@@ -2237,6 +2237,16 @@ async def run_agent(
         try:
             resources = agent_session.plugin_session.resources
             tools = resources.tools
+            if sandbox_mode:
+                for tool in tools:
+                    if isinstance(tool, JupyterSandboxTool):
+                        print("Checking Python sandbox packages...")
+                        try:
+                            await tool.prepare_environment(on_progress=print)
+                        except (OSError, RuntimeError) as exc:
+                            print(f"{Colors.RED}❌ Python sandbox preparation failed: {exc}{Colors.RESET}")
+                            return 1
+                        print(f"{Colors.GREEN}✅ Python sandbox packages ready{Colors.RESET}")
             memory_mgr = resources.memory_manager
             memory_extractor = agent_session.memory_extractor
             skill_loader = agent_session.skill_loader

@@ -20,6 +20,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "packaging>=25.0",
+    "uv>=0.9.0",
     "pydantic>=2.0.0",
     "jsonschema>=4.18.0",
     "pyyaml>=6.0.0",
