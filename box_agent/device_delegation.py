@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from acp import RequestError
 
+from box_agent.auth import current_request_org
 from box_agent.device_artifacts import artifact_refs, delivered_update, project_artifacts
 from box_agent.injections import InjectionKind, MessageInjection
 from box_agent.schema import Message
@@ -318,6 +319,9 @@ class DeviceDelegations:
         self.consumed: dict[str, int] = {}
         self.ended_turns: set[str] = set()
         self.wakes: dict[str, list[tuple[str, int]]] = {}
+        # Device work keeps its initiating cloud turn's payer.
+        self._turn_orgs: dict[str, str] = {}
+        self._restored_org: str | None = None
         self.attempted_wakes: set[str] = set()
         self.superseded_wakes: set[str] = set()
         self.discarded_operations: set[str] = set()
@@ -351,6 +355,30 @@ class DeviceDelegations:
     def reconcile_history(self) -> None:
         if self.log is not None:
             self._apply_history(self.log.events)
+
+    def bind_pending_org(self, org: str, *, replace: bool = False) -> None:
+        """Use a fresh host identity for work restored without a live parent turn."""
+        if replace or self._restored_org is None:
+            self._restored_org = org
+
+    def bind_turn_org(self, turn: str, org: str) -> None:
+        self._turn_orgs.setdefault(turn, org)
+
+    def wake_org(self, turn: str) -> str:
+        pairs = set(self.wakes[turn]) | {
+            (op, record.get("readySeq", record["seq"]))
+            for op, record in self.operations.items()
+            if self._wakeable(op, record.get("readySeq", record["seq"]))
+        }
+        orgs = {
+            self._turn_orgs.get(self.operations[op]["parentTurnId"], self._restored_org)
+            for op, seq in pairs if self._wakeable(op, seq)
+        }
+        if None in orgs or not orgs:
+            raise RequestError(-32602, "DEVICE_WAKE_ORG_REQUIRED", {"code": "DEVICE_WAKE_ORG_REQUIRED"})
+        if len(orgs) != 1:
+            raise RequestError(-32602, "DEVICE_WAKE_ORG_CONFLICT", {"code": "DEVICE_WAKE_ORG_CONFLICT"})
+        return orgs.pop()
 
     def _apply_history(self, events: Sequence[dict[str, Any]]) -> None:
         # Physical state still answers late events and carries Stop intents.
@@ -535,7 +563,9 @@ class DeviceDelegations:
         if self.closed:
             raise RuntimeError("device delegations are closed")
         # A cancelled parent must still consume a late acceptance and target it.
-        task = asyncio.create_task(self._start(device_id, instruction, self.turn_id(), session_id, artifact_delivery))
+        turn = self.turn_id()
+        self.bind_turn_org(turn, current_request_org() or "")
+        task = asyncio.create_task(self._start(device_id, instruction, turn, session_id, artifact_delivery))
         self._track(task)
         return await asyncio.shield(task)
 

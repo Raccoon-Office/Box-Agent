@@ -52,7 +52,7 @@ def completion(request, provider):
 
 @asynccontextmanager
 async def wire_agent(tmp_path, provider=LLMProvider.OPENAI, respond=None,
-                     api_base="https://code-test.xiaohuanxiong.com/v1"):
+                     api_base="https://code-test.xiaohuanxiong.com/v1", notifications=None):
     auth_file = tmp_path / "auth.json"
     auth_file.write_text(json.dumps({"access_token": "login-token", "office_identity": "legacy-team"}))
     requests = []
@@ -82,6 +82,8 @@ async def wire_agent(tmp_path, provider=LLMProvider.OPENAI, respond=None,
     host._conn = server
 
     async def notification(method, params, is_notification):
+        if method == "_device/turn" and notifications is not None:
+            notifications.append(params)
         if method == "session/request_permission":
             return {"outcome": {"outcome": "selected", "optionId": "approve"}}
 
@@ -113,6 +115,193 @@ async def new(rpc, workspace, **meta):
 async def prompt(rpc, session_id, **meta):
     return await rpc("session/prompt", {"sessionId": session_id,
         "prompt": [{"type": "text", "text": "hello"}], "_meta": meta})
+
+
+def pending_device_result(host, session_id, operation="op", parent_turn="parent", parent_org=None,
+                          status="succeeded"):
+    broker = host._sessions[session_id].device_delegations
+    if parent_org is not None:
+        broker.bind_turn_org(parent_turn, parent_org)
+    broker.save({"operationId": operation, "deviceId": "desktop", "sessionId": "local",
+                 "turnId": operation, "parentTurnId": parent_turn, "status": "accepted", "seq": 0})
+    broker.end(parent_turn)
+    return {"version": 1, "sessionId": session_id, "event": {
+        "operationId": operation, "deviceId": "desktop", "sessionId": "local",
+        "turnId": operation, "seq": 1, "status": status, "result": {"text": "device result"}}}
+
+
+async def finish_device_wake(host, session_id):
+    task = host._sessions[session_id].device_wake_task
+    if task is not None:
+        await asyncio.wait_for(task, 10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("meta", [{}, {"org": None}, {"org": "event-team"}])
+@pytest.mark.parametrize("status", ["succeeded", "interrupted"])
+async def test_idle_device_event_keeps_initiating_org_on_model_wire(tmp_path, meta, status):
+    async with wire_agent(tmp_path) as (rpc, host, requests, auth_file):
+        sid = await new(rpc, tmp_path, device={"version": 1}, org="creation-team")
+        await prompt(rpc, sid, org="origin-team", turnId="parent")
+        requests.clear()
+        auth_file.write_text(json.dumps({"access_token": "login-token", "office_identity": "new-team"}))
+        event = pending_device_result(host, sid, parent_org="origin-team", status=status)
+        assert await rpc("_device/event", {**event, "_meta": meta}) == {"recorded": True}
+        await finish_device_wake(host, sid)
+        assert requests
+        assert all(r.headers.get("X-Org-Code") == "origin-team" for r in requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("meta", [{}, {"org": None}, {"org": "event-team"}])
+async def test_queued_device_event_keeps_initiating_org_after_other_prompt(tmp_path, meta):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def respond(request):
+        if request.headers.get("X-Org-Code") == "busy-team":
+            entered.set()
+            await release.wait()
+        return completion(request, LLMProvider.OPENAI)
+
+    async with wire_agent(tmp_path, respond=respond) as (rpc, host, requests, _):
+        sid = await new(rpc, tmp_path, device={"version": 1})
+        event = pending_device_result(host, sid, parent_org="origin-team")
+        busy = asyncio.create_task(prompt(rpc, sid, org="busy-team", turnId="busy"))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await rpc("_device/event", {**event, "_meta": meta})
+            assert host._sessions[sid].device_wake_task is None
+        finally:
+            release.set()
+            await busy
+        await finish_device_wake(host, sid)
+        assert len(requests) >= 2
+        assert requests[0].headers["X-Org-Code"] == "busy-team"
+        wake_requests = [r for r in requests if "Review the device delegation updates" in r.content.decode()]
+        assert wake_requests
+        assert all(r.headers.get("X-Org-Code") == "origin-team" for r in wake_requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["session/resume", "session/load"])
+@pytest.mark.parametrize("org", [None, "restored-team"])
+async def test_restored_device_work_uses_new_execution_identity(tmp_path, method, org):
+    async with wire_agent(tmp_path) as (rpc, host, requests, _):
+        sid = await new(rpc, tmp_path, device={"version": 1}, session_id="device-restore")
+        event = pending_device_result(host, sid)
+        host._sessions[sid].waiting_for_user_input = True
+        await rpc("_device/event", {**event, "_meta": {"org": "old-team"}})
+        assert not requests
+        await rpc(method, {"sessionId": sid, "cwd": str(tmp_path), "mcpServers": [],
+                          "_meta": {"device": {"version": 1}, "org": org}})
+        if method == "session/load":
+            assert not requests
+            await prompt(rpc, sid, org=org, turnId="continue")
+        await finish_device_wake(host, sid)
+        assert requests
+        assert all(r.headers.get("X-Org-Code") == org for r in requests)
+
+
+@pytest.mark.asyncio
+async def test_device_event_ignores_org_and_does_not_block_cancel(tmp_path):
+    async with wire_agent(tmp_path) as (rpc, host, requests, _):
+        sid = await new(rpc, tmp_path, device={"version": 1})
+        event = pending_device_result(host, sid)
+        assert await rpc("_device/event", {**event, "_meta": {"org": 123}}) == {"recorded": True}
+        await finish_device_wake(host, sid)
+        assert host._sessions[sid].device_delegations.operations["op"]["seq"] == 1
+        assert requests
+        assert all("X-Org-Code" not in r.headers for r in requests)
+        assert await rpc("_device/cancel_turn", {
+            "sessionId": sid, "turnId": "parent", "_meta": {"org": 123},
+        }) == {"accepted": False}
+        other = await new(rpc, tmp_path)
+        assert (await prompt(rpc, other))["stopReason"] == "end_turn"
+        assert all("X-Org-Code" not in r.headers for r in requests)
+
+
+@pytest.mark.asyncio
+async def test_queued_device_results_use_parent_turn_org(tmp_path):
+    notifications = []
+    async with wire_agent(tmp_path, notifications=notifications) as (rpc, host, requests, _):
+        sid = await new(rpc, tmp_path, device={"version": 1})
+        state = host._sessions[sid]
+        state.waiting_for_user_input = True
+        for org in ["team-a", "team-b"]:
+            event = pending_device_result(host, sid, operation=org, parent_org="origin-team")
+            await rpc("_device/event", {**event, "_meta": {"org": org}})
+        state.waiting_for_user_input = False
+        host._schedule_device_wake(sid, state)
+        await finish_device_wake(host, sid)
+        assert requests
+        assert all(r.headers.get("X-Org-Code") == "origin-team" for r in requests)
+        assert len(state.device_delegations.attempted_wakes) == 1
+        async def received_both_notifications():
+            while len(notifications) < 2:
+                await asyncio.sleep(0.001)
+        await asyncio.wait_for(received_both_notifications(), 2)
+        turn = next(iter(state.device_delegations.attempted_wakes))
+        assert [(note["turnId"], note["phase"]) for note in notifications] == [
+            (turn, "started"), (turn, "finished"),
+        ]
+        assert "result" in notifications[1]
+        host._schedule_device_wake(sid, state)
+        await finish_device_wake(host, sid)
+        assert len(notifications) == 2
+        assert (await prompt(rpc, sid, org="team-c", turnId="continue"))["stopReason"] == "end_turn"
+        assert requests[-1].headers.get("X-Org-Code") == "team-c"
+
+
+@pytest.mark.asyncio
+async def test_ready_results_from_different_payers_do_not_start_model(tmp_path):
+    notifications = []
+    async with wire_agent(tmp_path, notifications=notifications) as (rpc, host, requests, _):
+        sid = await new(rpc, tmp_path, device={"version": 1})
+        state = host._sessions[sid]
+        state.waiting_for_user_input = True
+        for org in ["team-a", "team-b"]:
+            event = pending_device_result(host, sid, operation=org,
+                parent_turn=org, parent_org=org)
+            await rpc("_device/event", {**event, "_meta": {"org": None}})
+        state.waiting_for_user_input = False
+        host._schedule_device_wake(sid, state)
+        await finish_device_wake(host, sid)
+        assert not requests
+        assert len(state.device_delegations.attempted_wakes) == 1
+        async def received_both_notifications():
+            while len(notifications) < 2:
+                await asyncio.sleep(0.001)
+        await asyncio.wait_for(received_both_notifications(), 2)
+        assert [note["phase"] for note in notifications] == ["started", "finished"]
+        assert notifications[1]["error"]["data"]["code"] == "DEVICE_WAKE_ORG_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_stopped_device_work_stays_stopped_and_new_prompt_uses_new_org(tmp_path):
+    entered = asyncio.Event()
+
+    async def respond(request):
+        if request.headers.get("X-Org-Code") == "old-team":
+            entered.set()
+            await asyncio.Future()
+        return completion(request, LLMProvider.OPENAI)
+
+    async with wire_agent(tmp_path, respond=respond) as (rpc, host, requests, _):
+        sid = await new(rpc, tmp_path, device={"version": 1})
+        busy = asyncio.create_task(prompt(rpc, sid, org="old-team", turnId="parent"))
+        await asyncio.wait_for(entered.wait(), 5)
+        event = pending_device_result(host, sid)
+        await rpc("session/cancel", {"sessionId": sid, "_meta": {
+            "turnId": "parent", "org": 123,
+        }}, notify=True)
+        assert (await busy)["stopReason"] == "cancelled"
+        count = len(requests)
+        await rpc("_device/event", {**event, "_meta": {"org": "old-team"}})
+        await finish_device_wake(host, sid)
+        assert len(requests) == count
+        assert (await prompt(rpc, sid, org="new-team", turnId="continue"))["stopReason"] == "end_turn"
+        assert requests[count:]
+        assert all(r.headers.get("X-Org-Code") == "new-team" for r in requests[count:])
 
 
 @pytest.mark.asyncio

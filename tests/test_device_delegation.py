@@ -3,6 +3,7 @@ from copy import deepcopy
 
 import pytest
 from acp import RequestError
+from box_agent.auth import scoped_request_org
 from box_agent.device_delegation import DeviceDelegations, DeviceTool
 
 
@@ -31,21 +32,73 @@ class Log:
 
 
 @pytest.mark.asyncio
-async def test_start_returns_acceptance_and_terminal_events_restore_without_reexecution():
+async def test_pending_wake_uses_parent_turn_or_resume_identity(tmp_path):
+    from box_agent.session_log import SessionLog
+
+    async def request(*args):
+        return {}
+
+    log = SessionLog.create(tmp_path / "logs", session_id="parent", cwd=tmp_path)
+    broker = DeviceDelegations("cloud", request, lambda: "parent", log)
+    try:
+        broker.save({**target(), "operationId": "op", "parentTurnId": "parent",
+                     "status": "accepted", "seq": 0})
+        broker.end("parent")
+        broker.bind_turn_org("parent", "origin-team")
+        def event(seq, status):
+            return {"version": 1, "sessionId": "cloud", "event": {
+                **target(), "operationId": "op", "seq": seq, "status": status}}
+        broker.event(event(2, "succeeded"))
+        broker.event(event(2, "succeeded"))
+        reopened_gap = DeviceDelegations("cloud", request, lambda: "next", log)
+        reopened_gap.bind_pending_org("resume-team", replace=True)
+        reopened_gap.event(event(1, "running"))
+        assert reopened_gap.next_wake() is not None
+        assert reopened_gap.wake_org(reopened_gap.next_wake()) == "resume-team"
+        broker.event(event(1, "running"))
+        broker.bind_pending_org("finishing-team")
+        turn = broker.next_wake()
+        assert turn is not None
+        assert broker.wake_org(turn) == "origin-team"
+        # Org is not a durable session default; reopening must select it anew.
+        assert all("origin-team" not in str(e["data"]) for e in log.events)
+        restored = DeviceDelegations("cloud", request, lambda: "next", log)
+        restored.bind_pending_org("", replace=True)
+        assert restored.next_wake() is not None
+        assert restored.wake_org(restored.next_wake()) == ""
+        broker.confirm_receipts({"device": {broker._cursor_key(target()): 2}})
+        assert broker.next_wake() is None
+    finally:
+        await broker.aclose()
+        log.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation,session_id", [
+    ("session.start", None), ("session.send", "local-9"),
+])
+async def test_device_turn_keeps_parent_org_and_restores_without_reexecution(operation, session_id):
     calls = []
     async def request(method, params):
         calls.append((method, params))
         return {"deviceId": "FixtureDesktopA", "sessionId": "local-9", "turnId": "t1", "status": "accepted"}
     log = Log()
     broker = DeviceDelegations("cloud-3", request, lambda: "parent-1", log)
-    result = await DeviceTool(broker, "session.start").invoke({"deviceId": "FixtureDesktopA", "instruction": "write"})
+    with scoped_request_org("origin-team"):
+        args = {"deviceId": "FixtureDesktopA", "instruction": "write"}
+        if session_id is not None:
+            args["sessionId"] = session_id
+        result = await DeviceTool(broker, operation).invoke(args)
     assert result.success
     op = calls[0][1]["operationId"]
     assert calls[0][0] == "device/request"
-    assert calls[0][1]["operation"] == "session.start"
+    assert calls[0][1]["operation"] == operation
     event = {"version": 1, "sessionId": "cloud-3", "event": {
         "operationId": op, "deviceId": "FixtureDesktopA", "sessionId": "local-9", "turnId": "t1", "seq": 1, "status": "succeeded", "result": {"text": "ok"}}}
     assert broker.event(event) == {"recorded": True}
+    broker.end("parent-1")
+    turn = broker.next_wake()
+    assert turn is not None and broker.wake_org(turn) == "origin-team"
     count = len(log.events)
     broker.event(event)
     assert len(log.events) == count

@@ -85,6 +85,23 @@ values on execution requests fail with request error `-32602` and data code
 `INVALID_ORG` before execution. Cancellation, queries, and other control
 operations do not validate org; missing or malformed org cannot block a cancel.
 
+Device completion events may carry `params._meta.org`, which is ignored for billing.
+Events report device state and never
+replace the payer of an already running cloud turn. Automatic continuation
+uses the org of the cloud turn that started the device work, even if the user
+logs out while the cloud task remains active. If one automatic turn would
+consume ready results from different initiating payers, it reports
+`DEVICE_WAKE_ORG_CONFLICT` without making a model request. Each automatic
+model turn explicitly enters its resolved billing scope.
+
+The initiating turn identity is held only in memory. After reopening, pending work
+uses the new execution request's org (`session/resume`, or `session/new` when
+reopening a stable session). `session/load` only replays history; a later prompt
+supplies its own identity. Ordinary prompt results without an event identity use
+that prompt's org. This is not a session billing default or a stored login identity.
+Stop continues to suppress automatic wakes for stopped work. Logging out interrupts
+local execution but does not stop an already running cloud task.
+
 ACP requests never fall back to the login file's organization. Non-ACP callers
 retain their existing login-file behavior. Trusted remote MCP tool calls and
 the local web-extract summarizer carry the request identity through per-call
