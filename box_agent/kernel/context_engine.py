@@ -1070,10 +1070,10 @@ def _archived_entry_start(content: str, end: int, number: int, original: str) ->
     return None
 
 
-def _smaller_summary_anchors(anchor: Message) -> Iterator[Message]:
+def _smaller_summary_anchors(anchor: Message, *, protect_latest: bool = True) -> Iterator[Message]:
     """Shrink only a verified archive suffix; leave every byte of the summary intact."""
     texts = anchor.earlier_user_messages or []
-    if len(texts) < 2:
+    if len(texts) < (2 if protect_latest else 1):
         return
     content = anchor.content
     hint = content.rfind(_LOG_HINT_INTRO)
@@ -1091,10 +1091,12 @@ def _smaller_summary_anchors(anchor: Message) -> Iterator[Message]:
             header = "\n\n" + _earlier_user_header(number - 1)
             if content.endswith(_SUMMARY_MESSAGE_SUFFIX + header, 0, start):
                 body = content[:start - len(header)]
-                # starts are newest first. The latest original remains whole.
+                # Starts are newest first. The final removal also drops the archive heading.
                 for dropped, next_start in enumerate(reversed(starts[:-1]), 1):
                     updated = body + "\n\n" + _earlier_user_header(number - 1 + dropped) + content[next_start:]
                     yield anchor.model_copy(update={"content": updated})
+                if not protect_latest:
+                    yield anchor.model_copy(update={"content": body + content[archive_end:]})
                 return
 
 
@@ -1125,13 +1127,9 @@ async def _fit_fallback(
     previous = None
     cost = 0
     if not after and len(anchors) > 1:
-        index = anchors[-2]
-        after = [g for g in interactions if index < g.start < primary]
-        anchor_cost = _fallback_context_estimate([original[index]], None, llm=llm)
-        if anchor_cost <= _FALLBACK_GROUP_TOKEN_LIMIT:
-            previous = index
-            kept[index] = original[index]
-            cost = anchor_cost
+        previous = anchors[-2]
+        kept[previous] = original[previous]
+        after = [g for g in interactions if previous < g.start < primary]
     chosen = []
     for group in reversed(after):
         cost += _fallback_context_estimate(original[group.start:group.stop], None, llm=llm)
@@ -1159,8 +1157,8 @@ async def _fit_fallback(
     def rebuild():
         omitted = [i for i in range(1, len(original))
                    if i not in kept and original[i].runtime_kind != "compaction_notice"]
-        if kept[primary] is not original[primary]:
-            omitted.append(primary)  # The old anchor contains the hidden original entries.
+        # An original anchor seq still has the archive entries omitted from its replacement.
+        omitted.extend(i for i in anchors[-2:] if i in kept and kept[i] is not original[i])
         history = [original[0], *(kept[i] for i in sorted(kept))]
         if had_notice or omitted:
             # A targeted tool-result edit may have a newer seq than the next
@@ -1186,8 +1184,17 @@ async def _fit_fallback(
         dropped_rounds += original[group.start].role == "assistant"
         history, tokens = rebuild()
     if tokens > target and previous is not None:
-        del kept[previous]
-        history, tokens = rebuild()
+        if _is_summary_marker(kept[previous]):
+            for candidate in _smaller_summary_anchors(kept[previous], protect_latest=False):
+                kept[previous] = candidate
+                dropped_users += 1
+                history, tokens = rebuild()
+                if tokens <= target:
+                    break
+        if tokens > target:
+            dropped_users += _is_real_user_message(kept[previous])
+            del kept[previous]
+            history, tokens = rebuild()
     if tokens > target and _is_summary_marker(kept[primary]):
         for candidate in _smaller_summary_anchors(kept[primary]):
             kept[primary] = candidate

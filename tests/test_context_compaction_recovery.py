@@ -631,20 +631,99 @@ async def test_fallback_reports_omission_without_directing_an_unbounded_log_sear
         assert str(log.path) not in notice.content and "query_jsonl" not in notice.content
 
 
-async def test_previous_anchor_and_its_groups_share_one_local_fallback_allowance():
-    class Counter(_Summary):
-        estimate_text_tokens = staticmethod(len)
+class _FallbackCounter(_Summary):
+    context_window = 65_536
+    estimate_text_tokens = staticmethod(len)
 
-    llm = Counter()
-    previous = Message(role="user", content="previous" * 500)
-    last = Message(role="user", content="new")
-    history = [Message(role="system", content="system"), previous, Message(role="assistant", content="A" * 5_000),
-               Message(role="assistant", content="B" * 6_000), last]
-    result = await _fallback(history, llm=llm)
-    assert result.messages[:-1] == [history[0], previous, history[3], last]
-    assert context_engine._fallback_context_estimate(result.messages[1:-2], {}, llm=llm) <= 12_000
-    tight = await _fallback(history, llm=llm, limit=2_000)
-    assert tight.messages[:-1] == [history[0], last] and tight.mode == "fallback"
+
+@pytest.mark.parametrize("previous_is_summary", [True, False], ids=["summary", "user"])
+async def test_fallback_keeps_a_large_previous_anchor_outside_the_interaction_allowance(tmp_path, previous_is_summary):
+    llm = _FallbackCounter()
+    if previous_is_summary:
+        previous = context_engine._summary_with_users("S" * 6_000, ["U" * 9_000], [], True, "")
+    else:
+        previous = Message(role="user", content="P" * 13_000)
+    system = Message(role="system", content="system")
+    primary = Message(role="user", content="继续")
+    work_history = _history(rounds=3, size=0)
+    old, middle, recent = (work_history[start:start + 2] for start in (2, 5, 8))
+    for group, size in zip((old, middle, recent), (2_000, 5_000, 6_000)):
+        group[-1].content = "X" * size
+    history = [system, previous, *old, *middle, *recent, primary]
+    assert context_engine._fallback_context_estimate([previous], None, llm=llm) > 12_000
+    assert context_engine._fallback_context_estimate([*middle, *recent], None, llm=llm) <= 12_000
+    with closing(SessionLog.create(tmp_path, session_id="previous-anchor", cwd=tmp_path)) as log:
+        log.append_unlogged_messages(history[1:], turn=1, step=1)
+        log.flush()
+        first, last = (log.surface_message_sequence(history[1:], message) for message in old)
+        result = await _fallback(history, llm=llm, log=log)
+        assert result.mode == "fallback" and result.degradation is None
+        assert result.messages[:-1] == [system, previous, *middle, *recent, primary]
+        assert result.messages[1] is previous
+        notice = result.messages[-1]
+        assert notice.runtime_kind == "compaction_notice"
+        assert f"seq ranges: {first}-{last}." in notice.content and str(log.path) in notice.content
+
+
+async def test_fallback_drops_previous_summary_users_in_order_before_dropping_its_body(tmp_path):
+    llm = _FallbackCounter()
+    system = Message(role="system", content="system")
+    primary = Message(role="user", content="继续")
+    older = Message(role="assistant", content="A" * 4_000)
+    newer = Message(role="assistant", content="B" * 6_000)
+    texts = ["early original " * 200, "latest original " * 250]
+    body = "summary fact " * 450
+    with closing(SessionLog.create(tmp_path, session_id="previous-summary", cwd=tmp_path)) as log:
+        hint = context_engine._session_log_hint(log, None)
+        entries = context_engine._earlier_user_entries(texts[:-1], len, 10_000)
+        previous = context_engine._summary_with_users(body, texts, entries, True, hint)
+        latest_only = context_engine._summary_with_users(body, texts, [], True, hint)
+        body_only = context_engine._summary_with_users(body, [], [], False, hint)
+        history = [system, previous, older, newer, primary]
+        log.append_unlogged_messages(history[1:], turn=1, step=1)
+        log.flush()
+        anchor_seq, old_seq, new_seq, _ = log.surface_sequences(history[1:])
+        cases = [
+            ([previous, newer], (old_seq, old_seq), 1, 0),
+            ([previous], (old_seq, new_seq), 2, 0),
+            ([latest_only], (anchor_seq, new_seq), 2, 1),
+            ([body_only], (anchor_seq, new_seq), 2, 2),
+            ([], (anchor_seq, new_seq), 2, 2),
+        ]
+        for retained, omitted, dropped_rounds, dropped_users in cases:
+            notice = context_engine._omission_notice([omitted], log.path)
+            expected = [system, *retained, primary, notice]
+            limit = context_engine._fallback_context_estimate(expected, None, llm=llm)
+            result = await _fallback(history, llm=llm, log=log, limit=limit)
+            assert result.mode == "fallback"
+            assert [message.content for message in result.messages] == [message.content for message in expected]
+            assert result.messages[-2] is primary
+            assert result.degradation == {
+                "droppedRounds": dropped_rounds, "droppedEarlierUsers": dropped_users,
+                "droppedSkillBodies": 0, "droppedRuntimeState": [],
+            }
+            if retained:
+                assert result.messages[1].earlier_user_messages == texts
+
+
+async def test_fallback_drops_previous_real_user_as_a_whole_after_interactions():
+    llm = _FallbackCounter()
+    system = Message(role="system", content="system")
+    previous = Message(role="user", content="P" * 13_000)
+    work = Message(role="assistant", content="W" * 6_000)
+    primary = Message(role="user", content="继续")
+    history = [system, previous, work, primary]
+    notice = context_engine._omission_notice([], None)
+    for kept, dropped_users in (([previous], 0), ([], 1)):
+        expected = [system, *kept, primary, notice]
+        limit = context_engine._fallback_context_estimate(expected, None, llm=llm)
+        result = await _fallback(history, llm=llm, limit=limit)
+        assert result.mode == "fallback" and result.messages == expected
+        assert result.messages[-2] is primary
+        assert result.degradation == {
+            "droppedRounds": 1, "droppedEarlierUsers": dropped_users,
+            "droppedSkillBodies": 0, "droppedRuntimeState": [],
+        }
 
 
 async def test_fallback_logs_the_notice_or_latest_anchor_before_reopening(tmp_path):
