@@ -274,29 +274,7 @@ def _normalize_cwd(cwd: str | Path) -> str:
     return os.path.normcase(os.path.abspath(os.fspath(cwd)))
 
 
-_LEGACY_WORKFLOW_CHECKPOINT_PREFIX = "[Post-Compaction Workflow Checkpoint]"
-_LEGACY_RUNTIME_CONTEXT_PREFIXES = (
-    "The host runtime supplied the following internal state update",
-    "The user sent the following message while the current task was already running",
-)
-_LEGACY_WORKFLOW_MARKERS = (
-    "CONTROLLED_PRESENTATION_STAGE=",
-    "[BOX_AGENT_EXTERNAL_SKILL_CHECKPOINT]",
-)
 _SURFACE_MESSAGE_TYPES = {"user/message", "assistant/message", "tool/result"}
-
-
-def _is_legacy_workflow_context(message: Message) -> bool:
-    """Identify only framework-authored workflow context from older logs."""
-
-    if message.role != "user" or not isinstance(message.content, str):
-        return False
-    content = message.content.lstrip()
-    if content.startswith(_LEGACY_WORKFLOW_CHECKPOINT_PREFIX):
-        return True
-    return content.startswith(_LEGACY_RUNTIME_CONTEXT_PREFIXES) and any(
-        marker in content for marker in _LEGACY_WORKFLOW_MARKERS
-    )
 
 
 def _apply_surface_message(
@@ -1030,7 +1008,6 @@ class SessionLog:
         persisted_payloads = [
             message.model_dump(mode="json", exclude_none=True)
             for _, message in self._surface_nodes()
-            if not _is_legacy_workflow_context(message)
         ]
         live_payloads = [
             message.model_dump(mode="json", exclude_none=True) for message in messages
@@ -1227,7 +1204,7 @@ class SessionLog:
         self, index: int, message: Message, *, turn: int, step: int, edit: dict[str, Any],
     ) -> dict[str, Any]:
         """Replace one replay-visible node while keeping the original in host history."""
-        nodes = [node for node in self._surface_nodes() if not _is_legacy_workflow_context(node[1])]
+        nodes = self._surface_nodes()
         if type(index) is not int or not 0 <= index < len(nodes):
             raise SessionLogCorrupted(f"surface edit index {index!r} is outside the active surface")
         seq, previous = nodes[index]
@@ -1448,7 +1425,7 @@ class SessionLog:
             if event_type in _SURFACE_MESSAGE_TYPES:
                 message = _apply_surface_message(surface, event)
                 _restore_context_usage(message, data.get("contextUsage"))
-        messages = [message for _, message in surface if not _is_legacy_workflow_context(message)]
+        messages = [message for _, message in surface]
         latest_snapshot_seen = False
         for message in reversed(messages):
             if message.usage is not None and message.usage._request_snapshot is not None:

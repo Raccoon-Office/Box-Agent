@@ -9,7 +9,7 @@ import pytest
 
 from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent, ToolCallResult
 from box_agent.runtime import run_agent_loop
-from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
+from box_agent.schema import FunctionCall, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.session_log import SessionLog
 from box_agent.tool_result_storage import ToolResultStorage
 from box_agent.tools.base import Tool, ToolResult
@@ -89,21 +89,34 @@ def assert_done(events, reason=StopReason.END_TURN):
 
 
 @pytest.mark.parametrize("logged", [True, False], ids=["session-log", "sdk"])
-async def test_compacted_parallel_tool_receipts_keep_the_same_bytes_on_the_next_request(tmp_path, caplog, logged):
+@pytest.mark.parametrize("limit", [3_000, 8_000], ids=["omitted-round", "retained-round"])
+async def test_compacted_parallel_tool_round_has_a_stable_prefix_on_the_next_request(tmp_path, caplog, logged, limit):
+    class MeasuredFirstCall(RecordingModel):
+        async def generate_stream(self, messages, **kwargs):
+            async for event in super().generate_stream(messages, **kwargs):
+                if event.tool_calls and len(self.requests) == 1:
+                    event.usage = TokenUsage(total_tokens=9_000)
+                yield event
+
     batch = [report(f"report-{label}", label, 9_500) for label in "ABC"]
     history = initial_history()
     storage = ToolResultStorage(tmp_path, aggregate_budget=16_000)
     with (closing(SessionLog.create(tmp_path, session_id="reports", cwd=tmp_path)) if logged else nullcontext()) as log:
-        model = RecordingModel(batch, [report("small", "D", 8)], log=log)
-        events = [event async for event in run(model, history, ReportTool(), storage, log, token_limit=3_000)]
+        model = MeasuredFirstCall(batch, [report("small", "D", 8)], log=log)
+        events = [event async for event in run(model, history, ReportTool(), storage, log, token_limit=limit)]
         assert_done(events)
         assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
         assert len(model.requests) == 3
         _, first, second = model.requests
         for call in batch:
-            receipt, = tool_bodies(first, call.id)
-            assert receipt.startswith("[Tool result compacted")
-            assert tool_bodies(second, call.id) == [receipt]
+            bodies = tool_bodies(first, call.id)
+            if limit == 3_000:
+                assert bodies == []
+            elif call.id == "report-C":
+                assert bodies == ["C" * 9_500]
+            else:
+                assert len(bodies) == 1 and bodies[0].startswith("<persisted-output>")
+            assert tool_bodies(second, call.id) == bodies
         assert second[:len(first)] == first
         if logged:
             assert model.persisted_counts == [0, 2, 2]
@@ -284,3 +297,40 @@ async def test_delivery_failure_notice_survives_next_step_and_log_replay(tmp_pat
         assert notice.startswith("Output delivery failed") and "formatter unavailable" in notice
         assert tool_bodies(next_request, "failed") == [notice]
         assert tool_bodies(snapshot(log.replay().messages), "failed") == [notice]
+
+
+async def test_workflow_text_in_midturn_updates_survives_fresh_edits_compaction_and_reopen(tmp_path, caplog):
+    from box_agent.kernel.context_engine import _maybe_summarize
+    from box_agent.kernel.tool_messages import ToolMessageCommitter
+    from box_agent.loop_guards import format_injected_message, format_runtime_context_update
+
+    marker = "CONTROLLED_PRESENTATION_STAGE=3 [BOX_AGENT_EXTERNAL_SKILL_CHECKPOINT]"
+    injected = Message(role="user", content=format_injected_message(marker))
+    runtime = Message(role="user", source="runtime", content=format_runtime_context_update(marker))
+    history = [*initial_history(), *(Message(role="assistant", content=f"round {i}") for i in range(7)),
+               injected, runtime, Message(role="assistant", content="", tool_calls=[report("edited", "A", 6000)]),
+               Message(role="tool", name="report", tool_call_id="edited", content="A" * 6_000)]
+    with closing(SessionLog.create(tmp_path, session_id="workflow-text", cwd=tmp_path)) as log:
+        for _ in range(2):
+            log.append_unlogged_messages(history[1:], turn=1, step=1)
+            log.flush()
+            assert log.replay().messages == history[1:]
+        committer = ToolMessageCommitter(history, log, turn=1)
+        storage = ToolResultStorage(tmp_path, aggregate_budget=3_000)
+        committer.apply_fresh_budget(storage, tools={"report": ReportTool()}, session_id="workflow-text", step=2)
+        assert history[-1].content.startswith("<persisted-output>")
+        assert log.replay().messages == history[1:]
+        edits = [e for e in log.events if e["data"].get("edit", {}).get("persistedPath")]
+        assert len(edits) == 1 and edits[0]["surfaceOp"]["start"] == edits[0]["surfaceOp"]["end"]
+        result = await _maybe_summarize(RecordingModel(), history, 20_000, 0, False, force=True, session_log=log)
+        assert result.mode == "summary"
+        assert injected in result.messages and runtime in result.messages
+        log.append("compaction/summary", {"mode": "summary", "message": result.messages[1].model_dump()})
+        log.replace_surface(result.messages[1:], turn=1, step=2)
+        log.append("compaction/end", {"mode": "summary"})
+        log.flush()
+    with closing(SessionLog.open(tmp_path, session_id="workflow-text", cwd=tmp_path)) as log:
+        assert log.replay().messages == result.messages[1:]
+        original = [m for _, m, _ in log.history_messages()]
+        assert injected in original and runtime in original and original[-1].content == "A" * 6_000
+    assert "surface_diverged" not in caplog.text

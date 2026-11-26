@@ -650,7 +650,7 @@ def test_session_log_restores_legacy_workspace_without_rewriting_header(
     assert log.path.read_bytes() == before
 
 
-def test_replay_filters_only_known_legacy_workflow_context(tmp_path):
+def test_replay_and_history_preserve_messages_with_legacy_workflow_text(tmp_path):
     log = SessionLog.create(tmp_path, session_id="legacy-workflow", cwd=tmp_path)
     messages = [
         "Please explain [Post-Compaction Workflow Checkpoint] to me.",
@@ -685,10 +685,8 @@ def test_replay_filters_only_known_legacy_workflow_context(tmp_path):
         cwd=tmp_path,
     )
 
-    assert [message.content for message in restored.replay().messages] == [
-        messages[0],
-        messages[4],
-    ]
+    assert [message.content for message in restored.replay().messages] == messages
+    assert [message.content for _, message, _ in restored.history_messages()] == messages
     restored.close()
 
 
@@ -895,9 +893,9 @@ def test_single_surface_edit_uses_projected_position_and_preserves_original_hist
     images = log.replay().images
     edit = {"reason": "tool_result_budget", "persistedPath": "results/tool.txt", "originalChars": 13}
     preview = second.model_copy(update={"content": "preview"})
-    updated = [first, preview, tail]
+    updated = [legacy, first, preview, tail]
     try:
-        event = log.replace_surface_message(1, preview, turn=2, step=3, edit=edit)
+        event = log.replace_surface_message(2, preview, turn=2, step=3, edit=edit)
         assert event["type"] == "tool/result"
         assert event["surfaceOp"] == {"op": "replace", "start": target["seq"], "end": target["seq"]}
         assert event["sourceEventSeqs"] == [target["seq"]]
@@ -907,7 +905,7 @@ def test_single_surface_edit_uses_projected_position_and_preserves_original_hist
         }
         assert log.replay().messages == updated
         assert log.append_unlogged_messages(updated, turn=2, step=3) == []
-        replacement = log.replace_surface_message(1, second, turn=2, step=4, edit={"reason": "undo"})
+        replacement = log.replace_surface_message(2, second, turn=2, step=4, edit={"reason": "undo"})
         assert replacement["sourceEventSeqs"] == [event["seq"]]
         log.flush()
     finally:
@@ -916,7 +914,7 @@ def test_single_surface_edit_uses_projected_position_and_preserves_original_hist
     reopened = SessionLog.open(tmp_path, session_id="single-edit", cwd=tmp_path)
     try:
         assert reopened.replay(through_seq=event["seq"]).messages == updated
-        assert reopened.replay().messages == [first, second, tail]
+        assert reopened.replay().messages == [legacy, first, second, tail]
         assert reopened.replay().images == images
         assert [msg for _, msg, _ in reopened.history_messages()] == [legacy, first, second, tail]
     finally:
