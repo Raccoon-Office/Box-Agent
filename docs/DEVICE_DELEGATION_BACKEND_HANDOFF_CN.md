@@ -136,7 +136,7 @@ sequenceDiagram
 {"jsonrpc":"2.0","id":22,"method":"_device/event","params":{"version":1,"sessionId":"cloud-1","event":{"operationId":"start-01","deviceId":"PC-A","sessionId":"remote-device-01","turnId":"t1","seq":2,"status":"succeeded","summary":"已在桌面工作区生成 report.txt"}}}
 ```
 
-`_device/event.params._meta.org` 可以由宿主/2c 提供，但事件只上报设备状态，该字段不参与计费，也不影响事件接收。云任务在退出登录后继续执行，自动续跑沿用发起相应设备工作的云端父轮 org；本地子轮中断或迟到事件都不把它改为个人或另一组织。同一次续跑若会消费不同父轮的结果且付款身份冲突，则不发模型请求并报告 `DEVICE_WAKE_ORG_CONFLICT`。重启恢复由新的 `session/resume`（或重新打开稳定会话的 `session/new`）提供 org，不从日志恢复旧身份，也不从登录文件推断。`session/load` 仅读取回放。取消操作不校验 org。
+`_device/event.params._meta.org` 可以由宿主/2c 提供，但事件只上报设备状态，该字段不参与计费，也不影响事件接收。云任务在退出登录后继续执行，自动续跑沿用发起相应设备工作的云端父轮 org；本地子轮中断或迟到事件都不把它改为个人或另一组织。同一次续跑若会消费不同父轮的结果且付款身份冲突，则不发模型请求并报告 `DEVICE_WAKE_ORG_CONFLICT`。重启恢复由新的 `session/resume`（或重新打开稳定会话的 `session/new`）提供 org，不从日志恢复旧身份，也不从登录文件推断。`session/load` 只回放历史；此后到达的设备事件仅落盘，直到明确的执行请求才允许自动续跑。取消操作不校验 org。
 
 以上 wait 请求与成功回包为单设备示例。正常响应来自桌面，`source:"device"`。get 和 wait 共用目标子轮快照；wait 不传游标，重复等待已就绪的子轮应立即返回。断线后若父 Harness 已持有历史观测，可注明其来源与观测时间供模型参考；新 get 仍须收到桌面回执才能成功。
 

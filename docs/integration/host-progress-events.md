@@ -96,9 +96,11 @@ model turn explicitly enters its resolved billing scope.
 
 The initiating turn identity is held only in memory. After reopening, pending work
 uses the new execution request's org (`session/resume`, or `session/new` when
-reopening a stable session). `session/load` only replays history; a later prompt
-supplies its own identity. Ordinary prompt results without an event identity use
-that prompt's org. This is not a session billing default or a stored login identity.
+reopening a stable session). `session/load` replays history and records later
+device events without starting an automatic turn; a later execution request
+enables wake and supplies its own identity. Ordinary prompt results without an
+event identity use that prompt's org. This is not a session billing default or
+a stored login identity.
 Stop continues to suppress automatic wakes for stopped work. Logging out interrupts
 local execution but does not stop an already running cloud task.
 

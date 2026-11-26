@@ -203,6 +203,73 @@ async def test_restored_device_work_uses_new_execution_identity(tmp_path, method
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("continuation", [None, "session/resume", "session/new", "session/prompt"])
+async def test_loaded_device_event_waits_for_execution_request(tmp_path, continuation):
+    notifications = []
+    async with wire_agent(tmp_path, notifications=notifications) as (rpc, host, requests, _):
+        upstream = "read-only-device"
+        sid = await new(rpc, tmp_path, device={"version": 1}, session_id=upstream)
+        event = pending_device_result(host, sid)
+        await rpc("session/load", {"sessionId": sid, "cwd": str(tmp_path), "mcpServers": [],
+                                   "_meta": {"device": {"version": 1}, "org": "load-team"}})
+        state = host._sessions[sid]
+        assert not state.device_auto_wake_enabled
+        assert await rpc("_device/event", event) == {"recorded": True}
+        assert state.device_delegations.operations["op"]["status"] == "succeeded"
+        assert not state.device_delegations.wakes
+        assert not state.device_delegations.attempted_wakes
+        assert not any(item["type"] == "device/wake" for item in state.device_delegations.log.events)
+        assert not notifications and not requests
+
+        if continuation == "session/resume":
+            await rpc(continuation, {"sessionId": sid, "cwd": str(tmp_path), "mcpServers": [],
+                                     "_meta": {"device": {"version": 1}, "org": "next-team"}})
+        elif continuation == "session/new":
+            assert await new(rpc, tmp_path, device={"version": 1},
+                             session_id=upstream, org="next-team") == sid
+        elif continuation == "session/prompt":
+            await prompt(rpc, sid, org="next-team", turnId="continue")
+        else:
+            return
+
+        await finish_device_wake(host, sid)
+        assert requests
+        assert all(request.headers.get("X-Org-Code") == "next-team" for request in requests)
+        assert host._sessions[sid].device_auto_wake_enabled
+
+
+@pytest.mark.asyncio
+async def test_device_event_during_session_load_replay_does_not_wake(tmp_path):
+    async with wire_agent(tmp_path) as (rpc, host, requests, _):
+        sid = await new(rpc, tmp_path, device={"version": 1}, session_id="replay-device")
+        event = pending_device_result(host, sid)
+        entered, release = asyncio.Event(), asyncio.Event()
+        replay = host._replay_session_history
+
+        async def paused_replay(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await replay(*args, **kwargs)
+
+        host._replay_session_history = paused_replay
+        loading = asyncio.create_task(rpc("session/load", {
+            "sessionId": sid, "cwd": str(tmp_path), "mcpServers": [],
+            "_meta": {"device": {"version": 1}, "org": "load-team"},
+        }))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            state = host._sessions[sid]
+            assert not state.device_auto_wake_enabled
+            assert await rpc("_device/event", event) == {"recorded": True}
+        finally:
+            release.set()
+            await loading
+        assert not state.device_delegations.wakes
+        assert not state.device_delegations.attempted_wakes
+        assert not requests
+
+
+@pytest.mark.asyncio
 async def test_device_event_ignores_org_and_does_not_block_cancel(tmp_path):
     async with wire_agent(tmp_path) as (rpc, host, requests, _):
         sid = await new(rpc, tmp_path, device={"version": 1})
