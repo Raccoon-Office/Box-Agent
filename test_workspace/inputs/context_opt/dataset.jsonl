@@ -1,0 +1,9 @@
+{"id": "h-serve-for-user", "query": "写一个 hello.html 页面，标题和正文都写“你好，预览”，然后把服务启动起来给我看。", "input_files": []}
+{"id": "h-self-check-only", "query": "写一个单页 timer.html 倒计时页面（默认 60 秒，有开始和暂停按钮），自己检查一下能正常加载。", "input_files": []}
+{"id": "h-edit-no-preview", "query": "把 report.html 里的一级标题改成“月度报告”，其他内容不变。", "input_files": [], "workspace_setup": {"files": ["report.html"]}}
+{"id": "h-serve-second-turn", "query": "帮我写一个 about.html 自我介绍页面，名字写“小浣熊”。", "input_files": [], "follow_up_turns": [{"query": "页面写好了吗？启动给我看看效果。"}]}
+{"id": "t-tail-error-compute", "query": "计算 orders.csv 里 amount 列的总和，写到 total.json（字段 total）。", "input_files": [], "workspace_setup": {"files": ["orders.csv"]}}
+{"id": "t-diagnosis", "query": "帮我检查 orders.csv 有没有数据问题，只需要告诉我问题在哪，不用修改文件。", "input_files": [], "workspace_setup": {"files": ["orders.csv"]}}
+{"id": "t-similar-no-table", "query": "根据 budget-notes.md 帮我设计一个月度预算表格的列结构，写到 columns.md。", "input_files": [], "workspace_setup": {"files": ["budget-notes.md"]}}
+{"id": "t-csv-second-turn", "query": "我等下给你一份订单表，先简单说说你会怎么按地区汇总销售额，不用动手。", "input_files": [], "workspace_setup": {"files": ["sales_region.csv"]}, "follow_up_turns": [{"query": "表格是工作目录里的 sales_region.csv。按 region 汇总 amount，写到 by_region.json：JSON 对象，键是地区，值是金额数字。"}]}
+{"id": "t-inplace-append", "query": "给 orders_small.csv 末尾追加一行：id 为 4，region 为 华西，amount 为 66.00，格式和已有行一致，并确认追加后文件仍然合法。", "input_files": [], "workspace_setup": {"files": ["orders_small.csv"]}}

@@ -1,0 +1,213 @@
+{
+ "version": "context-opt/v1",
+ "cases": [
+  {
+   "id": "h-serve-for-user",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "contains",
+     "path": "hello.html",
+     "value": "你好，预览"
+    },
+    {
+     "kind": "tool",
+     "name": "bash",
+     "success": true,
+     "arguments": {
+      "lifetime": "runtime"
+     }
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "http://127\\.0\\.0\\.1:\\d+"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "h-self-check-only",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "contains",
+     "path": "timer.html",
+     "value": "<button"
+    },
+    {
+     "kind": "tool_args_not_matching",
+     "name": "bash",
+     "argument": "lifetime",
+     "pattern": "^runtime$"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "h-edit-no-preview",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "contains",
+     "path": "report.html",
+     "value": "<h1>月度报告</h1>"
+    },
+    {
+     "kind": "contains",
+     "path": "report.html",
+     "value": "<p>本月数据待补充。</p>"
+    },
+    {
+     "kind": "tool_args_not_matching",
+     "name": "bash",
+     "argument": "command",
+     "pattern": "http\\.server"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ],
+   "mutable_inputs": [
+    "report.html"
+   ]
+  },
+  {
+   "id": "h-serve-second-turn",
+   "split": "holdout",
+   "checks": [
+    {
+     "kind": "contains",
+     "path": "about.html",
+     "value": "小浣熊"
+    },
+    {
+     "kind": "tool",
+     "name": "bash",
+     "success": true,
+     "arguments": {
+      "lifetime": "runtime"
+     }
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "http://127\\.0\\.0\\.1:\\d+"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "t-tail-error-compute",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "tool",
+     "name": "validate_table",
+     "success": true
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "12\\.3\\.4|第\\s*20\\s*(条|行|笔)|id\\s*[=为:：]?\\s*20|最后一(行|条)|末行"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ],
+   "expected_state": "completed_or_waiting"
+  },
+  {
+   "id": "t-diagnosis",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "tool",
+     "name": "validate_table",
+     "success": true,
+     "arguments": {
+      "purpose": "diagnosis"
+     }
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "12\\.3\\.4"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "t-similar-no-table",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "contains",
+     "path": "columns.md",
+     "value": "差额"
+    },
+    {
+     "kind": "no_tool",
+     "names": [
+      "validate_table"
+     ]
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "t-csv-second-turn",
+   "split": "holdout",
+   "checks": [
+    {
+     "kind": "json",
+     "path": "by_region.json",
+     "value": {
+      "华东": 150.75,
+      "华北": 99.5,
+      "华南": 200
+     }
+    },
+    {
+     "kind": "tool",
+     "name": "validate_table",
+     "success": true
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "t-inplace-append",
+   "split": "holdout",
+   "checks": [
+    {
+     "kind": "contains",
+     "path": "orders_small.csv",
+     "value": "3,华南,7.25\n4,华西,66.00"
+    },
+    {
+     "kind": "tool",
+     "name": "validate_table",
+     "success": true,
+     "arguments": {
+      "source_mode": "edit_target"
+     }
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ],
+   "mutable_inputs": [
+    "orders_small.csv"
+   ]
+  }
+ ]
+}
