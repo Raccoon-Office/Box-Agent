@@ -97,7 +97,10 @@ def current_snapshot(
     if "seq" in snapshot and (type(snapshot["seq"]) is not int or snapshot["seq"] < 0):
         raise ValueError("invalid device status sequence")
     if status == "waiting_approval":
-        snapshot["approval"] = approval_snapshot(value.get("approval"))
+        if value.get("status") == "approval_required" and "approval" not in value:
+            snapshot.pop("approval", None)
+        else:
+            snapshot["approval"] = approval_snapshot(value.get("approval"))
     else:
         snapshot.pop("approval", None)
     if status == "waiting_input" and "inputRequest" in snapshot:
@@ -506,6 +509,7 @@ class DeviceDelegations:
         return bool(record and self._eligible(record)
                     and record["parentTurnId"] in self.ended_turns
                     and record["status"] in READY and seq == record.get("readySeq", record["seq"])
+                    and (record["status"] != "waiting_approval" or "approval" in record)
                     and seq > self._consumed_seq(record))
 
     def request_injections(self, history: list[Message]) -> tuple[MessageInjection, ...]:
