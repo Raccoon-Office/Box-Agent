@@ -3392,12 +3392,12 @@ async def test_cancellation_interrupts_opted_in_event_tool():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("max_steps", [1, 3])
-async def test_max_steps_requests_and_persists_one_tool_free_summary(tmp_path, max_steps):
+async def test_max_steps_requests_and_persists_summary_with_existing_tools(tmp_path, max_steps):
     """Exhausted work gets one summary request without claiming completion."""
     class SummaryLLM(CapturingStreamLLM):
         async def generate_stream(self, messages, tools=None, **kwargs):
             if self._idx == max_steps:
-                assert not tools
+                assert [tool.name for tool in tools] == ["echo"]
                 assert "步数预算已用尽" in messages[-1].content
             async for event in super().generate_stream(messages, tools=tools, **kwargs):
                 yield event
@@ -3444,7 +3444,7 @@ async def test_step_summary_does_not_retry_or_execute_more_tools(requests_tool):
         LLMResponse(content="", tool_calls=_echo_tool_calls(1), finish_reason="tool_calls"),
         LLMResponse(
             content="", thinking="Cannot finish.",
-            tool_calls=_echo_tool_calls(1) if requests_tool else None,
+            tool_calls=_echo_tool_calls(2)[1:] if requests_tool else None,
             finish_reason="tool_calls" if requests_tool else "stop",
         ),
     ])
@@ -3455,11 +3455,18 @@ async def test_step_summary_does_not_retry_or_execute_more_tools(requests_tool):
     ))
     assert echo.calls == 1
     assert llm._idx == 2
-    assert messages[-1].role == "user"  # Invalid wrap-up was not committed.
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert len(done) == 1
-    assert done[0].stop_reason == StopReason.MAX_STEPS
-    assert "couldn't be completed" in done[0].final_content
+    if requests_tool:
+        rejected = [e for e in events if isinstance(e, ToolCallResult)][-1]
+        assert not rejected.success
+        assert "步数预算已用尽" in rejected.error
+        assert messages[-1].role == "tool"
+        assert messages[-1].tool_call_id == "t1"
+        assert done[0].stop_reason == StopReason.MAX_STEPS
+    else:
+        assert done[0].stop_reason == StopReason.ERROR
+        assert "未生成最终答复" in done[0].final_content
 
 
 @pytest.mark.asyncio

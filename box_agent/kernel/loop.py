@@ -688,7 +688,7 @@ async def _run_agent_loop_impl(
     Args:
         _services: Immutable resolved capability implementations.
         messages: Message history (mutated in-place).
-        max_steps: Maximum work iterations, followed by at most one tool-free
+        max_steps: Maximum work iterations, followed by at most one wrap-up
             summary request if exhausted. The stop reason remains MAX_STEPS.
         tool_limits: Typed limits for search, wrap-up, and delegated runs.
         max_tool_calls: Optional hard cap across all tool executions in this loop.
@@ -1308,10 +1308,9 @@ async def _run_agent_loop_impl(
         )
         return result, await run_session_write(session_log, commit_compaction, result)
 
-    final_summary = ""
-    # Reuse the normal request/stream/persistence path for one tool-free wrap-up.
+    # One extra iteration lets the model answer the step-budget wrap-up notice.
     for step in range(max_steps + 1):
-        summary_only = step == max_steps
+        step_budget_exhausted = step == max_steps
         if resource_ledger is not None:
             invalidated = resource_ledger.reconcile(messages)
             if invalidated:
@@ -1442,7 +1441,7 @@ async def _run_agent_loop_impl(
                 tool_context_added |= bool(descriptions)
 
         append_tool_descriptions(messages)
-        tool_list = [] if summary_only else list(prepared_tools.definitions)
+        tool_list = list(prepared_tools.definitions)
         offered_tools_by_name = prepared_tools.targets
         budget_tools_by_name = {tool.name: tool for tool in tool_list}
         request_context_messages = [
@@ -1477,7 +1476,7 @@ async def _run_agent_loop_impl(
         # Reserve the final few steps for synthesis: stop further
         # research and force a self-contained answer from gathered
         # material before the step budget is exhausted.
-        if summary_only or (
+        if step_budget_exhausted or (
             not wrapup_injected
             and max_steps > wrapup_remaining_steps
             and step >= max_steps - wrapup_remaining_steps
@@ -1505,12 +1504,12 @@ async def _run_agent_loop_impl(
             ).apply(messages)
 
         # ── Step start ──────────────────────────────────────
-        yield StepStart(step=step + 1, max_steps=max_steps + int(summary_only))
+        yield StepStart(step=step + 1, max_steps=max_steps + int(step_budget_exhausted))
         if cancelled():
             yield await cancellation_done_event()
             return
         if hook_mgr.hooks:
-            await hook_mgr.fire_step_start(step=step + 1, max_steps=max_steps + int(summary_only))
+            await hook_mgr.fire_step_start(step=step + 1, max_steps=max_steps + int(step_budget_exhausted))
         if cancelled():
             yield await cancellation_done_event()
             return
@@ -2619,19 +2618,6 @@ async def _run_agent_loop_impl(
             yield DoneEvent(stop_reason=StopReason.MAX_TOKENS, final_content=msg)
             return
 
-        if summary_only:
-            # Never execute or persist unsolicited tool calls from the wrap-up.
-            # Keep MAX_STEPS: a useful summary is not proof of task completion.
-            if not response.tool_calls and response.content.strip():
-                await run_session_write(session_log, commit_model_response, assistant_msg)
-                final_summary = response.content
-            elapsed = perf_counter() - step_start
-            total = perf_counter() - run_start
-            if hook_mgr.hooks:
-                await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-            yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-            break
-
         # ── Append assistant message (non-truncated path) ───
         await run_session_write(session_log, commit_model_response, assistant_msg)
 
@@ -2646,6 +2632,7 @@ async def _run_agent_loop_impl(
         if not response.tool_calls:
             if (
                 force_plan_for_turn
+                and not step_budget_exhausted
                 and not plan_write_succeeded
                 and not forced_plan_retry_injected
             ):
@@ -2690,6 +2677,7 @@ async def _run_agent_loop_impl(
             # short replies (legitimately end without punctuation).
             if (
                 truncation_continuation_enabled
+                and not step_budget_exhausted
                 and truncation_continuations < max_truncation_continuations
                 and response.finish_reason in (None, "stop", "end_turn")
                 and response.content.strip()
@@ -2787,7 +2775,7 @@ async def _run_agent_loop_impl(
                         ),
                     ),
                     finish_reason=response.finish_reason,
-                    tools_available=bool(tool_list),
+                    tools_available=bool(tool_list) and not step_budget_exhausted,
                     thinking_enabled=thinking_enabled,
                     step=step,
                     max_steps=max_steps,
@@ -2873,7 +2861,8 @@ async def _run_agent_loop_impl(
 
             # Capability checks are deterministic and cannot be waived by the
             # model judge, a completion claim, or a serialized tool result.
-            completion_issues = await completion_checks.check()
+            # A budget wrap-up reports partial work; it does not claim completion.
+            completion_issues = [] if step_budget_exhausted else await completion_checks.check()
             if cancelled() or (inject_queue is not None and not inject_queue.empty()):
                 continue
             if completion_issues:
@@ -2901,9 +2890,10 @@ async def _run_agent_loop_impl(
 
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
+            stop_reason = StopReason.MAX_STEPS if step_budget_exhausted else StopReason.END_TURN
             if hook_mgr.hooks:
                 await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-                await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=response.content)
+                await hook_mgr.fire_done(stop_reason=stop_reason, final_content=response.content)
             # Extract memory at agent loop end (background)
             if memory_extractor:
                 asyncio.create_task(
@@ -2917,7 +2907,7 @@ async def _run_agent_loop_impl(
             proposal = await _build_proposal_event_with_plan()
             if proposal is not None:
                 yield proposal
-            yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=response.content)
+            yield DoneEvent(stop_reason=stop_reason, final_content=response.content)
             return
 
         # ── Cancellation check (before tools) ──────────────
@@ -2983,8 +2973,10 @@ async def _run_agent_loop_impl(
 
         control = ToolStepControl(
             step=step + 1,
-            allowed_names=frozenset({"plan_write"}) if plan_approval_gate_active else None,
-            blocked_reason=_PLAN_APPROVAL_SKIP_MESSAGE,
+            allowed_names=(frozenset() if step_budget_exhausted else
+                           frozenset({"plan_write"}) if plan_approval_gate_active else None),
+            blocked_reason=(near_limit_wrapup_text(step, max_steps) if step_budget_exhausted
+                            else _PLAN_APPROVAL_SKIP_MESSAGE),
             result_transform=decorate_control_result,
             pending_followup_tokens=pending_transient_followup_tokens,
         )
@@ -3115,7 +3107,7 @@ async def _run_agent_loop_impl(
             )
 
     # ── Max steps exhausted ─────────────────────────────────
-    msg = final_summary or f"Task couldn't be completed after {max_steps} steps."
+    msg = f"Task couldn't be completed after {max_steps} steps."
     if memory_extractor:
         asyncio.create_task(
             memory_extractor.maybe_extract(

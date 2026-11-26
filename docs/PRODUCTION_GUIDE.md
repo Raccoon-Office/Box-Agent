@@ -307,7 +307,9 @@ Setting the last value to `0` disables that extra cap, not the provider timeout.
 The inferred batch path also enforces file/count/content limits; see
 [Sub-agent Delegation](SUB_AGENT_DELEGATION.md).
 When the shared loop exhausts `max_steps`, it makes at most one additional
-tool-free request to summarize existing results and remaining gaps. For example,
+request with a wrap-up instruction to summarize existing results and remaining gaps.
+The tool list is preserved; further tool calls receive budget errors through the
+existing execution gate, without running the tools. For example,
 `max_steps: 1` allows one work iteration followed by one summary request if needed.
 The summary is streamed and saved, but the stop reason remains `max_steps`
 (`max_turn_requests` in ACP); this does not certify task completion. This also
