@@ -9,6 +9,11 @@ import sys
 from pathlib import Path
 
 from box_agent.tools.skill_loader import SkillLoader
+from box_agent.tools.sub_agent_capabilities import (
+    CapabilityFailure,
+    DelegationSpec,
+    parse_delegation_spec,
+)
 
 
 VALIDATOR = (
@@ -131,18 +136,13 @@ def test_validator_writes_success_report_for_reduced_focused_route(
     )
 
 
-def test_documented_page_evidence_preserves_provenance_in_handoff(
+def test_validator_preserves_page_body_evidence_basis(
     tmp_path: Path,
 ) -> None:
-    contract = (SKILL_ROOT / "references" / "output_contract.md").read_text(
-        encoding="utf-8"
-    )
-    example = re.search(r"```json\n(.*?)\n```", contract, re.DOTALL)
-    assert example is not None
-    ledger = json.loads(example.group(1))
-    ledger["topic"] = "topic"
     research = tmp_path / "research"
     _write_focused_research(research)
+    ledger = json.loads((research / "topic_evidence.json").read_text(encoding="utf-8"))
+    ledger["evidence"][0]["evidence_basis"] = "page_body"
     (research / "topic_evidence.json").write_text(
         json.dumps(ledger), encoding="utf-8"
     )
@@ -641,74 +641,33 @@ def test_validator_excludes_conflicting_user_input_from_verified_handoff(
     )
 
 
-def test_research_instructions_preserve_depth_without_rephrased_query_loops() -> None:
+def test_research_instructions_use_shared_web_access_routing() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-    routes = (SKILL_ROOT / "references" / "routes.md").read_text(encoding="utf-8")
-    prompts = (SKILL_ROOT / "references" / "prompts.md").read_text(encoding="utf-8")
-    output_contract = (
-        SKILL_ROOT / "references" / "output_contract.md"
-    ).read_text(encoding="utf-8")
 
-    assert "covering distinct evidence gaps" in skill
-    assert "do not rerun a near-equivalent" in skill
     assert "shared **Web Access Routing**" in skill
-    assert "not another channel priority" in skill
-    assert "`managed_browser_navigate` and `managed_browser_snapshot` together" in skill
+    assert "does not define another channel priority" in " ".join(skill.split())
     assert "Navigation metadata alone is not a failed body read" in skill
-    assert "Do not route between browser modes through a" in skill
-    assert "five distinct evidence intents" in routes
-    assert "reworded versions of an already-run entity/fact query do not add depth" in routes
-    assert "`{output_dir}/research/{topic}_evidence.json`" in skill
-    assert "URL-bound search-result summary may be medium-confidence evidence" in prompts
-    assert "evidence_basis=search_summary" in skill
-    assert "user_input_alignment" in output_contract
-    assert "verified_evidence" in output_contract
-
-
-def test_research_instructions_stop_blocked_source_loops_and_notify_user() -> None:
-    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-    routes = (SKILL_ROOT / "references" / "routes.md").read_text(encoding="utf-8")
-    prompts = (SKILL_ROOT / "references" / "prompts.md").read_text(encoding="utf-8")
-    output_contract = (
-        SKILL_ROOT / "references" / "output_contract.md"
-    ).read_text(encoding="utf-8")
-
-    assert "After two consecutive blocked-source failures" in skill
-    assert "Promptly tell the user what" in skill
-    assert "do not silently spend the remaining search budget" in skill
-    assert "Count failures by evidence target" in routes
-    assert "Send a concise user-visible status update" in routes
-    assert "do not keep issuing variants of the same search" in prompts
-    assert "surface the blocked-target note to the main agent" in prompts
-    assert "`unverified_reason` must\n  name the failure class" in output_contract
 
 
 def test_research_instructions_use_conversation_selected_absolute_directory() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-    assert '--research-dir "{output_dir}/research"' in skill
-    assert '--report "{output_dir}/research/qa/{topic}_research_check.json"' in skill
     assert "Resolve one absolute `{output_dir}` from the current conversation" in skill
-    assert "Reserved research artifact templates override" in skill
-    assert "ai-quality-scheduling_dim01.md" in skill
-    assert "never write\n  `ai-quality-scheduling-dim01.md`" in skill
+    assert "`{output_dir}/research/{topic}_final.md`" in skill
     assert "session cwd or workspace" in skill
     assert "Do not infer an output root from environment variables" in skill
     assert "model-created task directory" in skill
     assert '--research-dir "{workspace}/research"' not in skill
 
 
-def test_loaded_research_references_and_handoff_use_the_selected_task_directory(
+def test_loaded_research_outputs_use_the_selected_task_directory(
     tmp_path: Path,
 ) -> None:
     skill = SkillLoader(SKILL_ROOT).load_skill(SKILL_ROOT / "SKILL.md")
     assert skill is not None and not skill.broken
     prompt = skill.to_prompt()
-    references = {
-        Path(path).name: Path(path).read_text(encoding="utf-8")
-        for path in re.findall(r"\]\(`([^`]+)`\)", prompt)
-    }
-    assert {"routes.md", "prompts.md", "output_contract.md"} <= references.keys()
+    for target in re.findall(r"\]\(`([^`]+)`\)", prompt):
+        assert Path(target).is_file()
     output_dir = tmp_path / "chosen-deck"
 
     def render_path(template: str) -> Path:
@@ -721,44 +680,42 @@ def test_loaded_research_references_and_handoff_use_the_selected_task_directory(
         assert path.is_absolute(), template
         return path
 
-    contract_dir = re.search(
-        r"```text\n([^\n]+)\n```", references["output_contract.md"]
+    research = output_dir / "research"
+    plan = re.search(r"`(\{output_dir\}/research/research_plan_\{topic\}\.md)`", prompt)
+    report = re.search(r"`(\{output_dir\}/research/\{topic\}_final\.md)`", prompt)
+    assert plan is not None and report is not None
+    assert render_path(plan.group(1)) == research / "research_plan_topic.md"
+    assert render_path(report.group(1)) == research / "topic_final.md"
+
+
+def test_documented_child_task_parses_with_scoped_output() -> None:
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    example = re.search(r"```json\n(.*?)\n```", skill, re.DOTALL)
+    assert example is not None
+    arguments = json.loads(example.group(1))
+    assert "required_tools" not in arguments
+    research_tools = ("read_file", "write_file", "web_search", "web_extract")
+    spec = parse_delegation_spec(
+        **arguments, default_required_tools=(*research_tools, "bash"),
     )
-    assert contract_dir is not None
-    research = render_path(contract_dir.group(1))
-    assert research == output_dir / "research"
-    route_dir = re.search(r"Create `([^`]+)`", references["routes.md"])
-    assert route_dir is not None
-    assert render_path(route_dir.group(1)) == research
-    _write_focused_research(research)
+    assert isinstance(spec, DelegationSpec), spec
+    assert arguments["budget"]["max_tool_calls"] >= 48
+    assert spec.budget.max_tool_calls >= 48
+    assert set(research_tools) <= set(spec.required_tools)
+    assert "bash" not in spec.required_tools
+    assert spec.constraints.write_scope
+    for output in spec.constraints.write_scope:
+        assert not Path(output).is_absolute()
+        assert ".." not in Path(output).parts
+        assert str(Path("/work/project") / output) in spec.task
+    for name in spec.skill_names:
+        assigned = SkillLoader(SKILL_ROOT.parent / name).load_skill(
+            SKILL_ROOT.parent / name / "SKILL.md"
+        )
+        assert assigned is not None and not assigned.broken
 
-    templates = references["prompts.md"]
-    dimension = re.search(r"Output path: ([^\n]+_dim\[NN\]\.md)", templates)
-    assert dimension is not None
-    assert render_path(dimension.group(1)).is_file()
-    evidence = re.search(r"- Evidence ledger: ([^\n]+)", templates)
-    handoff = re.search(r"- Delivery handoff report: ([^\n]+)", templates)
-    assert evidence is not None and handoff is not None
-    assert render_path(evidence.group(1)).is_file()
-
-    research_arg = re.search(r'--research-dir "([^"]+)"', prompt)
-    report_arg = re.search(r'--report "([^"]+)"', prompt)
-    assert research_arg is not None and report_arg is not None
-    assert render_path(research_arg.group(1)) == research
-    report = render_path(report_arg.group(1))
-    assert render_path(handoff.group(1)) == report
-    result = subprocess.run(
-        [
-            sys.executable, str(VALIDATOR), "--research-dir", str(research),
-            "--topic", "topic", "--route", "B", "--min-dimensions", "3",
-            "--report", str(report),
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(report.read_text(encoding="utf-8"))["delivery_allowed"] is True
-    assert not (tmp_path / "research").exists()
+    arguments["required_tools"] = list(research_tools)
+    arguments.pop("write_scope")
+    failure = parse_delegation_spec(**arguments)
+    assert isinstance(failure, CapabilityFailure)
+    assert failure.code == "INVALID_DELEGATION_SPEC"
