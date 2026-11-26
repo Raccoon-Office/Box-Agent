@@ -16,7 +16,7 @@ from .kernel.context_engine import (
 )
 from .kernel.context_types import InitialContextTransition
 from .schema import Message
-from .session_log import run_session_write
+from .session_log import run_on_session_loop, run_session_write
 from .llm.capabilities import bound_context_token_limit
 from .connector_context import restore_connector_status
 from .input_context import project_user_message
@@ -519,4 +519,6 @@ class DefaultContextEngine:
             total_input_tokens=total_input_tokens,
             history_updates=history_updates,
         )
-        return self._input_guard.prepare_context(projection) if self._input_guard is not None else projection
+        if self._input_guard is not None:
+            return run_on_session_loop(self._input_guard.prepare_context, projection)
+        return projection
