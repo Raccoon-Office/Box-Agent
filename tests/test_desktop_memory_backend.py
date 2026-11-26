@@ -533,8 +533,9 @@ async def test_real_session_keeps_single_frozen_block_and_same_batch_mutation_is
         assert first == last and last.role == "system"
         assert not any(is_memory_history_message(message) for message in llm.requests[-1]["messages"])
         text = last.content
-        assert text.count("--- MEMORY START ---") == 1
-        assert "profile-unique-data" in text and "experience-unique-data" in text
+        assert text.count("## Memory Rules") == 1 and "--- MEMORY START ---" not in text
+        assert "profile-unique-data" in text and "automatic-unique-data" in text and "dates-unique-data" in text
+        assert "experience-unique-data" not in text and "user_items-unique-data" not in text
         failed = next(message for message in llm.requests[-1]["messages"] if message.role == "tool" and message.name == "memory_edit")
         assert "CORE_READ_REQUIRED" in str(failed.content)
         assert not any(operation == "core/mutate" for operation, _ in host.calls)
@@ -607,19 +608,70 @@ async def test_desktop_system_memory_is_omitted_under_budget_pressure_and_reused
     manager = backend(host)
     try:
         host.sections["profile"]["content"] = "用户偏好" * 850
-        content = await manager.load_context(query="question", session_id="session-1", turn_id="turn-1")
+        content = await manager.load_context(
+            query="question", session_id="session-1", turn_id="turn-1", for_system_prompt=True,
+        )
         snapshot = manager.memory_history
         snapshot.begin_system_day(None)
-        snapshot.finish_system_refresh(external_memory_block(content, 15_400))
+        snapshot.finish_system_refresh(content)
         engine = DefaultContextEngine()
         engine.bind_memory(manager)
         messages = [Message(role="system", content="用户规则"), Message(role="user", content="当前问题")]
         tools = prepare_tools([])
         small = engine.prepare_request(messages, prepared_tools=tools, token_limit=4_000)
         roomy = engine.prepare_request(messages, prepared_tools=tools, token_limit=40_000)
-        assert not small.blocked_reason and small.messages[0] == messages[0]
+        assert not small.blocked_reason and "用户规则" in small.messages[0].content
+        assert "## Memory Rules" in small.messages[0].content and "用户偏好" not in small.messages[0].content
         assert roomy.messages[0].role == "system" and snapshot.system_block in roomy.messages[0].content
         assert "用户偏好" in snapshot.system_block
+    finally:
+        await manager.aclose()
+
+
+async def test_desktop_cloud_preloads_only_nonempty_system_sections(host):
+    manager = backend(host)
+    try:
+        host.sections["profile"]["content"] = "  \n  "
+        host.sections["experience"]["status"] = "error"
+        content = await manager.load_context(
+            query="question", session_id="session-1", turn_id="turn-1", for_system_prompt=True,
+        )
+        assert manager.memory_history.prompt_type == "memsense"
+        assert "### Long-term Memory" in content and "automatic-unique-data" in content
+        assert "### 最近几天的记忆摘要" in content and "dates-unique-data" in content
+        assert "### User Profile" not in content
+        assert "experience-unique-data" not in content and "user_items-unique-data" not in content
+    finally:
+        await manager.aclose()
+
+
+async def test_desktop_revocation_removes_memory_from_an_already_prepared_system_message(host):
+    manager = backend(host)
+    try:
+        content = await manager.load_context(
+            query="question", session_id="session-1", turn_id="turn-1", for_system_prompt=True,
+        )
+        snapshot = manager.memory_history
+        snapshot.begin_system_day(None)
+        snapshot.finish_system_refresh(content)
+        engine = DefaultContextEngine()
+        engine.bind_memory(manager)
+        messages = [
+            Message(role="system", content="位于记忆前的规则\n{MEMORY_BLOCK}\n位于记忆后的规则"),
+            Message(role="user", content="当前问题"),
+        ]
+        prepared = engine.prepare_request(messages, prepared_tools=prepare_tools([]), token_limit=40_000)
+        assert "profile-unique-data" in prepared.messages[0].content
+        assert "--- MEMORY START ---" not in prepared.messages[0].content
+
+        manager.end_turn()
+        revoked = manager.model_input_guard.prepare_context(prepared)
+        for system in (revoked.messages[0], revoked.context_messages[0]):
+            assert system.content.count("## Memory Rules") == 1
+            assert "## Memory Content\n位于记忆后的规则" in system.content
+            assert system.content.startswith("位于记忆前的规则")
+            assert "profile-unique-data" not in system.content
+            assert "### User Profile" not in system.content
     finally:
         await manager.aclose()
 
@@ -677,7 +729,8 @@ async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_tu
         assert "不同授权的画像" in new_scope and "更新后的桌面画像" not in new_scope
         host.source = "unavailable"
         empty = await turn(9)
-        assert "## Memory Content" in empty and "--- MEMORY START ---" not in empty
+        assert "## Memory Content" in empty and "### User Profile" not in empty
+        assert "当前用户的明确要求优先" not in empty
         assert "不同授权的画像" not in empty
         host.source = "cloud"
         host.automatic = False
@@ -1622,7 +1675,8 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
                 expected.append(recorded)
             assert request["data"]["messages"] == expected
             system = request["data"]["messages"][0]
-            assert system["role"] == "system" and "user_items-unique-data" in system["content"]
+            assert system["role"] == "system" and "profile-unique-data" in system["content"]
+            assert "user_items-unique-data" not in system["content"] and "experience-unique-data" not in system["content"]
             assert not any(m["role"] == "user" and "user_items-unique-data" in m["content"]
                            for m in request["data"]["messages"] if isinstance(m.get("content"), str))
         assert requests[0]["llm_call_id"] != requests[1]["llm_call_id"]
@@ -1685,10 +1739,10 @@ async def test_revocation_removes_preload_from_next_model_request(tmp_path, host
             _ = [event async for event in session.run_events(options=session.build_run_options(logger=None))]
             assert session.memory_manager.current_scope is None
         assert len(model.requests) == 2
-        assert 'user_items-unique-data' in str(model.requests[0]['messages'])
+        assert 'profile-unique-data' in str(model.requests[0]['messages'])
         failure = next(m for m in model.requests[1]['messages'] if m.role == 'tool' and m.name == 'memory_search')
         assert code in str(failure.content)
-        assert 'user_items-unique-data' not in str(model.requests[1]['messages'])
+        assert 'profile-unique-data' not in str(model.requests[1]['messages'])
     finally:
         await session.aclose()
         await process.aclose()

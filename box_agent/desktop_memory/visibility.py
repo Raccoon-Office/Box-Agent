@@ -196,8 +196,8 @@ class DesktopInputGuard(CoreVisibilityGuard):
                                  context_messages=list(filter(visible, projection.context_messages)),
                                  history_updates=tuple(filter(visible, projection.history_updates)))
             if self._memory_history.system_day is not None and not self._memory_history.system_block:
-                projection = replace(projection, messages=project_memory_system(projection.messages, ""),
-                                     context_messages=project_memory_system(projection.context_messages, ""))
+                projection = replace(projection, messages=self._empty_system_memory(projection.messages),
+                                     context_messages=self._empty_system_memory(projection.context_messages))
         if self._read_recovery_pending:
             # Consume before the shared loop compacts/reprojects. A byte-bound
             # failure must not become a permanent ban on model-valid input.
@@ -211,6 +211,11 @@ class DesktopInputGuard(CoreVisibilityGuard):
                 )
         return super().prepare_context(projection)
 
+    def _empty_system_memory(self, messages: list[Message]) -> list[Message]:
+        context = self._context
+        base = context.without_system_memory(messages) if context is not None else messages
+        return project_memory_system(base, "", prompt_type=self._memory_history.prompt_type)
+
     def project_messages(self, messages, *, tools, token_limit, tail=(), reserve_tokens=0, memory_update=None):
         history = self._memory_history
         if history is None:
@@ -222,7 +227,7 @@ class DesktopInputGuard(CoreVisibilityGuard):
         if history.system_day is not None:
             if history.system_block and not fits(messages):
                 _log.info("memory operation=preload reason=system_snapshot_over_budget")
-                return project_memory_system(messages, "")
+                return self._empty_system_memory(messages)
             return messages
 
         latest = next((message for message in reversed(messages) if history.accepts(message)), None)

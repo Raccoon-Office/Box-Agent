@@ -12,7 +12,9 @@ from typing import Any, Mapping
 from uuid import UUID
 
 from ..config import DesktopMemoryConfig, ExternalMemoryConfig
-from ..memory import MemsenseMemoryBackend, MemoryEditError, MemoryHistory
+from ..memory import (
+    MemsenseMemoryBackend, MemoryEditError, MemoryHistory, memsense_content_overhead, render_memsense_content,
+)
 from ..tools.base import check_tool_cancellation
 from .evidence import _redact
 from .transport import MemoryHostTransport, MemoryProxyError
@@ -70,9 +72,11 @@ def _scope(data: dict[str, Any], epoch: str, session: str, turn: str) -> TurnSco
 _SECTIONS = (("user_items", "用户维护记忆", 6000), ("profile", "用户画像", 2000),
              ("automatic", "自动长期记忆", 3000), ("dates", "近期日期内容（UTC）", 2000),
              ("experience", "本轮相关经验", 3000))
+_MEMSENSE_SLOTS = {"profile": "{USER_PROFILE}", "automatic": "{LONG_TERM_MEMORY}", "dates": "{DATE_MEMORY_BLOCK}"}
 
 
-def _format_sections(sections: Any, scope: TurnScope, *, max_chars: int = 15400, trim_priority: bool = False) -> str:
+def _format_sections(sections: Any, scope: TurnScope, *, max_chars: int = 15400,
+                     trim_priority: bool = False, memsense_prompt: bool = False) -> str:
     if not isinstance(sections, dict) or sections.keys() - {item[0] for item in _SECTIONS}:
         raise MemoryProxyError("MEMORY_PROXY_INVALID_RESPONSE")
     if not scope.binding["automaticAtStart"] or scope.binding["source"] == "unavailable":
@@ -91,22 +95,28 @@ def _format_sections(sections: Any, scope: TurnScope, *, max_chars: int = 15400,
                                                   or view["original_length"] < len(view["content"]))
                 or "continuation" in view and not isinstance(view["continuation"], dict)):
             raise MemoryProxyError("MEMORY_PROXY_INVALID_RESPONSE")
-        text = view["content"]
+        text = view["content"].strip() if memsense_prompt else view["content"]
         if not text or view.get("status") in {"missing", "error"}:
             continue
+        if memsense_prompt and key not in _MEMSENSE_SLOTS:
+            continue
         revision = view.get("revision", "")
-        header = "## " + label + (" [stale]" if view.get("status") == "stale" else "")
+        header = "" if memsense_prompt else "## " + label
+        if view.get("status") == "stale":
+            header += " [stale]"
         if revision:
             header += " [" + revision.replace("\n", " ").replace("\r", " ") + "]"
         if view.get("truncated"):
             header += " [片段，需工具续读]"
         if view.get("continuation"):
             header += "\n续读参数（仅定位，不授予权限）: " + model_json(view["continuation"])
-        pieces.append((header + "\n", text, weight))
+        pieces.append((header.strip() + "\n" if header else "", text, weight))
         section_keys.append(key)
     if not pieces:
         return ""
-    available = max(0, max_chars - sum(len(header) for header, _, _ in pieces) - 2 * (len(pieces) - 1))
+    overhead = (memsense_content_overhead({_MEMSENSE_SLOTS[key] for key in section_keys})
+                if memsense_prompt else 2 * (len(pieces) - 1))
+    available = max(0, max_chars - sum(len(header) for header, _, _ in pieces) - overhead)
     allocations = [min(len(text), available * weight // 16000) for _, text, weight in pieces]
     if trim_priority:
         allocations = [min(len(text), weight) for _, text, weight in pieces]
@@ -122,15 +132,17 @@ def _format_sections(sections: Any, scope: TurnScope, *, max_chars: int = 15400,
         extra = min(remaining, len(text) - allocations[index])
         allocations[index] += extra
         remaining -= extra
-    result = []
+    result = {}
     suffix = "…[片段，需工具续读]"
-    for (header, text, _), size in zip(pieces, allocations):
+    for key, (header, text, _), size in zip(section_keys, pieces, allocations):
         if size == 0:
             continue
         if len(text) > size:
             text = text[:size - len(suffix)] + suffix if size >= len(suffix) else text[:size]
-        result.append(header + text)
-    return "\n\n".join(result)
+        result[key] = header + text
+    if memsense_prompt:
+        return render_memsense_content({_MEMSENSE_SLOTS[key]: text for key, text in result.items()}, limit=max_chars)
+    return "\n\n".join(result.values())
 
 
 class DesktopMemoryBackend(MemsenseMemoryBackend):
@@ -206,7 +218,7 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
             return False
         return True
 
-    async def load_context(self, *, query: str, **context: Any) -> str:
+    async def load_context(self, *, query: str, for_system_prompt: bool = False, **context: Any) -> str:
         self.model_input_guard.reset()
         self._records.clear()
         self.current_scope = None
@@ -225,18 +237,20 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         if serial != self._serial or self._closed:
             raise MemoryProxyError("TURN_REVOKED")
         scope = _scope(data, self.desktop_config.identity_epoch, session, turn)
-        content = _format_sections(data.get("sections"), scope)
+        memsense_prompt = for_system_prompt and scope.binding["source"] == "cloud"
+        content = _format_sections(data.get("sections"), scope, memsense_prompt=memsense_prompt)
         self.current_scope = scope
         self._sections = data["sections"]
         binding = scope.binding
         if binding["automaticAtStart"] and binding["source"] != "unavailable" and not any(
-            isinstance(view, dict) and view.get("status") == "error" for view in self._sections.values()
+            isinstance(view, dict) and view.get("status") == "error"
+            for key, view in self._sections.items() if not memsense_prompt or key in _MEMSENSE_SLOTS
         ):
             # 轮次和请求标识每次都变。仅按宿主确认的身份、来源与授权版本隔离快照。
             self.memory_history.set_scope(tuple(binding.get(key) for key in (
                 "accountKey", "officeIdentity", "identityEpoch", "subject", "source",
                 "memoryGeneration", "automaticRevision", "onlineAtStart",
-            )))
+            )), prompt_type="memsense" if memsense_prompt else "default")
         return content
 
     def _preload(self, limit: int) -> str:

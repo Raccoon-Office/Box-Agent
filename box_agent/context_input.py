@@ -110,6 +110,7 @@ class DefaultContextEngine:
         self._memory_lookup = None
         self._memory_owner = memory_owner
         self._memory_history = None
+        self._system_without_memory: Message | None = None
         self._local_memory_refresh = None
         self._input_guard: ModelInputGuard | None = None
         self.references: SkillReferenceContext | None = None
@@ -224,7 +225,19 @@ class DefaultContextEngine:
         projected = restore_connector_status(
             project_legacy_system([project_user_message(message) for message in visible], suffix, self._system_prompt_projector),
         )
-        return project_memory_system(projected, memory.system_block) if system_memory else projected
+        if not system_memory:
+            return projected
+        base = project_memory_system(projected, "")
+        self._system_without_memory = base[0] if base and base[0].role == "system" else None
+        return project_memory_system(base, memory.system_block, prompt_type=memory.prompt_type)
+
+    def without_system_memory(self, messages: list[Message]) -> list[Message]:
+        """恢复投影前的系统消息，避免用记忆正文识别无分隔符的模板。"""
+        if self._system_without_memory is not None and messages and messages[0].role == "system":
+            return [self._system_without_memory, *messages[1:]]
+        from .memory import project_memory_system
+
+        return project_memory_system(messages, "")
 
     @property
     def tool_reader(self):
@@ -232,7 +245,7 @@ class DefaultContextEngine:
 
     def compact_history(self, original: list[Message], compacted: list[Message]) -> list[Message]:
         """Apply resource retention only after the existing compaction decision."""
-        from .memory import is_memory_history_message, project_memory_system
+        from .memory import is_memory_history_message
 
         compacted = [message for message in compacted if not is_memory_history_message(message)]
         if self.references is not None:
@@ -245,19 +258,19 @@ class DefaultContextEngine:
             compacted = [*compacted, latest_date]
         if self._memory_history is not None:
             if self._memory_history.system_day is not None:
-                compacted = project_memory_system(compacted, "")
+                compacted = self.without_system_memory(compacted)
             else:
                 compacted = self._memory_history.restore(original, compacted)
         return compacted
 
     def compaction_source(self, messages: list[Message]) -> list[Message]:
         """Keep method bodies out of both generated and deterministic summaries."""
-        from .memory import is_memory_history_message, project_memory_system
+        from .memory import is_memory_history_message
 
         # 记忆由原后端重新供给，不能混进无法撤回的对话摘要。
         messages = [message for message in messages if not is_memory_history_message(message)]
         if self._memory_history is not None and self._memory_history.system_day is not None:
-            messages = project_memory_system(messages, "")
+            messages = self.without_system_memory(messages)
         return self.references.compaction_source(messages) if self.references is not None else messages
 
 
