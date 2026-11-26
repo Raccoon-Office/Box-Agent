@@ -14,22 +14,14 @@ inferences, subject to encoded-byte and provider request-body limits. Pixels sta
 outside durable message content; SessionLog records references and lifecycle
 metadata. See [Image context](IMAGE_CONTEXT.md) for the complete contract.
 
-Before each summary attempt, Box-Agent estimates the complete projected request,
-including the appended instruction, images, and any offered tool schemas. The
-summary request uses the client's `max_output_tokens`, with 8,192 tokens as
-the fallback when the client declares no output limit. With a known context
-window, `derive_context_token_limit` reserves up to 20,000 of those tokens when
-deriving the safe input budget. The per-request `max_tokens` also respects the
-estimated space remaining in the window. With an unknown window, preflight uses
-the session input budget. Both ordinary and forced compaction use this check.
-The rebuilt main request must then fit the main model's budget.
+Before each summary attempt the runtime counts the complete projected input, including instructions, images and offered tools, in the summary route’s calibrated tokens. For a known window it reserves 1,024 tokens of framing headroom and requires room for at least `min(8192, configured_output)` output tokens. The request and its instruction both use `max_tokens = min(configured_output, window − input − 1024)`. Tightening this number triggers another measurement of the rendered request. Clients with fixed output limits need room for the entire configured output. An undeclared output cap defaults to 8,192. With an unknown window, preflight uses the supplied session input limit.
 
 When an ACP prompt selects a model with a smaller safe input budget, Box-Agent
 prepares the full request against the target model before changing the session
 binding. If the request exceeds the budget, the previous session's summary
 route compacts the history with room for request assembly and any required
 Skill reading notice. Box-Agent then prepares the complete target request
-again. A failed check returns `MODEL_SWITCH_CONTEXT_PREPARATION_FAILED` and
+again. An unsuccessful target-budget check returns `MODEL_SWITCH_CONTEXT_PREPARATION_FAILED` and
 keeps the previous binding, original history and submitted user message with
 its attachments. The target model receives the request only after it passes
 this check.
@@ -80,7 +72,8 @@ from public ToolResult serialization, durable message content and ordinary
 AgentLogger history. Session traces and provider debug logs redact raw image
 payloads. A summary may receive still-active images when its model and budgets
 permit; summary calls do not advance the main-model inference counter or retire
-images merely because the summary provider has a smaller body limit.
+images merely because the summary provider has a smaller body limit. Once a user
+image moves behind the cut, its archived path lets the model reopen it on demand.
 
 An empty or discarded retry retains the same image age. An accepted, committed
 main-model response advances the counter, including tool-call responses within
@@ -483,7 +476,11 @@ text and regular text share the same counter.
 
 After each main response with reported input usage, the session divides actual
 input by the local estimate of that request and clamps the ratio to `[0.5, 2.0]`.
-The newest ratio for each route scales future incremental estimates. A provider's
+Each local estimate used for a window, threshold, output allowance or rebuilt history is
+`ceil(local_tokens × route_ratio)`. Measured usage is already in provider tokens.
+The summary route supplies its own ratio. The 15,000-token recent window, the
+2,000/10,000-token user archive quotas, the 5,000/25,000-token Skill quotas and
+the 12,000-token fallback allowance use local counts. A provider's
 context-length rejection can also supply an actual input count for calibration.
 The ratio starts at `1.0` and is held in memory for the session.
 
@@ -520,8 +517,8 @@ Cache reuse requires the same model and a matching prefix. The ACP session
 router still applies its 8,192-token cap when resolving the summary client.
 
 On the first attempt and every retry, the prompt asks the model to keep its
-entire reply, including the closing `</summary>` tag, within the smaller of
-8,192 tokens and the actual output allowance for that request. The closing
+entire reply, including the closing `</summary>` tag, within the actual
+`max_tokens` of that request. The closing
 `REMINDER` calls for one plain-text summary block and prohibits tool calls.
 The nine-section format includes all genuine
 user turns in chronological order and preserves the user's security constraints
@@ -533,64 +530,19 @@ facts that need source verification, and claim success only where the conversati
 proves it. The runtime writes the complete accepted body after `Summary:`.
 Accepted summaries have no character limit and remain intact during compaction.
 
-The synthetic `user` message uses this framing:
+The compaction cut is the start of the newest continuous window of complete interactions. It holds up to five assistant rounds and 15,000 local tokens. A tool call and its matching results move together. An oversized newest round places the cut after that round. Later steps append new messages to the rebuilt prefix.
 
 ```text
-This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
-
-Summary:
-<model-generated summary>
-
-If you need specific details from before compaction (exact code snippets, error messages, tool output, or content you generated), query the full session log at: <absolute path> (JSONL; prefer query_jsonl over reading the whole file).
-
-Continue the conversation from where it left off. Do not acknowledge the summary, recap what was happening, or ask the user to repeat information solely because compaction occurred. If genuinely required information is still missing, use the normal user-input or decision tool. Otherwise, pick up the last task as if the break never happened.
+system
+summary message: model body and continuation instructions, [Earlier User Messages], Session Log hint
+recent messages after the cut, in original order
+[Invoked Skills]
+runtime state
 ```
 
-The recovery line appears when the session has a Session Log and uses the
-absolute `SessionLog.path`, honoring the configured state directory. If
-`query_jsonl` is unavailable, the line directs the model to paginate with
-`read_file`. The shared product-directory policy applies to this path. When
-`allow_full_access: false`, either tool can read the current `session.jsonl`
-in the Box-Agent state directory without requesting confirmation. The recovery
-line supplies the log path alone.
+The summary message carries the full originals of earlier user entries in `earlier_user_messages` for replay and subsequent compactions. Its visible archive is chronological. Each ordinary entry has up to 2,000 local tokens, keeping both ends, and ordinary entries share 10,000 tokens. When the latest real user precedes the cut, its complete text and paths follow those entries, outside both quotas. When it falls inside the recent window it appears there once. Recent history may therefore start with an assistant.
 
-The rebuilt history is ordered as follows:
-
-```text
-system message
-[Earlier User Messages] runtime user message
-summary user message
-recent complete rounds and the latest real user message
-[Invoked Skills] runtime user message
-runtime-state user message
-```
-
-Recent history keeps up to five assistant rounds and targets at most 15,000
-locally estimated tokens. A smaller model or a large fixed request prefix can
-leave less room. An assistant tool call and all contiguous results form one
-round, and assistant text without tools also counts as one round. User
-messages can stay in the window without consuming a round. The latest real user
-message always stays in its original relative position. Initial window selection
-keeps the newest complete round even when it exceeds the token cap. Its
-assistant and tool-result bodies can be replaced by bounded receipts while
-calls, arguments, identifiers, result order, and result count are preserved.
-
-Compaction establishes a new durable prefix for the first main request that
-uses this history. A retained tool receipt remains byte-for-byte the same on
-later requests until the next compaction. The loop appends new messages to
-that prefix and resumes from the same projection after reopening the log.
-For prompt caching, compaction changes the prefix at the first rewritten
-message. Subsequent steps can reuse the rebuilt prefix when the model, system
-prompt, tool schemas and request-only overlays also match. Rebuilding the
-system prompt on resume can change the provider's cache key.
-
-Earlier real user text appears oldest first, introduced as a historical record.
-An entry over 2,000 tokens keeps its beginning and end with an omission marker.
-The rendered record fits within 10,000 tokens by leaving out the oldest entries
-and reporting their count. Session Log keeps the complete original texts in the
-structured `earlier_user_messages` field so later compactions and replay can
-reuse them. Deterministic compaction uses the same archive. The latest-user
-lookup, memory recall, goal handling, and language selection use real user messages.
+An archived user entry lists each attached file. Images use the workspace path when available, then the absolute session image-store path. An unavailable image is marked explicitly. The original upload references and file facts stay in Session Log. Subsequent requests can reopen an archived image with `inspect_images` when needed. The recovery hint gives the absolute session log path and the available reader.
 
 Goal, Plan, and Todo contribute through their side-effect-free `compaction_state`
 contract. The runtime shares the 12,000-character budget across the blocks in that
@@ -614,89 +566,37 @@ rebuilt request. After each removal it rebuilds the projection, including Skill
 restoration, tool instructions, and the date, then re-estimates input tokens and
 stops as soon as the request fits the target.
 
-1. Drop the oldest retained assistant round with all of its contiguous tool
-   results. Repeat down to zero rounds if needed. Earlier genuine user messages
-   leaving the window join `[Earlier User Messages]`. The latest genuine user
-   message keeps its original relative position throughout.
-2. Drop restored Skill bodies one at a time, oldest invocation first. Each
-   dropped body leaves a locator with the Skill name, path, and directions
-   to reread it with `get_skill`. Its lines lose visibility credit.
-3. Remove the oldest displayed archive entry and update the omitted count.
-   If even the archive header is too large, remove the archive message. The
-   complete structured originals travel with the summary in that case and
-   remain available to Session Log replay and later compactions.
-4. Remove built-in runtime-state blocks one at a time in the order Todo, Plan,
-   Goal. Omit the runtime-state message when it has no blocks left.
+1. Drop the oldest complete assistant round. Move the cut forward and archive the real users that leave the recent window.
+2. Remove restored Skill bodies, oldest invocation first. Each locator retains its name, path and reread instructions.
+3. Remove ordinary visible user entries, oldest first. The newest real user and the model’s complete summary remain protected.
+4. Remove Todo, Plan and Goal in that order.
 
-The default target is the hard input limit `token_limit`. If the caller supplies
-`request_headroom_tokens`, the loop first targets `token_limit - request_headroom_tokens`.
-After exhausting the removals, a request within the hard limit can proceed even
-if it missed the softer target. A request still above the hard limit is marked
-`blocked` and uses the existing budget error handling. Proactive compaction,
-convergence retries, reactive recovery, and model-switch preflight share this
-order. The source messages and the complete summary body stay intact.
+The target is the hard input limit minus any requested headroom. Once optional material is exhausted, a result inside the hard limit can proceed. A result above it is `blocked`.
 
-### Retry and recovery
+### Summary retries and provider recovery
 
-- When summary preflight or the provider rejects the input length, Box-Agent
-  drops whole groups from the oldest end. Each retry aims to remove about 20% of
-  the removable source tokens, with at least one group removed. The system message and
-  latest real user message are protected. There are at most three truncation
-  retries. Retried source carries `[earlier conversation truncated for
-  compaction retry]` after the system message. A successful summary notes that the trimmed part is
-  outside its coverage. Earlier user text remains available through the separate
-  history record.
-- If the provider reports `length` or `max_tokens`, Box-Agent accepts one
-  complete, nonempty `<summary>...</summary>` block and discards any surrounding
-  text. A missing, unclosed, empty, or malformed block, extra summary tags, or a
-  tool call triggers one format retry. On a normal finish the block must occupy
-  the entire reply apart from whitespace. The format retry keeps the conversation
-  and appends a reminder to summarize every preceding message, including the
-  newest, without answering it or doing the work it requests.
-  Transient network, timeout,
-  upstream, and rate-limit failures retain the client's retry policy. An eligible
-  custom client without that policy can retry within the same attempt budget.
-- If the shared request still fails, Box-Agent makes one independent request on
-  the same client. It uses a short summarization-only system prompt, the current
-  (possibly trimmed) history without its original system message, and the summary
-  instruction with the format retry text. It omits tools. Authentication or
-  permission failures skip the independent request. A compaction makes at most
-  six summary calls at the application level, with one slot reserved for the
-  independent request. Provider SDK retries remain governed by the SDK.
-- When provider summarization fails or is disabled, the local fallback puts the
-  current user request first. Within its 12,000-character budget it collects
-  history newest first, presents the retained messages in chronological order,
-  and reports omitted older messages as `<fallback omitted N earlier source messages>`.
-  A long message preserves its head and tail. The `[Earlier User Messages]`
-  archive is handled separately.
-- If a main request returns a context-length error before emitting output,
-  Box-Agent forces compaction with a tighter history budget, prepares a fresh
-  request, and retries. Recognized formats include DashScope input ranges,
-  vLLM and TGI token limits, Moonshot model token limits, GLM prompt length errors,
-  DeepSeek input token limits, and the SenseNova gateway's input-plus-output
-  count. A reported input count can calibrate estimation and a reported maximum
-  can tighten the budget. Both fields are optional. HTTP 413 body-size errors and
-  ordinary string-length validation retain their own classification. The turn
-  allows at most two reactive retries. Exhaustion returns `CONTEXT_INPUT_BUDGET_EXCEEDED`.
-  A failure after output preserves partial assistant text and ends the turn.
-  Reactive recovery reuses completed tool results and commits the accepted reply once.
+Each compaction starts with one shared-prefix request and allows three shared retries in total. The last failure determines the next request.
 
-After three consecutive compaction outcomes in fallback or blocked mode, the
-session continues with deterministic compaction and stops calling the summary
-model. The rapid-refill counter credits at most one applied compaction per step,
-including convergence and reactive attempts. Three consecutive refills within
-the following one to three steps stop the turn with `CONTEXT_COMPACTION_THRASHING`
-and reset the streak.
-The user can read a large file or tool result in chunks, or start a new session.
-ACP forwards the error code through its existing `errorCode` field. Both counters
-are held in memory across turns. Compaction events report `summary_retries` and
-`head_truncated`. Session Log uses `summaryRetries` and `headTruncated` for the
-same fields. The retry count includes recovery from local preflight failures.
-`summary_path` in the Python event and `summaryPath` in the Session Log
-`compaction/summary` event report the outcome as `shared`, `independent`, or
-`deterministic`. The outcome, Python event, and Session Log record budget
-removals in `degradation` using `droppedRounds`, `droppedSkillBodies`,
-`droppedEarlierUsers`, and `droppedRuntimeState`.
+| Failure | Next action |
+| --- | --- |
+| Local input preflight or provider `context_length` | Remove roughly one fifth of removable tokens, oldest groups first. Preserve system, all real users, previous summaries and compaction metadata. If no group can be removed, go directly to the independent request. |
+| Output limit reached before a complete summary | Ask for a complete rewrite including the closing tag. Quote the previous limit and the actual token allowance for this request. |
+| Tool call, ambiguous tags, empty or malformed summary | Append the strict format reminder. A single complete nonempty block is accepted on a length finish even if it has surrounding text. |
+| Connection, timeout, 429, 5xx, authentication, permission or other provider error | The model client applies its retry policy. The kernel ends the turn with the ordinary structured provider error. The prior message surface stays active. |
+
+After shared content retries, one independent request uses the same model, the latest trimmed source, a summary-only system instruction, strict formatting and no tools. Another content failure selects the local fallback. Local preflight retries consume a retry slot without sending a provider request. Each new compaction starts with a fresh allowance, including the next step after a fallback.
+
+### Local fallback and Session Log recovery
+
+The fallback uses the most recent real user or summary as its anchor. It keeps a continuous suffix of complete assistant rounds after that anchor, newest first for selection and chronological for delivery. An oversized newest group yields an empty suffix. When the newest anchor has no subsequent interactions, the preceding anchor and its trailing groups share the same 12,000-local-token allowance. The latest anchor is protected separately.
+
+If input still exceeds the target, remove the oldest retained group, then the optional preceding anchor, then the oldest visible user entries within a summary anchor. The summary body and latest real user remain intact. Skill bodies and Todo/Plan/Goal are restored only in summary mode.
+
+An omission adds one final runtime user message with `runtime_kind="compaction_notice"`. When the log and omitted seqs can both be located, it lists the ranges and the absolute `session.jsonl` path. Otherwise it just reports the omission. Only when earlier information is needed should the model query those ranges with `query_jsonl` or paginate with `read_file`. A later fallback replaces the notice. A fallback that retains all content writes the latest anchor to the existing `compaction/summary` event. Older logs now replay workflow checkpoint and mid-turn update text at their original positions.
+
+A pre-output rejection of a main request permits two reactive compactions for that individual request. Any successful response renews the allowance, including a tool-call response without usage. Reported input can calibrate the route and a reported window tightens the limit in provider tokens. Exhaustion returns `CONTEXT_INPUT_BUDGET_EXCEEDED` with `reactiveCompactionAttempts`. Partial output ends the request and is preserved.
+
+Rapid refills still count once per distinct step. Three consecutive refills within the next one to three steps end the turn with `CONTEXT_COMPACTION_THRASHING`. The summary retry budget lives only for one compaction. Events expose `summary_retries`, `head_truncated` and `summary_path`. The corresponding Session Log fields are `summaryRetries`, `headTruncated` and `summaryPath` (`shared`, `independent` or `deterministic`). The `degradation` object records `droppedRounds`, `droppedSkillBodies`, `droppedEarlierUsers` and `droppedRuntimeState`.
 
 ## Adjacent protections
 
@@ -714,7 +614,7 @@ Direct regression coverage lives in:
 - `tests/test_compaction_budget_convergence.py` for degradation order, headroom,
   archive replay, and reactive recovery.
 - `tests/test_compaction_resource_retention.py` for Skill restoration and reference coverage.
-- `tests/test_context_compaction_e2e.py`, `tests/test_context_compaction_recovery.py`, and `tests/test_error_messages.py` for summary preflight, retries, circuit breakers, and provider errors.
+- `tests/test_context_compaction_e2e.py`, `tests/test_context_compaction_recovery.py`, and `tests/test_error_messages.py` for summary preflight, retries, rapid refills, and provider errors.
 - `tests/test_compaction_session_log.py` for the recovery hint and restricted-mode
   reads within the Box-Agent state directory.
 - `tests/test_image_inspection_tool.py`, `tests/test_multimodal_message_conversion.py`,
