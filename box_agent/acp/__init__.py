@@ -1145,6 +1145,7 @@ class SessionState(AgentSession):
     device_delegations: DeviceDelegations | None = None
     device_wake_task: asyncio.Task[None] | None = None
     device_wake_closed: bool = False
+    device_auto_wake_enabled: bool = True
     prompt_target_turn: str = ""
     prompt_stop_requested: bool = False
     trace_writer: SessionTraceWriter | None = None
@@ -2845,6 +2846,9 @@ class BoxACPAgent:
             if isinstance(error, OSError) and error.filename and Path(error.filename) == workspace:
                 raise _session_storage_error(error, "workspace") from error
             raise
+        # Load and resume both rebind an existing log. Neither may wake before
+        # resume selects its org; load stays replay-only until an execution request.
+        state.device_auto_wake_enabled = not load_existing
         self._sessions[session_id] = state
         if not load_existing:
             if state.device_delegations is not None:
@@ -2905,6 +2909,7 @@ class BoxACPAgent:
         state = self._sessions[session_id]
         if state.device_delegations is not None:
             state.device_delegations.bind_pending_org(current_request_org() or "", replace=True)
+            state.device_auto_wake_enabled = True
             state.device_delegations.retry_stopped_cancellations()
             self._schedule_device_wake(session_id, state)
         if replay_from is not None:
@@ -3312,6 +3317,7 @@ class BoxACPAgent:
             if state.trace_writer is not None:
                 trace_token = set_session_trace_writer(state.trace_writer, turn_id=turn_id)
             config = state.config or self._config
+            state.device_auto_wake_enabled = True
             with scoped_exact_approvals(delegated_turn), private_payload_scope(config.agent.memory_backend_type == "desktop"):
                 return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
         except SessionLogDurabilityError as exc:
@@ -3343,7 +3349,8 @@ class BoxACPAgent:
 
         def ready() -> bool:
             return not (
-                state.device_wake_closed or self._closing or state._prompt_in_progress
+                state.device_wake_closed or not state.device_auto_wake_enabled
+                or self._closing or state._prompt_in_progress
                 or state._history_edit_in_progress or state._history_restore_failed
                 or state.waiting_for_user_input or state.run_handle.is_active
             )
