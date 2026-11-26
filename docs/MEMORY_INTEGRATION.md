@@ -155,9 +155,9 @@ exists=false 时只允许 write 创建，不允许 edit。
 MemSense 块包含 `User Profile`、`Long-term Memory`、`Recent Date Memory`
 三个非空分区及使用规则。日期按旧到新排列，
 自动注入只保留日期标题和摘要正文；模型工具不开放日期文件的显式读取或修改。
-`date_memory_load_days` 仅用于 MemSense，默认 3，范围 0～31；读取
-`memory://date-memory/YYYY-MM-DD.md`。日期依据本轮时间戳和 MemSense 服务端
-的 UTC 日分区计算，包含当天和此前若干天，每个新 query 重新计算和读取。
+`date_memory_load_days` 仅用于 MemSense，默认 3，范围 0～31。新会话首轮或按
+Box-Agent 本地日期跨天后的首轮，随记忆快照加载 `memory://date-memory/YYYY-MM-DD.md`。
+文件范围按加载时的 UTC 日期计算，包含 UTC 当天和此前若干天。同一会话当天复用已有快照。
 服务端确认不存在或为空的文件不生成分区。
 日期预载只读取已有摘要，不会等待后台保存或代替服务端生成摘要。
 `context_max_chars` 限制后端上下文总长度；MemSense 截断保留完整 mem 条目
