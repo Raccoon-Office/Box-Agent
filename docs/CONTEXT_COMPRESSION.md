@@ -333,12 +333,14 @@ The trigger is derived from the model's input budget:
 
 ```text
 output_reserve = min(max_output_tokens, 20_000)
-autoCompactThreshold = int(0.9 * (context_window - output_reserve))
+autoCompactThreshold = int(0.8 * (context_window - output_reserve))
 ```
 
 On a 180,000-token window, a configured output of 8,000 gives a threshold of
-154,800 tokens. Configured outputs of 20,000, 64,000, and 80,000 all give a
-threshold of 144,000 tokens.
+137,600 tokens. Configured outputs of 20,000, 64,000, and 80,000 all give a
+threshold of 128,000 tokens. A 256,000-token window with a 64,000-token output
+limit gives a threshold of 188,800, and a 1,000,000-token window with a
+100,000-token output limit gives a threshold of 784,000.
 
 Before sending a main request with a known window, Box-Agent computes the
 available output from the projected input and 1,024 tokens of envelope headroom,

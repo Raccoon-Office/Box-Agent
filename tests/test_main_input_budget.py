@@ -123,7 +123,7 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
             assert any("Summary:" in str(m.get("content")) for m in main_requests[0]["messages"])
             assert not any(m.get("content") == old_detail for m in main_requests[0]["messages"])
             assert llm.estimate_text_tokens(json.dumps(main_requests[0], ensure_ascii=False)) < target_limit
-            assert adapter._sessions[created.session_id].agent.token_limit == target_limit == 144_000
+            assert adapter._sessions[created.session_id].agent.token_limit == target_limit == 128_000
         finally:
             await adapter.aclose()
 
@@ -159,7 +159,7 @@ async def test_acp_binding_can_configure_more_output_than_the_window(tmp_path):
             created = await adapter.new_session(str(tmp_path), llm_binding={
                 "source": "builtin", "model": llm.model, "contextWindow": 48_000, "maxTokens": 64_000,
             })
-            assert adapter._sessions[created.session_id].agent.token_limit == 25_200
+            assert adapter._sessions[created.session_id].agent.token_limit == 22_400
             response = await adapter.prompt(created.session_id, [{"type": "text", "text": "Hello."}])
             assert response.field_meta["ok"] is True
             main_request = next(request for request in requests if request.get("stream"))

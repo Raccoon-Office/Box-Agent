@@ -31,7 +31,7 @@ MODELS = [
     pytest.param("请处理附件。", {"files": ["synthetic.pdf"]}, "office", 2, id="document-file"),
     pytest.param("完成任务。", {"required_tools": ["execute_code"]}, "advanced", 3, id="explicit-tool"),
     pytest.param("制作成稿。", {"skills": ["sn-ppt-standard"]}, "office", 2, id="explicit-skill"),
-    pytest.param("你好", {"estimated_input_tokens": 100_000}, "advanced", 1, id="long-context"),
+    pytest.param("你好", {"estimated_input_tokens": 90_000}, "advanced", 1, id="long-context"),
     pytest.param("把这句话翻译成英文：这个错误已经修复。", {}, "light", 1,
                  id="translation-keyword-contamination"),
 ],
@@ -44,7 +44,7 @@ def test_synthetic_task_routes_to_the_expected_capability(task, options, model, 
 
 def test_synthetic_context_exhaustion_rejects_instead_of_claiming_a_route():
     with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
-        select_auto_model(MODELS, task="你好", estimated_input_tokens=108_001)
+        select_auto_model(MODELS, task="你好", estimated_input_tokens=96_001)
 
 
 def test_independent_child_tasks_do_not_inherit_each_others_capability_floor():
@@ -116,7 +116,7 @@ def test_translation_keeps_full_length_and_capacity_accounting():
     assert decision["task_tags"] == ["rewrite"]
     assert decision["required_ability_level"] == 2
     assert decision["estimated_input_tokens"] == (len(task) + 1) // 2
-    selected, _ = select_auto_model(MODELS, task=task, estimated_input_tokens=100_000)
+    selected, _ = select_auto_model(MODELS, task=task, estimated_input_tokens=90_000)
     assert selected["model"] == "advanced"
     with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
-        select_auto_model(MODELS, task=task, estimated_input_tokens=108_001)
+        select_auto_model(MODELS, task=task, estimated_input_tokens=96_001)

@@ -207,11 +207,13 @@ blocked 模式一致。
 
 ```text
 output_reserve = min(max_output_tokens, 20_000)
-autoCompactThreshold = int(0.9 * (context_window - output_reserve))
+autoCompactThreshold = int(0.8 * (context_window - output_reserve))
 ```
 
-以 180,000 tokens 的窗口为例，输出上限配置为 8,000 时，触发阈值为 154,800 tokens。
-配置为 20,000、64,000 或 80,000 时，阈值均为 144,000 tokens。
+以 180,000 tokens 的窗口为例，输出上限配置为 8,000 时，触发阈值为 137,600 tokens。
+配置为 20,000、64,000 或 80,000 时，阈值均为 128,000 tokens。
+256,000 tokens 的窗口配合 64,000 tokens 的输出上限，阈值为 188,800 tokens。
+1,000,000 tokens 的窗口配合 100,000 tokens 的输出上限，阈值为 784,000 tokens。
 
 主模型窗口已知时，发送前从窗口扣除本次投影输入和 1,024 tokens 的组装余量，计算可用
 输出空间，并以 `output_reserve` 为下限。本次输出上限取适用的输出额度与可用空间的较小值。

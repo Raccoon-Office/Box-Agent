@@ -306,7 +306,7 @@ async def test_parallel_children_derive_separate_budgets_from_their_selected_mod
     )
     assert all(result.success for result in results)
     assert {call["llm"].model: call["token_limit"] for call in child_runs} == {
-        "small": 21600, "large": 882000,
+        "small": 19_200, "large": 784_000,
     }
     assert tool._token_limit is None
     assert (model.context_window, model.max_output_tokens) == (1_000_000, 100_000)
@@ -318,7 +318,7 @@ async def test_child_recomputes_budget_when_its_inherited_binding_changes(child_
     assert (await tool.execute(task="First task", required_tools=[])).success
     model.context_window, model.max_output_tokens = 32000, 8000
     assert (await tool.execute(task="Second task", required_tools=[])).success
-    assert [call["token_limit"] for call in child_runs] == [882000, 21600]
+    assert [call["token_limit"] for call in child_runs] == [784_000, 19_200]
 
 
 @pytest.mark.parametrize("window, output, fits", [(1_000_000, 100_000, True), (32000, 8000, False)])
@@ -336,12 +336,12 @@ async def test_skill_preflight_uses_the_routed_child_budget(tmp_path, child_runs
     result = await tool.execute(task="Apply the delegated review method", skills=["review"], required_tools=[])
     assert result.success is fits, result.error
     if fits:
-        assert child_runs[0]["token_limit"] == 882000
+        assert child_runs[0]["token_limit"] == 784_000
         assert "R" * 110000 in child_runs[0]["messages"][1].content
     else:
         assert not child_runs
         assert result.raw_output["code"] == "SKILL_REFERENCE_BUDGET_EXCEEDED"
-        assert result.raw_output["token_limit"] == 21600
+        assert result.raw_output["token_limit"] == 19_200
 
 
 async def test_batch_files_checks_its_selected_model_budget_without_skills(tmp_path):
@@ -354,7 +354,7 @@ async def test_batch_files_checks_its_selected_model_budget_without_skills(tmp_p
     result = await tool.execute(task="Summarize this file", files=["input.txt"], required_tools=["read_file"])
     assert not result.success
     assert result.raw_output["code"] == "CONTEXT_INPUT_BUDGET_EXCEEDED"
-    assert result.raw_output["token_limit"] == 6300
+    assert result.raw_output["token_limit"] == 5_600
     model.generate.assert_not_called()
 
 

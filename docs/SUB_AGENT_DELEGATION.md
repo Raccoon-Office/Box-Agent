@@ -186,9 +186,9 @@ tool_limits:
 Callers may request smaller `budget.max_steps` and `budget.max_tool_calls`.
 Values above the configured limits are clamped. `budget` must be a JSON object,
 not serialized JSON text. By default, each child derives its safe input budget
-after routing as `0.9 * (context_window - max_output_tokens)`, using its actual
-model's capabilities and the same formula as the main agent. It is not fixed at
-50,000 tokens. Skill preflight, the general loop and prefetched batch requests
+after routing using its selected model's capabilities and the main agent's
+formula, `int(0.8 * (context_window - min(max_output_tokens, 20_000)))`.
+Skill preflight, the general loop and prefetched batch requests
 share that budget. An explicit positive `sub_agent_token_limit` remains an
 optional cap; omitted or `null` means automatic. Models without window metadata
 fall back to the main configuration's default safe input budget; this is a

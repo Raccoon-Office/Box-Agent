@@ -27,7 +27,7 @@ DEFAULT_MODEL = "claude-sonnet-4-20250514"
 HOSTED_GATEWAY_API_KEY_PLACEHOLDER = "box-agent-auth-json"
 XIAOHUANXIONG_MAX_OUTPUT_TOKENS = 80000
 USER_CONFIGURED_MAX_OUTPUT_TOKENS = 63999
-CONTEXT_INPUT_SAFETY_RATIO = 0.9
+CONTEXT_INPUT_SAFETY_RATIO = 0.8
 OUTPUT_RESERVE_CAP_TOKENS = 20_000
 
 
@@ -104,7 +104,7 @@ class LLMConfig(BaseModel):
     def context_token_limit(self) -> int:
         """Token threshold that triggers context summarization.
 
-        Reserve up to 20,000 output tokens, then use 90% of the remaining
+        Reserve up to 20,000 output tokens, then use 80% of the remaining
         window for input. The remaining headroom absorbs token-estimate drift.
         """
         return derive_context_token_limit(self.context_window, self.max_output_tokens)

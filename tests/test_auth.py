@@ -56,7 +56,7 @@ def test_resolve_auth_token_reads_supported_env(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.parametrize(("max_output_tokens", "expected"), [
-    (8_000, 154_800), (20_000, 144_000), (64_000, 144_000), (80_000, 144_000),
+    (8_000, 137_600), (20_000, 128_000), (64_000, 128_000), (80_000, 128_000),
 ])
 def test_context_compaction_limit_reserves_at_most_twenty_thousand_output_tokens(
     max_output_tokens: int, expected: int,
@@ -67,8 +67,19 @@ def test_context_compaction_limit_reserves_at_most_twenty_thousand_output_tokens
 
 
 def test_context_compaction_limit_uses_selected_model_capabilities() -> None:
-    assert derive_context_token_limit(128_000, 16_000) == 100_800
-    assert derive_context_token_limit(32_000, 64_000) == 10_800
+    assert derive_context_token_limit(128_000, 16_000) == 89_600
+    assert derive_context_token_limit(32_000, 64_000) == 9_600
+
+
+@pytest.mark.parametrize(("context_window", "max_output_tokens", "expected"), [
+    (180_000, 64_000, 128_000),
+    (256_000, 64_000, 188_800),
+    (1_000_000, 100_000, 784_000),
+])
+def test_context_compaction_limit_leaves_headroom_for_large_model_windows(
+    context_window: int, max_output_tokens: int, expected: int,
+) -> None:
+    assert derive_context_token_limit(context_window, max_output_tokens) == expected
 
 
 @pytest.mark.parametrize(

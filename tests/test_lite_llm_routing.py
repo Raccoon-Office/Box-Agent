@@ -480,7 +480,7 @@ def test_model_resolver_stops_before_cloning_when_no_candidate_can_fit(monkeypat
     assert llm.model == "model-automatic"
 
 
-@pytest.mark.parametrize("output, budget", [(100, 810), (400, 540)])
+@pytest.mark.parametrize("output, budget", [(100, 720), (400, 480)])
 def test_auto_routing_reserves_output_and_the_agent_safety_margin(output, budget):
     candidates = [{"model": "small", "tags": [], "abilityLevel": 3,
                    "contextWindow": 1_000, "maxTokens": output}]
@@ -504,8 +504,8 @@ def test_auto_routing_rejects_output_limits_that_leave_no_input_capacity(output)
 def test_auto_routing_uses_capped_reserve_for_large_output_cap():
     candidate = {"model": "small", "tags": [], "abilityLevel": 3,
                  "contextWindow": 32_000, "maxTokens": 64_000}
-    _, diagnostic = select_auto_model([candidate], task="hello", estimated_input_tokens=10_800)
-    assert diagnostic["input_token_budget"] == 10_800
+    _, diagnostic = select_auto_model([candidate], task="hello", estimated_input_tokens=9_600)
+    assert diagnostic["input_token_budget"] == 9_600
 
 
 def test_routing_uses_the_actual_auxiliary_output_cap_without_changing_the_pool():
@@ -514,25 +514,25 @@ def test_routing_uses_the_actual_auxiliary_output_cap_without_changing_the_pool(
                  "contextWindow": 1_000, "maxTokens": 400}
     llm.auto_model_candidates = [candidate]
     routed, diagnostic = resolve_model_client(
-        llm, task="hello", estimated_input_tokens=800, max_output_tokens_cap=100,
+        llm, task="hello", estimated_input_tokens=700, max_output_tokens_cap=100,
     )
     assert routed.model == "large"
     assert routed.max_output_tokens == 100
-    assert diagnostic["input_token_budget"] == 810
+    assert diagnostic["input_token_budget"] == 720
     assert candidate["maxTokens"] == 400
     with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
-        resolve_model_client(llm, task="hello", estimated_input_tokens=811, max_output_tokens_cap=100)
+        resolve_model_client(llm, task="hello", estimated_input_tokens=721, max_output_tokens_cap=100)
 
 
 def test_routing_reserves_the_inherited_output_limit_when_the_catalog_omits_it():
     llm = _DummyLLM("automatic")
     llm.max_output_tokens = 200
     llm.auto_model_candidates = [{"model": "small", "tags": [], "abilityLevel": 3, "contextWindow": 1_000}]
-    routed, diagnostic = resolve_model_client(llm, task="hello", estimated_input_tokens=700, max_output_tokens_cap=800)
+    routed, diagnostic = resolve_model_client(llm, task="hello", estimated_input_tokens=630, max_output_tokens_cap=800)
     assert routed.max_output_tokens == 200
-    assert diagnostic["input_token_budget"] == 720
+    assert diagnostic["input_token_budget"] == 640
     with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
-        resolve_model_client(llm, task="hello", estimated_input_tokens=721, max_output_tokens_cap=800)
+        resolve_model_client(llm, task="hello", estimated_input_tokens=641, max_output_tokens_cap=800)
 
 
 @pytest.mark.asyncio
@@ -578,7 +578,7 @@ async def test_routed_child_checks_full_input_against_its_selected_model_window(
             parent_tool_call_id="test-child", task_preview="hello",
             sub_agent_id="routed-child", title="routed child",
         )
-        assert routing["input_token_budget"] == 6_300
+        assert routing["input_token_budget"] == 5_600
         assert child.context_window == 8_000
         events = []
         while not queue.empty():
@@ -683,7 +683,7 @@ async def test_acp_session_with_large_context_can_prepare_its_bounded_compaction
             cwd=str(tmp_path), field_meta={"llm_binding": binding},
         )))
         state = agent._sessions[session.sessionId]
-        assert state.agent.token_limit == 882_000
+        assert state.agent.token_limit == 784_000
         assert state.summary_llm.model == "large"
         assert state.summary_llm.max_output_tokens == 8_192
         assert main.last_messages is None
@@ -763,8 +763,8 @@ async def test_conversation_sessions_bind_models_without_mutating_each_other(tmp
         "maxTokens": 16000,
     }
     assert second_state.agent.llm.max_output_tokens == 16000
-    assert first_state.agent.token_limit == 144_000
-    assert second_state.agent.token_limit == 100800
+    assert first_state.agent.token_limit == 128_000
+    assert second_state.agent.token_limit == 89_600
 
 
 @pytest.mark.asyncio
@@ -1035,7 +1035,7 @@ async def test_session_switches_model_between_turns_without_recreating_agent(tmp
         "maxTokens": 16000,
     }
     assert state.agent.llm.max_output_tokens == 16000
-    assert state.agent.token_limit == 100800
+    assert state.agent.token_limit == 89_600
     assert main.model == "model-main"
 
 
