@@ -253,6 +253,8 @@ Bash 和 Python 沙箱照常执行，`BOX_AGENT_SCRATCH_DIR` 保持指向已校�
 诊断 2 秒，清理 10 秒。清理会先把可丢弃的文件或目录移入本次清理的私有目录，再从那里删除。
 超时记 `skill_scratch/cleanup_timeout`，本轮照常结束。超时和取消都会停止领取其他文件。
 若此时文件系统仍在移动某个条目，下次工具调用会使用新的会话临时目录，旧目录中剩余的文件会在后续清理时重新检查。
+若延迟的移动带走了预览，而原路径又已被占用，新写入的内容保留在原处。可按
+`skill_scratch/cleanup_restore_failed` 日志中的 `isolated` 路径找回之前的预览。
 正在删除已隔离文件时，下一轮可直接复用原路径。上一次清理未结束时跳过重复清理（`skill_scratch/cleanup_skipped`）。
 
 失败原因只记日志：ACP 写到 stderr，CLI 写到 `~/.box-agent/log/skill_scratch_<pid>.log`，每个会话同一原因只记一次，

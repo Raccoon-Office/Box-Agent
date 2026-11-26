@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from contextvars import copy_context
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import TypeVar
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
+from ..artifact_metadata import write_retention
 from ..artifact_publication import ChatReferenceScanError, retained_chat_file_in
 
 
@@ -390,9 +392,16 @@ class _CleanupLease:
             try:
                 _restore_scratch_entry(isolated, entry)
             except OSError:
-                protect_scratch_reference(isolated)
+                # Protect the private directory as a unit, including isolated symlinks.
+                recovery_dir = isolated.parent
+                protect_scratch_reference(recovery_dir)
                 _log.warning("skill_scratch/cleanup_restore_failed path=%r isolated=%r",
                              str(entry), str(isolated), exc_info=True)
+                try:
+                    write_retention(recovery_dir)
+                except OSError:
+                    _log.warning("skill_scratch/cleanup_retention_failed path=%r",
+                                 str(recovery_dir), exc_info=True)
         return not expired
 
 
@@ -416,17 +425,14 @@ def _rename_directory_no_replace(source: Path, target: Path) -> None:
 
 
 def _restore_scratch_entry(isolated: Path, entry: Path) -> None:
-    """Return an unconfirmed claim without overwriting a newly written entry."""
-    try:
-        if os.name == "nt":
-            isolated.rename(entry)
-        elif stat.S_ISDIR(isolated.lstat().st_mode):
-            _rename_directory_no_replace(isolated, entry)
-        else:
-            os.link(isolated, entry, follow_symlinks=False)
-            isolated.unlink()
-    except FileExistsError:
-        pass
+    """Restore an isolated entry, raising if its original path is occupied."""
+    if os.name == "nt":
+        isolated.rename(entry)
+    elif stat.S_ISDIR(isolated.lstat().st_mode):
+        _rename_directory_no_replace(isolated, entry)
+    else:
+        os.link(isolated, entry, follow_symlinks=False)
+        isolated.unlink()
 
 
 def cleanup_skill_scratch_dir(scratch: SkillScratchDirectory | SessionSkillScratch) -> list[str]:
@@ -493,7 +499,9 @@ def _clean_prepared_scratch(prepared: SkillScratchDirectory, lease: _CleanupLeas
                     isolated.unlink()
             except OSError:
                 if not lease.stopped:
-                    _restore_scratch_entry(isolated, entry)
+                    # This entry was confirmed disposable. A later cleanup can retry it.
+                    with suppress(FileExistsError):
+                        _restore_scratch_entry(isolated, entry)
                 raise
             removed.append(str(entry))
     finally:

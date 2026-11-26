@@ -148,7 +148,8 @@ def test_prepare_and_cleanup_skill_scratch_dir(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "keep"
 
 
-def test_scratch_retries_failed_deletion_without_nesting_quarantines(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reuse_path", [False, True], ids=["available", "reused"])
+def test_scratch_retries_failed_deletion_without_nesting_quarantines(tmp_path, monkeypatch, reuse_path):
     scratch = prepare_skill_scratch_dir(tmp_path)
     preview = scratch.path / "draft.html"
     preview.write_text("discard")
@@ -156,11 +157,21 @@ def test_scratch_retries_failed_deletion_without_nesting_quarantines(tmp_path, m
 
     def refuse_once(path, *args, **kwargs):
         monkeypatch.setattr(Path, "unlink", unlink)
+        if reuse_path:
+            preview.write_text("new preview")
+            ChatReferences(tmp_path).retain_text(f"[Preview]({preview.as_uri()})")
         raise PermissionError("busy")
 
     monkeypatch.setattr(Path, "unlink", refuse_once)
     with pytest.raises(PermissionError, match="busy"):
         cleanup_skill_scratch_dir(scratch)
+    if reuse_path:
+        isolated, = scratch.path.glob(".cleanup-*/draft.html")
+        assert isolated.read_text() == "discard"
+        assert cleanup_skill_scratch_dir(scratch) == [str(isolated.parent)]
+        assert list(scratch.path.iterdir()) == [preview]
+        assert preview.read_text() == "new preview"
+        return
     assert list(scratch.path.iterdir()) == [preview]
     assert preview.read_text() == "discard"
     assert cleanup_skill_scratch_dir(scratch) == [str(preview)]
@@ -196,7 +207,8 @@ def test_restore_scratch_directory_preserves_a_new_empty_directory(tmp_path, mon
         return lstat(path)
 
     monkeypatch.setattr(Path, "lstat", create_target_before_move)
-    skill_scratch._restore_scratch_entry(isolated, target)
+    with pytest.raises(FileExistsError):
+        skill_scratch._restore_scratch_entry(isolated, target)
 
     assert new_directory is not None and os.path.samestat(new_directory, target.stat())
     assert list(target.iterdir()) == []
@@ -1023,6 +1035,77 @@ async def test_late_scratch_deletion_preserves_reused_preview_path(tmp_path, mon
         resume.set()
     assert await asyncio.wait_for(scratch._cleanup, 2) == [str(entry)]
     assert preview.read_text() == "second turn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("is_directory", "retention_writable"), [
+    pytest.param(False, True, id="file"),
+    pytest.param(True, True, id="directory"),
+    pytest.param(True, False, id="read-only-retention-cache"),
+])
+async def test_restore_conflict_keeps_the_published_preview_at_the_logged_path(
+    tmp_path, monkeypatch, caplog, is_directory, retention_writable,
+):
+    scratch = SessionSkillScratch(tmp_path)
+    root = await scratch.ensure()
+    entry = root / ("bundle" if is_directory else "preview.html")
+    if is_directory:
+        entry.mkdir()
+    preview = entry / "preview.html" if is_directory else entry
+    preview.write_text("draft")
+    moving, resume = threading.Event(), threading.Event()
+    rename = Path.rename
+
+    def move_then_reuse_path(path, target):
+        if path != entry or moving.is_set():
+            return rename(path, target)
+        moving.set()
+        assert resume.wait(5)
+        result = rename(path, target)
+        # Another writer takes the public path before the late move can be undone.
+        if is_directory:
+            entry.mkdir()
+        preview.write_text("new occupant")
+        return result
+
+    monkeypatch.setattr(Path, "rename", move_then_reuse_path)
+    if not retention_writable:
+        def deny_retention(path):
+            raise PermissionError("read-only retention cache")
+        monkeypatch.setattr(skill_scratch, "write_retention", deny_retention)
+    monkeypatch.setattr(skill_scratch, "_CLEANUP_TIMEOUT_SECONDS", 0.5)
+    cleanup = asyncio.create_task(skill_scratch.acleanup_skill_scratch_dir(scratch))
+    try:
+        assert await asyncio.to_thread(moving.wait, 2)
+        assert await asyncio.wait_for(cleanup, 2) == []
+        assert await scratch.ensure() != root
+        preview.write_text("published preview")
+        with closing(SessionLog.create(tmp_path / "sessions", session_id="chat", cwd=tmp_path)) as log:
+            references = ChatReferences(tmp_path, session_log=log)
+            references.retain_text(f"[Preview]({preview.as_uri()})")
+            assert preview in references.paths
+    finally:
+        resume.set()
+    assert await asyncio.wait_for(scratch._cleanup, 2) == []
+
+    isolated, = root.glob(f".cleanup-*/{entry.name}")
+    recovered = isolated / preview.name if is_directory else isolated
+    disposable = root / "discard.tmp"
+    disposable.touch()
+    assert str(disposable) in await skill_scratch.acleanup_skill_scratch_dir(scratch)
+    assert recovered.read_text() == "published preview"
+    assert preview.read_text() == "new occupant"
+    warning = f"skill_scratch/cleanup_restore_failed path={str(entry)!r} isolated={str(isolated)!r}"
+    assert warning in caplog.text
+    if not retention_writable:
+        assert "skill_scratch/cleanup_retention_failed" in caplog.text
+        return
+
+    # A fresh cleanup of this root must also find the recovery copy on disk.
+    reopened = prepare_skill_scratch_dir(tmp_path, scratch_root_dir=root)
+    cleanup_skill_scratch_dir(reopened)
+    assert recovered.read_text() == "published preview"
+    assert preview.read_text() == "new occupant"
 
 
 @pytest.mark.asyncio
