@@ -73,7 +73,8 @@ async def test_summary_local_preflight_trims_whole_rounds_and_notes_unseen_histo
     assert request[0] is history[0] and request[-2] is history[-1]
     assert request[1].content == context_engine._SUMMARY_TRUNCATION_MARKER
     list(context_engine.tool_message_groups(request))
-    assert "Original request 0" not in [message.content for message in request]
+    assert all(message in request for message in history if message.role == "user")
+    assert history[2] not in request and history[3] not in request
     assert "Original request 0" in outcome.messages[1].earlier_user_messages
     summary = next(message for message in outcome.messages if context_engine._is_summary_marker(message))
     assert context_engine._SUMMARY_TRUNCATION_NOTE in summary.content
@@ -124,24 +125,23 @@ async def test_output_limit_keeps_one_complete_summary_without_retry(content, fi
     ("<summary>first</summary><summary>partial", "length"),
     ("wrong envelope", "stop"),
 ])
-async def test_bad_summary_output_gets_one_strict_retry(outcome):
-    provider = _Summary([outcome] * 3)
+async def test_bad_summary_output_retries_by_failure_type_then_uses_independent_request(outcome):
+    provider = _Summary([outcome] * 5)
     provider.max_output_tokens = 2_048
     result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
-    assert result.mode == "fallback"
-    assert result.summary_path == "deterministic"
-    assert result.summary_retries == 2
-    assert result.summary_calls == len(provider.requests) == 3
-    first, retry, independent = provider.requests
+    assert result.mode == "fallback" and result.summary_path == "deterministic"
+    assert result.summary_retries == 4 and result.summary_calls == len(provider.requests) == 5
+    first, *retries, independent = provider.requests
     assert first[-1].content == context_engine._summary_request(2_048)
-    assert retry[:-1] == first[:-1]
-    assert retry[-1].content == independent[-1].content
-    assert retry[-1].content.startswith(first[-1].content)
-    for request in (first, retry, independent):
-        assert request[-1].content.count("within 2048 tokens, including the closing </summary> tag.") == 1
+    for retry in retries:
+        assert retry[:-1] == first[:-1]
+        if outcome[0] in ("<summary>partial", "partial</summary>"):
+            assert "max_tokens limit of 2048" in retry[-1].content and "within 2048 tokens" in retry[-1].content
+        else:
+            assert retry[-1].content.endswith(context_engine._SUMMARY_FORMAT_RETRY)
+    assert independent[-1].content.endswith(context_engine._SUMMARY_FORMAT_RETRY)
     assert all(options["max_output_tokens"] == 2_048 for options in provider.request_options)
-    assert "characters" not in retry[-1].content
-    assert independent[0].content != first[0].content
+    assert independent[0].content == context_engine._INDEPENDENT_SUMMARY_SYSTEM
     assert not result.head_truncated
 
 
@@ -185,28 +185,45 @@ async def test_summary_retries_instead_of_accepting_latest_instruction_or_tool_c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error, count", [
-    (_AuthenticationError("Authentication failed"), 1),
-    (_PermissionError("Forbidden"), 1),
-    (_PermissionError("This model is not supported by your account"), 1),
-    (ConnectionError("connection reset"), 3),
-])
-async def test_summary_only_retries_bare_transport_failures(error, count):
-    provider = _Summary([error] * count)
-    result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
-    assert result.mode == "fallback"
-    assert result.summary_calls == len(provider.requests) == count
-    assert result.summary_retries == count - 1
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 503, None])
+async def test_summary_service_failure_ends_turn_with_main_request_error_and_preserves_history(tmp_path, status):
+    from box_agent.llm.error_messages import client_error_details
+    from box_agent.runtime import run_agent_loop
 
+    exc = ConnectionError("connection reset") if status is None else RuntimeError(f"HTTP {status}")
+    exc.status_code = status
+    exc.code = "provider_error"
+    exc.request_id = "summary-request-id"
+    class Provider(_Summary):
+        async def generate(self, *args, **kwargs):
+            pytest.fail("Summary requests must stream")
 
-@pytest.mark.asyncio
-async def test_summary_with_sdk_retries_goes_directly_to_independent_request():
-    provider = _Summary([ConnectionError("connection reset")])
+    provider = Provider([exc] * 2)
     provider.retry_config = object()
-    result = await context_engine._maybe_summarize(provider, _history(size=10), 20_000, 0, False, force=True)
-    assert result.summary_path == "independent"
-    assert result.summary_calls == len(provider.requests) == 2
-    assert result.summary_retries == 1
+    provider.model = "summary-route"
+    provider.context_window = 100_000
+    history = _history(size=800)
+    result = await context_engine._maybe_summarize(provider, history, 5_000, 0, False)
+    assert result.mode == "error" and result.messages is None and result.error_code == exc.code
+    assert result.summary_calls == 1 and result.summary_retries == 0 and result.summary_path == "shared"
+    assert result.provider_error.error_details == client_error_details(exc, provider)
+    original = list(history)
+    log = SessionLog.create(tmp_path / "sessions", session_id="provider-error", cwd=tmp_path)
+    try:
+        events = [e async for e in run_agent_loop(
+            llm=_Summary(), summary_llm=provider, messages=history, token_limit=5_000, tools={},
+            session_log=log, session_turn=1, max_steps=1,
+        )]
+        (error,) = [e for e in events if isinstance(e, ErrorEvent)]
+        assert error.error_details == result.provider_error.error_details and error.exception is exc
+        assert error.error_category == result.provider_error.error_category and error.error_code == exc.code
+        assert events[-1].stop_reason == StopReason.ERROR
+        assert len(provider.requests) == 2
+        assert history == original and log.replay().messages == original[1:]
+        log_text = log.path.read_text(encoding="utf-8")
+        assert '"compaction/start"' in log_text and '"compaction/end"' not in log_text
+    finally:
+        log.close()
 
 
 @pytest.mark.asyncio
@@ -221,7 +238,7 @@ async def test_summary_caps_calls_and_keeps_the_resolved_model_for_every_layer()
 
     capped = _Summary([
         *[_ContextOverflow("Prompt is too long")] * 3,
-        ("KITE-214", "stop"), ConnectionError("connection reset"),
+        ("KITE-214", "stop"),
     ])
     capped.model = "fixed-summary-model"
     capped.max_output_tokens = 20_000
@@ -245,13 +262,13 @@ async def test_summary_caps_calls_and_keeps_the_resolved_model_for_every_layer()
     )
     assert resolved.clones == 1 and main.requests == resolved.requests == []
     assert result.mode == "summary" and result.summary_path == "independent"
-    assert result.summary_calls == len(capped.requests) == 6
-    assert result.summary_retries == 5 and result.head_truncated
+    assert result.summary_calls == len(capped.requests) == 5
+    assert result.summary_retries == 4 and result.head_truncated
     assert all(request[0] is history[0] for request in capped.requests[:-1])
     assert all(options["tools"] == list(tools) for options in capped.request_options[:-1])
     assert resolved.max_output_tokens == 20_000
     assert all(options["max_output_tokens"] == resolved.max_output_tokens for options in capped.request_options)
-    assert all("within 8192 tokens, including the closing </summary> tag" in request[-1].content
+    assert all("within 20000 tokens, including the closing </summary> tag" in request[-1].content
                for request in capped.requests)
     independent = capped.requests[-1]
     assert [message.content for message in independent if message.role == "system"] == [
@@ -444,7 +461,7 @@ async def test_deterministic_summary_preserves_the_newest_round_and_full_fallbac
 async def test_compaction_circuit_breakers_span_turns(tmp_path, summary_fails):
     provider = _ReactiveProvider(0)
     if summary_fails:
-        provider.summary_provider.outcomes = [_AuthenticationError("Authentication failed")] * 3
+        provider.summary_provider.outcomes = [("malformed", "stop")] * 15
     agent = _agent(tmp_path, provider, token_limit=20_000, max_steps=1)
     outcomes = []
     for turn in range(4):
@@ -459,7 +476,9 @@ async def test_compaction_circuit_breakers_span_turns(tmp_path, summary_fails):
         ])
         outcomes.append([event async for event in agent.run_events()])
 
-    assert len(provider.summary_provider.requests) == 3
+    assert len(provider.summary_provider.requests) == sum(
+        e.summary_calls for events in outcomes for e in events if isinstance(e, SummarizationEvent)
+    )
     if summary_fails:
         assert all(any(isinstance(event, SummarizationEvent) and event.mode == "fallback"
                        for event in events) for events in outcomes)
@@ -520,3 +539,16 @@ async def test_each_successful_request_gets_a_new_reactive_budget_in_provider_un
     assert events[-1].stop_reason == StopReason.END_TURN, events[-1].final_content
     assert llm.main_calls == 6 and len(llm.requests) == 3
     assert limits.count(12_000 - 1_000 - context_engine.REQUEST_INPUT_HEADROOM_TOKENS) == 3
+
+
+async def test_third_summary_request_still_contains_the_fact_from_the_first_summary():
+    fact = "KITE-3519"
+    history = _history(size=15)
+    for cycle in range(3):
+        provider = _Summary([*([_ContextOverflow("prompt too long")] if cycle else []),
+                             (f"<summary>Preserve {fact}</summary>", "stop")])
+        result = await context_engine._maybe_summarize(provider, history, 20_000, 0, False, force=True)
+        assert result.mode == "summary"
+        for request in provider.requests:
+            assert any(fact in str(message.content) for message in request) == bool(cycle)
+        history = [*result.messages, *_history(rounds=7, size=10)[1:]]

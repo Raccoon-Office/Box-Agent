@@ -271,8 +271,8 @@ async def test_anthropic_auxiliary_wire_budget_preserves_native_thinking_and_mai
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_limit, prompt_limit", [(4_096, 4_096), (64_000, 8_192)])
-async def test_anthropic_summary_limits_prompt_and_preserves_wire_output_budget(model_limit, prompt_limit):
+@pytest.mark.parametrize("model_limit", [4_096, 64_000])
+async def test_anthropic_summary_instruction_matches_each_wire_output_budget(model_limit):
     requests = []
 
     def respond(request):
@@ -325,10 +325,11 @@ async def test_anthropic_summary_limits_prompt_and_preserves_wire_output_budget(
     retry_prompt = retry_blocks[-2]["text"]
     tight_prompt = tight["messages"][-1]["content"][-1]["text"]
     wide_prompt = wide["messages"][-1]["content"][-1]["text"]
-    assert tight_prompt == wide_prompt == _summary_request(model_limit)
-    assert retry_prompt.startswith(tight_prompt)
-    for prompt in (wide_prompt, tight_prompt, retry_prompt):
-        assert f"within {prompt_limit} tokens, including the closing </summary> tag" in prompt
+    assert wide_prompt == _summary_request(model_limit)
+    assert tight_prompt == _summary_request(tight["max_tokens"])
+    assert retry_prompt.startswith(_summary_request(retry["max_tokens"]))
+    for prompt, request in ((wide_prompt, wide), (tight_prompt, tight), (retry_prompt, retry)):
+        assert f"within {request['max_tokens']} tokens, including the closing </summary> tag" in prompt
         assert prompt.count("including the closing </summary> tag") == 1
     summary_input = _fallback_context_estimate([
         *long_history, Message(role="user", source="runtime", content=tight_prompt),
@@ -338,8 +339,8 @@ async def test_anthropic_summary_limits_prompt_and_preserves_wire_output_budget(
     ], {}, llm=llm)
     assert tight["max_tokens"] == min(model_limit, llm.context_window - summary_input - REQUEST_INPUT_HEADROOM_TOKENS)
     assert retry["max_tokens"] == min(model_limit, llm.context_window - retry_input - REQUEST_INPUT_HEADROOM_TOKENS)
-    if model_limit > prompt_limit:
-        assert prompt_limit < retry["max_tokens"] < tight["max_tokens"] < wide["max_tokens"]
+    if model_limit > 8_192:
+        assert 8_192 <= retry["max_tokens"] < tight["max_tokens"] < wide["max_tokens"]
 
 
 @pytest.mark.asyncio

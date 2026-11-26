@@ -87,12 +87,10 @@ async def test_cancel_after_repetitive_stream_closes_does_not_retry():
 
 async def test_history_budget_error_reports_actual_limit():
     class Summary:
-        async def generate(self, **kwargs):
-            return LLMResponse(content='<summary>Earlier task.</summary>', finish_reason='stop')
-
         async def generate_stream(self, **kwargs):
-            raise AssertionError('Oversized input must not reach provider')
-            yield
+            assert kwargs.get('call_kind') == 'context_summary', 'Oversized main input reached provider'
+            yield StreamEvent(type='text', delta='<summary>Earlier task.</summary>')
+            yield StreamEvent(type='finish', finish_reason='stop')
 
     # Drive the real history-compaction boundary with a large system prompt.
     events = [event async for event in run_agent_loop(llm=Summary(), tools={},

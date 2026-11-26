@@ -309,6 +309,10 @@ def extract_llm_error_code(exc: BaseException) -> int | str | None:
         return None
 
 
+def client_error_details(exc: BaseException, client: object) -> dict[str, object]:
+    return structured_llm_error(exc, provider=_safe_attr(client, "provider"), model=_safe_attr(client, "model"))
+
+
 def structured_llm_error(
     exc: BaseException,
     *,

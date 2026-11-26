@@ -306,7 +306,7 @@ async def test_loop_compacts_once_and_reuses_restored_skill_text(runtime, monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_available", [True, False])
-async def test_loop_selected_body_recovers_with_summary_or_unavailable_summary_fallback(runtime, summary_available):
+async def test_selected_skill_is_delivered_only_after_successful_summary_service(runtime, summary_available):
     runtime.loader.get_skill("demo").skill_path.write_text(
         "---\nname: demo\ndescription: example\n---\nEXACT_METHOD_BODY\n" + "method line\n" * 2500)
     runtime.select(["demo"])
@@ -314,10 +314,16 @@ async def test_loop_selected_body_recovers_with_summary_or_unavailable_summary_f
     provider = Provider(summary_available=summary_available)
     events = [event async for event in run_agent_loop(llm=provider, messages=history, tools={},
         skill_engine=runtime, token_limit=24000, max_steps=1)]
-    assert provider.summary_calls == (1 if summary_available else 2) and len(provider.requests) == 1
+    assert provider.summary_calls == 1
     compactions = [event for event in events if isinstance(event, SummarizationEvent)]
-    assert len(compactions) == 1
-    assert compactions[0].mode == ("summary" if summary_available else "fallback")
+    if not summary_available:
+        error, = [event for event in events if isinstance(event, ErrorEvent)]
+        assert "summary channel unavailable" in error.message
+        assert events[-1].stop_reason == StopReason.ERROR
+        assert not compactions and not provider.requests and not runtime.turn_deliveries
+        return
+    assert len(provider.requests) == len(compactions) == 1
+    assert compactions[0].mode == "summary"
     assert "EXACT_METHOD_BODY" in str(provider.requests[0])
     assert _fallback_context_estimate(provider.requests[0], {}) + 1024 <= 24000
     assert runtime.turn_deliveries["demo"]["complete"]

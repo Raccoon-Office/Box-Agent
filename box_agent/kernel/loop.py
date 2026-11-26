@@ -135,6 +135,25 @@ _COMPACTION_THRASHING_MESSAGE = "上下文压缩后反复超限。可能是某�
 _PROVIDER_STALE_SECONDS_ENV: Final[str] = "BOX_AGENT_PROVIDER_STALE_SECONDS"
 
 
+class _ProviderFailure(Exception):
+    def __init__(self, event: ErrorEvent):
+        super().__init__(event.message)
+        self.event = event
+
+
+async def _provider_error_boundary(events, hooks):
+    try:
+        async for event in events:
+            yield event
+    except _ProviderFailure as failure:
+        event = failure.event
+        if hooks.hooks:
+            await hooks.fire_error(message=event.message, is_fatal=True, exception=event.exception)
+            await hooks.fire_done(stop_reason=StopReason.ERROR, final_content=event.message)
+        yield event
+        yield DoneEvent(stop_reason=StopReason.ERROR, final_content=event.message)
+
+
 class _CompactionThrashing(RuntimeError):
     """Stop before calling the compactor on its third rapid refill."""
 
@@ -1221,7 +1240,10 @@ async def _run_agent_loop_impl(
             summary_request_history=summary_request_history,
         )
         try:
-            return await compact_engine.compact_if_needed(inputs)
+            result = await compact_engine.compact_if_needed(inputs)
+            if result.provider_error is not None and not cancelled():
+                raise _ProviderFailure(result.provider_error)
+            return result
         except _CompactionThrashing as exc:
             _log.warning("context compaction stopped after rapid refills session=%s", session_id)
             compaction_state.rapid_refills = 0
@@ -2143,7 +2165,7 @@ async def _run_agent_loop_impl(
                 )
 
             except Exception as exc:
-                from ..llm.error_messages import structured_llm_error
+                from ..llm.error_messages import client_error_details
                 from ..llm.image_payload import RequestBodyTooLargeError
                 from ..retry import StreamInterrupted
 
@@ -2180,21 +2202,7 @@ async def _run_agent_loop_impl(
                     yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                     advance_step = True
                     break
-                # structured_llm_error unwraps RetryExhaustedError to inspect the
-                # underlying provider error while preserving a stable host contract.
-                try:
-                    error_provider = getattr(llm, "provider", "")
-                except Exception:
-                    error_provider = ""
-                try:
-                    error_model = getattr(llm, "model", "")
-                except Exception:
-                    error_model = ""
-                error_details = structured_llm_error(
-                    exc,
-                    provider=error_provider,
-                    model=error_model,
-                )
+                error_details = client_error_details(exc, llm)
                 error_code = error_details.get("code")
                 if error_details["category"] == "context_length":
                     error_code = "CONTEXT_INPUT_BUDGET_EXCEEDED"
@@ -2345,19 +2353,10 @@ async def _run_agent_loop_impl(
                     yield ContentEvent(content=msg)
                     yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=msg)
                     return
-                if hook_mgr.hooks:
-                    await hook_mgr.fire_error(message=msg, is_fatal=True, exception=exc)
-                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
-                yield ErrorEvent(
-                    message=msg,
-                    is_fatal=True,
-                    exception=exc,
-                    error_code=error_code,
-                    error_category=str(error_details["category"]),
-                    error_details=error_details,
-                )
-                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
-                return
+                raise _ProviderFailure(ErrorEvent(
+                    message=msg, is_fatal=True, exception=exc, error_code=error_code,
+                    error_category=str(error_details["category"]), error_details=error_details,
+                )) from exc
             finally:
                 if llm_debug_sink_token is not None:
                     reset_llm_debug_sink(llm_debug_sink_token)
@@ -3387,12 +3386,14 @@ class AgentLoopKernel:
             _on_completion_checks=bind_checks,
             **self._run_arguments,
         )
+        bounded = _provider_error_boundary(events, self._services.hook_bus)
         try:
-            async for event in events:
+            async for event in bounded:
                 if isinstance(event, DoneEvent) and completion_checks is not None and not completion_checks.suspended:
                     await run_session_write(completion_checks.context.session_log, completion_checks.close)
                 yield event
         finally:
+            await bounded.aclose()
             await events.aclose()
             if self._services.tool_engine is not None:
                 await self._services.tool_engine.aclose()

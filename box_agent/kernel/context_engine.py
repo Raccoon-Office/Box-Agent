@@ -14,11 +14,11 @@ from pathlib import Path, PurePath
 from typing import Any, Callable, Final
 
 from ..cache_fingerprint import sha256_fingerprint
-from ..config import OUTPUT_RESERVE_CAP_TOKENS, derive_context_token_limit
-from ..events import CompactionDegradation
+from ..config import OUTPUT_RESERVE_CAP_TOKENS
+from ..events import CompactionDegradation, ErrorEvent
 from ..llm.capabilities import image_input_support, model_context_window
 from ..llm.base import closing_llm_stream
-from ..llm.error_messages import structured_llm_error
+from ..llm.error_messages import client_error_details
 from ..llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS, cap_auxiliary_client
 from ..llm.token_estimator import estimate_text_tokens
 from ..schema import Message
@@ -38,8 +38,7 @@ TRANSIENT_IMAGE_MAX_TOKENS: Final[int] = 4_096
 TRANSIENT_IMAGE_PIXEL_TOKEN_DIVISOR: Final[int] = 600
 
 _LOCAL_FALLBACK_CHAR_LIMIT = 12_000
-_SUMMARY_HEAD_RETRY_LIMIT = 3
-_SUMMARY_CALL_LIMIT = 6
+_SHARED_SUMMARY_RETRY_LIMIT = 3
 _INDEPENDENT_SUMMARY_SYSTEM = "You are a helpful AI assistant tasked with summarizing conversations."
 _SUMMARY_TRUNCATION_MARKER = "[earlier conversation truncated for compaction retry]"
 _SUMMARY_TRUNCATION_NOTE = (
@@ -171,9 +170,8 @@ _SUMMARY_REQUEST = (
 
 
 def _summary_request(max_output_tokens: int) -> str:
-    prompt_limit = min(8_192, max_output_tokens)
     return (
-        f"{_SUMMARY_REQUEST}\n\nKeep the entire output within {prompt_limit} tokens, "
+        f"{_SUMMARY_REQUEST}\n\nKeep the entire output within {max_output_tokens} tokens, "
         "including the closing </summary> tag.\n\n"
         "REMINDER: Do NOT call any tools. Respond with plain text only — a <summary> block. "
         "Tool calls will be rejected and you will fail the task."
@@ -230,6 +228,12 @@ class _SummaryOutputInvalid(RuntimeError):
     """The response did not contain one complete, text-only summary."""
 
 
+class _SummaryOutputTruncated(RuntimeError):
+    def __init__(self, max_tokens: int):
+        super().__init__(f"Summary output reached max_tokens={max_tokens} before closing the summary")
+        self.max_tokens = max_tokens
+
+
 def accepts_request_output_tokens(llm: Any, *, allow_kwargs: bool = True) -> bool:
     """Keep injected clients with the original stream signature compatible."""
     try:
@@ -265,6 +269,7 @@ async def _create_summary(
     input_token_limit: int | None = None,
     session_log=None,
     strict_format: bool = False,
+    truncated_at: int | None = None,
     tools: tuple[ToolDefinitionView, ...] | None = None,
     client_is_capped: bool = False,
     calibration: ContextTokenCalibration | None = None,
@@ -282,8 +287,6 @@ async def _create_summary(
     output_tokens = _summary_output_tokens(llm)
     summary_llm = llm if client_is_capped else cap_auxiliary_client(llm, output_tokens)
     window = model_context_window(summary_llm)
-    if window is not None:
-        input_token_limit = derive_context_token_limit(window, output_tokens)
     supports_override = accepts_request_output_tokens(summary_llm)
     budget_tools = {tool.name: tool for tool in tools} if tools else None
     request_output = output_tokens
@@ -291,6 +294,11 @@ async def _create_summary(
     instruction_index = None
     while True:
         suffix = _SUMMARY_FORMAT_RETRY if strict_format else ""
+        if truncated_at is not None:
+            suffix += (
+                f"\n\nThe previous output reached its max_tokens limit of {truncated_at} and was cut off. "
+                f"Rewrite the complete summary, including </summary>, within {request_output} tokens."
+            )
         instruction = Message(role="user", source="runtime", content=_summary_request(request_output) + suffix)
         if instruction_index is None:
             summary_messages = [*messages, instruction]
@@ -301,21 +309,22 @@ async def _create_summary(
         else:
             summary_messages[instruction_index] = instruction
 
-        if input_token_limit is None:
+        if window is None and input_token_limit is None:
             break
-        input_tokens = _calibrated_context_estimate(summary_messages, budget_tools, llm=summary_llm, calibration=calibration)
-        if input_tokens > input_token_limit:
-            raise _SummaryInputBudgetExceeded("Summary request exceeds the safe input budget")
+        input_tokens = _calibrated_context_estimate(
+            summary_messages, budget_tools, llm=summary_llm, calibration=calibration,
+        )
         if window is None:
+            if input_tokens > input_token_limit:
+                raise _SummaryInputBudgetExceeded("Summary request exceeds the safe input budget")
             break
-        room = request_output_room(window, input_tokens, output_tokens)
+        room = window - input_tokens - REQUEST_INPUT_HEADROOM_TOKENS
+        minimum = min(SMALL_TASK_MAX_OUTPUT_TOKENS, output_tokens) if supports_override else output_tokens
+        if room < minimum:
+            raise _SummaryInputBudgetExceeded("Summary input leaves insufficient output room in the context window")
         if request_output <= room:
             break
-        if not supports_override:
-            raise _SummaryInputBudgetExceeded("Summary client cannot reduce output to fit the context window")
         request_output = room
-        if not strict_format:
-            break
         # Recheck the prompt with the smaller number. Reuse projected history and
         # image overlays unless a custom projector rewrote the instruction itself.
         instruction_index = next((i for i in reversed(range(len(summary_messages)))
@@ -341,9 +350,11 @@ async def _create_summary(
     block = re.compile(r"<summary>(.*?)</summary>", flags=re.DOTALL)
     if reached_output_limit:
         # The provider can hit its limit after it has already closed the summary.
-        if response_content.count("<summary>") != 1 or response_content.count("</summary>") != 1:
-            raise _SummaryOutputInvalid("Context summary reached its output token limit without one complete block")
         match = block.search(response_content)
+        if match is None:
+            raise _SummaryOutputTruncated(request_output)
+        if response_content.count("<summary>") != 1 or response_content.count("</summary>") != 1:
+            raise _SummaryOutputInvalid("summary provider returned multiple summary tags")
     else:
         match = block.fullmatch(response_content.strip())
     if match is None:
@@ -363,12 +374,11 @@ def _truncate_summary_source(
     messages: list[Message], llm: Any, calibration: ContextTokenCalibration | None = None,
 ) -> list[Message] | None:
     """Drop about one fifth of the removable source, leaving protocol groups intact."""
-    latest_user = next((message for message in reversed(messages) if _is_real_user_message(message)), None)
     groups: list[tuple[range, int]] = []
     removed: set[int] = set()
     for group in tool_message_groups(messages):
         first = messages[group.start]
-        if first.role == "system" or first is latest_user:
+        if first.role == "system" or _is_real_user_message(first) or _is_compaction_metadata(first):
             continue
         if first.source == "runtime" and first.content == _SUMMARY_TRUNCATION_MARKER:
             removed.update(group)
@@ -1199,83 +1209,77 @@ async def _maybe_summarize(
         # Already projected for this route, including its overlays and images.
         summary_projector = None
     summary_calls = 0
-    head_retries = 0
-    format_retry = transient_retry = independent_retry = False
+    summary_retries = 0
+    head_truncated = False
+    strict = False
+    truncated_at = None
     error: str | None = None
-    error_type = "none"
-    mode = "summary"
+    error_type: str | None = None
     summary_path = "shared"
-
-    async def attempt(source: list[Message], *, strict: bool, tools: tuple[ToolDefinitionView, ...] | None) -> str:
-        nonlocal summary_calls
-        summary_calls += 1
+    mode = "summary"
+    summary_client = cap_auxiliary_client(summary_client, _summary_output_tokens(summary_client))
+    while allow_llm_summary:
         try:
-            content = await _create_summary(
-                summary_client, source, summary_calls,
+            summary_calls += 1
+            summary = await _create_summary(
+                summary_client, attempt_source, summary_calls,
                 session_id=session_id, turn_id=turn_id, title=title,
                 summary_projector=summary_projector, session_log=session_log,
-                input_token_limit=summary_input_token_limit, strict_format=strict,
-                tools=tools, client_is_capped=True, calibration=calibration,
+                input_token_limit=summary_input_token_limit, strict_format=strict, truncated_at=truncated_at,
+                tools=summary_tools, client_is_capped=True, calibration=calibration,
             )
-            if not content.strip():
+            if not summary.strip():
                 raise _SummaryOutputInvalid("summary provider returned empty content")
-            return content
-        except _SummaryInputBudgetExceeded:
-            summary_calls -= 1
-            raise
+            break
+        except Exception as exc:
+            local_overflow = isinstance(exc, _SummaryInputBudgetExceeded)
+            if local_overflow:
+                summary_calls -= 1  # No provider request was sent.
+            details = client_error_details(exc, summary_client)
+            input_overflow = local_overflow or details["category"] == "context_length"
+            if not (input_overflow or isinstance(exc, (_SummaryOutputInvalid, _SummaryOutputTruncated))):
+                failure = ErrorEvent(
+                    message=str(details["message"]), is_fatal=True, exception=exc,
+                    error_code=details["code"], error_category=str(details["category"]), error_details=details,
+                )
+                return CompactionOutcome(
+                    None, estimated, estimated, mode="error", error=failure.message, error_code=failure.error_code,
+                    error_type=type(exc).__name__, provider_error=failure, trigger_source=trigger_source,
+                    summary_calls=summary_calls, summary_retries=summary_retries,
+                    summary_path=summary_path, head_truncated=head_truncated,
+                )
+            if summary_path == "independent":
+                error, error_type = str(exc), type(exc).__name__
+                break
+            if summary_retries < _SHARED_SUMMARY_RETRY_LIMIT:
+                strict = isinstance(exc, _SummaryOutputInvalid)
+                truncated_at = exc.max_tokens if isinstance(exc, _SummaryOutputTruncated) else None
+                if input_overflow:
+                    shorter = _truncate_summary_source(attempt_source, summary_client, calibration)
+                    if shorter is not None:
+                        attempt_source = shorter
+                        head_truncated = True
+                        summary_retries += 1
+                        continue
+                else:
+                    summary_retries += 1
+                    continue
+            summary_path = "independent"
+            summary_retries += 1
+            strict, truncated_at, summary_tools = True, None, None
+            attempt_source = [
+                Message(role="system", content=_INDEPENDENT_SUMMARY_SYSTEM),
+                *(message for message in attempt_source if message.role != "system"),
+            ]
+    else:
+        error, error_type = "LLM summary disabled", "RuntimeError"
 
-    try:
-        if not allow_llm_summary:
-            raise RuntimeError("LLM summary disabled")
-        summary_client = cap_auxiliary_client(summary_client, _summary_output_tokens(summary_client))
-        while True:
-            try:
-                summary = await attempt(attempt_source, strict=format_retry, tools=summary_tools)
-                break
-            except Exception as exc:
-                failure = structured_llm_error(exc)
-                category = failure["category"]
-                if failure["httpStatus"] in {401, 403} or category in {"auth", "hosted_auth", "permission"}:
-                    raise
-                # Reserve the last call for the independent request.
-                if summary_calls < _SUMMARY_CALL_LIMIT - 1:
-                    if ((isinstance(exc, _SummaryInputBudgetExceeded) or category == "context_length")
-                            and head_retries < _SUMMARY_HEAD_RETRY_LIMIT):
-                        truncated = _truncate_summary_source(attempt_source, summary_client, calibration)
-                        if truncated is not None:
-                            attempt_source = truncated
-                            head_retries += 1
-                            continue
-                    if isinstance(exc, _SummaryOutputInvalid) and not format_retry:
-                        format_retry = True
-                        continue
-                    # Built-in clients and their SDKs handle transport retries.
-                    # Bare custom clients retain one bounded retry.
-                    if ((isinstance(exc, (ConnectionError, TimeoutError))
-                         or category in {"timeout", "connection", "server_error", "rate_limit"})
-                            and getattr(summary_client, "retry_config", None) is None and not transient_retry):
-                        transient_retry = True
-                        continue
-                independent_retry = True
-                independent_source = [
-                    Message(role="system", content=_INDEPENDENT_SUMMARY_SYSTEM),
-                    *(message for message in attempt_source if message.role != "system"),
-                ]
-                summary = await attempt(independent_source, strict=True, tools=None)
-                summary_path = "independent"
-                break
-    except Exception as exc:
-        error = str(exc)
-        error_type = type(exc).__name__
     if error is not None:
         mode = "fallback"
         summary_path = "deterministic"
-        _log.warning(
-            "summarization failed: %s — using deterministic bounded fallback",
-            error,
-        )
+        _log.warning("summarization failed: %s — using local fallback", error)
         summary = _deterministic_history_fallback(summary_source[1:])
-    truncation_note = f"\n\n{_SUMMARY_TRUNCATION_NOTE}" if mode == "summary" and head_retries else ""
+    truncation_note = f"\n\n{_SUMMARY_TRUNCATION_NOTE}" if mode == "summary" and head_truncated else ""
 
     runtime_sections = _runtime_state_sections(tools)
     summary_message = Message(
@@ -1312,11 +1316,11 @@ async def _maybe_summarize(
         estimated_after,
         mode=mode,
         summary_calls=summary_calls,
-        summary_retries=head_retries + int(format_retry) + int(transient_retry) + int(independent_retry),
+        summary_retries=summary_retries,
         summary_path=summary_path,
-        head_truncated=bool(head_retries),
+        head_truncated=head_truncated,
         error=error,
-        error_type=None if error_type == "none" else error_type,
+        error_type=error_type,
         trigger_source=trigger_source,
         protected_messages=len(retained),
         degradation=degradation,

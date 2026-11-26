@@ -6731,7 +6731,7 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
         Message(role="tool", content="B" * 50_000, tool_call_id="t1", name="bash"),
         Message(role="user", content="please do X"),
     ]
-    llm = _FakeSummaryLLM(raise_exc=RuntimeError("network"))
+    llm = _FakeSummaryLLM("malformed", raw_response=True)
     outcome = await _maybe_summarize(
         llm, msgs, token_limit=5_000, api_total_tokens=0, skip_check=False
     )
@@ -6739,7 +6739,7 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
     assert new_msgs is not None
     assert skip_next is False
     assert outcome.mode == "fallback"
-    assert outcome.error == "network"
+    assert "one <summary>" in outcome.error
     assert [m.role for m in new_msgs] == ["system", "user", "user", "assistant", "tool", "user"]
     assert new_msgs[1].earlier_user_messages == ["old request"]
     assert "Deterministic history fallback" in str(new_msgs[2].content)

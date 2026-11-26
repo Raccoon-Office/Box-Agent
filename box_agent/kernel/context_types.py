@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..events import CompactionDegradation
+from ..events import CompactionDegradation, ErrorEvent
 from ..schema import Message
 from ..tools.base import Tool
 
@@ -110,9 +110,10 @@ class CompactionOutcome:
     still_over_limit: bool | None = None
     summary_retries: int = 0
     head_truncated: bool = False
-    error_code: str | None = None
+    error_code: int | str | None = None
     summary_path: str | None = None
     degradation: CompactionDegradation | None = None
+    provider_error: ErrorEvent | None = None
 
     def __post_init__(self) -> None:
         blocked = self.mode == "blocked"

@@ -309,7 +309,7 @@ async def test_agent_trims_an_over_budget_summary_and_resumes(tmp_path, history_
 @pytest.mark.parametrize("summary_window, history_chars, request_shape", [
     (130_000, 98_000, "full"),
     (100_000, 98_000, "tight-output"),
-    (100_000, 100_500, "summary-instruction-overflow"),
+    (80_000, 99_000, "summary-instruction-overflow"),
     (60_000, 98_000, "summary-history-overflow"),
 ], ids=["full", "tight-output", "summary-instruction-overflow", "summary-history-overflow"])
 async def test_summary_uses_its_own_window_and_output_reservation(summary_window, history_chars, request_shape):
@@ -329,7 +329,7 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
         summary_llm = llm.for_model("summary-model", max_output_tokens=configured_output)
         summary_llm.context_window = summary_window
         main_limit = derive_context_token_limit(80_000, configured_output)
-        summary_limit = derive_context_token_limit(summary_window, configured_output)
+        summary_limit = summary_window - 8_192 - REQUEST_INPUT_HEADROOM_TOKENS
         history_tokens = _fallback_context_estimate(history, {}, llm=llm)
         summary_tokens = _fallback_context_estimate([
             *history, Message(role="user", source="runtime", content=_summary_request(configured_output)),
@@ -362,7 +362,7 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
         )
         if request_shape == "tight-output":
             assert output == summary_window - sent_input - REQUEST_INPUT_HEADROOM_TOKENS
-            assert 20_000 <= output < configured_output
+            assert 8_192 <= output < configured_output
         else:
             assert output == configured_output
         assert sent_input <= summary_limit
@@ -591,3 +591,50 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
         assert not errors and len(provider.normal_requests) == 1
         assert any(message.content == "x" * user_chars for message in provider.normal_requests[0])
         assert done.stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.parametrize("summary_cap", [8_192, 50_000])
+async def test_same_window_threshold_keeps_full_summary_prefix_on_wire(summary_cap):
+    from box_agent.config import derive_context_token_limit
+    from box_agent.runtime import run_agent_loop
+    from tests.test_main_input_budget import wire_llm
+
+    history = [Message(role="system", content="sys"), Message(role="user", content="old"),
+               Message(role="assistant", content="x" * 77_000), Message(role="user", content="continue")]
+    old_payload = history[2].content
+    async with wire_llm(context_window=80_000, max_output_tokens=50_000) as (llm, requests):
+        summary = llm.for_model(llm.model, max_output_tokens=summary_cap)
+        events = [event async for event in run_agent_loop(
+            llm=llm, summary_llm=summary, messages=history, tools={}, max_steps=1,
+            token_limit=derive_context_token_limit(80_000, 50_000),
+        )]
+    (compaction,) = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert compaction.mode == "summary" and compaction.summary_calls == 1 and not compaction.head_truncated
+    assert old_payload in [m["content"] for m in requests[0]["messages"]]
+    cap = requests[0].get("max_tokens", requests[0].get("max_completion_tokens"))
+    assert 8_192 <= cap <= summary_cap and (cap < 50_000)
+    assert requests[0]["messages"][-1]["content"] == _summary_request(cap)
+    assert events[-1].stop_reason == StopReason.END_TURN
+
+
+async def test_summary_preflight_uses_summary_route_and_legacy_clients_need_full_output_room():
+    from box_agent.kernel.context_engine import ContextTokenCalibration, _SummaryInputBudgetExceeded
+    from tests.test_context_compaction_recovery import _Summary
+
+    class Legacy(_Summary):
+        context_window = 20_000
+        max_output_tokens = 15_000
+
+        async def generate_stream(self, messages, tools, thinking_enabled, session_id, turn_id, title, call_kind):
+            async for event in super().generate_stream(messages):
+                yield event
+
+    provider = Legacy()
+    history = [Message(role="user", content="漢" * 1850)]
+    calibration = ContextTokenCalibration()
+    calibration.record(_Summary(), 2, 1)
+    assert await _create_summary(provider, history, 1, calibration=calibration)
+    calibration.record(provider, 2, 1)
+    with pytest.raises(_SummaryInputBudgetExceeded):
+        await _create_summary(provider, history, 1, calibration=calibration)
+    assert len(provider.requests) == 1
