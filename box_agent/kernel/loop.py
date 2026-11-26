@@ -1287,8 +1287,12 @@ async def _run_agent_loop_impl(
                     )
                 )
             if session_log is not None and session_turn is not None:
-                summary_message = next((message for message in new_msgs[1:] if _is_summary_marker(message)),
-                                       new_msgs[1])
+                if result.summary_path == "deterministic":
+                    summary_message = next(message for message in reversed(new_msgs[1:]) if
+                                           message.runtime_kind == "compaction_notice" or
+                                           _is_real_user_message(message) or _is_summary_marker(message))
+                else:
+                    summary_message = next((m for m in new_msgs[1:] if _is_summary_marker(m)), new_msgs[1])
                 session_log.append(
                     "compaction/summary",
                     {

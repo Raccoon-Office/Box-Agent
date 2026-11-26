@@ -1151,6 +1151,20 @@ class SessionLog:
                 history.append((event["seq"], Message.model_validate(payload), data))
         return history
 
+    def surface_sequences(self, messages: list[Message]) -> tuple[int, ...]:
+        """Resolve a projected history prefix to durable seqs, or omit an ambiguous mapping."""
+        nodes = self._surface_nodes()
+        if len(nodes) > len(messages):
+            return ()
+        for (_, saved), live in zip(nodes, messages):
+            if saved.role != live.role or saved.source != live.source:
+                return ()
+            if saved.input_facts and saved.input_facts == live.input_facts:
+                continue  # Host projection can render the same immutable user input differently.
+            if saved.model_dump() != live.model_dump():
+                return ()
+        return tuple(seq for seq, _ in nodes)
+
     def surface_message_sequence(self, messages: list[Message], target: Message) -> int | None:
         """Resolve a live message by position, never by matching its text alone."""
         positions = [index for index, message in enumerate(messages) if message is target]

@@ -9,7 +9,7 @@ import logging
 import math
 import re
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Iterator
 from pathlib import Path, PurePath
 from typing import Any, Callable, Final
 
@@ -37,7 +37,7 @@ TRANSIENT_IMAGE_DEFAULT_TOKENS: Final[int] = 4_096
 TRANSIENT_IMAGE_MAX_TOKENS: Final[int] = 4_096
 TRANSIENT_IMAGE_PIXEL_TOKEN_DIVISOR: Final[int] = 600
 
-_LOCAL_FALLBACK_CHAR_LIMIT = 12_000
+_FALLBACK_GROUP_TOKEN_LIMIT = 12_000
 _SHARED_SUMMARY_RETRY_LIMIT = 3
 _INDEPENDENT_SUMMARY_SYSTEM = "You are a helpful AI assistant tasked with summarizing conversations."
 _SUMMARY_TRUNCATION_MARKER = "[earlier conversation truncated for compaction retry]"
@@ -88,7 +88,7 @@ _EARLIER_USER_MARKER = "[Earlier User Messages]"
 _EARLIER_USER_INTRO = (
     f"{_EARLIER_USER_MARKER}\n\n"
     "This conversation was compacted. What follows are the user's earlier messages, word for word "
-    "and oldest first. They are a record, not new requests; the latest request appears later in the conversation."
+    "and oldest first. Use them as the original record of the conversation."
 )
 _EARLIER_USER_MIDDLE = "\n[The middle of this message is left out to save space.]\n"
 _SUMMARY_REQUEST = (
@@ -179,7 +179,7 @@ def _summary_request(max_output_tokens: int) -> str:
 
 
 def _summary_message_text(msg: Message) -> str:
-    """Serialize one history message for the local deterministic fallback."""
+    """Serialize the model-visible message for token counting and usage fingerprints."""
 
     model_content = msg.model_content()
     content = model_content if isinstance(model_content, str) else _budget_content_json(model_content)
@@ -205,6 +205,9 @@ def _summary_message_text(msg: Message) -> str:
     return "\n".join(sections)
 
 
+_LOG_HINT_INTRO = "\n\nIf you need specific details from before compaction"
+
+
 def _session_log_hint(session_log: SessionLog | None, tools: dict[str, Tool] | None) -> str:
     """Render the log locator shared by the compacted history and its budget."""
     path = getattr(session_log, "path", None)
@@ -215,7 +218,7 @@ def _session_log_hint(session_log: SessionLog | None, tools: dict[str, Tool] | N
     reader = ("prefer query_jsonl over reading the whole file" if tools and "query_jsonl" in tools
               else "use paginated read_file to read the log")
     return (
-        "\n\nIf you need specific details from before compaction (exact code snippets, error messages, "
+        f"{_LOG_HINT_INTRO} (exact code snippets, error messages, "
         f"tool output, or content you generated), query the full session log at: {path} (JSONL; {reader})."
     )
 
@@ -399,52 +402,6 @@ def _truncate_summary_source(
     return kept
 
 
-def _deterministic_history_fallback(messages: list[Message]) -> str:
-    """Build an explicitly lossy bounded record when the summary provider fails."""
-
-    lines = ["Deterministic history fallback (summary provider unavailable):"]
-    latest_user = next(
-        (
-            message
-            for message in reversed(messages)
-            if _is_real_user_message(message)
-        ),
-        None,
-    )
-    if latest_user is not None:
-        user_text = _summary_message_text(latest_user).replace("\x00", "")
-        user_limit = min(4_000, _LOCAL_FALLBACK_CHAR_LIMIT // 3)
-        user_text = _bound_text_middle(user_text, user_limit, label="fallback")
-        lines.append(f"Current user request (prioritized):\n{user_text}")
-
-    remaining_messages = [
-        message for message in messages
-        if message is not latest_user
-        and not (message.source == "runtime" and isinstance(message.content, str)
-                 and message.content.startswith(_EARLIER_USER_MARKER))
-    ]
-    used = len("\n\n".join(lines))
-    recent: list[str] = []
-    for index in range(len(remaining_messages) - 1, -1, -1):
-        omitted_marker = f"<fallback omitted {index} earlier source messages>" if index else ""
-        reserve = len(omitted_marker) + 2 if omitted_marker else 0
-        available = _LOCAL_FALLBACK_CHAR_LIMIT - used - 2 - reserve
-        if available <= 0:
-            break
-        text = _summary_message_text(remaining_messages[index]).replace("\x00", "")
-        if len(text) > available:
-            # Leave enough room for the excerpt marker and both ends.
-            if available < 64:
-                break
-            text = _bound_text_middle(text, available, label="fallback")
-        recent.append(text)
-        used += len(text) + 2
-    omitted = len(remaining_messages) - len(recent)
-    if omitted:
-        lines.append(f"<fallback omitted {omitted} earlier source messages>")
-    return "\n\n".join([*lines, *reversed(recent)])
-
-
 def _message_chars(message: Message) -> int:
     """Return deterministic serialized size for char/4 pressure estimates."""
 
@@ -626,37 +583,6 @@ def _bound_text_middle(
     tail_chars = available - head_chars
     tail = text[-tail_chars:] if tail_chars else ""
     return f"{text[:head_chars]}{marker}{tail}"
-
-
-def _bound_retained_messages(
-    messages: list[Message], *, llm: Any = None, token_limit: int = _RECENT_GROUP_TOKEN_LIMIT,
-) -> list[Message]:
-    """Keep recent protocol structure while bounding already-summarized bodies."""
-
-    bounded: list[Message] = []
-    for group in tool_message_groups(messages):
-        members = messages[group.start:group.stop]
-        if members[0].role != "assistant" or _fallback_context_estimate(members, None, llm=llm) <= token_limit:
-            bounded.extend(members)
-            continue
-        for message in members:
-            size = f"original model serialized size: {_message_chars(message):,} characters."
-            if message.tool_calls:
-                # Tool-call arguments and IDs are the protocol contract.
-                content = ""
-            elif message.role == "tool":
-                content = (
-                    "[Tool result compacted after inclusion in the continuation summary. "
-                    f"Tool: {message.name or 'unknown'}; {size} The matching tool call above "
-                    "retains its original arguments and identifier.]"
-                )
-            else:
-                content = (
-                    "[Assistant content compacted after inclusion in the continuation "
-                    f"summary; {size}]"
-                )
-            bounded.append(message.model_copy(update={"content": content, "thinking": None}))
-    return bounded
 
 
 def context_text_counter(llm: Any | None) -> Callable[[str], int]:
@@ -847,6 +773,8 @@ def _select_recent_messages(
     groups = list(tool_message_groups(messages, start))
     for group in reversed(groups):
         first = messages[group.start]
+        if _is_summary_marker(first):
+            break
         if _is_compaction_metadata(first):
             continue
         is_round = first.role == "assistant"
@@ -854,40 +782,67 @@ def _select_recent_messages(
             break
         group_tokens = _fallback_context_estimate(messages[group.start:group.stop], None, llm=llm)
         if selected_tokens + group_tokens > token_limit:
-            if rounds:
-                break
-            if not is_round:
-                continue
-            # The newest complete assistant round is protected even if large.
+            break
         selected_indices.update(group)
         rounds += is_round
         selected_tokens += group_tokens
 
-    latest_user = next((i for i in range(len(messages) - 1, start - 1, -1)
-                        if _is_real_user_message(messages[i])), None)
-    if latest_user is not None:
-        selected_indices.add(latest_user)
     ordered = [messages[index] for index in sorted(selected_indices)]
     return ordered, selected_indices
 
 
-def _original_user_text(message: Message) -> str:
-    if message.input_facts is not None:
-        return "\n".join(block["text"] for block in message.input_facts.get("blocks", ())
-                         if block["type"] == "text")
-    if isinstance(message.content, str):
-        return message.content
-    return "\n".join(block["text"] for block in message.content
-                     if isinstance(block.get("text"), str))
+def _original_user_text(message: Message, session_log: SessionLog | None = None) -> str:
+    facts = message.input_facts or {}
+    blocks = facts.get("blocks", message.content if isinstance(message.content, list) else ())
+    text = (message.content if "blocks" not in facts and isinstance(message.content, str) else
+            "\n".join(block["text"] for block in blocks if block.get("type") == "text"))
+    files = facts.get("context", {}).get("files", ())
+    refs = facts.get("images", ())
+    resource_images = facts.get("resourceImages", {})
+    file_image_indices = set()
+    attachments = []
+    for file in files:
+        path = file.get("path") or file.get("relativePath")
+        if not path:
+            continue
+        name = file.get("name") or Path(path).name
+        if file.get("mimeType", "").startswith("image/"):
+            attachments.append(f"image {name} → {path} (re-open with inspect_images if needed)")
+            file_image_indices.add(resource_images.get(file.get("uri")))
+        else:
+            attachments.append(f"file {name} → {path}")
+    inline_indices = {b.get("imageIndex", i) for i, b in enumerate(
+        b for b in blocks if b.get("type") in {"image", "input_image", "input_image_reference"}
+    )}
+    # Prepared records place inline images first and file images last. Legacy
+    # records may lack the URI/index map but still have this ordering.
+    if not resource_images:
+        file_count = sum(f.get("mimeType", "").startswith("image/") and bool(f.get("path") or f.get("relativePath"))
+                         for f in files)
+        file_image_indices.update(range(max(len(inline_indices), len(refs) - file_count), len(refs)))
+    log_path = getattr(session_log, "path", None)
+    for index in sorted((set(range(len(refs))) | inline_indices) - file_image_indices):
+        ref = refs[index] if index < len(refs) else {}
+        relative = ref.get("contentRef", "")
+        if isinstance(log_path, PurePath) and isinstance(relative, str) and re.fullmatch(
+            r"images/[0-9a-f]{64}\.(?:png|jpg)", relative,
+        ):
+            path = log_path.parent / relative
+            if not path.is_absolute():
+                path = Path(path).absolute()
+            attachments.append(f"image {path.name} → {path} (re-open with inspect_images if needed)")
+        else:
+            attachments.append("image was not saved and cannot be reopened")
+    return text + ("\n" if text else "") + "Attachments: " + "; ".join(attachments) if attachments else text
 
 
-def _collect_earlier_user_texts(messages: list[Message], retained: Collection[int]) -> list[str]:
+def _collect_earlier_user_texts(messages: list[Message], cut: int, session_log: SessionLog | None) -> list[str]:
     texts: list[str] = []
-    for index, message in enumerate(messages):
+    for message in messages[1:cut]:
         if message.role == "user" and message.source == "runtime" and message.earlier_user_messages:
             texts.extend(message.earlier_user_messages)
-        elif index not in retained and _is_real_user_message(message):
-            texts.append(_original_user_text(message))
+        elif _is_real_user_message(message):
+            texts.append(_original_user_text(message, session_log))
     return texts
 
 
@@ -932,15 +887,22 @@ def _earlier_user_entries(
     return list(reversed(entries))
 
 
-def _render_earlier_users(texts: list[str], entries: list[str]) -> Message:
-    content = _earlier_user_header(len(texts) - len(entries)) + "".join(entries)
-    return Message(role="user", source="runtime", content=content, earlier_user_messages=texts)
+def _summary_with_users(body: str, texts: list[str], entries: list[str], protected: bool, log_hint: str) -> Message:
+    content = _SUMMARY_MESSAGE_PREFIX + body + _SUMMARY_MESSAGE_SUFFIX
+    if texts:
+        visible = list(entries)
+        if protected:
+            visible.append(f"\n\n{len(texts)}. {texts[-1]}")
+        if visible:
+            content += "\n\n" + _earlier_user_header(len(texts) - len(visible)) + "".join(visible)
+    return Message(role="user", source="runtime", earlier_user_messages=texts or None,
+                   content=content + log_hint)
 
 
-def _earlier_user_message(
-    texts: list[str], count_tokens: Callable[[str], int], *, token_limit: int = _EARLIER_USER_TOKEN_LIMIT,
-) -> Message:
-    return _render_earlier_users(texts, _earlier_user_entries(texts, count_tokens, token_limit))
+def _clear_compacted_usage(message: Message) -> Message:
+    if message.usage is not None or message.request_only_input_tokens:
+        return message.model_copy(update={"usage": None, "request_only_input_tokens": 0})
+    return message
 
 
 def _runtime_state_sections(tools: dict[str, Tool] | None) -> list[tuple[str, str]]:
@@ -997,10 +959,11 @@ async def _restore_runtime_state(_messages: list[Message], tools: dict[str, Tool
 
 
 async def _fit_compacted_history(
-    original: list[Message], retained: dict[int, Message], summary: Message,
+    original: list[Message], retained: dict[int, Message], summary: str,
     runtime_sections: list[tuple[str, str]], *,
     llm: Any, budget_tools: dict[str, Any] | None, target: int,
-    projector: CompactedHistoryProjector | None, calibration: ContextTokenCalibration | None = None,
+    projector: CompactedHistoryProjector | None, calibration: ContextTokenCalibration | None,
+    session_log: SessionLog | None, log_hint: str,
 ) -> tuple[list[Message], int, CompactionDegradation | None]:
     """Rebuild and measure after each removal, keeping the summary and current user."""
     degradation: CompactionDegradation = {
@@ -1008,9 +971,14 @@ async def _fit_compacted_history(
         "droppedEarlierUsers": 0, "droppedRuntimeState": [],
     }
     count_tokens = context_text_counter(llm)
-    earlier_users = _collect_earlier_user_texts(original, retained.keys())
-    earlier_entries = _earlier_user_entries(earlier_users, count_tokens, _EARLIER_USER_TOKEN_LIMIT)
-    show_archive = True
+    def archive():
+        cut = min(retained, default=len(original))
+        texts = _collect_earlier_user_texts(original, cut, session_log)
+        protected = bool(texts) and not any(_is_real_user_message(message) for message in retained.values())
+        entries = _earlier_user_entries(texts[:-1] if protected else texts, count_tokens, _EARLIER_USER_TOKEN_LIMIT)
+        return texts, entries, protected
+
+    earlier_users, earlier_entries, protected = archive()
     max_skill_bodies: int | None = None
     try:
         can_limit_skills = projector is not None and "max_skill_bodies" in inspect.signature(projector).parameters
@@ -1018,16 +986,8 @@ async def _fit_compacted_history(
         can_limit_skills = False
 
     async def rebuild() -> tuple[list[Message], int]:
-        history = [original[0]]
-        summary_record = summary
-        if earlier_users:
-            if show_archive:
-                history.append(_render_earlier_users(earlier_users, earlier_entries))
-            else:
-                # The model sees only content. Session Log replay carries the
-                # originals on the summary once the standalone archive is gone.
-                summary_record = summary.model_copy(update={"earlier_user_messages": earlier_users})
-        history.extend((summary_record, *retained.values()))
+        record = _summary_with_users(summary, earlier_users, earlier_entries, protected, log_hint)
+        history = [original[0], record, *retained.values()]
         state = _runtime_state_message(runtime_sections)
         if state is not None:
             history.append(state)
@@ -1042,7 +1002,6 @@ async def _fit_compacted_history(
         return history, tokens, None
 
     indices = list(retained)
-    latest_user = next(index for index in reversed(indices) if _is_real_user_message(original[index]))
     window = list(retained.values())
     start = 0
     for group in tool_message_groups(window):
@@ -1051,11 +1010,9 @@ async def _fit_compacted_history(
         if window[group.start].role != "assistant":
             continue
         for index in indices[start:group.stop]:
-            if index != latest_user:
-                del retained[index]
+            del retained[index]
         start = group.stop
-        earlier_users = _collect_earlier_user_texts(original, retained.keys())
-        earlier_entries = _earlier_user_entries(earlier_users, count_tokens, _EARLIER_USER_TOKEN_LIMIT)
+        earlier_users, earlier_entries, protected = archive()
         degradation["droppedRounds"] += 1
         history, tokens = await rebuild()
 
@@ -1072,9 +1029,6 @@ async def _fit_compacted_history(
         earlier_entries = earlier_entries[1:]
         degradation["droppedEarlierUsers"] += 1
         history, tokens = await rebuild()
-    if tokens > target and earlier_users:
-        show_archive = False
-        history, tokens = await rebuild()
 
     for label in ("Todo", "Plan", "Goal"):
         if tokens <= target:
@@ -1085,8 +1039,155 @@ async def _fit_compacted_history(
             degradation["droppedRuntimeState"].append(label)
             history, tokens = await rebuild()
 
-    changed = not show_archive or any(degradation.values())
-    return history, tokens, degradation if changed else None
+    return history, tokens, degradation if any(degradation.values()) else None
+
+
+def _archived_entry_start(content: str, end: int, number: int, original: str) -> int | None:
+    """Match a numbered original backwards, including an earlier route's middle cut."""
+    prefix = f"\n\n{number}. "
+    if content.endswith(prefix + original, 0, end):
+        return end - len(prefix) - len(original)
+    lower = max(0, end - len(original) - len(prefix) - len(_EARLIER_USER_MIDDLE))
+    marker = content.rfind(_EARLIER_USER_MIDDLE, lower, end)
+    while marker >= 0:
+        tail = content[marker + len(_EARLIER_USER_MIDDLE):end]
+        if original.endswith(tail):
+            for head_len in (len(tail), len(tail) + 1):
+                head = prefix + original[:head_len]
+                if content.endswith(head, lower, marker):
+                    return marker - len(head)
+        marker = content.rfind(_EARLIER_USER_MIDDLE, lower, marker)
+    return None
+
+
+def _smaller_summary_anchors(anchor: Message) -> Iterator[Message]:
+    """Shrink only a verified archive suffix; leave every byte of the summary intact."""
+    texts = anchor.earlier_user_messages or []
+    if len(texts) < 2:
+        return
+    content = anchor.content
+    hint = content.rfind(_LOG_HINT_INTRO)
+    for archive_end in (len(content), hint):
+        if archive_end < 0:
+            continue
+        end = archive_end
+        starts = []
+        for number in range(len(texts), 0, -1):
+            start = _archived_entry_start(content, end, number, texts[number - 1])
+            if start is None:
+                break
+            starts.append(start)
+            end = start
+            header = "\n\n" + _earlier_user_header(number - 1)
+            if content.endswith(_SUMMARY_MESSAGE_SUFFIX + header, 0, start):
+                body = content[:start - len(header)]
+                # starts are newest first. The latest original remains whole.
+                for dropped, next_start in enumerate(reversed(starts[:-1]), 1):
+                    updated = body + "\n\n" + _earlier_user_header(number - 1 + dropped) + content[next_start:]
+                    yield anchor.model_copy(update={"content": updated})
+                return
+
+
+def _omission_notice(ranges: list[tuple[int, int]], path: PurePath | None) -> Message:
+    content = "This compaction could not generate a summary. Some earlier conversation was omitted from context."
+    if path is not None and ranges:
+        if not path.is_absolute():
+            path = Path(path).absolute()
+        label = ", ".join(str(lo) if lo == hi else f"{lo}-{hi}" for lo, hi in ranges)
+        content += (
+            f" Omitted session log seq ranges: {label}."
+            f" Only if continuing the current task requires this earlier information, consult {path} for the listed seq ranges."
+            " Prefer query_jsonl. If unavailable, use paginated read_file. Do not read the whole file."
+        )
+    return Message(role="user", source="runtime", runtime_kind="compaction_notice", content=content)
+
+
+async def _fit_fallback(
+    original: list[Message], *, llm: Any, target: int, budget_tools: dict[str, Any] | None,
+    calibration: ContextTokenCalibration | None, session_log: SessionLog | None,
+) -> tuple[list[Message], int, CompactionDegradation | None]:
+    groups = list(tool_message_groups(original, 1))
+    anchors = [g.start for g in groups if _is_anchor(original[g.start])]
+    primary = anchors[-1]
+    kept = {primary: original[primary]}
+    interactions = [g for g in groups if original[g.start].role == "assistant"]
+    after = [g for g in interactions if g.start > primary]
+    previous = None
+    cost = 0
+    if not after and len(anchors) > 1:
+        index = anchors[-2]
+        after = [g for g in interactions if index < g.start < primary]
+        anchor_cost = _fallback_context_estimate([original[index]], None, llm=llm)
+        if anchor_cost <= _FALLBACK_GROUP_TOKEN_LIMIT:
+            previous = index
+            kept[index] = original[index]
+            cost = anchor_cost
+    chosen = []
+    for group in reversed(after):
+        cost += _fallback_context_estimate(original[group.start:group.stop], None, llm=llm)
+        if cost > _FALLBACK_GROUP_TOKEN_LIMIT:
+            break
+        chosen.append(group)
+        kept.update((i, _clear_compacted_usage(original[i])) for i in group)
+
+    path = getattr(session_log, "path", None)
+    sequences = ()
+    resolve = getattr(session_log, "surface_sequences", None)
+    if callable(resolve):
+        sequences = await run_session_write(session_log, resolve, original[1:])
+    previous_ranges = []
+    had_notice = False
+    for message in original[1:]:
+        if message.runtime_kind == "compaction_notice" and message.source == "runtime":
+            had_notice = True
+            match = re.search(r"Omitted session log seq ranges: ([0-9, -]+)\.", message.content)
+            if match:
+                for value in match[1].split(", "):
+                    lo, _, hi = value.partition("-")
+                    previous_ranges.append((int(lo), int(hi or lo)))
+
+    def rebuild():
+        omitted = [i for i in range(1, len(original))
+                   if i not in kept and original[i].runtime_kind != "compaction_notice"]
+        if kept[primary] is not original[primary]:
+            omitted.append(primary)  # The old anchor contains the hidden original entries.
+        history = [original[0], *(kept[i] for i in sorted(kept))]
+        if had_notice or omitted:
+            # A targeted tool-result edit may have a newer seq than the next
+            # surface node. Merge in log order and never include a retained seq.
+            ranges = [*previous_ranges, *((sequences[i - 1], sequences[i - 1]) for i in omitted
+                                         if i <= len(sequences))]
+            merged = []
+            for lo, hi in sorted(ranges):
+                if merged and lo <= merged[-1][1] + 1:
+                    merged[-1] = (merged[-1][0], max(hi, merged[-1][1]))
+                else:
+                    merged.append((lo, hi))
+            history.append(_omission_notice(merged, path if isinstance(path, PurePath) else None))
+        return history, _calibrated_context_estimate(history, budget_tools, llm=llm, calibration=calibration)
+
+    history, tokens = rebuild()
+    dropped_rounds = dropped_users = 0
+    for group in reversed(chosen):
+        if tokens <= target:
+            break
+        for i in group:
+            del kept[i]
+        dropped_rounds += original[group.start].role == "assistant"
+        history, tokens = rebuild()
+    if tokens > target and previous is not None:
+        del kept[previous]
+        history, tokens = rebuild()
+    if tokens > target and _is_summary_marker(kept[primary]):
+        for candidate in _smaller_summary_anchors(kept[primary]):
+            kept[primary] = candidate
+            dropped_users += 1
+            history, tokens = rebuild()
+            if tokens <= target:
+                break
+    degradation = ({"droppedRounds": dropped_rounds, "droppedEarlierUsers": dropped_users,
+                    "droppedSkillBodies": 0, "droppedRuntimeState": []} if dropped_rounds or dropped_users else None)
+    return history, tokens, degradation
 
 
 async def _maybe_summarize(
@@ -1140,7 +1241,7 @@ async def _maybe_summarize(
         )
 
     if (not messages or messages[0].role != "system"
-            or not any(_is_real_user_message(message) for message in messages[1:])):
+            or not any(_is_anchor(message) for message in messages[1:])):
         return CompactionOutcome(
             None,
             estimated,
@@ -1149,33 +1250,12 @@ async def _maybe_summarize(
             trigger_source=trigger_source,
         )
 
-    # A small model may need less than the standard recent-round allowance.
-    log_hint = _session_log_hint(session_log, tools)
-    count_tokens = context_text_counter(llm)
-    hint_tokens = count_tokens(log_hint) if log_hint else 0
-    prefix_tokens = _calibrated_context_estimate(messages[:1], budget_tools, llm=llm, calibration=calibration)
-    ratio = calibration.ratio(llm) if calibration is not None else 1.0
-    local_room = math.floor((token_limit - prefix_tokens - 512) / ratio) - hint_tokens
-    recent_limit = max(1, min(_RECENT_GROUP_TOKEN_LIMIT, local_room))
     try:
-        retained_messages, retained_indices = _select_recent_messages(messages, llm=llm, token_limit=recent_limit)
+        retained_messages, retained_indices = _select_recent_messages(messages, llm=llm)
     except InvalidToolHistory as exc:
         return CompactionOutcome(
-            None, estimated, estimated, mode="blocked", error=str(exc),
-            trigger_source=trigger_source,
+            None, estimated, estimated, mode="blocked", error=str(exc), trigger_source=trigger_source,
         )
-    retained_messages = _bound_retained_messages(retained_messages, llm=llm, token_limit=recent_limit)
-    # Provider usage describes the pre-compaction request.  Retaining it would
-    # make the next prepare pass anchor on the old, uncompressed context and
-    # reject the freshly compacted request.  Keep the original objects (and
-    # their usage) in the audit snapshot, but clear the metadata on the new
-    # durable surface so the next request is measured from this surface.
-    retained_messages = [
-        message.model_copy(update={"usage": None, "request_only_input_tokens": 0})
-        if message.usage is not None or message.request_only_input_tokens
-        else message
-        for message in retained_messages
-    ]
 
     if before_summary is not None:
         await run_session_write(session_log, before_summary, estimated)
@@ -1278,22 +1358,23 @@ async def _maybe_summarize(
         mode = "fallback"
         summary_path = "deterministic"
         _log.warning("summarization failed: %s — using local fallback", error)
-        summary = _deterministic_history_fallback(summary_source[1:])
-    truncation_note = f"\n\n{_SUMMARY_TRUNCATION_NOTE}" if mode == "summary" and head_truncated else ""
-
-    runtime_sections = _runtime_state_sections(tools)
-    summary_message = Message(
-        role="user", source="runtime",
-        content=f"{_SUMMARY_MESSAGE_PREFIX}{summary}{truncation_note}{log_hint}{_SUMMARY_MESSAGE_SUFFIX}",
-    )
-    # Explicit headroom is a soft target. Exhausting optional history still
-    # permits a request within the hard input limit.
     target = max(1, token_limit - max(0, request_headroom_tokens or 0))
-    retained = dict(zip(sorted(retained_indices), retained_messages))
-    new_messages, estimated_after, degradation = await _fit_compacted_history(
-        messages, retained, summary_message, runtime_sections, llm=llm,
-        budget_tools=budget_tools, target=target, projector=compacted_history_projector, calibration=calibration,
-    )
+    if mode == "fallback":
+        new_messages, estimated_after, degradation = await _fit_fallback(
+            messages, llm=llm, target=target, budget_tools=budget_tools, calibration=calibration, session_log=session_log,
+        )
+        protected_count = sum(message.runtime_kind != "compaction_notice" for message in new_messages[1:])
+    else:
+        if head_truncated:
+            summary += f"\n\n{_SUMMARY_TRUNCATION_NOTE}"
+        retained = {index: _clear_compacted_usage(message)
+                    for index, message in zip(sorted(retained_indices), retained_messages)}
+        new_messages, estimated_after, degradation = await _fit_compacted_history(
+            messages, retained, summary, _runtime_state_sections(tools), llm=llm, budget_tools=budget_tools,
+            target=target, projector=compacted_history_projector, calibration=calibration,
+            session_log=session_log, log_hint=_session_log_hint(session_log, tools),
+        )
+        protected_count = len(retained)
     if estimated_after > token_limit:
         mode = "blocked"
     _log.info(
@@ -1306,8 +1387,8 @@ async def _maybe_summarize(
         token_limit,
         summary_calls,
         summary_path,
-        len(messages) - 1 - len(retained),
-        len(retained),
+        len(messages) - 1 - protected_count,
+        protected_count,
         error_type,
     )
     return CompactionOutcome(
@@ -1322,7 +1403,7 @@ async def _maybe_summarize(
         error=error,
         error_type=error_type,
         trigger_source=trigger_source,
-        protected_messages=len(retained),
+        protected_messages=protected_count,
         degradation=degradation,
     )
 
@@ -1340,7 +1421,8 @@ def _is_compaction_metadata(msg: Message) -> bool:
 
     if msg.role != "user" or not isinstance(msg.content, str):
         return False
-    if msg.source == "runtime" and (msg.earlier_user_messages is not None
+    if msg.source == "runtime" and (msg.runtime_kind is not None or msg.name in {"current_date", "tool_descriptions", "invoked_skills"}
+                                    or msg.earlier_user_messages is not None
                                     or msg.skill_compaction_ranges is not None
                                     or msg.content.startswith(_EARLIER_USER_MARKER)):
         return True
@@ -1356,6 +1438,10 @@ def _is_compaction_metadata(msg: Message) -> bool:
 
 def _is_real_user_message(message: Message) -> bool:
     return message.role == "user" and message.source == "user" and not _is_compaction_metadata(message)
+
+
+def _is_anchor(message: Message) -> bool:
+    return _is_real_user_message(message) or _is_summary_marker(message)
 
 
 def request_input_tokens(messages: list[Message], tools: Any, *, llm: Any | None = None,

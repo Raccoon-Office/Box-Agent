@@ -126,7 +126,7 @@ class Message(BaseModel):
 
     role: str  # "system", "user", "assistant", "tool"
     source: Literal["user", "runtime"] = Field(default="user", exclude=True)
-    runtime_kind: Literal["skill_catalog", "tool_descriptions"] | None = None
+    runtime_kind: Literal["skill_catalog", "tool_descriptions", "compaction_notice"] | None = None
     content: str | list[dict[str, Any]]  # Can be string or list of content blocks
     thinking: str | None = None  # Extended thinking content for assistant messages
     tool_calls: list[ToolCall] | None = None

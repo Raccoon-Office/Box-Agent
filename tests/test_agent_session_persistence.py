@@ -963,7 +963,7 @@ async def test_compaction_replay_failure_does_not_close_turn_with_old_live_surfa
 def _assert_old_history_is_archived(messages):
     archive, = [message for message in messages if message.earlier_user_messages is not None]
     assert archive.role == "user" and archive.source == "runtime"
-    assert archive.content.startswith("[Earlier User Messages]")
+    assert archive.content.index("durable compacted history") < archive.content.index("[Earlier User Messages]")
     originals = [f"old-{index}:" + "x" * 200 for index in range(0, 14, 2)]
     assert archive.earlier_user_messages == originals
     assert all(message.content not in originals and not str(message.content).startswith("old-1:")

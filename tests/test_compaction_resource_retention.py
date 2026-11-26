@@ -5,6 +5,8 @@ from threading import get_ident
 
 import pytest
 
+from tests.test_context_compaction_retention import _SummaryProvider
+
 from box_agent.kernel.compact_engine import DefaultCompactEngine
 from box_agent.kernel.context_types import CompactionInput
 from box_agent.llm.token_estimator import estimate_text_tokens
@@ -137,8 +139,8 @@ async def test_compaction_discards_superseded_skill_bodies_in_history_and_summar
     assert 'OLD_METHOD_BODY' not in str(summary_source)
     assert 'CURRENT_METHOD_BODY' not in str(summary_source)
     result = await DefaultCompactEngine().compact_if_needed(CompactionInput(
-        history=tuple(history), token_limit=10000, llm=object(), force=True,
-        allow_llm_summary=False, compaction_source_projector=context.compaction_source,
+        history=tuple(history), token_limit=10000, llm=_SummaryProvider(), force=True,
+        compaction_source_projector=context.compaction_source,
         compacted_history_projector=lambda compacted: context.compact_history(history, compacted),
     ))
     assert not result.blocked and result.messages is not None
@@ -160,8 +162,8 @@ async def test_compaction_excludes_withdrawn_reference_without_restoring_it():
     source = context.compaction_source(history)
     assert 'WITHDRAWN_METHOD_BODY' not in str(source)
     result = await DefaultCompactEngine().compact_if_needed(CompactionInput(
-        history=tuple(history), token_limit=10000, llm=object(), force=True,
-        allow_llm_summary=False, compaction_source_projector=context.compaction_source,
+        history=tuple(history), token_limit=10000, llm=_SummaryProvider(), force=True,
+        compaction_source_projector=context.compaction_source,
         compacted_history_projector=lambda compacted: context.compact_history(history, compacted),
     ))
     assert not result.blocked and result.messages is not None
@@ -400,8 +402,8 @@ async def test_retention_runs_only_after_existing_compaction_decision(force):
         calls.append(True)
         return [*messages, Message(role='user', source='runtime', content='retained-resource')]
     result = await DefaultCompactEngine().compact_if_needed(CompactionInput(
-        history=history, token_limit=10000, llm=object(), force=force,
-        allow_llm_summary=False, compacted_history_projector=retain,
+        history=history, token_limit=10000, llm=_SummaryProvider(), force=force,
+        compacted_history_projector=retain,
         compaction_source_projector=lambda messages: source_calls.append(True) or messages,
     ))
     assert bool(calls) is force
@@ -416,7 +418,7 @@ async def test_retention_runs_only_after_existing_compaction_decision(force):
 async def test_restored_resources_are_charged_to_compaction_budget():
     result = await DefaultCompactEngine().compact_if_needed(CompactionInput(
         history=(Message(role='system', content='BASE'), Message(role='user', content='task')),
-        token_limit=1000, llm=object(), force=True, allow_llm_summary=False,
+        token_limit=1000, llm=_SummaryProvider(), force=True,
         compacted_history_projector=lambda messages: [*messages, Message(role='user', content='x' * 10000)],
     ))
     assert result.blocked and result.estimated_after > 1000

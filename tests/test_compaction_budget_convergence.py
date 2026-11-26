@@ -154,9 +154,9 @@ async def test_one_round_degradation_keeps_remaining_groups_and_resources(tmp_pa
     assert [message.tool_calls for message in outcome.messages if message.tool_calls] == [
         message.tool_calls for message in full.messages if message.tool_calls
     ][1:]
-    for marker in ("[Earlier User Messages]", "[Invoked Skills]", "[Post-Compaction Runtime State]"):
+    for marker in ("[Invoked Skills]", "[Post-Compaction Runtime State]"):
         assert _messages_with_marker(outcome.messages, marker) == _messages_with_marker(full.messages, marker)
-    assert _summary(outcome.messages).content == _expected_summary(case.llm)
+    assert _summary(outcome.messages).content.startswith(_expected_summary(case.llm))
     latest_index = outcome.messages.index(case.latest)
     assert outcome.messages[latest_index + 1].tool_calls[0].id == "result-4-0"
     assert [message.model_dump() for message in case.history] == original
@@ -170,25 +170,25 @@ async def test_exhausting_headroom_rebuilds_each_stage_before_accepting_hard_lim
     assert outcome.mode == "summary" and 1 < outcome.estimated_after <= case.hard_limit
     assert outcome.degradation == _degradation(5, 2, 5, ("Todo", "Plan", "Goal"))
     assert case.llm.summary_calls == 1
-    assert len(projected) == 17
+    assert len(projected) == 16
     assert [_tool_ids(candidate) for candidate in projected[:6]] == [
         [f"result-{index}-{part}" for index in range(drop, 5) for part in range(2)]
         for drop in range(6)
     ]
     for candidate in projected:
-        assert _summary(candidate).content == _expected_summary(case.llm)
-        assert candidate.count(case.latest) == 1
+        assert _summary(candidate).content.startswith(_expected_summary(case.llm))
+        assert candidate.count(case.latest) + int(case.latest.content in _summary(candidate).content) == 1
         assert candidate[-2:] == [case.descriptor, case.date]
-    for candidate in projected[:14]:
+    for candidate in projected[:13]:
         assert _messages_with_marker(candidate, "[Post-Compaction Runtime State]") == _messages_with_marker(
             projected[0], "[Post-Compaction Runtime State]",
         )
     for candidate in projected[5:]:
-        assert candidate[candidate.index(_summary(candidate)) + 1] == case.latest
+        assert _summary(candidate).earlier_user_messages[-1] == case.latest.content
         assert not _tool_ids(candidate)
     for index, candidate in enumerate(projected[:6]):
-        (archive,) = _messages_with_marker(candidate, "[Earlier User Messages]")
-        assert archive.earlier_user_messages == case.earlier[:index + 1]
+        archive = _summary(candidate)
+        assert archive.earlier_user_messages == (case.earlier + [case.latest.content])[:index + 1]
         assert all(text in archive.content for text in archive.earlier_user_messages)
 
     for candidate, dropped in zip(projected[5:8], range(3)):
@@ -206,15 +206,15 @@ async def test_exhausting_headroom_rebuilds_each_stage_before_accepting_hard_lim
                 assert f"{name.upper()}_BODY" in skills.content and ranges == set(range(len(lines)))
 
     for dropped, candidate in enumerate(projected[7:13]):
-        (archive,) = _messages_with_marker(candidate, "[Earlier User Messages]")
-        assert archive.earlier_user_messages == case.earlier
+        archive = _summary(candidate)
+        assert archive.earlier_user_messages == [*case.earlier, case.latest.content]
         assert [text for text in case.earlier if text in archive.content] == case.earlier[dropped:]
         if dropped:
             assert f"[{dropped} earlier user messages are left out here; see the summary.]" in archive.content
-    for candidate in projected[13:]:
-        assert not _messages_with_marker(candidate, "[Earlier User Messages]")
-        assert _summary(candidate).earlier_user_messages == case.earlier
-    for candidate, expected in zip(projected[13:], [("Goal", "Plan", "Todo"), ("Goal", "Plan"), ("Goal",), ()]):
+    for candidate in projected[12:]:
+        assert _summary(candidate).earlier_user_messages == [*case.earlier, case.latest.content]
+        assert case.latest.content in _summary(candidate).content
+    for candidate, expected in zip(projected[12:], [("Goal", "Plan", "Todo"), ("Goal", "Plan"), ("Goal",), ()]):
         sections = _messages_with_marker(candidate, "[Post-Compaction Runtime State]")
         labels = tuple(chunk.splitlines()[0] for chunk in sections[0].content.split("\n\n## ")[1:]) if sections else ()
         assert labels == expected
@@ -222,7 +222,7 @@ async def test_exhausting_headroom_rebuilds_each_stage_before_accepting_hard_lim
     # Verify that the first fitting candidate wins even when later candidates are smaller.
     single_skill_body = None
     for candidate_index, expected in [(6, _degradation(5, 1)), (8, _degradation(5, 2, 1)),
-                                      (14, _degradation(5, 2, 5, ("Todo",)))]:
+                                      (13, _degradation(5, 2, 5, ("Todo",)))]:
         limit = context_engine.request_input_tokens(projected[candidate_index], {}, llm=case.llm)
         accepted, attempts = await case.compact(limit=limit)
         assert not accepted.blocked and accepted.estimated_after == limit
@@ -244,8 +244,8 @@ async def test_exhausted_hard_budget_preserves_summary_and_replays_all_user_orig
 
     assert blocked.blocked and blocked.estimated_after > limit and blocked.summary_calls == 1
     assert blocked.degradation == exhausted.degradation
-    assert _summary(blocked.messages).content == _expected_summary(case.llm)
-    assert case.latest in blocked.messages
+    assert _summary(blocked.messages).content.startswith(_expected_summary(case.llm))
+    assert case.latest.content in _summary(blocked.messages).content
 
     root = tmp_path / "sessions"
     with closing(SessionLog.create(root, session_id="degraded-archive", cwd=tmp_path)) as log:
@@ -253,16 +253,16 @@ async def test_exhausted_hard_budget_preserves_summary_and_replays_all_user_orig
         log.flush()
     with closing(SessionLog.open(root, session_id="degraded-archive", cwd=tmp_path)) as log:
         replayed = log.replay().messages
-    assert _summary(replayed).earlier_user_messages == case.earlier
-    assert case.latest in replayed
+    assert _summary(replayed).earlier_user_messages == [*case.earlier, case.latest.content]
+    assert case.latest.content in _summary(replayed).content
     next_request = Message(role="user", content="Next real user request")
     resumed = await context_engine._maybe_summarize(
         case.llm, [case.history[0], *replayed, next_request], case.hard_limit, 0, False, force=True,
     )
-    (archive,) = _messages_with_marker(resumed.messages, "[Earlier User Messages]")
-    assert archive.earlier_user_messages == case.earlier
+    archive = _summary(resumed.messages)
+    assert archive.earlier_user_messages == [*case.earlier, case.latest.content]
     assert [message for message in resumed.messages if context_engine._is_real_user_message(message)] == [
-        case.latest, next_request,
+        next_request,
     ]
 
 

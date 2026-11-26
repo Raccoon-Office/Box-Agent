@@ -67,9 +67,11 @@ async def test_summary_points_to_the_actual_log_with_available_reader(session_lo
     else:
         log = None
         tools = None
+    from tests.test_context_compaction_retention import _SummaryProvider
+
     result = await _maybe_summarize(
-        object(), [Message(role="system", content="system"), Message(role="user", content="last request")],
-        10_000, 0, False, tools=tools, session_log=log, force=True, allow_llm_summary=False,
+        _SummaryProvider(), [Message(role="system", content="system"), Message(role="user", content="last request")],
+        10_000, 0, False, tools=tools, session_log=log, force=True,
     )
 
     summary = next(message.content for message in result.messages if _is_summary_marker(message))
@@ -78,7 +80,7 @@ async def test_summary_points_to_the_actual_log_with_available_reader(session_lo
         assert hint not in summary
     else:
         assert hint + str(log.path) + " (JSONL;" in summary
-        assert summary.index(hint) < summary.index("pick up the last task")
+        assert summary.index("pick up the last task") < summary.index(hint)
         assert "tool-results" not in summary
         if log_kind == "native":
             assert "prefer query_jsonl over reading the whole file" in summary

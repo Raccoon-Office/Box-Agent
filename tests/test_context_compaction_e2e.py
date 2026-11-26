@@ -198,7 +198,7 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
     assert facts["user_request"] == "latest user request"
 
     assert llm.normal_messages[1].earlier_user_messages == [old_user.content]
-    compacted_summary = llm.normal_messages[2]
+    compacted_summary = llm.normal_messages[1]
     assert compacted_summary.role == "user"
     assert "Summary:\n1. Primary Request and Intent:" in str(
         compacted_summary.content
@@ -252,8 +252,8 @@ async def test_agent_sends_and_replays_full_long_summary_with_original_whitespac
     assert event.mode == "summary" and event.summary_calls == 1 and not event.head_truncated
     assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
     sent = next(message.content for message in provider.normal_messages if _is_summary_marker(message))
-    assert sent.startswith(_SUMMARY_MESSAGE_PREFIX + summary + "\n\nIf you need specific details")
-    assert sent.endswith(_SUMMARY_MESSAGE_SUFFIX)
+    assert sent.startswith(_SUMMARY_MESSAGE_PREFIX + summary + _SUMMARY_MESSAGE_SUFFIX)
+    assert sent.index("[Earlier User Messages]") < sent.index("If you need specific details")
     with closing(SessionLog.open(root, session_id="long-summary", cwd=tmp_path)) as log:
         replayed = next(message.content for message in log.replay().messages if _is_summary_marker(message))
     assert replayed == sent
@@ -481,7 +481,8 @@ async def test_compaction_keeps_full_summary_when_no_headroom_was_requested(monk
     assert limit - context_engine.REQUEST_INPUT_HEADROOM_TOKENS < outcome.estimated_after <= limit
     assert outcome.degradation is None
     message = next(message for message in outcome.messages if context_engine._is_summary_marker(message))
-    assert message.content == context_engine._SUMMARY_MESSAGE_PREFIX + summary + context_engine._SUMMARY_MESSAGE_SUFFIX
+    assert message.content.startswith(context_engine._SUMMARY_MESSAGE_PREFIX + summary + context_engine._SUMMARY_MESSAGE_SUFFIX)
+    assert message.earlier_user_messages == ["original request"]
 
 
 @pytest.mark.asyncio
@@ -589,7 +590,9 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
         assert len(compactions) == 1
         assert preparations == [30_000, 30_000]
         assert not errors and len(provider.normal_requests) == 1
-        assert any(message.content == "x" * user_chars for message in provider.normal_requests[0])
+        assert next(m for m in provider.normal_requests[0] if _is_summary_marker(m)).earlier_user_messages == [
+            "x" * user_chars,
+        ]
         assert done.stop_reason == StopReason.END_TURN
 
 

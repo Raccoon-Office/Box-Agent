@@ -6740,11 +6740,9 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
     assert skip_next is False
     assert outcome.mode == "fallback"
     assert "one <summary>" in outcome.error
-    assert [m.role for m in new_msgs] == ["system", "user", "user", "assistant", "tool", "user"]
-    assert new_msgs[1].earlier_user_messages == ["old request"]
-    assert "Deterministic history fallback" in str(new_msgs[2].content)
-    assert new_msgs[-1] is msgs[-1]
-    assert "<fallback omitted 2 earlier source messages>" in str(new_msgs[2].content)
+    assert new_msgs[:-1] == [msgs[0], msgs[1], msgs[-1]]
+    assert new_msgs[-1].runtime_kind == "compaction_notice"
+    assert "earlier conversation was omitted" in new_msgs[-1].content
     assert sum(len(str(m.content)) for m in new_msgs) < sum(len(str(m.content)) for m in msgs)
 
 
@@ -6832,7 +6830,7 @@ async def test_second_compaction_sends_prior_summary_in_original_message_prefix(
     )
     assert prior_fact in str(summary_input[1].content)
     assert "current request" in str(summary_input[2].content)
-    assert msgs[2] in outcome.messages
+    assert outcome.messages[1].earlier_user_messages == [msgs[2].content]
     assert sum(
         1
         for message in outcome.messages
@@ -6867,7 +6865,7 @@ async def test_second_compaction_treats_runtime_state_as_metadata_not_real_user(
     )
 
     assert outcome.messages is not None
-    assert real_user in outcome.messages
+    assert outcome.messages[1].earlier_user_messages == [real_user.content]
     assert old_runtime_state not in outcome.messages
     assert all(
         sent is original
@@ -7028,15 +7026,9 @@ async def test_maybe_summarize_bounds_newest_group_over_recent_budget():
 
     assert outcome.mode == "summary"
     assert outcome.messages is not None
-    assert latest_user in outcome.messages
-    compacted_reasoning = next(
-        message
-        for message in outcome.messages
-        if message.role == "assistant" and message is not outcome.messages[0]
-    )
-    assert compacted_reasoning is not oversized_reasoning
-    assert compacted_reasoning.thinking is None
-    assert "Assistant content compacted" in str(compacted_reasoning.content)
+    assert outcome.messages[1].earlier_user_messages[-1] == latest_user.content
+    assert latest_user.content in outcome.messages[1].content
+    assert not any(m.role == "assistant" for m in outcome.messages)
 
 
 @pytest.mark.asyncio
@@ -7098,15 +7090,12 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
     assert outcome.mode == "summary"
     assert outcome.estimated_after < 90_000
     assert outcome.messages is not None
-    assert latest_user in outcome.messages
-    retained_assistant = next(message for message in outcome.messages if message.tool_calls)
-    retained_tools = [message for message in outcome.messages if message.role == "tool"]
-    assert retained_assistant.tool_calls == calls
-    assert [message.tool_call_id for message in retained_tools] == [call.id for call in calls]
-    assert _fallback_context_estimate(outcome.messages[2:], None) <= _RECENT_GROUP_TOKEN_LIMIT
+    assert len(outcome.messages) == 2
     summary_message = outcome.messages[1]
+    assert summary_message.earlier_user_messages == [latest_user.content]
+    assert latest_user.content in summary_message.content
     assert len(summary) > 8_000
-    assert summary_message.content == _SUMMARY_MESSAGE_PREFIX + summary + _SUMMARY_MESSAGE_SUFFIX
+    assert summary_message.content.startswith(_SUMMARY_MESSAGE_PREFIX + summary + _SUMMARY_MESSAGE_SUFFIX)
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import closing
 
 import pytest
 
@@ -94,7 +95,10 @@ async def test_summary_provider_overflow_is_retried_at_most_three_times(all_fail
     shared = provider.requests[:4]
     assert all(len(previous) > len(nxt) for previous, nxt in zip(shared, shared[1:]))
     assert all(request[0] is history[0] and request[-2] is history[-1] for request in shared)
-    assert outcome.messages[1].earlier_user_messages[0] == "Original request 0"
+    if all_fail:
+        assert outcome.messages[-1].runtime_kind == "compaction_notice"
+    else:
+        assert outcome.messages[1].earlier_user_messages[0] == "Original request 0"
 
 
 @pytest.mark.asyncio
@@ -109,7 +113,7 @@ async def test_output_limit_keeps_one_complete_summary_without_retry(content, fi
     assert result.summary_calls == len(provider.requests) == 1
     assert result.summary_retries == 0
     summary = next(message for message in result.messages if context_engine._is_summary_marker(message))
-    assert summary.content == (
+    assert summary.content.startswith(
         context_engine._SUMMARY_MESSAGE_PREFIX
         + "First detail.\nSecond detail."
         + context_engine._SUMMARY_MESSAGE_SUFFIX
@@ -425,35 +429,16 @@ def test_same_step_compactions_do_not_count_as_rapid_refills():
 
 
 @pytest.mark.asyncio
-async def test_deterministic_summary_preserves_the_newest_round_and_full_fallback():
-    call = ToolCall(id="latest-read", type="function", function=FunctionCall(name="read", arguments={}))
-    messages = [
-        Message(role="user", content="Oldest request"),
-        Message(role="assistant", content="Oldest reply"),
-        Message(role="user", source="runtime", content="[Earlier User Messages]\nArchived original"),
-        Message(role="assistant", content="Older payload start\n" + "x" * 20_000 + "\nOlder payload end"),
-        Message(role="assistant", content="Latest tool call", tool_calls=[call]),
-        Message(role="tool", content="Latest tool result", name="read", tool_call_id=call.id),
-        Message(role="user", content="Current request"),
-    ]
-    summary = context_engine._deterministic_history_fallback(messages)
-    assert 8_000 < len(summary) <= 12_000
-    assert "Current user request (prioritized):\n<role=user>\nCurrent request" in summary
-    assert "<fallback omitted 2 earlier source messages>" in summary
-    assert "Oldest request" not in summary and "Oldest reply" not in summary
-    assert "Archived original" not in summary
-    expected = ["Current request", "<fallback omitted", "Older payload start", "Older payload end",
-                "Latest tool call", "Latest tool result"]
-    positions = [summary.index(text) for text in expected]
-    assert positions == sorted(positions)
-
-    outcome = await context_engine._maybe_summarize(
-        _Summary(), [Message(role="system", content="system"), *messages],
-        30_000, 0, False, force=True, allow_llm_summary=False,
+async def test_fallback_keeps_the_latest_complete_group_and_omits_large_older_output():
+    history = _history(rounds=3, size=20)
+    history[-5].content = "large result" * 20_000
+    result = await context_engine._maybe_summarize(
+        _Summary([("bad format", "stop")] * 5), history, 30_000, 0, False, force=True,
     )
-    compacted = next(message for message in outcome.messages if context_engine._is_summary_marker(message))
-    assert outcome.mode == "fallback"
-    assert compacted.content == context_engine._SUMMARY_MESSAGE_PREFIX + summary + context_engine._SUMMARY_MESSAGE_SUFFIX
+    assert result.mode == "fallback"
+    assert result.messages[:-1] == [history[0], *history[-4:]]
+    assert result.messages[-1].runtime_kind == "compaction_notice"
+    assert not any(context_engine._is_summary_marker(m) for m in result.messages)
 
 
 @pytest.mark.asyncio
@@ -552,3 +537,142 @@ async def test_third_summary_request_still_contains_the_fact_from_the_first_summ
         for request in provider.requests:
             assert any(fact in str(message.content) for message in request) == bool(cycle)
         history = [*result.messages, *_history(rounds=7, size=10)[1:]]
+
+
+async def _fallback(history, *, log=None, limit=50_000, llm=None):
+    provider = llm or _Summary()
+    provider.outcomes = [("malformed", "stop")] * 5
+    return await context_engine._maybe_summarize(
+        provider, history, limit, 0, False, force=True, session_log=log,
+    )
+
+
+async def test_fallback_summary_anchor_is_byte_identical_and_repeated_notices_keep_omitted_seqs(tmp_path):
+    system = Message(role="system", content="system")
+    log = SessionLog.create(tmp_path, session_id="notice", cwd=tmp_path)
+    try:
+        summary = Message(role="user", source="runtime", content=context_engine._SUMMARY_MESSAGE_PREFIX + "KITE-92")
+        dropped = Message(role="user", content="obsolete")
+        work = _history(rounds=1, size=10)[2:4]
+        history = [system, dropped, summary, *work]
+        log.append_unlogged_messages(history[1:], turn=1, step=1)
+        log.flush()
+        seq = log.surface_message_sequence(history[1:], dropped)
+        first = await _fallback(history, log=log)
+        assert first.mode == "fallback" and first.messages[:-1] == [system, summary, *work]
+        assert first.messages[1] is summary
+        notice = first.messages[-1]
+        assert notice.runtime_kind == "compaction_notice" and notice.source == "runtime"
+        assert f"seq ranges: {seq}." in notice.content and str(log.path) in notice.content
+        assert "Only if continuing the current task requires" in notice.content
+        assert notice.model_content().startswith("[Host runtime reference source=runtime kind=compaction_notice]")
+        log.replace_surface(first.messages[1:], turn=1, step=2)
+        log.flush()
+        request = Message(role="user", content="newest task")
+        tail = Message(role="assistant", content="work after the latest request")
+        second_history = [system, *log.replay().messages, request, tail]
+        log.append_unlogged_messages(second_history[1:], turn=2, step=1)
+        log.flush()
+        second = await _fallback(second_history, log=log)
+        assert second.messages[:-1] == [system, request, tail]
+        assert second.messages[-1].content.count("could not generate a summary") == 1
+        assert second.messages[-1].content.startswith(notice.content.split("seq ranges:")[0])
+        assert str(seq) in second.messages[-1].content.split("seq ranges: ")[1].split(".")[0].split(", ")
+        assert not context_engine._is_real_user_message(second.messages[-1])
+    finally:
+        log.close()
+
+
+@pytest.mark.parametrize("over", [0, 1])
+async def test_fallback_takes_a_contiguous_suffix_at_exactly_12000_local_tokens(over):
+    class Counter(_Summary):
+        estimate_text_tokens = staticmethod(len)
+
+    llm = Counter()
+    anchor = Message(role="user", content="task")
+    old = Message(role="assistant", content="skip")
+    call = _history(rounds=1, size=0)[2:4]
+    call[1].content = "x" * (12_000 - context_engine._fallback_context_estimate(call, None, llm=llm) + over)
+    history = [Message(role="system", content="system"), anchor, old, *call]
+    outcome = await _fallback(history, llm=llm)
+    assert outcome.messages[:-1] == ([history[0], anchor] if over else [history[0], anchor, *call])
+    assert "session.jsonl" not in outcome.messages[-1].content and "query_jsonl" not in outcome.messages[-1].content
+
+
+async def test_fallback_drops_interactions_then_older_archived_users_and_preserves_latest():
+    latest = "KEEP\n" + "汉" * 3_000
+    history = [Message(role="system", content="system"), Message(role="user", content="old-" * 1200),
+               Message(role="user", content=latest), *(Message(role="assistant", content=f"step {i}") for i in range(7))]
+    compacted = await context_engine._maybe_summarize(_Summary(), history, 50_000, 0, False, force=True)
+    full = await _fallback(compacted.messages, limit=1)
+    assert full.blocked
+    assert full.degradation["droppedRounds"] == 5 and full.degradation["droppedEarlierUsers"] == 1
+    assert "old-old-" not in full.messages[1].content
+    assert "Retained evidence." in full.messages[1].content and latest in full.messages[1].content
+    assert full.messages[-1].runtime_kind == "compaction_notice"
+
+
+async def test_fallback_without_omissions_records_latest_anchor_with_no_notice():
+    history = _history(rounds=1, size=10)
+    outcome = await _fallback(history)
+    assert outcome.mode == "fallback" and outcome.messages == history
+
+
+async def test_fallback_reports_omission_without_directing_an_unbounded_log_search(tmp_path):
+    from contextlib import closing
+
+    history = _history(rounds=4, size=10)
+    with closing(SessionLog.create(tmp_path, session_id="unmapped", cwd=tmp_path)) as log:
+        outcome = await _fallback(history, log=log)
+        notice = outcome.messages[-1]
+        assert notice.runtime_kind == "compaction_notice" and "omitted from context" in notice.content
+        assert str(log.path) not in notice.content and "query_jsonl" not in notice.content
+
+
+async def test_previous_anchor_and_its_groups_share_one_local_fallback_allowance():
+    class Counter(_Summary):
+        estimate_text_tokens = staticmethod(len)
+
+    llm = Counter()
+    previous = Message(role="user", content="previous" * 500)
+    last = Message(role="user", content="new")
+    history = [Message(role="system", content="system"), previous, Message(role="assistant", content="A" * 5_000),
+               Message(role="assistant", content="B" * 6_000), last]
+    result = await _fallback(history, llm=llm)
+    assert result.messages[:-1] == [history[0], previous, history[3], last]
+    assert context_engine._fallback_context_estimate(result.messages[1:-2], {}, llm=llm) <= 12_000
+    tight = await _fallback(history, llm=llm, limit=2_000)
+    assert tight.messages[:-1] == [history[0], last] and tight.mode == "fallback"
+
+
+async def test_fallback_logs_the_notice_or_latest_anchor_before_reopening(tmp_path):
+    from box_agent.runtime import run_agent_loop
+
+    class Provider(_Summary):
+        context_window = 80_000
+        max_output_tokens = 1_000
+
+        async def generate_stream(self, messages, *, call_kind="", **kwargs):
+            if call_kind == "context_summary":
+                yield StreamEvent(type="text", delta="bad format")
+            else:
+                yield StreamEvent(type="text", delta="resumed")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    for omit in (False, True):
+        sid = f"fallback-{omit}"
+        log = SessionLog.create(tmp_path, session_id=sid, cwd=tmp_path)
+        history = _history(rounds=2 if omit else 1, size=10)
+        history[-3].usage = TokenUsage(total_tokens=15_000)
+        events = [e async for e in run_agent_loop(
+            llm=Provider(), tools={}, messages=history, token_limit=10_000, session_log=log, session_turn=1, max_steps=1,
+        )]
+        assert events[-1].stop_reason == StopReason.END_TURN
+        log.close()
+        with closing(SessionLog.open(tmp_path, session_id=sid, cwd=tmp_path)) as reopened:
+            (record,) = [e["data"] for e in reopened.events if e["type"] == "compaction/summary"]
+            assert (record["mode"], record["summaryPath"]) == ("fallback", "deterministic")
+            assert (record["message"].get("runtime_kind") == "compaction_notice") == omit
+            if not omit:
+                assert record["message"]["content"] == "Current task"
+            assert reopened.replay().messages == history[1:]
