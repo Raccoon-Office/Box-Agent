@@ -19,13 +19,16 @@ from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, TypeVar
+from typing import TYPE_CHECKING, Any, BinaryIO, TypeVar
 from uuid import uuid4
 
 from .schema import Message
 from .schema.schema import RequestUsageSnapshot
 from .session_projection import SessionProjection, mark_submitted_tool_results
 from .windows_session_lock import WINDOWS_LOCK_CONTENTION, WindowsSessionLock
+
+if TYPE_CHECKING:
+    from .kernel.context_types import CompactionPlan
 
 
 _log = logging.getLogger(__name__)
@@ -288,6 +291,7 @@ def _apply_surface_message(
     except Exception as exc:
         raise SessionLogCorrupted(f"session event {seq} has an invalid message") from exc
 
+    message._surface_seq = seq
     node = (seq, message)
     operation = event.get("surfaceOp")
     if operation == "append":
@@ -305,6 +309,12 @@ def _apply_surface_message(
     if start_index > end_index:
         raise SessionLogCorrupted(f"surface replacement {seq} has a reversed range")
     surface[start_index : end_index + 1] = [node]
+    if message.compaction_node in ("summary_head", "fallback_head"):
+        # Measurements on the retained nodes describe the previous prefix.
+        # Only the projection changes; the original events remain auditable.
+        for _, retained in surface[start_index + 1:]:
+            retained.usage = None
+            retained.request_only_input_tokens = 0
     return message
 
 
@@ -879,6 +889,7 @@ class SessionLog:
         event = self.append(
             event_type, data, surface_op=surface_op, source_event_seqs=source_event_seqs,
         )
+        message._surface_seq = event["seq"]
         self._pending_message_metadata.pop(id(message), None)
         return event
 
@@ -1005,9 +1016,10 @@ class SessionLog:
         measurements and other recovery state are not needed to compare messages.
         """
 
+        nodes = self._surface_nodes()
         persisted_payloads = [
             message.model_dump(mode="json", exclude_none=True)
-            for _, message in self._surface_nodes()
+            for _, message in nodes
         ]
         live_payloads = [
             message.model_dump(mode="json", exclude_none=True) for message in messages
@@ -1034,6 +1046,9 @@ class SessionLog:
                 step=step if step is not None else 0,
             )
 
+        # Some callers supply newly projected objects for already logged inputs.
+        for (seq, _), message in zip(nodes, messages):
+            message._surface_seq = seq
         appended: list[dict[str, Any]] = []
         for message, payload in zip(
             messages[len(persisted_payloads) :],
@@ -1108,7 +1123,8 @@ class SessionLog:
     ) -> list[tuple[int, Message, dict[str, Any]]]:
         """Replay original effective history, excluding model compaction copies."""
         history = []
-        compacting = False
+        legacy_compaction = False
+        format_two = False
         if events is None:
             events = self._active_events(checkpoint=checkpoint)
         for event in events:
@@ -1117,15 +1133,22 @@ class SessionLog:
             kind, data = event["type"], event["data"]
             if kind == "surface/reset":
                 history.clear()
-            elif kind == "compaction/summary":
-                compacting = True
+                legacy_compaction = format_two = False
+            elif kind == "compaction/start":
+                format_two = data.get("format") == 2
+                legacy_compaction = False
+            elif kind == "compaction/summary" and not format_two:
+                # Old writers started emitting copies only after the summary
+                # succeeded. A failed attempt could leave a start on its own.
+                legacy_compaction = True
             elif kind == "compaction/end":
-                compacting = False
-            elif (not compacting and not data.get("surfaceDerived")
-                  and kind in _SURFACE_MESSAGE_TYPES):
+                legacy_compaction = format_two = False
+            elif (not legacy_compaction and kind in _SURFACE_MESSAGE_TYPES
+                  and event.get("surfaceOp") == "append" and not data.get("surfaceDerived")):
                 data = deepcopy(data)
                 payload = data if kind == "user/message" else data["message"]
-                history.append((event["seq"], Message.model_validate(payload), data))
+                if payload.get("compaction_node") is None:
+                    history.append((event["seq"], Message.model_validate(payload), data))
         return history
 
     def surface_sequences(self, messages: list[Message]) -> tuple[int, ...]:
@@ -1207,22 +1230,64 @@ class SessionLog:
         nodes = self._surface_nodes()
         if type(index) is not int or not 0 <= index < len(nodes):
             raise SessionLogCorrupted(f"surface edit index {index!r} is outside the active surface")
-        seq, previous = nodes[index]
+        return self._append_surface_message(
+            message, turn=turn, step=step, **self._surface_edit_args(nodes[index], message, edit),
+        )
+
+    def _surface_edit_args(
+        self, node: tuple[int, Message], message: Message, edit: dict[str, Any],
+    ) -> dict[str, Any]:
+        seq, previous = node
         original = self._events[seq]
         event_types = {"user": "user/message", "assistant": "assistant/message", "tool": "tool/result"}
         if (original["type"] != event_types.get(message.role) or previous.role != message.role
                 or previous.tool_call_id != message.tool_call_id or previous.name != message.name):
-            raise SessionLogCorrupted(f"surface edit at index {index} does not match node {seq}")
+            raise SessionLogCorrupted(f"surface edit does not match node {seq}")
         # Images and context measurements belong to the message. Execution
         # facts such as raw results and accepted model rounds stay on their
         # original event, where replay processes each occurrence exactly once.
         data = original["data"]
         metadata = {key: data[key] for key in ("images", "contextUsage") if key in data}
-        return self._append_surface_message(
-            message, turn=turn, step=step,
-            surface_op={"op": "replace", "start": seq, "end": seq}, source_event_seqs=[seq],
-            surface_derived=True, metadata={**metadata, "edit": edit},
+        return {
+            "surface_op": {"op": "replace", "start": seq, "end": seq},
+            "source_event_seqs": [seq], "surface_derived": True, "metadata": {**metadata, "edit": edit},
+        }
+
+    def commit_compaction(self, plan: CompactionPlan, *, turn: int, step: int) -> None:
+        """Append validated edits, a single prefix replacement, and generated messages."""
+        nodes = self._surface_nodes()
+        seqs = tuple(seq for seq, _ in nodes)
+        if seqs != plan.source_seqs:
+            raise SessionLogCorrupted("compaction source does not match the current surface")
+        # The plan indexes the original history, including its system message.
+        if type(plan.cut_index) is not int or not 2 <= plan.cut_index <= len(nodes) + 1:
+            raise SessionLogCorrupted("compaction cut must cover a nonempty surface prefix")
+        cut = plan.cut_index - 1
+        if plan.cut_seq != (seqs[cut] if cut < len(nodes) else None):
+            raise SessionLogCorrupted("compaction cut does not name the first retained node")
+        if plan.head.role != "user" or plan.head.compaction_node not in ("summary_head", "fallback_head"):
+            raise SessionLogCorrupted("compaction replacement has no valid head")
+        if any(msg.compaction_node != "appended" or msg.role not in ("user", "assistant", "tool")
+               for msg in plan.appends):
+            raise SessionLogCorrupted("invalid compaction append")
+        # Validate every edit before writing the first one. seq order can
+        # differ from surface order after earlier single-node replacements.
+        retained = dict(nodes[cut:])
+        if not plan.rewrites.keys() <= retained.keys():
+            raise SessionLogCorrupted("compaction rewrite targets a node outside the retained suffix")
+        edits = [
+            (msg, self._surface_edit_args((seq, retained[seq]), msg, {"reason": "compaction"}))
+            for seq, msg in plan.rewrites.items()
+        ]
+        for message, args in edits:
+            self._append_surface_message(message, turn=turn, step=step, **args)
+        self._append_surface_message(
+            plan.head, turn=turn, step=step,
+            surface_op={"op": "replace", "start": seqs[0], "end": seqs[cut - 1]},
+            source_event_seqs=list(seqs[:cut]),
         )
+        for message in plan.appends:
+            self._append_surface_message(message, turn=turn, step=step, surface_op="append")
 
     def replace_surface(
         self,
