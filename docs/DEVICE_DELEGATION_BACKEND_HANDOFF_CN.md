@@ -136,6 +136,8 @@ sequenceDiagram
 {"jsonrpc":"2.0","id":22,"method":"_device/event","params":{"version":1,"sessionId":"cloud-1","event":{"operationId":"start-01","deviceId":"PC-A","sessionId":"remote-device-01","turnId":"t1","seq":2,"status":"succeeded","summary":"已在桌面工作区生成 report.txt"}}}
 ```
 
+`_device/event.params._meta.org` 可以由宿主/2c 提供，但事件只上报设备状态，该字段不参与计费，也不影响事件接收。云任务在退出登录后继续执行，自动续跑沿用发起相应设备工作的云端父轮 org；本地子轮中断或迟到事件都不把它改为个人或另一组织。同一次续跑若会消费不同父轮的结果且付款身份冲突，则不发模型请求并报告 `DEVICE_WAKE_ORG_CONFLICT`。重启恢复由新的 `session/resume`（或重新打开稳定会话的 `session/new`）提供 org，不从日志恢复旧身份，也不从登录文件推断。`session/load` 只回放历史；此后到达的设备事件仅落盘，直到明确的执行请求才允许自动续跑。取消操作不校验 org。
+
 以上 wait 请求与成功回包为单设备示例。正常响应来自桌面，`source:"device"`。get 和 wait 共用目标子轮快照；wait 不传游标，重复等待已就绪的子轮应立即返回。断线后若父 Harness 已持有历史观测，可注明其来源与观测时间供模型参考；新 get 仍须收到桌面回执才能成功。
 
 桌面已记录 seq=2 的终态。父会话再次等同一子轮时，使用新的请求标识，桌面立即返回完整结果。
@@ -226,7 +228,7 @@ Box 侧字段和恢复规则见[设备委派协议说明](DEVICE_DELEGATION_LOCA
 
 1. **派发时绑定云工作区。** 给支持 `artifact.upload` 的桌面转发 start/send 时，从父云会话记录取得工作区 ID，写入转发请求的 `params.workspaceId`。即使本次只要摘要，也要保留这个绑定，以便之后取件。它与桌面本地默认目录 `RaccoonWork` 各有用途。桌面把工作区与原请求一起保存；重投同一操作时沿用原值。
 2. **按身份和具体版本取件。** 从登录账号、云父会话、设备、本地子会话和子轮定位清单，再按 `artifactId` 取件。源设备和查看会话的设备可以不同。调用方已收到 `cloudFileRef` 时可直接访问云文件；新发出的取件 RPC 均转源设备，写入前确认离线则回 `DEVICE_OFFLINE`。桌面保留取件 ID 和原始修订的关联。面向用户的取件入口也校验其对父会话的访问权限。
-3. **区分子轮完成与文件交付完成。** 只需摘要时，终态可带仅有 `deviceId,artifactId,name` 的引用。指定 `artifactDelivery:"cloud"` 后，上传中的快照为 `running`、`deliveryStatus:"pending"`、`complete:false`。全部文件都有文件服务确认的 `cloudFileRef` 后才返回成功；交付失败时保留 `deliveryStatus:"failed"` 和 `error`。独立 mock 向桌面转发取件的超时为 120 秒，Box 为该 RPC 预留 130 秒。
+3. **区分子轮完成与文件交付完成。** 只需摘要时，终态可带仅有 `deviceId,artifactId,name` 的引用。指定 `artifactDelivery:"cloud"` 后，上传中的快照为 `running`、`deliveryStatus:"pending"`、`complete:false`。全部文件都有文件服务确认的 `cloudFileRef` 后才返回成功。没有可交付文件时，桌面按客户端协议上报 `failed` 和具体错误；Box 收到矛盾的 `succeeded` 且 `artifactRefs:[]` 或省略 `artifactRefs` 时，将其投影为 `failed`、`deliveryStatus:"failed"` 和 `NO_DELIVERABLE_ARTIFACTS`，不无限等待或误报成功。桌面上报的其他交付失败保留其 `error`。独立 mock 向桌面转发取件的超时为 120 秒，Box 为该 RPC 预留 130 秒。
 4. **合并终态后的补报。** 桌面以同一子轮、原 start/send 的 `operationId` 和更高的 `seq` 上报累计清单。2c 可靠转交累计清单。桌面和父 Harness 按原 `artifactId` 合并新增引用，校验设备和文件名，保留原结论、摘要及先前引用。未知条目或冲突的云引用须拒绝；重复事件可幂等确认。这样同一子轮后续的 get/wait 能读到云引用，已消费的完成结果不会再次唤醒父轮。
 
 取件请求、成功回包、文件服务路径和桌面重启后的恢复规则见[客户端产物交付](DEVICE_DELEGATION_CLIENT_HANDOFF_CN.md#设备产物按需交付)。后端验收可分别运行 `--artifact-required` 和 `--artifact-later`，核对上传期间等待、跨父会话拒绝、终态补报、已有云引用离线可用，以及新取件在源机离线时返回投递错误。

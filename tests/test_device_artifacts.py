@@ -25,6 +25,37 @@ uri = "file:///sandbox/report.csv"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("result", [{"artifactRefs": []}, {"text": "done"}, None])
+async def test_cloud_delivery_without_artifacts_fails_child_and_wakes_parent(result):
+    log = Log()
+    async def request(_, params):
+        snapshot = {**event, "source": "device"}
+        if params["operation"] == "session.wait":
+            return {"timedOut": False, "results": [snapshot]}
+        return snapshot
+
+    broker = DeviceDelegations("parent", request, lambda: "turn", log, artifact_upload=True)
+    broker.save({**target, "operationId": "op", "parentTurnId": "turn",
+                 "status": "accepted", "seq": 0, "artifactDelivery": "cloud"})
+    event = {**target, "operationId": "op", "seq": 1, "status": "succeeded", "complete": True}
+    if result is not None:
+        event["result"] = result
+    assert broker.event({"version": 1, "sessionId": "parent", "event": event}) == {"recorded": True}
+    broker.end("turn")
+    record = broker.operations["op"]
+    assert record["status"] == "failed" and record["complete"] is True
+    assert record["deliveryStatus"] == "failed"
+    assert record["error"] == "NO_DELIVERABLE_ARTIFACTS"
+    assert broker.next_wake() is not None
+    assert "NO_DELIVERABLE_ARTIFACTS" in broker.request_injections([])[0].content
+    snapshot = await broker.query("session.get_turn", target)
+    assert snapshot["status"] == "failed" and snapshot["complete"] is True
+    assert snapshot["error"] == "NO_DELIVERABLE_ARTIFACTS"
+    waited = await broker.query("session.wait", {"targets": [target]})
+    assert waited["results"][0]["error"] == "NO_DELIVERABLE_ARTIFACTS"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("required", [True, False])
 async def test_cloud_delivery_survives_restart_and_wakes_parent_once(required):
     state = {}
