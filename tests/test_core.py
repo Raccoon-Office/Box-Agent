@@ -3469,6 +3469,35 @@ async def test_step_summary_does_not_retry_or_execute_more_tools(requests_tool):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content, thinking",
+    [("", "Cannot finish."), ("  \n", None), ("  \n", "Cannot finish.")],
+    ids=["thinking-only", "whitespace", "whitespace-with-thinking"],
+)
+async def test_empty_step_summary_is_not_saved_and_closes_its_step(content, thinking):
+    """A wrap-up without a visible answer leaves no assistant turn and still ends its step."""
+    llm = CapturingStreamLLM([
+        LLMResponse(content="", tool_calls=_echo_tool_calls(1), finish_reason="tool_calls"),
+        LLMResponse(content=content, thinking=thinking, finish_reason="stop"),
+    ])
+    messages = _msgs()
+    events = await collect(run_agent_loop(
+        llm=llm, messages=messages, tools={"echo": CountingEchoTool()}, max_steps=1,
+    ))
+    # History still ends at the wrap-up notice; no blank/thinking-only reply is saved.
+    assert messages[-1].role == "user"
+    assert "步数预算已用尽" in messages[-1].content
+    assert not any(m.role == "assistant" and not m.tool_calls for m in messages)
+    starts = [e.step for e in events if isinstance(e, StepStart)]
+    ends = [e.step for e in events if isinstance(e, StepEnd)]
+    assert starts == ends == [1, 2]
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert len(done) == 1
+    assert done[0].stop_reason == StopReason.MAX_STEPS
+    assert done[0].final_content == "Task couldn't be completed after 1 steps."
+
+
+@pytest.mark.asyncio
 async def test_tool_heavy_turn_injects_hidden_final_summary_guidance():
     """After many visible tools, the runtime nudges the model to end with a conclusion."""
     llm = MockLLM(
