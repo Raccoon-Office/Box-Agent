@@ -253,3 +253,53 @@ Session Log JSONL
 - [游标及并发测试](../tests/test_acp_resume_replay.py)。
 - [真实 SDK/stdio 重启测试](../tests/test_acp_input_restart_stdio.py)：验证 wire `_meta`、附件和工具回放，以及恢复后继续对话。
 - [图片输入测试](../tests/test_user_input_contract.py)：验证图片准备结果原样回放，无再次执行。
+
+## 从桌面导入历史后续聊
+
+支持一次性导入的运行时在 initialize 返回的 `_meta.history_import.protocol_version` 中声明版本 1。
+桌面主进程先为已授权的目标账号、来源身份和来源会话分配稳定 UUID，在当前 Box-Agent profile 的私有
+`history-import/<UUID>/snapshot.json` 写入版本 1 快照。所需字段为 `version`、`id`、`workspace` 及有序
+`messages`。每条消息含 `role`（user 或 assistant）、`text`、毫秒时间戳 `timestamp` 和 `turnId`。
+用户消息开启一个 UUID 标识的轮次，随后助手消息沿用该标识。可选 `references` 列表中的 `path` 作为历史文本保留。
+
+发送 ACP 扩展 `_history/import`，参数为 `{"token":"<UUID>"}`。运行时在专用子进程校验不超过 64 MiB 的快照，
+首次导入按以下顺序提交：写临时 SessionLog → 文件 fsync → 关闭日志并原子发布 → 核验目标身份和导入内容前缀
+→ 目录 fsync → 返回 `sessionId`。非 Windows 平台依次同步会话目录、`sessions` 目录及其直接父目录；
+Windows 保持文件同步和原子发布，不执行目录 fsync。
+
+目标已存在或并发发布由另一请求完成时，同样先核验、再同步目录，全部成功后才返回同一 `sessionId`。
+核验包含日志版本、会话 ID、来源摘要、工作区，以及原始导入的事件顺序、内容、轮次和消息时间戳，
+忽略导入时生成的创建时间和生命周期事件时间。核验只读原始导入前缀，允许后面追加聊天，不取得写锁、
+截断或恢复现有日志。来源冲突、前缀损坏或同步失败均返回请求级错误，保留已发布日志和快照；
+后续显式重试重新核验并同步，不自动重试，也不因目标存在而跳过持久化确认。
+
+宿主收到 ACP 成功后，才在数据库事务中登记会话、消息和导入标记，事务成功后清理快照并返回 `imported`。
+数据库提交失败时继续保留快照，已登记会话仍按原逻辑返回 `skipped`。
+后续使用返回的句柄和原目标工作区执行 `session/resume`。
+
+### 导入控制与故障隔离
+
+支持受控导入的运行时额外声明 `_meta.history_import_control.protocol_version: 1`。
+新宿主在 `_history/import` 中附加 UUID `attemptId`，成功返回仍为 `{sessionId}`。
+同 token、同 attempt 的在途请求复用一个作业；旧作业尚未结束时，新 attempt 不会启动第二个写入者。
+导入不再使用普通会话的 `session-io` 线程池。源码及冻结程序共用私有 worker 入口；worker 不初始化模型和工具。
+
+运行时通过 `_history/import_progress` 通知发送 `{token, attemptId, stage, completed}`，
+每 250 ms 最多汇总一次实际完成计数；重复计数或心跳不代表进展。`{token, attemptId, exited: true}`
+表示所属子进程已退出。进度通知为 best effort，不阻塞导入或其他会话。
+
+宿主可调用 `_history/import_cancel`，参数为 `{token, attemptId}`。旧 attempt 的取消不影响新作业。
+运行时先请求协作停止，最多等待 2 秒，然后强制终止并等待 1 秒确认退出；返回 `stopped`、
+`pending_confirmation` 或 `not_found`。发送终止信号不等于退出。未确认退出的 token 继续保留归属，
+不允许新写入；累计两个未回收作业时拒绝新增导入，但不阻止普通会话。
+请求级错误包括 `HISTORY_IMPORT_BUSY`、`HISTORY_IMPORT_CAPACITY`、`HISTORY_IMPORT_CANCELLED`、
+`HISTORY_IMPORT_PENDING_CONFIRMATION`。快照/日志验证失败保留 `HISTORY_IMPORT_FAILED` 错误映射。
+
+私有 `history-import-jobs/` 中保存尝试身份及 OS 锁；重启后的新 worker 通过非阻塞锁确认旧写入者已停止，
+不根据 PID 或时间猜测锁已失效。macOS 使用独立父进程退出监视，Windows 使用写入前已加入的专属 Job Object。
+连接关闭时只回收所属导入子进程，不为单项导入错误重启整个 ACP。
+
+桌面主进程统一管理 60 秒无实际进展判定，排除系统休眠；有持续进展的大会话没有固定总时长限制。
+来源准备、运行时导入和数据库登记依次执行，取消后不自动重做；提交结果不明确时保留快照和日志，
+只有确认写入者停止后才核验已提交结果。Windows 真机验证见
+[历史导入隔离验证指南](WINDOWS_HISTORY_IMPORT_VERIFICATION_CN.md)。

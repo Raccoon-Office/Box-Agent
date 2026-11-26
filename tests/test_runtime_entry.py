@@ -15,6 +15,15 @@ from box_agent.mcp_servers import web_extract_server
 from box_agent.tools import mcp_bootstrap
 
 
+def test_runtime_entry_dispatches_history_import_without_starting_acp(monkeypatch):
+    from box_agent import session_import_worker
+    called = []
+    monkeypatch.setattr(sys, "argv", ["box-agent-acp", "--history-import-worker"])
+    monkeypatch.setattr(session_import_worker, "main", lambda: called.append(True))
+    runtime_entry.main()
+    assert called == [True]
+
+
 @pytest.mark.parametrize(
     ("platform", "frozen", "skip_docs"),
     [
