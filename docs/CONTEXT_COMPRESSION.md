@@ -530,7 +530,7 @@ facts that need source verification, and claim success only where the conversati
 proves it. The runtime writes the complete accepted body after `Summary:`.
 Accepted summaries have no character limit and remain intact during compaction.
 
-The compaction cut is the start of the newest continuous window of complete interactions. It holds up to five assistant rounds and 15,000 local tokens. A tool call and its matching results move together. An oversized newest round places the cut after that round. Later steps append new messages to the rebuilt prefix.
+The compaction cut is the start of the newest continuous window of complete interactions. The newest assistant round since the previous summary is selected intact, including all of its tool results, even if it exceeds 15,000 local tokens. Any following user input stays with the round so the window remains continuous. Older groups fit only within the cumulative 15,000-token budget and the five-round limit. If the newest round alone exceeds the budget, the window includes no older groups. Later steps append new messages to the rebuilt prefix.
 
 ```text
 system
@@ -588,9 +588,9 @@ After shared content retries, one independent request uses the same model, the l
 
 ### Local fallback and Session Log recovery
 
-The fallback uses the most recent real user or summary as its anchor. It keeps a continuous suffix of complete assistant rounds after that anchor, newest first for selection and chronological for delivery. An oversized newest group yields an empty suffix. When the newest anchor has no subsequent interactions, the preceding anchor and its trailing groups share the same 12,000-local-token allowance. The latest anchor is protected separately.
+The fallback uses the most recent real user or summary as its anchor. It keeps a continuous suffix of complete assistant rounds after that anchor within 12,000 local tokens, newest first for selection and chronological for delivery. If the newest anchor has no subsequent interactions, the fallback includes the preceding anchor when available and uses the 12,000-token allowance for the interactions between the two anchors. An oversized newest group yields an empty suffix. The allowance applies only to interactions.
 
-If input still exceeds the target, remove the oldest retained group, then the optional preceding anchor, then the oldest visible user entries within a summary anchor. The summary body and latest real user remain intact. Skill bodies and Todo/Plan/Goal are restored only in summary mode.
+If input still exceeds the target, remove the oldest retained group first. If more space is needed, remove the preceding anchor. For a preceding summary, first remove its visible user entries from oldest to newest, including its latest entry, and then remove the whole summary if needed. A preceding real user message is removed as a unit. Finally, if the latest anchor is a summary, remove its older visible user entries while keeping its summary body and latest user entry. The latest anchor stays in the fallback. Skill bodies and Todo/Plan/Goal are restored only in summary mode.
 
 An omission adds one final runtime user message with `runtime_kind="compaction_notice"`. When the log and omitted seqs can both be located, it lists the ranges and the absolute `session.jsonl` path. Otherwise it just reports the omission. Only when earlier information is needed should the model query those ranges with `query_jsonl` or paginate with `read_file`. A later fallback replaces the notice. A fallback that retains all content writes the latest anchor to the existing `compaction/summary` event. Older logs now replay workflow checkpoint and mid-turn update text at their original positions.
 

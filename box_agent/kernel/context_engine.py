@@ -771,6 +771,16 @@ def _select_recent_messages(
     rounds = 0
     selected_tokens = 0
     groups = list(tool_message_groups(messages, start))
+    protected_start = len(messages)
+    for group in reversed(groups):
+        first = messages[group.start]
+        if _is_summary_marker(first):
+            break
+        if first.role == "assistant":
+            # Keep the tail after this round contiguous, including newer user input.
+            protected_start = group.start
+            break
+
     for group in reversed(groups):
         first = messages[group.start]
         if _is_summary_marker(first):
@@ -781,7 +791,7 @@ def _select_recent_messages(
         if is_round and rounds >= _RECENT_GROUP_LIMIT:
             break
         group_tokens = _fallback_context_estimate(messages[group.start:group.stop], None, llm=llm)
-        if selected_tokens + group_tokens > token_limit:
+        if group.start < protected_start and selected_tokens + group_tokens > token_limit:
             break
         selected_indices.update(group)
         rounds += is_round

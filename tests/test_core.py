@@ -6999,7 +6999,7 @@ def test_recent_selection_reuses_processed_tool_result_without_second_size_limit
 
 
 @pytest.mark.asyncio
-async def test_maybe_summarize_bounds_newest_group_over_recent_budget():
+async def test_maybe_summarize_drops_oversized_newest_round_when_it_exceeds_target():
     from box_agent.core import _maybe_summarize
 
     latest_user = Message(role="user", content="keep this request")
@@ -7016,12 +7016,16 @@ async def test_maybe_summarize_bounds_newest_group_over_recent_budget():
         oversized_reasoning,
     ]
 
+    llm = _FakeSummaryLLM("complete execution summary")
+    llm.context_window = 64_000
     outcome = await _maybe_summarize(
-        _FakeSummaryLLM("complete execution summary"),
+        llm,
         msgs,
-        token_limit=5_000,
+        token_limit=50_000,
         api_total_tokens=0,
         skip_check=False,
+        force=True,
+        request_headroom_tokens=40_000,
     )
 
     assert outcome.mode == "summary"
@@ -7029,14 +7033,13 @@ async def test_maybe_summarize_bounds_newest_group_over_recent_budget():
     assert outcome.messages[1].earlier_user_messages[-1] == latest_user.content
     assert latest_user.content in outcome.messages[1].content
     assert not any(m.role == "assistant" for m in outcome.messages)
+    assert outcome.degradation["droppedRounds"] == 1
 
 
 @pytest.mark.asyncio
-async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_exact():
+async def test_maybe_summarize_drops_parallel_read_group_under_target_pressure():
     from box_agent.core import (
         _maybe_summarize,
-        _fallback_context_estimate,
-        _RECENT_GROUP_TOKEN_LIMIT,
         _SUMMARY_MESSAGE_PREFIX,
         _SUMMARY_MESSAGE_SUFFIX,
     )
@@ -7077,8 +7080,10 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
     ]
 
     summary = "\n  " + "continuation summary " * 700 + "\n"
+    llm = _FakeSummaryLLM(summary)
+    llm.context_window = 128_000
     outcome = await _maybe_summarize(
-        _FakeSummaryLLM(summary),
+        llm,
         messages,
         token_limit=90_000,
         api_total_tokens=0,
@@ -7091,6 +7096,7 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
     assert outcome.estimated_after < 90_000
     assert outcome.messages is not None
     assert len(outcome.messages) == 2
+    assert outcome.degradation["droppedRounds"] == 1
     summary_message = outcome.messages[1]
     assert summary_message.earlier_user_messages == [latest_user.content]
     assert latest_user.content in summary_message.content

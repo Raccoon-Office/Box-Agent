@@ -37,31 +37,83 @@ def test_recent_window_counts_assistant_rounds_and_charges_tokens():
 
 
 class _SummaryProvider:
+    context_window = 64_000
+
     async def generate_stream(self, **kwargs):
         yield StreamEvent(type="text", delta="<summary>Earlier conversation.</summary>")
         yield StreamEvent(type="finish", finish_reason="stop")
 
 
 @pytest.mark.asyncio
-async def test_oversized_recent_round_is_summarized_as_a_whole_with_full_user_text():
+@pytest.mark.parametrize("result_sizes", [(18_000,), (3_000,) * 6], ids=["single", "parallel"])
+async def test_summary_keeps_oversized_newest_round_byte_for_byte(result_sizes):
+    system = Message(role="system", content="system")
+    old_user = Message(role="user", content="Earlier request.")
     user = Message(role="user", content="Please continue.")
-    assistant, result = _tool_round(0, "汉" * 20_000)
-    extra_assistant, extra_result = _tool_round(1, "字" * 400)
-    assistant.tool_calls.extend(extra_assistant.tool_calls)
-    older_round = Message(role="assistant", content="Previous answer.")
-    messages = [Message(role="system", content="system"), older_round, user,
-                assistant, result, extra_result]
+    calls = []
+    results = []
+    for index, size in enumerate(result_sizes):
+        assistant, result = _tool_round(index, "汉" * size)
+        calls.extend(assistant.tool_calls)
+        results.append(result)
+    newest = [Message(role="assistant", content="", tool_calls=calls), *results]
+    messages = [system, old_user, *_tool_round("old"), user, *newest]
+    before = [message.model_dump_json().encode() for message in newest]
 
-    recent, _ = context_engine._select_recent_messages(messages)
-    assert recent == []
     outcome = await context_engine._maybe_summarize(
-        _SummaryProvider(), messages, 20_000, 0, False, force=True,
+        _SummaryProvider(), messages, 50_000, 0, False, force=True,
     )
     assert outcome.mode == "summary"
-    assert outcome.messages[1].earlier_user_messages == [user.content]
+    assert outcome.messages[0] is system
+    assert context_engine._is_summary_marker(outcome.messages[1])
+    assert outcome.messages[1].earlier_user_messages == [old_user.content, user.content]
     assert user.content in outcome.messages[1].content
-    assert len(outcome.messages) == 2
-    assert assistant.tool_calls[1].id == extra_result.tool_call_id
+    assert [message.model_dump_json().encode() for message in outcome.messages[2:]] == before
+    assert [call.id for call in outcome.messages[2].tool_calls] == [
+        message.tool_call_id for message in outcome.messages[3:]
+    ]
+    assert outcome.degradation is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target, dropped", [(10_000, 1), (6_000, 2), (3_000, 3)])
+async def test_summary_drops_recent_rounds_oldest_first_under_target_pressure(target, dropped):
+    user = Message(role="user", content="Finish the task.")
+    rounds = [_tool_round(index, "汉" * 4_000) for index in range(3)]
+    messages = [Message(role="system", content="system"), user,
+                *[message for group in rounds for message in group]]
+    outcome = await context_engine._maybe_summarize(
+        _SummaryProvider(), messages, 50_000, 0, False, force=True,
+        request_headroom_tokens=50_000 - target,
+    )
+
+    assert outcome.mode == "summary"
+    assert outcome.estimated_after <= target
+    assert outcome.degradation["droppedRounds"] == dropped
+    assert outcome.messages[1].earlier_user_messages == [user.content]
+    assert outcome.messages[2:] == [message for group in rounds[dropped:] for message in group]
+
+
+@pytest.mark.asyncio
+async def test_summary_keeps_newest_round_and_large_following_user_together():
+    system = Message(role="system", content="system")
+    previous = Message(role="user", content="Earlier request.")
+    newest = _tool_round(0, "汉" * 18_000)
+    current = Message(role="user", content="Follow-up: " + "字" * 16_000)
+    messages = [system, previous, *newest, current]
+    outcome = await context_engine._maybe_summarize(
+        _SummaryProvider(), messages, 50_000, 0, False, force=True,
+    )
+    assert outcome.mode == "summary"
+    assert outcome.messages[1].earlier_user_messages == [previous.content]
+    assert outcome.messages[2:] == [*newest, current]
+
+
+def test_recent_window_stops_at_the_previous_summary():
+    history = [Message(role="system", content="system"), *_tool_round("old"),
+               context_engine._summary_with_users("Earlier work.", [], [], False, ""),
+               Message(role="user", content="New request.")]
+    assert context_engine._select_recent_messages(history) == (history[-1:], {len(history) - 1})
 
 
 def test_earlier_user_token_budget_truncates_middle_and_omits_oldest_text():
