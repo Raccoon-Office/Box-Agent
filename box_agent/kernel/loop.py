@@ -62,7 +62,6 @@ from .context_engine import (
     _estimate_context_from_latest_response,
     _fallback_context_estimate,
     _is_real_user_message,
-    _is_summary_marker,
     _session_log_hint,
     _validate_transient_followup_result,
     accepts_request_output_tokens,
@@ -72,7 +71,9 @@ from .context_engine import (
     request_input_tokens,
     request_output_room,
 )
-from .context_types import CompactionInput, CompactionOutcome, ContextCompactionState, InitialContextTransition
+from .context_types import (
+    CompactionInput, CompactionOutcome, ContextCompactionState, InitialContextTransition, project_ordered_history,
+)
 from .ports import KernelServices
 from .tool_messages import ToolMessageCommitter, session_log_messages
 from ..injections import InjectionKind, InjectionManager, MessageInjection, parse_queued_injection
@@ -94,7 +95,7 @@ from .tool_messages import (
 )
 from ..logger import AgentLogger
 from ..payload_privacy import redact_diagnostic_text
-from ..session_log import SessionLogReplayError, run_session_write
+from ..session_log import SessionLogCorrupted, SessionLogReplayError, run_session_write
 from ..session_projection import mark_submitted_tool_results
 from ..llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from ..loop_guards import (
@@ -1172,6 +1173,18 @@ async def _run_agent_loop_impl(
             return False
         return not cancelled()
 
+    compaction_started = False
+
+    def end_failed_compaction(stage: str, error: str) -> None:
+        nonlocal compaction_started
+        if compaction_started:
+            session_log.append("compaction/end", {
+                "format": 2, "turn": session_turn, "step": step + 1,
+                "mode": "error", "stage": stage, "error": error,
+            })
+            session_log.flush()
+            compaction_started = False
+
     async def prepare_compaction(
         history_token_limit, *, force=False, estimate_tools=None, skip_check=False, request_headroom_tokens=None,
         summary_request_history=None,
@@ -1179,20 +1192,23 @@ async def _run_agent_loop_impl(
         # Context may project effective rules before estimation and summary.
         # Older custom contexts retain the identity projection.
         project_history = getattr(context_engine, "project_history", None)
-        effective_messages = project_history(messages) if callable(project_history) else messages
+        effective_messages = project_ordered_history(messages, project_history) if callable(project_history) else messages
+
         def before_summary(estimated: int) -> None:
-            if compaction_state.refilled_rapidly and compaction_state.rapid_refills >= 2:
-                raise _CompactionThrashing(estimated)
+            nonlocal compaction_started
             # The canonical live surface is already committed at the step
             # boundary (before prepare_request), and nothing durable is added
             # between that commit and compaction, so there is nothing new to
             # persist here — only record the compaction start marker.
             if session_log is not None and session_turn is not None:
                 session_log.append("compaction/start", {
-                    "turn": session_turn, "step": step + 1,
+                    "format": 2, "turn": session_turn, "step": step + 1,
                     "estimatedBefore": estimated, "tokenLimit": history_token_limit,
                 })
                 session_log.flush()
+                compaction_started = True
+            if compaction_state.refilled_rapidly and compaction_state.rapid_refills >= 2:
+                raise _CompactionThrashing(estimated)
 
         summary_projector = getattr(context_engine, "prepare_summary", None)
         if initial_context_transition is not None:
@@ -1201,6 +1217,7 @@ async def _run_agent_loop_impl(
         async def project_compacted_history(history, *, max_skill_bodies=None):
             if getattr(tool_exposure_manager, "stable_prefix", False):
                 history = tool_exposure_manager.restore_compacted_descriptions(history)
+            append_tool_descriptions(history, compaction=True)
             project = getattr(context_engine, "acompact_history", None)
             if not callable(project):
                 project = getattr(context_engine, "compact_history", None)
@@ -1218,7 +1235,7 @@ async def _run_agent_loop_impl(
             return await projected if inspect.isawaitable(projected) else projected
 
         inputs = CompactionInput(
-            history=tuple(effective_messages), token_limit=history_token_limit,
+            history=tuple(effective_messages), durable_history=tuple(messages), token_limit=history_token_limit,
             llm=llm, api_total_tokens=api_total_tokens,
             session_id=session_id, turn_id=turn_id, title=title,
             api_prompt_tokens=api_prompt_tokens, tools=tools,
@@ -1239,10 +1256,8 @@ async def _run_agent_loop_impl(
         )
         try:
             result = await compact_engine.compact_if_needed(inputs)
-            if result.provider_error is not None and not cancelled():
-                raise _ProviderFailure(result.provider_error)
-            return result
         except _CompactionThrashing as exc:
+            await run_session_write(session_log, end_failed_compaction, "thrashing", _COMPACTION_THRASHING_MESSAGE)
             _log.warning("context compaction stopped after rapid refills session=%s", session_id)
             compaction_state.rapid_refills = 0
             compaction_state.last_compaction_step = None
@@ -1251,85 +1266,73 @@ async def _run_agent_loop_impl(
                 None, estimated, estimated, mode="blocked", error=_COMPACTION_THRASHING_MESSAGE,
                 error_code=_COMPACTION_THRASHING_CODE,
             )
+        except (Exception, asyncio.CancelledError) as exc:
+            if compaction_started:
+                await run_session_write(session_log, end_failed_compaction, "prepare", str(exc) or "Compaction cancelled")
+            raise
+
+        if result.mode == "error" or result.provider_error is not None:
+            await run_session_write(session_log, end_failed_compaction, "summary", result.error or "Summary failed")
+        elif compaction_started and result.messages is None:
+            await run_session_write(session_log, end_failed_compaction, "cut", result.error or "No valid compaction cut")
+        if result.provider_error is not None and not cancelled():
+            raise _ProviderFailure(result.provider_error)
+        return result
 
     def commit_compaction(result: CompactionOutcome):
         """Publish the approved compaction through the durable surface."""
-        nonlocal api_total_tokens, api_prompt_tokens
+        nonlocal api_total_tokens, api_prompt_tokens, compaction_started
         event = None
         new_msgs, _skip_next_token_check, est_before = result
         if new_msgs is not None:
             # The compacted surface retains the host's original system record;
             # effective rules are projected again for every request.
             new_msgs[0] = messages[0]
-            # Snapshot messages before compression, then extract in background
-            if memory_extractor:
-                _snapshot = list(messages)
-                asyncio.create_task(
-                    memory_extractor.maybe_extract(
-                        _snapshot,
-                        "pre_summarize",
-                        turn_id=memory_turn_id,
-                    )
-                )
             if session_log is not None and session_turn is not None:
-                if result.summary_path == "deterministic":
-                    summary_message = next(message for message in reversed(new_msgs[1:]) if
-                                           message.runtime_kind == "compaction_notice" or
-                                           _is_real_user_message(message) or _is_summary_marker(message))
-                else:
-                    summary_message = next((m for m in new_msgs[1:] if _is_summary_marker(m)), new_msgs[1])
-                session_log.append(
-                    "compaction/summary",
-                    {
-                        "turn": session_turn,
-                        "step": step + 1,
-                        "mode": result.mode,
-                        "message": summary_message.model_dump(
-                            mode="json",
-                            exclude_none=True,
-                        ),
-                        "estimatedBefore": est_before,
-                        "estimatedAfter": result.estimated_after,
-                        "error": result.error,
-                        "summaryRetries": result.summary_retries,
-                        "headTruncated": result.head_truncated,
-                        **({"summaryPath": result.summary_path} if result.summary_path is not None else {}),
-                        **({"degradation": result.degradation} if result.degradation is not None else {}),
-                    },
-                )
-                session_log.replace_surface(
-                    new_msgs[1:],
-                    turn=session_turn,
-                    step=step + 1,
-                )
-                session_log.append(
-                    "compaction/end",
-                    {
-                        "turn": session_turn,
-                        "step": step + 1,
-                        "mode": result.mode,
-                        "error": result.error,
-                        "summaryRetries": result.summary_retries,
-                        "headTruncated": result.head_truncated,
-                    },
-                )
-                session_log.flush()
+                commit_plan = getattr(session_log, "commit_compaction", None)
                 replay = getattr(session_log, "replay", None)
+                plan = result.plan
+                if callable(commit_plan):
+                    if plan is None or tuple(m._surface_seq for m in messages[1:]) != plan.source_seqs:
+                        end_failed_compaction("commit", "Compaction plan does not match live history")
+                        raise SessionLogReplayError("compaction plan does not match live history")
+                    try:
+                        commit_plan(plan, turn=session_turn, step=step + 1)
+                    except SessionLogCorrupted as exc:
+                        end_failed_compaction("commit", str(exc))
+                        raise SessionLogReplayError("compaction plan does not match the session surface") from exc
+                else:
+                    # Legacy stores serialize the entire surface. Their copied
+                    # tail will have new seqs, so expire its old usage before writing.
+                    if plan is not None:
+                        tail_end = len(new_msgs) - len(plan.appends)
+                        for index in range(2, tail_end):
+                            retained = new_msgs[index]
+                            if retained.usage is not None or retained.request_only_input_tokens:
+                                new_msgs[index] = retained.model_copy(
+                                    update={"usage": None, "request_only_input_tokens": 0},
+                                )
+                    session_log.replace_surface(new_msgs[1:], turn=session_turn, step=step + 1)
+                session_log.append("compaction/end", {
+                    "format": 2, "turn": session_turn, "step": step + 1, "mode": result.mode,
+                    "cutSeq": plan.cut_seq if plan is not None else None,
+                    "summaryInput": list(result.summary_input) if result.summary_input is not None else None,
+                    "summaryOmitted": [list(pair) for pair in result.summary_omitted],
+                    "headTruncated": result.head_truncated, "degradation": result.degradation,
+                    "estimatedBefore": est_before, "estimatedAfter": result.estimated_after,
+                    "summaryRetries": result.summary_retries, "summaryPath": result.summary_path,
+                    "error": result.error,
+                })
+                session_log.flush()
+                compaction_started = False
                 if callable(replay):
                     try:
-                        projection = replay()
-                        restored_messages = [messages[0], *projection.messages]
+                        messages[:] = [messages[0], *replay().messages]
                     except Exception as exc:
                         raise SessionLogReplayError(
                             "compaction committed but the live surface could not be replayed"
                         ) from exc
-                    messages[:] = restored_messages
                 else:
-                    # Third-party SessionStorePort without native replay: the
-                    # durable surface was already committed via replace_surface +
-                    # flush above. Keep the validated post-compaction in-memory
-                    # surface (docs/design/skill-engine.md §6) instead of forcing
-                    # the Store to implement replay().
                     messages[:] = new_msgs
             else:
                 messages[:] = new_msgs
@@ -1363,6 +1366,13 @@ async def _run_agent_loop_impl(
             compaction_state.record()
         return event
 
+    async def publish_compaction(result: CompactionOutcome):
+        snapshot = list(messages) if memory_extractor and result.messages is not None else None
+        event = await run_session_write(session_log, commit_compaction, result)
+        if snapshot is not None and event is not None:
+            asyncio.create_task(memory_extractor.maybe_extract(snapshot, "pre_summarize", turn_id=memory_turn_id))
+        return event
+
     async def compact_context(
         history_token_limit, *, force=False, estimate_tools=None, skip_check=False, abandon_if_cancelled=False,
         summary_request_history=None,
@@ -1372,8 +1382,9 @@ async def _run_agent_loop_impl(
             summary_request_history=summary_request_history,
         )
         if abandon_if_cancelled and cancelled():
+            await run_session_write(session_log, end_failed_compaction, "cancelled", "Compaction cancelled")
             return result, None
-        return result, await run_session_write(session_log, commit_compaction, result)
+        return result, await publish_compaction(result)
 
     # One extra iteration lets the model answer the step-budget wrap-up notice.
     for step in range(max_steps + 1):
@@ -1494,15 +1505,18 @@ async def _run_agent_loop_impl(
         bootstrap_descriptions = getattr(tool_exposure_manager, "pending_bootstrap_descriptions", None)
         tool_context_added = False
 
-        def append_tool_descriptions(history):
+        def append_tool_descriptions(history, *, compaction=False):
             nonlocal tool_context_added
             if bootstrap_descriptions is not None:
                 descriptions = bootstrap_descriptions(
                     visible_history=history, offered_tools=prepared_tools.targets.values(),
                 )
-                history.extend(Message(role="user", source="runtime", name="tool_descriptions",
-                                       runtime_kind="tool_descriptions" if stable_tool_context else None,
-                                       content=description) for description in descriptions)
+                history.extend(
+                    Message(role="user", source="runtime", name="tool_descriptions", content=description,
+                            runtime_kind="tool_descriptions" if stable_tool_context else None,
+                            compaction_node="appended" if compaction else None)
+                    for description in descriptions
+                )
                 tool_context_added |= bool(descriptions)
 
         append_tool_descriptions(messages)
@@ -1640,12 +1654,15 @@ async def _run_agent_loop_impl(
                     )
                     if result.messages is not None and not result.blocked and not cancelled():
                         result.messages[0] = messages[0]
-                        append_tool_descriptions(result.messages)
-                        projection = await prepare_request(result.messages)
+                        preview = list(result.messages)
+                        append_tool_descriptions(preview)
+                        projection = await prepare_request(preview)
                 if cancelled():
+                    await run_session_write(session_log, end_failed_compaction, "cancelled", "Compaction cancelled")
                     yield await cancellation_done_event()
                     return
                 if projection.blocked_reason:
+                    await run_session_write(session_log, end_failed_compaction, "projection", projection.blocked_reason)
                     error_code = result.error_code if result is not None else None
                     msg = _COMPACTION_THRASHING_MESSAGE if error_code == _COMPACTION_THRASHING_CODE else (
                         "Could not fit this conversation into the selected model. "
@@ -1662,9 +1679,9 @@ async def _run_agent_loop_impl(
                     )
                     yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                     return
-                summarization_event = (await run_session_write(session_log, commit_compaction, result)
-                                       if result is not None else None)
+                summarization_event = await publish_compaction(result) if result is not None else None
                 if summarization_event is not None:
+                    append_tool_descriptions(messages)
                     context_engine.bind_history(messages)
                     yield summarization_event
             else:

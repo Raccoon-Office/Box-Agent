@@ -1340,14 +1340,17 @@ class SessionLog:
             remaining = messages[1:]
         else:
             remaining = messages
-        for message in remaining:
+        # Older store adapters can delegate a whole compacted view here. Its
+        # receipts and expired usage still describe copies of original UI rows.
+        compacted_tail = (messages[0]._compacted_tail_length or 0) if old_nodes else 0
+        for index, message in enumerate(remaining):
             appended.append(
                 self._append_surface_message(
                     message,
                     turn=turn,
                     step=step,
                     surface_op="append",
-                    surface_derived=retained(message),
+                    surface_derived=index < compacted_tail or retained(message),
                 )
             )
         return appended

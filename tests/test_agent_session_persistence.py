@@ -563,8 +563,8 @@ class _ReplayAuthoritativeStore:
     def __getattr__(self, name):
         return getattr(self.log, name)
 
-    def replace_surface(self, messages, **kwargs):
-        result = self.log.replace_surface(messages, **kwargs)
+    def commit_compaction(self, plan, **kwargs):
+        result = self.log.commit_compaction(plan, **kwargs)
         self.after_replace = True
         return result
 
@@ -1060,7 +1060,11 @@ async def test_compaction_without_native_replay_keeps_in_memory_surface(tmp_path
         for message in agent.messages
     )
     _assert_old_history_is_archived(agent.messages)
-    # The durable surface is still committed via replace_surface + flush.
+    # The legacy writer serializes the whole surface. Its retained rows must
+    # not resurrect measurements from the previous prefix on reopen.
+    before_reply = log.replay().messages[:-1]
+    assert all(m.usage is None and m.request_only_input_tokens == 0 for m in before_reply)
+    assert sum(m.content.startswith("old-23:") for _, m, _ in log.history_messages()) == 1
     assert any(
         "durable compacted history" in str(message.content)
         for message in log.replay().messages

@@ -16,7 +16,7 @@ from .kernel.context_engine import (
     context_text_counter,
     request_input_tokens, skill_reference_budget_chars,
 )
-from .kernel.context_types import ContextCompactionState, InitialContextTransition
+from .kernel.context_types import ContextCompactionState, InitialContextTransition, project_ordered_history
 from .schema import Message
 from .session_log import run_on_session_loop, run_session_write
 from .llm.capabilities import bound_context_token_limit
@@ -372,7 +372,7 @@ class DefaultContextEngine:
         request_tail = (transient_message,) if transient_message is not None else ()
         from .correction import prepare_correction_context
         available = skill_reference_budget_chars(
-            self.project_history([*history, *extra_messages, *request_tail]),
+            project_ordered_history([*history, *extra_messages, *request_tail], self.project_history),
             prepared_tools.definitions, max(0, token_limit - max(0, transient_tokens)), output_tokens, llm=self.llm,
             calibration=self.token_calibration,
         )
@@ -392,7 +392,7 @@ class DefaultContextEngine:
         self._transient_reserve_tokens = (max(
             0, self._transient_tokens - transient_input_tokens,
         ) if transient_message is not None else 0)
-        context_messages = self.project_history([*history, *extra_messages])
+        context_messages = project_ordered_history([*history, *extra_messages], self.project_history)
         if self._input_guard is not None:
             context_messages = self._input_guard.project_messages(
                 context_messages, tools=prepared_tools, token_limit=token_limit,

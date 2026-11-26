@@ -19,6 +19,20 @@ if TYPE_CHECKING:
 CompactedHistoryProjector = Callable[..., list[Message] | Awaitable[list[Message]]]
 
 
+def project_ordered_history(
+    messages: list[Message], project: Callable[[list[Message]], list[Message]],
+) -> list[Message]:
+    """Carry log positions across the order-preserving Context projection."""
+    projected = project(messages)
+    if projected is not messages:
+        for live, view in zip(messages, projected, strict=True):
+            if view is not live:
+                view._surface_seq = live._surface_seq
+                view._legacy_compaction_append = live._legacy_compaction_append
+                view._compacted_tail_length = live._compacted_tail_length
+    return projected
+
+
 @dataclass(slots=True)
 class ContextCompactionState:
     """Track compaction health across turns of one live session."""
