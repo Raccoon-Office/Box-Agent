@@ -232,9 +232,14 @@ def near_limit_wrapup_text(step: int, max_steps: int) -> str:
     ``step`` is the 0-based loop index (as in ``run_agent_loop``).
     """
     remaining = max_steps - step
-    return (
+    notice = (
+        f"⚠️ 步数预算已用尽（{max_steps} 步）。本次请求仅用于收尾，不代表任务已全部完成。"
+        if remaining <= 0 else
         f"⚠️ 步数预算即将用尽（已到第 {step + 1}/{max_steps} 步，约剩 {remaining} 步）。"
-        "现在请停止调用任何工具、停止继续搜索或探索。"
+    )
+    return (
+        notice
+        + "现在请停止调用任何工具、停止继续搜索或探索。"
         "仅基于你已经收集到的信息，在本轮直接给出完整、可独立阅读的最终答案/总结："
         "包含关键结论、数据、以及已产出的文件路径；若有未覆盖的缺口，简要标注即可，"
         "不要再去调查。"

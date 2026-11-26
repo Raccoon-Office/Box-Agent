@@ -244,6 +244,11 @@ sub_agent_batch_synthesis_timeout_seconds: 600
 限制传入 `files` 时推导出的无工具综合请求。将最后一项设为 `0` 只会关闭这层额外限制，
 不会关闭 provider timeout。批处理策略还包含文件数量与内容硬限制，详见
 [子 Agent 委派](SUB_AGENT_DELEGATION_CN.md)。
+共享循环耗尽 `max_steps` 后，最多追加一次不开放工具的模型请求，总结已有结果和剩余缺口。
+例如，`max_steps: 1` 允许一轮工作，必要时再请求一次总结。总结会流式输出并保存，但停止原因
+仍为 `max_steps`（ACP 中为 `max_turn_requests`），不代表任务已完成。使用通用循环的子智能体
+也遵循此规则。取消和模型服务故障保持原有处理；收尾仍为空时，不再追加请求。
+
 `provider_stale_seconds` 同时限制非流式任务结束检查的总等待时间；
 `BOX_AGENT_PROVIDER_STALE_SECONDS` 可覆盖该值。检查超时返回
 `TURN_COMPLETION_CHECK_TIMEOUT`，任务标记未完成并保留已有输出，不把超时当成完成判定。

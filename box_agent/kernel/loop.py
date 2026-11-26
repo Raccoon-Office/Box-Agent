@@ -688,7 +688,8 @@ async def _run_agent_loop_impl(
     Args:
         _services: Immutable resolved capability implementations.
         messages: Message history (mutated in-place).
-        max_steps: Maximum LLM call iterations.
+        max_steps: Maximum work iterations, followed by at most one tool-free
+            summary request if exhausted. The stop reason remains MAX_STEPS.
         tool_limits: Typed limits for search, wrap-up, and delegated runs.
         max_tool_calls: Optional hard cap across all tool executions in this loop.
         max_delegated_tool_calls: Optional aggregate cap for tool calls reported by
@@ -1307,7 +1308,10 @@ async def _run_agent_loop_impl(
         )
         return result, await run_session_write(session_log, commit_compaction, result)
 
-    for step in range(max_steps):
+    final_summary = ""
+    # Reuse the normal request/stream/persistence path for one tool-free wrap-up.
+    for step in range(max_steps + 1):
+        summary_only = step == max_steps
         if resource_ledger is not None:
             invalidated = resource_ledger.reconcile(messages)
             if invalidated:
@@ -1438,7 +1442,7 @@ async def _run_agent_loop_impl(
                 tool_context_added |= bool(descriptions)
 
         append_tool_descriptions(messages)
-        tool_list = list(prepared_tools.definitions)
+        tool_list = [] if summary_only else list(prepared_tools.definitions)
         offered_tools_by_name = prepared_tools.targets
         budget_tools_by_name = {tool.name: tool for tool in tool_list}
         request_context_messages = [
@@ -1473,7 +1477,7 @@ async def _run_agent_loop_impl(
         # Reserve the final few steps for synthesis: stop further
         # research and force a self-contained answer from gathered
         # material before the step budget is exhausted.
-        if (
+        if summary_only or (
             not wrapup_injected
             and max_steps > wrapup_remaining_steps
             and step >= max_steps - wrapup_remaining_steps
@@ -1501,12 +1505,12 @@ async def _run_agent_loop_impl(
             ).apply(messages)
 
         # ── Step start ──────────────────────────────────────
-        yield StepStart(step=step + 1, max_steps=max_steps)
+        yield StepStart(step=step + 1, max_steps=max_steps + int(summary_only))
         if cancelled():
             yield await cancellation_done_event()
             return
         if hook_mgr.hooks:
-            await hook_mgr.fire_step_start(step=step + 1, max_steps=max_steps)
+            await hook_mgr.fire_step_start(step=step + 1, max_steps=max_steps + int(summary_only))
         if cancelled():
             yield await cancellation_done_event()
             return
@@ -2615,6 +2619,19 @@ async def _run_agent_loop_impl(
             yield DoneEvent(stop_reason=StopReason.MAX_TOKENS, final_content=msg)
             return
 
+        if summary_only:
+            # Never execute or persist unsolicited tool calls from the wrap-up.
+            # Keep MAX_STEPS: a useful summary is not proof of task completion.
+            if not response.tool_calls and response.content.strip():
+                await run_session_write(session_log, commit_model_response, assistant_msg)
+                final_summary = response.content
+            elapsed = perf_counter() - step_start
+            total = perf_counter() - run_start
+            if hook_mgr.hooks:
+                await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            break
+
         # ── Append assistant message (non-truncated path) ───
         await run_session_write(session_log, commit_model_response, assistant_msg)
 
@@ -3098,7 +3115,7 @@ async def _run_agent_loop_impl(
             )
 
     # ── Max steps exhausted ─────────────────────────────────
-    msg = f"Task couldn't be completed after {max_steps} steps."
+    msg = final_summary or f"Task couldn't be completed after {max_steps} steps."
     if memory_extractor:
         asyncio.create_task(
             memory_extractor.maybe_extract(

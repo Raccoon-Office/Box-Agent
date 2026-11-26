@@ -57,7 +57,7 @@ def session_config(tmp_path, *, max_steps=2):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "max_steps, expected_reason, expected_calls",
-    [(1, StopReason.MAX_STEPS, 1), (2, StopReason.END_TURN, 2)],
+    [(1, StopReason.MAX_STEPS, 2), (2, StopReason.END_TURN, 2)],
 )
 async def test_session_config_controls_actual_loop_step_limit(
     tmp_path, max_steps, expected_reason, expected_calls,

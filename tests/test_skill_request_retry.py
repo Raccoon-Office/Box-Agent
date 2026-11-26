@@ -72,10 +72,13 @@ async def test_all_restored_bodies_survive_partial_ack_failure(tmp_path, monkeyp
 
 @pytest.mark.parametrize('first_response', ['empty', 'thinking', 'provider_stale', 'length', 'repetitive'])
 async def test_unaccepted_response_keeps_restored_body_for_next_run(tmp_path, first_response):
+    # Exhaustion adds a summary request; keep that response unaccepted too so
+    # this test still exercises restoration across runs, not a successful ack.
+    unaccepted_requests = 2 if first_response in {"provider_stale", "length"} else 1
     class RecoveringProvider(CapturingProvider):
         async def generate_stream(self, messages, **kwargs):
             self.requests.append([message.model_copy(deep=True) for message in messages])
-            if len(self.requests) == 1:
+            if len(self.requests) <= unaccepted_requests:
                 if first_response == 'repetitive':
                     for _ in range(20):
                         yield StreamEvent(type='text', delta='</parameter>\n')
@@ -97,8 +100,8 @@ async def test_unaccepted_response_keeps_restored_body_for_next_run(tmp_path, fi
     _ = [event async for event in agent.run_events(options=options)]
     agent.add_user_message('retry')
     _ = [event async for event in agent.run_events(options=options)]
-    assert len(provider.requests) == 2
-    assert body in str(provider.requests[-1])
+    assert len(provider.requests) == unaccepted_requests + 1
+    assert all(body in str(request) for request in provider.requests)
 
 
 def test_old_response_cannot_acknowledge_a_later_restore(tmp_path):

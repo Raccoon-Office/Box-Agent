@@ -306,6 +306,14 @@ The batch synthesis setting caps only the tool-free request inferred from `files
 Setting the last value to `0` disables that extra cap, not the provider timeout.
 The inferred batch path also enforces file/count/content limits; see
 [Sub-agent Delegation](SUB_AGENT_DELEGATION.md).
+When the shared loop exhausts `max_steps`, it makes at most one additional
+tool-free request to summarize existing results and remaining gaps. For example,
+`max_steps: 1` allows one work iteration followed by one summary request if needed.
+The summary is streamed and saved, but the stop reason remains `max_steps`
+(`max_turn_requests` in ACP); this does not certify task completion. This also
+applies to children using the general loop. Cancellation and provider failures
+retain their existing handling; an empty summary does not trigger more requests.
+
 The same `provider_stale_seconds` budget bounds the total wait for the non-streaming
 completion check; `BOX_AGENT_PROVIDER_STALE_SECONDS` overrides it. A timeout returns
 `TURN_COMPLETION_CHECK_TIMEOUT`, preserving existing output and reporting an incomplete
