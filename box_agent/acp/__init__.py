@@ -2848,6 +2848,7 @@ class BoxACPAgent:
         self._sessions[session_id] = state
         if not load_existing:
             if state.device_delegations is not None:
+                state.device_delegations.bind_pending_org(current_request_org() or "")
                 state.device_delegations.retry_stopped_cancellations()
             self._schedule_device_wake(session_id, state)
         return response
@@ -2903,6 +2904,7 @@ class BoxACPAgent:
             await self._replay_session_history(session_id, replay_from_turn_id=replay_from)
         state = self._sessions[session_id]
         if state.device_delegations is not None:
+            state.device_delegations.bind_pending_org(current_request_org() or "", replace=True)
             state.device_delegations.retry_stopped_cancellations()
             self._schedule_device_wake(session_id, state)
         if replay_from is not None:
@@ -3330,6 +3332,8 @@ class BoxACPAgent:
             state.prompt_stop_requested = False
             if not finished.done():
                 finished.set_result(None)
+            if state.device_delegations is not None:
+                state.device_delegations.bind_pending_org(current_request_org() or "")
             self._schedule_device_wake(session_id, state)
 
     def _schedule_device_wake(self, session_id: str, state: SessionState) -> None:
@@ -3355,6 +3359,13 @@ class BoxACPAgent:
                     if turn is None:
                         return
                     try:
+                        org = broker.wake_org(turn)
+                    except RequestError as error:
+                        broker.attempted_wakes.add(turn)
+                        await self._notify_device_turn(session_id, turn, "started")
+                        await self._notify_device_turn(session_id, turn, "finished", error=error.to_error_obj())
+                        return
+                    try:
                         broker.attempted_wakes.add(turn)
                         instruction = (
                             "Reconcile unread device results after restart. Use retained tool outcomes, "
@@ -3362,9 +3373,11 @@ class BoxACPAgent:
                             if turn.startswith("device-wake-recovery-") else
                             "Review the device delegation updates and continue the existing task as needed."
                         )
-                        response = await self._submit_prompt(
-                            session_id, [text_block(instruction)], {"turnId": turn}, wake_turn=turn,
-                        )
+                        with scoped_request_org(org):
+                            response = await self._submit_prompt(
+                                session_id, [text_block(instruction)],
+                                {"turnId": turn, "org": org or None}, wake_turn=turn,
+                            )
                     except asyncio.CancelledError:
                         await self._notify_device_turn(session_id, turn, "finished", result={"stopReason": "cancelled"})
                         raise
