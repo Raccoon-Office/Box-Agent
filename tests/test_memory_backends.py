@@ -231,7 +231,7 @@ async def test_memsense_appends_only_changed_snapshots_and_preserves_the_request
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_type", ["memsense", "local"])
+@pytest.mark.parametrize("backend_type", ["memsense", "local", "generic"])
 async def test_compaction_restores_only_the_latest_snapshot_before_the_next_request(tmp_path, memory_http, backend_type):
     class SummaryLLM(RecordingLLM):
         """分别记录摘要和主对话请求，验证压缩没有混入旧记忆。"""
@@ -250,6 +250,9 @@ async def test_compaction_restores_only_the_latest_snapshot_before_the_next_requ
 
     settings = backend_settings(tmp_path)
     settings.memory_backend_type = backend_type
+    if backend_type == "generic":
+        settings.memory_external.recall = MemoryHttpOperation(path="/context", response_path="text")
+        memory_http.handler = lambda request, payload: httpx.Response(200, json={"text": memory_http.profile})
     session, llm = await managed_session(tmp_path, settings, llm=SummaryLLM("最终回答"))
     session.agent.token_limit = 104_400
     try:
@@ -328,13 +331,16 @@ async def test_local_auto_match_uses_real_user_input_when_snapshot_is_last(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_type", ["memsense", "local"])
+@pytest.mark.parametrize("backend_type", ["memsense", "local", "generic"])
 async def test_resume_deduplicates_the_same_identity_and_hides_other_identities(tmp_path, memory_http, backend_type):
     from box_agent.session_log import SessionLog
 
     root = tmp_path / "logs"
     settings = backend_settings(tmp_path)
     settings.memory_backend_type = backend_type
+    if backend_type == "generic":
+        settings.memory_external.recall = MemoryHttpOperation(path="/context", response_path="text")
+        memory_http.handler = lambda request, payload: httpx.Response(200, json={"text": memory_http.profile})
     log = SessionLog.create(root, session_id="session-1", cwd=tmp_path)
     try:
         first, _ = await managed_session(tmp_path, settings, session_log=log)
@@ -350,8 +356,7 @@ async def test_resume_deduplicates_the_same_identity_and_hides_other_identities(
 
     for tenant_id, expected in (("default", prior.content), ("another-tenant", "隔离后的画像")):
         log = SessionLog.open(root, session_id="session-1", cwd=tmp_path)
-        settings = backend_settings(tmp_path, memory_tenant_id=tenant_id)
-        settings.memory_backend_type = backend_type
+        settings = settings.model_copy(update={"memory_tenant_id": tenant_id})
         try:
             reopened, llm = await managed_session(tmp_path, settings, session_log=log, resume=True)
             try:
@@ -505,20 +510,46 @@ async def test_memsense_context_budget_keeps_complete_entry_boundaries(tmp_path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend_type", ["generic", "mem0", "memu"])
-async def test_other_backends_keep_their_own_prompt_format_in_shared_slot(tmp_path, memory_http, backend_type):
-    """通用类型只调用配置接口，不读取 MemSense 文件或清洗它们的标签。"""
+async def test_mapped_backends_append_changed_snapshots_without_changing_the_system_prompt(tmp_path, memory_http, backend_type):
+    """保留通用协议和原始条目格式，区分确认空结果与读取失败。"""
     content = '<mem time="自定义格式" priority="服务自己的值">通用结果</mem>'
-    memory_http.handler = lambda request, payload: httpx.Response(200, json={"text": content})
+    memory_http.profile = content
+    memory_http.handler = lambda request, payload: (
+        httpx.Response(403) if payload["q"] == "读取失败"
+        else httpx.Response(200, json={"text": memory_http.profile})
+    )
     settings = backend_settings(tmp_path)
     settings.memory_backend_type = backend_type
-    settings.memory_external.recall = MemoryHttpOperation(path="/context", response_path="text")
-    session, llm = await managed_session(tmp_path, settings, prompt="之前\n{MEMORY_CONTEXT}\n之后")
+    settings.memory_external.recall = MemoryHttpOperation(
+        path="/context", request={"q": "${query}"}, response_path="text",
+    )
+    session, llm = await managed_session(
+        tmp_path, settings, prompt="之前\n{MEMORY_CONTEXT}\n--- MEMORY START ---旧记忆--- MEMORY END ---\n之后",
+    )
+    questions = ["问题", "记忆相同", "读取失败", "重新读到相同结果", "记忆变化", "空结果", "仍为空"]
     try:
-        await run(session, "问题")
-        prompt = llm.requests[0]["messages"][0].content
-        assert prompt.index("之前") < prompt.index(content) < prompt.index("之后")
-        assert "## User Profile" not in prompt and "## Recent Date Memory" not in prompt
-        assert memory_http.calls == [("/context", {})]
+        for index, question in enumerate(questions):
+            if question == "记忆变化":
+                memory_http.profile = "新记忆"
+            if question == "空结果":
+                memory_http.profile = None
+            await run(session, question, f"run-{index}")
+        requests = [request["messages"] for request in llm.requests]
+        first, same, failed, recovered, changed, empty, still_empty = map(history_snapshots, requests)
+        original, = first
+        assert original.role == "user" and original.source == "runtime"
+        assert content in original.content
+        assert "## User Profile" not in original.content and "## Recent Date Memory" not in original.content
+        assert first == same == recovered
+        assert not failed
+        assert changed[:-1] == first and "新记忆" in changed[-1].content
+        assert empty[:-1] == changed and "已失效" in empty[-1].content
+        assert empty == still_empty
+        prompt = requests[0][0].content
+        assert prompt.index("之前") < prompt.index("之后")
+        assert all(marker not in prompt for marker in ("{MEMORY_CONTEXT}", "--- MEMORY START ---", "旧记忆"))
+        assert all(messages[0].content == prompt for messages in requests)
+        assert memory_http.calls == [("/context", {"q": question}) for question in questions]
     finally:
         await session.aclose()
 

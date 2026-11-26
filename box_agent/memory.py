@@ -3004,6 +3004,7 @@ _MEMORY_BLOCK_RE = re.compile(
     r"--- (?:EXTERNAL )?MEMORY START ---.*?--- (?:EXTERNAL )?MEMORY END ---", re.DOTALL,
 )
 _MEMORY_HISTORY_PREFIX = "memsense_memory:"
+_MAPPED_MEMORY_BACKENDS = frozenset({"generic", "mem0", "memu"})
 
 
 def is_memory_history_message(message: Message) -> bool:
@@ -3022,14 +3023,15 @@ class MemoryHistory:
 
     def __init__(self, backend: str, scope: tuple | None = None) -> None:
         self.backend = backend
-        self.label = {"memsense": "MemSense", "desktop": "桌面", "local": "本地"}[backend]
+        self.label = {"memsense": "MemSense", "desktop": "桌面", "local": "本地",
+                      "generic": "通用外部", "mem0": "Mem0", "memu": "MemU"}[backend]
         self.empty = f"当前 {self.label} 记忆为空。此前自动注入的 {self.label} 记忆快照已失效。"
         self.set_scope(scope)
 
     def set_scope(self, scope: tuple | None) -> None:
         # 沿用已有快照命名空间，让认识此标记的旧版本也能过滤新后端快照。
         kind = "" if self.backend == "memsense" else f"{self.backend}:"
-        digest = hashlib.sha256(json.dumps(scope).encode()).hexdigest() if scope is not None else None
+        digest = hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest() if scope is not None else None
         self.name = _MEMORY_HISTORY_PREFIX + kind + digest if digest else None
         self.pending: Message | None = None
 
@@ -3220,8 +3222,18 @@ class ExternalMemoryBackend:
         self.log_context: dict[str, str] = {}
         self.capabilities = frozenset(name for name in ("recall", "read", "search", "save")
                                       if getattr(config, name, None) is not None)
+        if backend_type in _MAPPED_MEMORY_BACKENDS:
+            self.memory_history = MemoryHistory(backend_type)
         if backend_type in {"mem0", "memu"}:
             logger.warning("memory backend=%s 使用 generic 映射，尚未提供原生协议适配", backend_type)
+
+    def _mapped_recall_scope(self) -> tuple | None:
+        """按实际召回配置和身份隔离历史，连接凭据只参与快照标识的哈希。"""
+        recall = self.config.recall
+        if recall is None:
+            return None
+        return (self.config.base_url.rstrip("/"), self.tenant_id, self.user_id, self.config.headers,
+                recall.model_dump(mode="json"))
 
     def clone_for_session(self) -> ExternalMemoryBackend:
         """Borrow configuration, keeping per-session remote state independent."""
@@ -3756,8 +3768,13 @@ class MemoryRuntime:
 
     async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
         history = getattr(self.backend, "memory_history", None)
+        mapped_backend = self.backend.backend_type in _MAPPED_MEMORY_BACKENDS
         if history is not None:
-            history.stage(None)
+            if mapped_backend:
+                # 通用召回失败时继续省略旧记忆；成功后才恢复同范围快照。
+                history.set_scope(None)
+            else:
+                history.stage(None)
         if getattr(session, "cancelled", False):
             return
         self.backend.log_context = {"session_id": turn.session_id, "turn_id": turn.turn_id}
@@ -3770,6 +3787,8 @@ class MemoryRuntime:
         try:
             await asyncio.wait((self._refresh_task, cancelled), return_when=asyncio.FIRST_COMPLETED)
             content = None if self._refresh_cancel.is_set() else await self._refresh_task
+            if mapped_backend and history is not None and content is not None:
+                history.set_scope(self.backend._mapped_recall_scope())
         except Exception as exc:
             self.backend.log_failure("recall", type(exc).__name__)
             content = None
