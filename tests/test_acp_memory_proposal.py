@@ -132,7 +132,7 @@ async def test_memory_proposal_list_waits_off_event_loop(tmp_path: Path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("core_change", ["unchanged", "rewritten", "deleted"])
-async def test_user_snapshot_uses_current_core_and_cached_routing_while_memory_is_busy(tmp_path: Path, core_change, monkeypatch):
+async def test_system_memory_uses_current_core_and_cached_routing_while_memory_is_busy(tmp_path: Path, core_change, monkeypatch):
     agent, mgr = _make_agent(tmp_path)
     # 单独验证自动预载，排除按问题召回纠错条目的索引读锁。
     monkeypatch.setattr(mgr, "recall_corrections", lambda *args, **kwargs: [])
@@ -169,7 +169,9 @@ async def test_user_snapshot_uses_current_core_and_cached_routing_while_memory_i
             [Message(role="system", content=state.agent.system_prompt), Message(role="user", content="continue")],
             prepared_tools=prepare_tools([]), token_limit=20000,
         ), timeout=2)
-        snapshot, = [message for message in projection.messages if is_memory_history_message(message)]
+        snapshot = projection.messages[0]
+        assert snapshot.role == "system"
+        assert not any(is_memory_history_message(message) for message in projection.messages)
         assert ("updated preference" in snapshot.content) == (core_change == "rewritten")
         assert ("cached preference" in snapshot.content) == (core_change == "unchanged")
         assert "`project`" in snapshot.content

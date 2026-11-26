@@ -1242,7 +1242,8 @@ async def test_acp_opens_session_during_maintenance_and_loads_local_memory_on_pr
         agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory_extraction=False),
         tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system", memory_manager=memory)
+    llm = MemoryPromptLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system", memory_manager=memory)
     entered, release = threading.Event(), threading.Event()
 
     def hold_maintenance_lock():
@@ -1267,19 +1268,16 @@ async def test_acp_opens_session_during_maintenance_and_loads_local_memory_on_pr
         sessionId=session.sessionId, prompt=[{"text": "请确认项目配置"}],
     )))
     assert response.stopReason == "end_turn"
-    snapshot, = [message for message in agent._sessions[session.sessionId].agent.messages
-                 if is_memory_history_message(message)]
+    snapshot = llm.requests[-1][0]
+    assert snapshot.role == "system"
     assert "user prefers Chinese" in snapshot.content and "`project`" in snapshot.content
     memory.write_core("- user prefers English")
     response = await agent.prompt(**acp_params(SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "继续处理项目配置"}],
     )))
     assert response.stopReason == "end_turn"
-    prior, latest = [message for message in agent._sessions[session.sessionId].agent.messages
-                     if is_memory_history_message(message)]
-    assert prior == snapshot
-    assert "user prefers English" in latest.content and "`project`" in latest.content
-    assert "user prefers Chinese" not in latest.content
+    assert llm.requests[-1][0] == snapshot
+    assert not any(is_memory_history_message(message) for message in state.agent.messages)
 
 
 @pytest.mark.asyncio
@@ -1997,6 +1995,19 @@ class DoneLLM:
 
     async def generate(self, messages, tools=None):
         return LLMResponse(content="done", finish_reason="stop")
+
+
+class MemoryPromptLLM(DoneLLM):
+    """记录 ACP 实际交给模型的消息。"""
+
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+
+    async def generate_stream(self, messages, tools=None, **kwargs):
+        self.requests.append(messages)
+        async for event in super().generate_stream(messages, tools, **kwargs):
+            yield event
 
 
 @pytest.mark.asyncio
@@ -8079,7 +8090,8 @@ async def test_acp_new_session_returns_only_metadata_and_first_prompt_loads_core
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path), memory_dir=str(tmp_path / "memory")),
         tools=ToolsConfig(),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [EchoTool()], "system", memory_manager=memory_mgr)
+    llm = MemoryPromptLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [EchoTool()], "system", memory_manager=memory_mgr)
 
     session = await agent.new_session(
         **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
@@ -8097,8 +8109,10 @@ async def test_acp_new_session_returns_only_metadata_and_first_prompt_loads_core
     assert "--- MEMORY START ---" not in state.agent.system_prompt
     response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "你好"}])))
     assert response.stopReason == "end_turn"
-    snapshot, = [message for message in state.agent.messages if is_memory_history_message(message)]
+    snapshot = llm.requests[-1][0]
+    assert snapshot.role == "system"
     assert "User prefers concise Chinese responses" in snapshot.content
+    assert not any(is_memory_history_message(message) for message in state.agent.messages)
 
 
 @pytest.mark.asyncio

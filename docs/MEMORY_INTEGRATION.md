@@ -136,23 +136,21 @@ exists=false 时只允许 write 创建，不允许 edit。
 
 ### 自动记忆的注入位置
 
-各内置后端将预载结果作为用户输入后的运行时 `user` 消息交给模型。每个真实用户轮次
-读取一次，结果与最近的同授权范围快照相同则沿用。
-新快照取代此前的自动记忆，已发送的消息保留原样。快照随 Session Log 保存和回放，
-自动快照不会作为用户发言提交给记忆后端。摘要排除自动快照，压缩后的历史尾部补回最新一份。
-首次读到空结果时跳过，已有快照时确认空结果会追加一次失效通知。
+六种内置后端把自动预载的记忆追加到实际发给模型的 `system` 消息。
+新会话首轮或按 Box-Agent 运行环境的本地日期跨天后首轮加载。同一会话当天复用同一份正文，
+当天重新打开会话时从 Session Log 恢复。确认空结果时，system prompt 省略记忆块。
+首次加载失败时记录日志，当天运行中的会话省略该范围的记忆，同日重新打开可再次尝试。
+历史压缩会排除自动记忆，新模型请求会继续使用当天的快照。旧版追加的自动记忆用户消息
+会从模型请求和摘要中滤掉。自动记忆快照也不会作为用户发言提交到记忆后端。
 
-`local` 预载 `MEMORY.md` 和 `memory_summary.md`，按记忆目录隔离快照。按问题自动匹配的项目经验
-仍是本轮请求上下文。读取失败时记日志，沿用最近确认的快照。
-直连 `memsense` 部分或全部读取失败时也沿用最近确认的快照。
-`desktop` 依赖本轮宿主绑定。绑定不可用、撤销或变化时，旧范围的快照从发给模型的历史中省略。
-桌面预算不足时可以临时省略已发送快照。新快照按预算裁剪，落盘使用实际发送的正文。
+`local` 预载 `MEMORY.md` 和 `memory_summary.md`，按记忆目录隔离。按问题自动匹配的项目经验
+仍是本轮请求上下文。`desktop` 每轮调用宿主的 `context` 接口确认当前授权和来源。
+授权不可用时本轮省略记忆块，切换到新授权范围时加载该范围当天的快照。模型预算不足时
+也可能临时省略记忆块。
 
-`generic`、`mem0` 和 `memu` 配置 `recall` 后才加载快照，召回失败的轮次会省略旧快照。
-快照按后端、身份和召回连接配置隔离，外部请求仍使用各自的 HTTP 映射。
-内置后端会移除旧提示模板中的 `{MEMORY_CONTEXT}` 及旧记忆块。默认 system prompt 的
-`Memory Rules` 约束回复和产物中的记忆表述。若降级到早于快照识别功能的版本，应使用新会话，
-避免旧版把快照当作普通历史回放。
+`generic`、`mem0` 和 `memu` 配置 `recall` 后才加载，外部请求使用各自的 HTTP 映射。
+快照按后端、身份和召回连接配置隔离。内置后端会移除旧提示模板中的 `{MEMORY_CONTEXT}` 及旧记忆块。
+默认 system prompt 的 `Memory Rules` 约束回复和产物中的记忆表述。
 
 MemSense 块包含 `User Profile`、`Long-term Memory`、`Recent Date Memory`
 三个非空分区及使用规则。日期按旧到新排列，
@@ -243,7 +241,7 @@ Box-Agent provides persistent cross-session memory with core memory plus topic-s
 
 | Type | Purpose | Recall behavior | Storage |
 |------|---------|-----------------|---------|
-| **Core memory** | User identity, explicit preferences, local defaults, durable behavioral rules | Automatically loaded into a runtime user snapshot when it changes | `~/.box-agent/memory/MEMORY.md` |
+| **Core memory** | User identity, explicit preferences, local defaults, durable behavioral rules | Loaded into the system prompt on the first turn of the session or of a new day | `~/.box-agent/memory/MEMORY.md` |
 | **Memory summary** | Lightweight routing guide for deciding whether a request should search memory | Injected with core memory; does not contain full context entries | `~/.box-agent/memory/memory_summary.md` |
 | **Context / experience memory** | Project context, task templates, historical notes, decisions, deadlines, prior pitfalls | Topic-routed search on demand via `memory_search`; weak auto-match may surface v2 hits | `~/.box-agent/memory/v2/experiences/<topic>.md` |
 
@@ -401,11 +399,11 @@ Memory updated (context, fallback_appended). Current context memory: ...
 
 ### 4.2 Automatic recall
 
-On ACP `newSession`, Box-Agent:
+On the first model turn of a session or of a new day, Box-Agent:
 
-1. Reads `MEMORY.md`.
-2. Builds a memory block if core memory exists.
-3. Appends the block to the session system prompt.
+1. Reads `MEMORY.md` and `memory_summary.md` for local memory.
+2. Saves the formatted system memory block in the Session Log for reuse that day.
+3. Appends the block to the system message of each model request.
 
 Format:
 

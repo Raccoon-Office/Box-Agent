@@ -100,6 +100,7 @@ class DefaultContextEngine:
         [str, str | tuple[str, ...]], str,
     ] = effective_system_prompt, image_context=None, llm=None, thinking_enabled=False,
         initial_context_transition: InitialContextTransition | None = None,
+        memory_owner: Any = None,
     ) -> None:
         self._system_prompt_projector = system_prompt_projector
         self.image_context = image_context
@@ -107,6 +108,7 @@ class DefaultContextEngine:
         self.thinking_enabled = thinking_enabled
         self.initial_context_transition = initial_context_transition
         self._memory_lookup = None
+        self._memory_owner = memory_owner
         self._memory_history = None
         self._local_memory_refresh = None
         self._input_guard: ModelInputGuard | None = None
@@ -173,7 +175,7 @@ class DefaultContextEngine:
 
     def bind_memory(self, memory_lookup: Any) -> None:
         """Bind optional memory after run capabilities have been resolved."""
-        from .memory import MemoryManager, active_local_memory_history, local_memory_history
+        from .memory import MemoryManager, active_local_memory_history, session_local_memory_history
 
         self._memory_lookup = memory_lookup
         self._memory_history = getattr(memory_lookup, "memory_history", None)
@@ -181,8 +183,8 @@ class DefaultContextEngine:
         if isinstance(memory_lookup, MemoryManager):
             self._memory_history = active_local_memory_history(memory_lookup)
             if self._memory_history is None:
-                # 直接调用 AgentSession 运行入口时也加载一次，供本次运行的所有请求使用。
-                self._memory_history = local_memory_history(memory_lookup)
+                # 直接运行 Agent 也复用同一会话当天的快照。
+                self._memory_history = session_local_memory_history(self._memory_owner, memory_lookup)
                 self._local_memory_refresh = memory_lookup
         guard = getattr(memory_lookup, "model_input_guard", None)
         self._input_guard = guard if isinstance(guard, ModelInputGuard) else None
@@ -210,16 +212,19 @@ class DefaultContextEngine:
 
     def project_history(self, messages: list[Message]) -> list[Message]:
         """Effective rules for budgeting/compaction, without reference delivery."""
-        from .memory import is_memory_history_message
+        from .memory import is_memory_history_message, project_memory_system
 
         # 关闭记忆或切换账号后，保留日志原样，但不把旧身份的快照发给模型。
         memory = self._memory_history
+        system_memory = memory is not None and memory.system_day is not None
         visible = [message for message in messages
-                   if not is_memory_history_message(message) or (memory is not None and memory.accepts(message))]
+                   if not is_memory_history_message(message)
+                   or (memory is not None and not system_memory and memory.accepts(message))]
         suffix = verified_system_suffixes(self.references.runtime) if self.references is not None else ()
-        return restore_connector_status(
+        projected = restore_connector_status(
             project_legacy_system([project_user_message(message) for message in visible], suffix, self._system_prompt_projector),
         )
+        return project_memory_system(projected, memory.system_block) if system_memory else projected
 
     @property
     def tool_reader(self):
@@ -227,7 +232,7 @@ class DefaultContextEngine:
 
     def compact_history(self, original: list[Message], compacted: list[Message]) -> list[Message]:
         """Apply resource retention only after the existing compaction decision."""
-        from .memory import is_memory_history_message
+        from .memory import is_memory_history_message, project_memory_system
 
         compacted = [message for message in compacted if not is_memory_history_message(message)]
         if self.references is not None:
@@ -239,15 +244,20 @@ class DefaultContextEngine:
         if latest_date is not None and _latest_current_date(compacted) != latest_date:
             compacted = [*compacted, latest_date]
         if self._memory_history is not None:
-            compacted = self._memory_history.restore(original, compacted)
+            if self._memory_history.system_day is not None:
+                compacted = project_memory_system(compacted, "")
+            else:
+                compacted = self._memory_history.restore(original, compacted)
         return compacted
 
     def compaction_source(self, messages: list[Message]) -> list[Message]:
         """Keep method bodies out of both generated and deterministic summaries."""
-        from .memory import is_memory_history_message
+        from .memory import is_memory_history_message, project_memory_system
 
         # 记忆由原后端重新供给，不能混进无法撤回的对话摘要。
         messages = [message for message in messages if not is_memory_history_message(message)]
+        if self._memory_history is not None and self._memory_history.system_day is not None:
+            messages = project_memory_system(messages, "")
         return self.references.compaction_source(messages) if self.references is not None else messages
 
 
@@ -303,7 +313,10 @@ class DefaultContextEngine:
 
     async def aprepare_request(self, messages: list[Message], **arguments: Any) -> PreparedContext:
         if self._local_memory_refresh is not None:
-            await asyncio.to_thread(self._refresh_local_memory)
+            from .memory import arefresh_local_memory
+
+            manager, self._local_memory_refresh = self._local_memory_refresh, None
+            await arefresh_local_memory(manager, self._memory_history, self._session_store)
         runtime = self.references.runtime if self.references is not None else None
         validate = getattr(runtime, "avalidate_references", None)
         if not callable(validate):
@@ -346,7 +359,7 @@ class DefaultContextEngine:
         from .memory import refresh_local_memory
 
         manager, self._local_memory_refresh = self._local_memory_refresh, None
-        refresh_local_memory(manager, self._memory_history)
+        refresh_local_memory(manager, self._memory_history, self._session_store)
 
     def _prepare_request(
         self, messages: list[Message], *, prepared_tools: PreparedTools,
@@ -364,7 +377,8 @@ class DefaultContextEngine:
         self._pending_followup_blocks = []
         self.prepared_tools = prepared_tools
         history_updates = _current_date_update(messages)
-        memory_updates = self._memory_history.updates(messages) if self._memory_history is not None else ()
+        memory = self._memory_history
+        memory_updates = memory.updates(messages) if memory is not None and memory.system_day is None else ()
         history = [*messages, *history_updates] if history_updates else messages
         request_tail = (transient_message,) if transient_message is not None else ()
         from .correction import prepare_correction_context

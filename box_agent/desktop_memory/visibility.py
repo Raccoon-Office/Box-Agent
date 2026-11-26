@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from ..context_input import DefaultContextEngine, ModelInputGuard, PreparedContext
 from ..kernel.context_engine import _budget_content_json, _budget_image_tokens, request_input_tokens
-from ..memory import MemoryHistory, external_memory_block, is_memory_history_message
+from ..memory import MemoryHistory, external_memory_block, is_memory_history_message, project_memory_system
 from ..schema import Message
 from .transport import MemoryProxyError
 
@@ -195,6 +195,9 @@ class DesktopInputGuard(CoreVisibilityGuard):
             projection = replace(projection, messages=list(filter(visible, projection.messages)),
                                  context_messages=list(filter(visible, projection.context_messages)),
                                  history_updates=tuple(filter(visible, projection.history_updates)))
+            if self._memory_history.system_day is not None and not self._memory_history.system_block:
+                projection = replace(projection, messages=project_memory_system(projection.messages, ""),
+                                     context_messages=project_memory_system(projection.context_messages, ""))
         if self._read_recovery_pending:
             # Consume before the shared loop compacts/reprojects. A byte-bound
             # failure must not become a permanent ban on model-valid input.
@@ -212,13 +215,19 @@ class DesktopInputGuard(CoreVisibilityGuard):
         history = self._memory_history
         if history is None:
             return messages
-        latest = next((message for message in reversed(messages) if history.accepts(message)), None)
-        if latest is None:
-            return messages
 
         def fits(candidate):
             return self._input_tokens([*candidate, *tail], tools.definitions) + reserve_tokens + 1024 <= token_limit
 
+        if history.system_day is not None:
+            if history.system_block and not fits(messages):
+                _log.info("memory operation=preload reason=system_snapshot_over_budget")
+                return project_memory_system(messages, "")
+            return messages
+
+        latest = next((message for message in reversed(messages) if history.accepts(message)), None)
+        if latest is None:
+            return messages
         if fits(messages):
             return messages
         # 预算不足时，只能临时省略已发快照。新快照裁剪后才进入持久历史。

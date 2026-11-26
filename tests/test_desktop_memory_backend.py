@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from datetime import date, timedelta
 from pathlib import Path
 import secrets
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from box_agent.tools.engine.preparation import prepare_tools
 from box_agent.tools.memory_tool import create_memory_tools
 from tests.test_agent_session import session_config
 from tests.test_desktop_memory_evidence import CREDENTIAL_SAMPLES
+from tests.test_memory_backends import set_memory_date
 from tests.test_session_plugins import RecordingLLM
 from tests.acp_helpers import acp_params
 
@@ -527,10 +529,10 @@ async def test_real_session_keeps_single_frozen_block_and_same_batch_mutation_is
             session.agent.add_user_message("read then write")
             _ = [event async for event in session.run_events(options=session.build_run_options(logger=None))]
         assert len(llm.requests) == 2
-        snapshots = [message for message in llm.requests[-1]["messages"] if is_memory_history_message(message)]
-        text = snapshots[0].content
-        assert len(snapshots) == 1 and snapshots[0].role == "user"
-        assert "--- MEMORY START ---" not in llm.requests[-1]["messages"][0].content
+        first, last = [request["messages"][0] for request in llm.requests]
+        assert first == last and last.role == "system"
+        assert not any(is_memory_history_message(message) for message in llm.requests[-1]["messages"])
+        text = last.content
         assert text.count("--- MEMORY START ---") == 1
         assert "profile-unique-data" in text and "experience-unique-data" in text
         failed = next(message for message in llm.requests[-1]["messages"] if message.role == "tool" and message.name == "memory_edit")
@@ -601,10 +603,33 @@ async def test_small_model_budget_reduces_preload_without_changing_user_rules_or
         await manager.aclose()
 
 
-async def test_desktop_appends_changed_snapshots_and_revalidates_history_on_every_turn(tmp_path, host):
+async def test_desktop_system_memory_is_omitted_under_budget_pressure_and_reused_when_room_returns(host):
+    manager = backend(host)
+    try:
+        host.sections["profile"]["content"] = "用户偏好" * 850
+        content = await manager.load_context(query="question", session_id="session-1", turn_id="turn-1")
+        snapshot = manager.memory_history
+        snapshot.begin_system_day(None)
+        snapshot.finish_system_refresh(external_memory_block(content, 15_400))
+        engine = DefaultContextEngine()
+        engine.bind_memory(manager)
+        messages = [Message(role="system", content="用户规则"), Message(role="user", content="当前问题")]
+        tools = prepare_tools([])
+        small = engine.prepare_request(messages, prepared_tools=tools, token_limit=4_000)
+        roomy = engine.prepare_request(messages, prepared_tools=tools, token_limit=40_000)
+        assert not small.blocked_reason and small.messages[0] == messages[0]
+        assert roomy.messages[0].role == "system" and snapshot.system_block in roomy.messages[0].content
+        assert "用户偏好" in snapshot.system_block
+    finally:
+        await manager.aclose()
+
+
+async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_turn(tmp_path, host, monkeypatch):
     from box_agent.agent_service import AgentService
     from box_agent.api import RunRequest
 
+    today = date(2026, 11, 26)
+    set_memory_date(monkeypatch, today)
     config = session_config(tmp_path)
     config.agent.memory_backend_type = "desktop"
     manager = backend(host)
@@ -619,51 +644,50 @@ async def test_desktop_appends_changed_snapshots_and_revalidates_history_on_ever
         handle = await AgentService().start(RunRequest(run_id, "session-1", f"问题 {number}"), session=session)
         assert (await handle.result()).status.value == "completed"
         messages = model.requests[-1]["messages"]
-        assert "--- MEMORY START ---" not in messages[0].content
-        return messages, [message for message in messages if is_memory_history_message(message)]
+        assert messages[0].role == "system"
+        assert not any(is_memory_history_message(message) for message in messages)
+        return messages[0].content
 
     async def timeout(operation, payload):
         if operation == "context":
             raise httpx.ReadTimeout("fixture: context timed out")
 
     try:
-        first, original = await turn(1)
-        same, repeated = await turn(2)
-        assert len(original) == 1 and repeated == original
-        assert same[:len(first)] == first
+        first = await turn(1)
+        assert "profile-unique-data" in first
+        assert await turn(2) == first
         host.sections["profile"]["content"] = "更新后的桌面画像"
-        changed, updated = await turn(3)
-        assert changed[:len(same)] == same
-        assert len(updated) == 2 and "更新后的桌面画像" in updated[-1].content
+        assert await turn(3) == first
+        assert sum(operation == "context" for operation, _ in host.calls) == 3
+        set_memory_date(monkeypatch, today + timedelta(days=1))
+        updated = await turn(4)
+        assert "更新后的桌面画像" in updated and "profile-unique-data" not in updated
         host.before = timeout
-        _, unavailable = await turn(4)
-        assert unavailable == []
+        assert "--- MEMORY START ---" not in await turn(5)
         host.before = None
         host.sections["profile"]["status"] = "error"
-        _, partial = await turn(5)
-        assert partial == []
+        assert "--- MEMORY START ---" not in await turn(6)
         host.sections = {}
-        _, cleared = await turn(6)
-        _, still_empty = await turn(7)
-        assert cleared[:2] == updated and len(cleared) == 3 and "已失效" in cleared[-1].content
-        assert cleared == still_empty
+        assert await turn(7) == updated
         host.generation += 1
         host.sections = {"profile": {"content": "不同授权的画像"}}
-        _, new_scope = await turn(8)
-        assert len(new_scope) == 1 and "不同授权的画像" in new_scope[0].content
-        assert new_scope[0].name != updated[-1].name
+        new_scope = await turn(8)
+        assert "不同授权的画像" in new_scope and "更新后的桌面画像" not in new_scope
         host.automatic = False
-        _, disabled = await turn(9)
-        assert disabled == []
-        persisted = [message for message in log.replay().messages if is_memory_history_message(message)]
-        assert persisted == [*cleared, *new_scope]
+        assert "--- MEMORY START ---" not in await turn(9)
+        snapshots = [event["data"] for event in log.events_of_type("memory/system-snapshot")]
+        assert len(snapshots) == 3
+        assert [row["day"] for row in snapshots] == ["2026-11-26", "2026-11-27", "2026-11-27"]
+        assert snapshots[0]["scope"] == snapshots[1]["scope"] != snapshots[2]["scope"]
+        assert all(row["block"] in prompt for row, prompt in zip(snapshots, [first, updated, new_scope]))
+        assert not any(is_memory_history_message(message) for message in log.replay().messages)
     finally:
         await session.aclose()
         await manager.aclose()
         log.close()
 
 
-async def test_desktop_compaction_restores_latest_snapshot_without_sending_snapshots_to_summarizer(tmp_path, host):
+async def test_desktop_compaction_reuses_system_memory_without_sending_it_to_summarizer(tmp_path, host):
     from box_agent.agent_service import AgentService
     from box_agent.api import RunRequest
 
@@ -694,22 +718,23 @@ async def test_desktop_compaction_restores_latest_snapshot_without_sending_snaps
     async def turn(number):
         handle = await AgentService().start(RunRequest(f"run-{number}", "session-1", f"问题 {number}"), session=session)
         assert (await handle.result()).status.value == "completed"
-        return [message for message in model.requests[-1]["messages"] if is_memory_history_message(message)]
+        return model.requests[-1]["messages"][0]
 
     try:
-        await turn(1)
+        first = await turn(1)
         host.sections["profile"]["content"] = "最新的桌面画像"
-        old, latest = await turn(2)
+        assert await turn(2) == first
+        assert first.role == "system" and "profile-unique-data" in first.content
         session.agent.messages.extend([
             Message(role="user", content="先完成一次运行"),
             Message(role="assistant", content="x" * 200_000,
                     usage=TokenUsage(prompt_tokens=104_400, completion_tokens=100, total_tokens=104_500)),
         ])
-        assert await turn(3) == [latest]
+        assert await turn(3) == first
         assert model.summary is not None and not any(is_memory_history_message(message) for message in model.summary)
         assert all("profile-unique-data" not in str(message.content) for message in model.summary)
-        assert old not in session.agent.messages
-        assert await turn(4) == [latest]
+        assert "--- MEMORY START ---" not in session.agent.messages[0].content
+        assert await turn(4) == first
     finally:
         await session.aclose()
         await manager.aclose()
@@ -1589,9 +1614,10 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
                     recorded["source"] = message.source
                 expected.append(recorded)
             assert request["data"]["messages"] == expected
-            assert "user_items-unique-data" not in request["data"]["messages"][0]["content"]
-            assert any(m["role"] == "user" and "user_items-unique-data" in m["content"]
-                       for m in request["data"]["messages"] if isinstance(m.get("content"), str))
+            system = request["data"]["messages"][0]
+            assert system["role"] == "system" and "user_items-unique-data" in system["content"]
+            assert not any(m["role"] == "user" and "user_items-unique-data" in m["content"]
+                           for m in request["data"]["messages"] if isinstance(m.get("content"), str))
         assert requests[0]["llm_call_id"] != requests[1]["llm_call_id"]
         tool_request = next(row for row in records if row["event"] == "tool.request" and row["tool_call_id"] == "trace-call")
         tool_response = next(row for row in records if row["event"] == "tool.response" and row["tool_call_id"] == "trace-call")
