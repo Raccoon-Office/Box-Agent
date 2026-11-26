@@ -25,6 +25,7 @@ from time import perf_counter
 from typing import Any, Callable, Final
 from urllib.parse import urlsplit
 
+from ..auth import HostedAuthRequiredError
 from ..cache_fingerprint import build_cache_fingerprint
 from ..tools.completion_checks import CompletionChecks, CompletionContext
 from ..config import AgentConfig, ToolLimitsConfig
@@ -3180,11 +3181,30 @@ class AgentLoopKernel:
             _on_completion_checks=bind_checks,
             **self._run_arguments,
         )
+        async def close_checks() -> None:
+            if completion_checks is not None and not completion_checks.suspended:
+                await run_session_write(completion_checks.context.session_log, completion_checks.close)
+
         try:
             async for event in events:
-                if isinstance(event, DoneEvent) and completion_checks is not None and not completion_checks.suspended:
-                    await run_session_write(completion_checks.context.session_log, completion_checks.close)
+                if isinstance(event, DoneEvent):
+                    await close_checks()
                 yield event
+        except HostedAuthRequiredError as exc:
+            # Context preparation can call a summary provider before the main LLM stream starts.
+            from ..llm.error_messages import structured_llm_error
+
+            details = structured_llm_error(exc)
+            message = str(details["message"])
+            hooks = self._services.hook_bus
+            if hooks.hooks:
+                await hooks.fire_error(message=message, is_fatal=True, exception=exc)
+                await hooks.fire_done(stop_reason=StopReason.ERROR, final_content=message)
+            yield ErrorEvent(message=message, is_fatal=True, exception=exc,
+                             error_code=details["code"], error_category=str(details["category"]),
+                             error_details=details)
+            await close_checks()
+            yield DoneEvent(stop_reason=StopReason.ERROR, final_content=message)
         finally:
             await events.aclose()
             if self._services.tool_engine is not None:

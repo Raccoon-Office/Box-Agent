@@ -518,6 +518,12 @@ def _safe_unwrap(exc: BaseException) -> BaseException:
         return exc
 
 
+def hosted_auth_required_error(exc: BaseException) -> HostedAuthRequiredError | None:
+    """Return the actionable account error even when a provider wrapped it."""
+    root = _safe_unwrap(exc)
+    return root if isinstance(root, HostedAuthRequiredError) else None
+
+
 def _normalize_identity(value: object) -> str:
     try:
         enum_value = getattr(value, "value", value)

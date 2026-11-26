@@ -12,6 +12,10 @@ they are not reported as proof that the user must log in again. No stream is
 replayed after content has been consumed. Non-stream OpenAI output limits are
 preserved across the authentication retry.
 
+If hosted authentication fails during context summarization, the current turn
+ends with a structured `hosted_auth` error. The agent keeps the existing
+history so the host can recheck the account before the user continues.
+
 This is runtime source behavior. Packaged hosts require a rebuilt and installed
 runtime, process restart, and a fresh live task before deployment is verified.
 

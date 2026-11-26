@@ -14,6 +14,7 @@ from typing import Any, Callable, Final
 from ..cache_fingerprint import sha256_fingerprint
 from ..llm.capabilities import bound_context_token_limit, image_input_support
 from ..llm.base import closing_llm_stream
+from ..llm.error_messages import hosted_auth_required_error
 from ..llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS, cap_auxiliary_client
 from ..schema import Message
 from ..schema.schema import RequestUsageSnapshot
@@ -870,6 +871,11 @@ async def _maybe_summarize(
         if not summary.strip():
             raise RuntimeError("summary provider returned empty content")
     except Exception as exc:
+        # A local fallback cannot restore a rejected account. Preserve the provider
+        # failure before rebuilding history or evaluating the fallback's size.
+        auth_error = hosted_auth_required_error(exc)
+        if auth_error is not None:
+            raise auth_error
         if isinstance(exc, _SummaryInputBudgetExceeded):
             summary_calls = 0
         error = str(exc)

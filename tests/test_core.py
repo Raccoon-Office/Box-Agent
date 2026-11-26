@@ -6539,6 +6539,35 @@ async def test_maybe_summarize_uses_dedicated_summary_llm():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_expired_summary_credentials_end_turn_without_replacing_history(wrapped):
+    from box_agent.auth import HostedAuthRequiredError
+    from box_agent.retry import RetryExhaustedError
+
+    expiry = HostedAuthRequiredError("登录态已过期，请重新登录")
+    summary = _FakeSummaryLLM(raise_exc=RetryExhaustedError(expiry, 1) if wrapped else expiry)
+    summary.context_window = 100_000
+    summary.max_output_tokens = 4_096
+    main = _FakeSummaryLLM()
+    history = [
+        Message(role="system", content="system"),
+        Message(role="user", content="task"),
+        Message(role="assistant", content="completed work " * 2_000),
+        Message(role="user", content="continue"),
+    ]
+    before = [message.model_dump() for message in history]
+    events = [event async for event in run_agent_loop(
+        llm=main, summary_llm=summary, messages=history, tools={}, token_limit=1_000,
+    )]
+    failure, done = events[-2:]
+    assert isinstance(failure, ErrorEvent) and failure.is_fatal
+    assert failure.error_category == "hosted_auth" and failure.message == str(expiry)
+    assert isinstance(done, DoneEvent) and done.stop_reason == StopReason.ERROR
+    assert len(summary.calls) == 1 and not main.calls
+    assert [message.model_dump() for message in history] == before
+
+
+@pytest.mark.asyncio
 async def test_create_summary_does_not_truncate_model_output():
     from box_agent.core import _create_summary
 
