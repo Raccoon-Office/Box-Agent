@@ -352,12 +352,12 @@ async def prepare_tools(resources: SessionResources) -> None:
 
 async def _prepare_memory_prompt(resources: SessionResources, prompt: str) -> str:
     """共享槽位装配只负责位置，具体内容仍由现有 memory 能力提供。"""
-    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block
+    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block, uses_memory_history
 
     manager = resources.memory_manager
     if resources.context.options.utility or manager is None:
         return prompt.replace(MEMORY_CONTEXT_SLOT, "")
-    if getattr(manager, "memsense_history", None) is not None:
+    if uses_memory_history(manager):
         # 迁移宿主传入的旧记忆块，避免其留在固定系统前缀中。
         return place_memory_block(prompt, "")
     external = isinstance(manager, ExternalMemoryBackend)
@@ -408,7 +408,9 @@ async def prepare_prompt(resources: SessionResources) -> None:
             status("⚠️  Code workspace prompt not found", success=False)
 
     memory_block = None
-    if resources.memory_manager is not None and not options.utility:
+    from .memory import uses_memory_history
+
+    if resources.memory_manager is not None and not options.utility and not uses_memory_history(resources.memory_manager):
         memory_block = await asyncio.to_thread(resources.memory_manager.recall) or None
         resources.state["memory_block"] = memory_block
 
@@ -868,12 +870,12 @@ def build_session_prompt(
         child_prompt_segments=child_prompt_segments,
         skill_sourcing_provided=SKILL_SOURCE_DISCOVERY_PROMPT in (prompt_suffix or ""),
     )
-    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block
+    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block, uses_memory_history
 
     # 统一装配器使用后端已有的槽位规则，避免各入口重复召回或追加记忆。
     if utility or (memory is None and not memory_block):
         prompt = prompt.replace(MEMORY_CONTEXT_SLOT, "")
-    elif getattr(memory, "memsense_history", None) is not None:
+    elif uses_memory_history(memory):
         prompt = place_memory_block(prompt, "")
     else:
         prompt = place_memory_block(

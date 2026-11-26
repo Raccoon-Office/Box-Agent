@@ -91,7 +91,7 @@ MCP 等第三方工具即使注册为同名 memory 工具，也不能借用本�
 
 ### MemSense 核心文件工具
 
-修改前必须在同一会话显式 `memory_read` 目标文件；自动 system prompt
+修改前必须在同一会话显式 `memory_read` 目标文件；自动记忆
 预载不解锁修改，读取另一文件也不能解锁目标文件。工具描述说明这一要求，
 执行时同样强制校验。read 的完整 JSON 结构进入模型的工具消息，例如：
 
@@ -136,15 +136,20 @@ exists=false 时只允许 write 创建，不允许 edit。
 
 ### 自动记忆的注入位置
 
-local、generic 和 desktop 的 system prompt 可以使用 `{MEMORY_CONTEXT}`，
-默认模板已预留该位置。禁用记忆和 utility 会话会移除占位符。
+`local`、`desktop` 和直连 `memsense` 将预载结果作为用户输入后的运行时 `user`
+消息交给模型。每个真实用户轮次读取一次，结果与最近的同授权范围快照相同则沿用。
+新快照取代此前的自动记忆，已发送的消息保留原样。快照随 Session Log 保存和回放，
+自动快照不会作为用户发言提交给记忆后端。摘要排除自动快照，压缩后的历史尾部补回最新一份。
+首次读到空结果时跳过，已有快照时确认空结果会追加一次失效通知。
 
-`memory_backend_type: memsense` 将预载结果作为用户输入后的运行时 `user`
-消息交给模型。每个真实用户轮次读取一次，结果与最近的同身份快照相同则不追加。
-新快照取代此前的自动记忆，已发送的消息保留原样。它随会话历史保存和回放，
-不作为用户发言保存到 MemSense。压缩排除旧快照，在压缩后的历史末尾补回最新一份。
-初次读到空结果无需追加；已有快照时读到空结果，则通知模型旧快照失效。
-部分或全部读取失败会写日志，保留最近一次确认的快照，并在下一轮重试。
+`local` 预载 `MEMORY.md` 和 `memory_summary.md`，按记忆目录隔离快照。按问题自动匹配的项目经验
+仍是本轮请求上下文。读取失败时记日志，沿用最近确认的快照。
+直连 `memsense` 部分或全部读取失败时也沿用最近确认的快照。
+`desktop` 依赖本轮宿主绑定。绑定不可用、撤销或变化时，旧范围的快照从发给模型的历史中省略。
+桌面预算不足时可以临时省略已发送快照。新快照按预算裁剪，落盘使用实际发送的正文。
+
+`generic` 和复用通用协议的占位后端继续使用 system prompt 中的 `{MEMORY_CONTEXT}`。
+禁用记忆和 utility 会话会移除占位符。若降级到早于快照识别功能的版本，应使用新会话，避免旧版把快照当作普通历史回放。
 
 MemSense 块包含 `User Profile`、`Long-term Memory`、`Recent Date Memory`
 三个非空分区及使用规则。日期按旧到新排列，
@@ -235,7 +240,7 @@ Box-Agent provides persistent cross-session memory with core memory plus topic-s
 
 | Type | Purpose | Recall behavior | Storage |
 |------|---------|-----------------|---------|
-| **Core memory** | User identity, explicit preferences, local defaults, durable behavioral rules | Automatically injected into the system prompt at session start | `~/.box-agent/memory/MEMORY.md` |
+| **Core memory** | User identity, explicit preferences, local defaults, durable behavioral rules | Automatically loaded into a runtime user snapshot when it changes | `~/.box-agent/memory/MEMORY.md` |
 | **Memory summary** | Lightweight routing guide for deciding whether a request should search memory | Injected with core memory; does not contain full context entries | `~/.box-agent/memory/memory_summary.md` |
 | **Context / experience memory** | Project context, task templates, historical notes, decisions, deadlines, prior pitfalls | Topic-routed search on demand via `memory_search`; weak auto-match may surface v2 hits | `~/.box-agent/memory/v2/experiences/<topic>.md` |
 

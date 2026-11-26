@@ -21,7 +21,7 @@ from box_agent.config import AgentConfig, Config, ExternalMemoryConfig, MemoryHt
 from box_agent.events import DoneEvent, StopReason
 from box_agent.memory import (
     MemoryBackendError, MemoryManager, MemoryRuntime,
-    create_memory_backend, is_memsense_history_message, memory_user_turn, place_memory_block,
+    create_memory_backend, is_memory_history_message, memory_user_turn, place_memory_block,
 )
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.schema import FunctionCall, Message, StreamEvent, TokenUsage, ToolCall
@@ -108,7 +108,7 @@ async def run(session, text, run_id="run-1"):
 
 def history_snapshots(messages):
     """找出模型请求或回放里真正由运行时添加的记忆消息。"""
-    return [message for message in messages if is_memsense_history_message(message)]
+    return [message for message in messages if is_memory_history_message(message)]
 
 
 def test_local_default_reuses_existing_storage_and_other_identities_are_isolated(tmp_path):
@@ -231,7 +231,8 @@ async def test_memsense_appends_only_changed_snapshots_and_preserves_the_request
 
 
 @pytest.mark.asyncio
-async def test_memsense_compaction_restores_only_the_latest_snapshot_before_the_next_request(tmp_path, memory_http):
+@pytest.mark.parametrize("backend_type", ["memsense", "local"])
+async def test_compaction_restores_only_the_latest_snapshot_before_the_next_request(tmp_path, memory_http, backend_type):
     class SummaryLLM(RecordingLLM):
         """分别记录摘要和主对话请求，验证压缩没有混入旧记忆。"""
 
@@ -247,11 +248,18 @@ async def test_memsense_compaction_restores_only_the_latest_snapshot_before_the_
             async for event in super().generate_stream(**kwargs):
                 yield event
 
-    session, llm = await managed_session(tmp_path, llm=SummaryLLM("最终回答"))
+    settings = backend_settings(tmp_path)
+    settings.memory_backend_type = backend_type
+    session, llm = await managed_session(tmp_path, settings, llm=SummaryLLM("最终回答"))
     session.agent.token_limit = 104_400
     try:
+        if backend_type == "local":
+            session.memory_manager.write_core("用户偏好中文")
         await run(session, "旧任务")
-        memory_http.profile = "最新的画像"
+        if backend_type == "local":
+            session.memory_manager.write_core("最新的画像")
+        else:
+            memory_http.profile = "最新的画像"
         await run(session, "继续任务", "run-2")
         old, newest = history_snapshots(llm.requests[-1]["messages"])
         session.agent.messages.extend([
@@ -271,14 +279,68 @@ async def test_memsense_compaction_restores_only_the_latest_snapshot_before_the_
 
 
 @pytest.mark.asyncio
-async def test_memsense_resume_deduplicates_the_same_identity_and_hides_other_identities(tmp_path, memory_http):
+async def test_local_appends_only_changed_snapshots_and_distinguishes_empty_from_failure(tmp_path, monkeypatch, caplog):
+    settings = AgentConfig(memory_dir=str(tmp_path / "memory"), enable_memory_extraction=False)
+    session, llm = await managed_session(tmp_path, settings, prompt="之前\n{MEMORY_CONTEXT}\n之后")
+    manager = session.memory_manager
+
+    def unavailable():
+        raise OSError("fixture: read failed")
+
+    try:
+        manager.write_core("本地偏好 A")
+        await run(session, "问题一")
+        await run(session, "问题二", "run-2")
+        manager.write_core("本地偏好 B")
+        await run(session, "问题三", "run-3")
+        with monkeypatch.context() as patch:
+            patch.setattr(manager, "read_core", unavailable)
+            await run(session, "读失败", "run-4")
+        manager.memory_file.unlink()
+        await run(session, "已清空", "run-5")
+        await run(session, "仍为空", "run-6")
+    finally:
+        await session.aclose()
+
+    first, same, changed, failed, empty, still_empty = [request["messages"] for request in llm.requests]
+    assert first[0] == same[0] == changed[0] and "本地偏好" not in first[0].content
+    assert same[:len(first)] == first and changed[:len(same)] == same
+    assert [len(history_snapshots(messages)) for messages in (first, same, changed, failed, empty, still_empty)] == [1, 1, 2, 2, 3, 3]
+    assert "本地偏好 A" in history_snapshots(first)[0].content
+    assert "本地偏好 B" in history_snapshots(changed)[-1].content
+    assert "已失效" in history_snapshots(empty)[-1].content
+    assert "backend=local operation=recall reason=OSError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_local_auto_match_uses_real_user_input_when_snapshot_is_last(tmp_path, monkeypatch):
+    from box_agent.kernel.loop import _auto_match_memory_for_latest_prompt
+    from box_agent.memory import local_memory_history
+
+    manager = MemoryManager(str(tmp_path / "memory"))
+    queries = []
+    monkeypatch.setattr(manager, "auto_match_context", lambda query: queries.append(query) or [])
+    messages = [Message(role="user", content="用户问题"), local_memory_history(manager).message("本地记忆")]
+
+    await _auto_match_memory_for_latest_prompt(messages, manager)
+
+    assert queries == ["用户问题"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_type", ["memsense", "local"])
+async def test_resume_deduplicates_the_same_identity_and_hides_other_identities(tmp_path, memory_http, backend_type):
     from box_agent.session_log import SessionLog
 
     root = tmp_path / "logs"
+    settings = backend_settings(tmp_path)
+    settings.memory_backend_type = backend_type
     log = SessionLog.create(root, session_id="session-1", cwd=tmp_path)
     try:
-        first, _ = await managed_session(tmp_path, session_log=log)
+        first, _ = await managed_session(tmp_path, settings, session_log=log)
         try:
+            if backend_type == "local":
+                first.memory_manager.write_core("第一份画像")
             await run(first, "保存第一份快照")
             prior, = history_snapshots(log.replay().messages)
         finally:
@@ -289,11 +351,15 @@ async def test_memsense_resume_deduplicates_the_same_identity_and_hides_other_id
     for tenant_id, expected in (("default", prior.content), ("another-tenant", "隔离后的画像")):
         log = SessionLog.open(root, session_id="session-1", cwd=tmp_path)
         settings = backend_settings(tmp_path, memory_tenant_id=tenant_id)
+        settings.memory_backend_type = backend_type
         try:
             reopened, llm = await managed_session(tmp_path, settings, session_log=log, resume=True)
             try:
                 if tenant_id != "default":
-                    memory_http.profile = expected
+                    if backend_type == "local":
+                        reopened.memory_manager.write_core(expected)
+                    else:
+                        memory_http.profile = expected
                 await run(reopened, "继续同一会话", f"resume-{tenant_id}")
                 snapshot, = history_snapshots(llm.requests[-1]["messages"])
                 assert expected in snapshot.content
@@ -478,8 +544,12 @@ async def test_shared_prompt_slot_respects_local_and_disabled_sessions(tmp_path,
         result = session.agent.system_prompt
         assert "{MEMORY_CONTEXT}" not in result
         if mode == "local":
-            assert result.index("之前") < result.index("原有本地记忆") < result.index("之后")
-            assert "[Core Memory]" in result
+            assert result.index("之前") < result.index("之后")
+            assert "原有本地记忆" not in result
+            await run(session, "使用本地记忆")
+            snapshot, = history_snapshots(session.agent.messages)
+            assert snapshot.role == "user" and "[Core Memory]" in snapshot.content
+            assert "原有本地记忆" in snapshot.content
         else:
             assert "--- MEMORY START ---" not in result
         assert not memory_http.calls

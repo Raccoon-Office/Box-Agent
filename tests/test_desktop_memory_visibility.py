@@ -13,6 +13,7 @@ import pytest
 from box_agent.context_input import DefaultContextEngine, PreparedContext
 from box_agent.desktop_memory.transport import MemoryProxyError
 from box_agent.desktop_memory.visibility import CoreRead, CoreVisibilityGuard, DesktopInputGuard
+from box_agent.memory import MemoryHistory
 from box_agent.kernel.context_engine import REQUEST_INPUT_HEADROOM_TOKENS
 from box_agent.schema import Message
 from box_agent.tools.engine.preparation import prepare_tools
@@ -206,21 +207,46 @@ async def test_capacity_failure_is_explicit_and_revokes_previous_path(bound):
 
 
 def test_conservative_history_budget_omission_is_diagnosable_without_payload(caplog):
-    from box_agent.memory import place_memory_block
-    guard = DesktopInputGuard(lambda *_: None, lambda size: "PRIVATE_PRELOAD" if size else "")
-    content = place_memory_block("BASE", "--- MEMORY START ---\nPRIVATE_PRELOAD\n--- MEMORY END ---", reserve=True)
-    history = [Message(role="system", content=content), Message(role="user", content="PRIVATE_HISTORY " * 8000)]
+    memory = MemoryHistory("desktop", ("authorized",))
+    guard = DesktopInputGuard(lambda *_: None, lambda size: "PRIVATE_PRELOAD" if size else "", history=memory)
+    history = [Message(role="system", content="BASE"), Message(role="user", content="PRIVATE_HISTORY " * 8000),
+               memory.message("PRIVATE_PRELOAD")]
     projected = guard.project_messages(history, tools=prepare_tools([]), token_limit=90000)
-    assert "PRIVATE_PRELOAD" not in projected[0].content
-    assert projected[1].content == history[1].content
+    assert projected == history[:2]
     assert "reason=history_over_budget" in caplog.text and "limit=90000" in caplog.text
     assert "PRIVATE_PRELOAD" not in caplog.text and "PRIVATE_HISTORY" not in caplog.text
+
+
+def test_desktop_budget_keeps_the_latest_existing_snapshot_without_editing_history():
+    memory = MemoryHistory("desktop", ("authorized",))
+    newest = memory.message("最近的画像")
+    history = [Message(role="system", content="BASE"), memory.message("旧画像 " * 4000),
+               Message(role="user", content="继续"), newest]
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "", history=memory)
+
+    result = guard.project_messages(history, tools=prepare_tools([]), token_limit=4000)
+
+    assert result == [history[0], history[2], newest]
+    assert len(history) == 4 and result[-1] is newest
+
+
+def test_desktop_revocation_after_projection_discards_the_pending_snapshot():
+    memory = MemoryHistory("desktop", ("authorized",))
+    system = Message(role="system", content="BASE")
+    snapshot = memory.message("旧画像")
+    projection = PreparedContext([system, snapshot], [system, snapshot], history_updates=(snapshot,))
+    guard = DesktopInputGuard(lambda *_: None, lambda _: "", history=memory)
+    memory.set_scope(None)
+
+    result = guard.prepare_context(projection)
+
+    assert result.messages == result.context_messages == [system]
+    assert result.history_updates == ()
 
 
 @pytest.mark.parametrize("preload", [False, True])
 async def test_online_memory_does_not_block_a_long_first_message_without_a_core_read(preload):
     from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
-    from box_agent.memory import place_memory_block
     from box_agent.runtime import run_agent_loop
     from box_agent.schema import StreamEvent
 
@@ -238,12 +264,13 @@ async def test_online_memory_does_not_block_a_long_first_message_without_a_core_
                 yield StreamEvent(type="text", delta="received")
             yield StreamEvent(type="finish", finish_reason="stop")
 
-    guard = DesktopInputGuard(lambda *_: None, lambda size: "preload" if size and preload else "")
-    lookup = SimpleNamespace(model_input_guard=guard, auto_match_context=lambda _: [], correction_curator=None)
-    system = (place_memory_block("BASE", "--- MEMORY START ---\npreload\n--- MEMORY END ---", reserve=True)
-              if preload else "BASE")
+    memory = MemoryHistory("desktop", ("authorized",))
+    memory.stage("preload" if preload else None)
+    guard = DesktopInputGuard(lambda *_: None, lambda size: "preload" if size and preload else "", history=memory)
+    lookup = SimpleNamespace(model_input_guard=guard, auto_match_context=lambda _: [], correction_curator=None,
+                             memory_history=memory)
     content = "x" * 32000
-    history = [Message(role="system", content=system), Message(role="user", content=content)]
+    history = [Message(role="system", content="BASE"), Message(role="user", content=content)]
     provider = Provider()
     ordinary = DefaultContextEngine(llm=provider).prepare_request(
         history, prepared_tools=prepare_tools([]), token_limit=30000)
@@ -259,15 +286,13 @@ async def test_online_memory_does_not_block_a_long_first_message_without_a_core_
 
 @pytest.mark.parametrize("preload", [False, True])
 def test_only_a_failed_core_read_requests_one_compaction_per_turn(preload, caplog):
-    from box_agent.memory import place_memory_block
-
     llm = SimpleNamespace(estimate_text_tokens=lambda text: len(text.encode("utf-8")) // 2)
-    guard = DesktopInputGuard(lambda *_: None, lambda size: "PRIVATE_PRELOAD" if size and preload else "")
+    memory = MemoryHistory("desktop", ("authorized",))
+    memory.stage("PRIVATE_PRELOAD" if preload else None)
+    guard = DesktopInputGuard(lambda *_: None, lambda size: "PRIVATE_PRELOAD" if size and preload else "", history=memory)
     engine = DefaultContextEngine(llm=llm)
-    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
-    system = (place_memory_block("BASE", "--- MEMORY START ---\nPRIVATE_PRELOAD\n--- MEMORY END ---", reserve=True)
-              if preload else "BASE")
-    history = [Message(role="system", content=system),
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard, memory_history=memory))
+    history = [Message(role="system", content="BASE"),
                Message(role="assistant", content="PRIVATE_HISTORY " * 75000),
                Message(role="user", content="remember")]
     tools = prepare_tools([])

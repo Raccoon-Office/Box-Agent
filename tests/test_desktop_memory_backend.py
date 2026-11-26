@@ -18,8 +18,10 @@ from box_agent.config import AgentConfig, DesktopMemoryConfig
 from box_agent.context_input import DefaultContextEngine
 from box_agent.desktop_memory.backend import DesktopMemoryBackend, model_json
 from box_agent.desktop_memory.transport import MemoryProxyError
-from box_agent.memory import _MemoryTurn, create_memory_backend, memory_user_turn, uses_local_memory
-from box_agent.schema import Message, StreamEvent, FunctionCall, ToolCall
+from box_agent.memory import (
+    _MemoryTurn, create_memory_backend, external_memory_block, is_memory_history_message, memory_user_turn, uses_local_memory,
+)
+from box_agent.schema import Message, StreamEvent, FunctionCall, ToolCall, TokenUsage
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_log import SessionLog, run_session_write
 from box_agent.tools.engine.preparation import prepare_tools
@@ -525,7 +527,10 @@ async def test_real_session_keeps_single_frozen_block_and_same_batch_mutation_is
             session.agent.add_user_message("read then write")
             _ = [event async for event in session.run_events(options=session.build_run_options(logger=None))]
         assert len(llm.requests) == 2
-        text = llm.requests[-1]["messages"][0].content
+        snapshots = [message for message in llm.requests[-1]["messages"] if is_memory_history_message(message)]
+        text = snapshots[0].content
+        assert len(snapshots) == 1 and snapshots[0].role == "user"
+        assert "--- MEMORY START ---" not in llm.requests[-1]["messages"][0].content
         assert text.count("--- MEMORY START ---") == 1
         assert "profile-unique-data" in text and "experience-unique-data" in text
         failed = next(message for message in llm.requests[-1]["messages"] if message.role == "tool" and message.name == "memory_edit")
@@ -561,15 +566,14 @@ async def test_automatic_off_online_cloud_session_can_wake_pending_reconciliatio
 
 async def test_small_model_budget_reduces_preload_without_changing_user_rules_or_full_core(host):
     from box_agent.kernel.context_engine import request_input_tokens
-    from box_agent.memory import place_memory_block
 
     manager = backend(host)
     try:
         for key in host.sections:
             host.sections[key]["content"] = (key + " ") * 1500
         content = await manager.load_context(query="query", session_id="session-1", turn_id="turn-1")
-        original = "KEEP-USER-RULES\n" + place_memory_block(
-            "", "--- MEMORY START ---\n" + content + "\n--- MEMORY END ---", reserve=True)
+        manager.memory_history.stage(external_memory_block(content, 15400))
+        original = "KEEP-USER-RULES"
         history = [Message(role="system", content=original), Message(role="user", content="current task")]
         engine = DefaultContextEngine()
         engine.bind_memory(manager)
@@ -581,14 +585,133 @@ async def test_small_model_budget_reduces_preload_without_changing_user_rules_or
         assert "KEEP-USER-RULES" in request.messages[0].content
         assert request_input_tokens(request.messages, tools.definitions) + 1024 <= 5000
         assert manager.model_input_guard._input_tokens(request.messages, tools.definitions) + 1024 <= 5000
-        assert len(request.messages[0].content) < len(original)
-        assert history[0].content == original
-        assert "experience experience" not in request.messages[0].content
+        snapshot, = request.history_updates
+        assert snapshot in request.messages and len(snapshot.content) < len(content)
+        assert request.messages[0].content == history[0].content == original
+        assert "experience experience" not in snapshot.content
+        # 预算恢复后，已发送的裁剪版本按原始召回内容去重。
+        repeated = engine.prepare_request([*history, snapshot], prepared_tools=tools, token_limit=40000)
+        assert not repeated.history_updates
+        assert [m for m in repeated.messages if is_memory_history_message(m)] == [snapshot]
         host.files["memory.md"] = "<mem>" + "core data " * 6000 + "</mem>"
         with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
             await manager.read_core_memory("memory.md")
         assert not any(operation == "core/mutate" for operation, _ in host.calls)
     finally:
+        await manager.aclose()
+
+
+async def test_desktop_appends_changed_snapshots_and_revalidates_history_on_every_turn(tmp_path, host):
+    from box_agent.agent_service import AgentService
+    from box_agent.api import RunRequest
+
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    manager = backend(host)
+    model = RecordingLLM()
+    log = SessionLog.create(tmp_path / "logs", session_id="session-1", cwd=tmp_path)
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=model, memory_manager=manager, tools=[], system_prompt="BASE", session_log=log,
+    ), options=SessionOptions(workspace_dir=tmp_path, profile="acp"))
+
+    async def turn(number):
+        run_id = f"run-{number}"
+        handle = await AgentService().start(RunRequest(run_id, "session-1", f"问题 {number}"), session=session)
+        assert (await handle.result()).status.value == "completed"
+        messages = model.requests[-1]["messages"]
+        assert "--- MEMORY START ---" not in messages[0].content
+        return messages, [message for message in messages if is_memory_history_message(message)]
+
+    async def timeout(operation, payload):
+        if operation == "context":
+            raise httpx.ReadTimeout("fixture: context timed out")
+
+    try:
+        first, original = await turn(1)
+        same, repeated = await turn(2)
+        assert len(original) == 1 and repeated == original
+        assert same[:len(first)] == first
+        host.sections["profile"]["content"] = "更新后的桌面画像"
+        changed, updated = await turn(3)
+        assert changed[:len(same)] == same
+        assert len(updated) == 2 and "更新后的桌面画像" in updated[-1].content
+        host.before = timeout
+        _, unavailable = await turn(4)
+        assert unavailable == []
+        host.before = None
+        host.sections["profile"]["status"] = "error"
+        _, partial = await turn(5)
+        assert partial == []
+        host.sections = {}
+        _, cleared = await turn(6)
+        _, still_empty = await turn(7)
+        assert cleared[:2] == updated and len(cleared) == 3 and "已失效" in cleared[-1].content
+        assert cleared == still_empty
+        host.generation += 1
+        host.sections = {"profile": {"content": "不同授权的画像"}}
+        _, new_scope = await turn(8)
+        assert len(new_scope) == 1 and "不同授权的画像" in new_scope[0].content
+        assert new_scope[0].name != updated[-1].name
+        host.automatic = False
+        _, disabled = await turn(9)
+        assert disabled == []
+        persisted = [message for message in log.replay().messages if is_memory_history_message(message)]
+        assert persisted == [*cleared, *new_scope]
+    finally:
+        await session.aclose()
+        await manager.aclose()
+        log.close()
+
+
+async def test_desktop_compaction_restores_latest_snapshot_without_sending_snapshots_to_summarizer(tmp_path, host):
+    from box_agent.agent_service import AgentService
+    from box_agent.api import RunRequest
+
+    class SummaryLLM(RecordingLLM):
+        summary = None
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
+        async def generate_stream(self, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                self.summary = kwargs["messages"]
+                yield StreamEvent(type="text", delta="<summary>继续做原任务。</summary>")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            async for event in super().generate_stream(**kwargs):
+                yield event
+
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    manager = backend(host)
+    model = SummaryLLM()
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=model, memory_manager=manager, tools=[], system_prompt="BASE",
+    ), options=SessionOptions(workspace_dir=tmp_path, profile="acp"))
+    session.agent.token_limit = 104_400
+
+    async def turn(number):
+        handle = await AgentService().start(RunRequest(f"run-{number}", "session-1", f"问题 {number}"), session=session)
+        assert (await handle.result()).status.value == "completed"
+        return [message for message in model.requests[-1]["messages"] if is_memory_history_message(message)]
+
+    try:
+        await turn(1)
+        host.sections["profile"]["content"] = "最新的桌面画像"
+        old, latest = await turn(2)
+        session.agent.messages.extend([
+            Message(role="user", content="先完成一次运行"),
+            Message(role="assistant", content="x" * 200_000,
+                    usage=TokenUsage(prompt_tokens=104_400, completion_tokens=100, total_tokens=104_500)),
+        ])
+        assert await turn(3) == [latest]
+        assert model.summary is not None and not any(is_memory_history_message(message) for message in model.summary)
+        assert all("profile-unique-data" not in str(message.content) for message in model.summary)
+        assert old not in session.agent.messages
+        assert await turn(4) == [latest]
+    finally:
+        await session.aclose()
         await manager.aclose()
 
 
@@ -1466,7 +1589,9 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
                     recorded["source"] = message.source
                 expected.append(recorded)
             assert request["data"]["messages"] == expected
-            assert "user_items-unique-data" in request["data"]["messages"][0]["content"]
+            assert "user_items-unique-data" not in request["data"]["messages"][0]["content"]
+            assert any(m["role"] == "user" and "user_items-unique-data" in m["content"]
+                       for m in request["data"]["messages"] if isinstance(m.get("content"), str))
         assert requests[0]["llm_call_id"] != requests[1]["llm_call_id"]
         tool_request = next(row for row in records if row["event"] == "tool.request" and row["tool_call_id"] == "trace-call")
         tool_response = next(row for row in records if row["event"] == "tool.response" and row["tool_call_id"] == "trace-call")

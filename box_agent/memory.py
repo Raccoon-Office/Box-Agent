@@ -3,7 +3,7 @@
 Directory layout::
 
     ~/.box-agent/memory/
-    ├── MEMORY.md          # Core memory for system-prompt injection
+    ├── MEMORY.md          # Core memory for automatic recall
     ├── memory_summary.md  # Lightweight routing summary for deciding memory_search
     └── v2/experiences/    # Topic-sharded searchable context (retrieved on demand)
 """
@@ -573,7 +573,7 @@ class MemoryManager:
     """Two-tier memory: MEMORY.md (core) + topic-sharded searchable context.
 
     - **MEMORY.md** — user identity, preferences, writing style.
-      Injected into the system prompt via ``recall()`` when available.
+      Loaded by ``recall()`` for the conversation's memory snapshot.
       Written by LLM via ``memory_write(category="core")``.
 
     - **memory_summary.md** — compact routing guide injected with core memory so
@@ -641,7 +641,7 @@ class MemoryManager:
 
     @property
     def memory_file(self) -> Path:
-        """MEMORY.md — core memory for system-prompt injection."""
+        """核心记忆文件，用于自动召回。"""
         return self.memory_dir / "MEMORY.md"
 
     @property
@@ -1502,17 +1502,21 @@ class MemoryManager:
 
         return top
 
-    # ── Recall (system prompt injection) ────────────────────────
+    # ── 自动召回 ────────────────────────────────────────────────
 
-    def _core_memory_revision(self) -> tuple[int, int, int, int, int] | None:
+    def _core_memory_revision(self, *, require_complete: bool = False) -> tuple[int, int, int, int, int] | None:
         try:
             stat = self.memory_file.stat()
+        except FileNotFoundError:
+            return None
         except OSError:
+            if require_complete:
+                raise
             return None
         return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
-    def recall(self, **_kwargs) -> str:
-        """Build a memory block for system-prompt injection.
+    def recall(self, *, require_complete: bool = False, **_kwargs) -> str:
+        """组装核心记忆和可搜索记忆的路由摘要。
 
         Injects MEMORY.md (core) plus the lightweight ``memory_summary.md``
         routing guide. Full context entries remain on demand via
@@ -1522,20 +1526,30 @@ class MemoryManager:
         acquired = self._context_transaction_lock.acquire(blocking=False)
         try:
             revision, core, summary = self._recall_cache
-            if acquired:
-                revision = self._core_memory_revision()
+            if acquired or require_complete:
+                # 核心文件独立于主题索引。维护占锁时仍可验证核心文件，并沿用已缓存的路由。
+                revision = self._core_memory_revision(require_complete=require_complete)
                 try:
                     core = self.read_core()
                 except Exception:
+                    if require_complete:
+                        raise
                     logger.exception("Failed to read core memory during recall")
                     core = ""
+            if acquired:
                 try:
                     summary = self.read_memory_summary()
                 except Exception:
+                    if require_complete:
+                        raise
                     logger.exception("Failed to refresh memory routing during recall")
 
             # Hosts can rewrite or delete MEMORY.md outside the context lock.
-            if core and (revision is None or self._core_memory_revision() != revision):
+            if require_complete and self._core_memory_revision(require_complete=True) != revision:
+                raise MemoryBackendError("召回期间本地核心记忆发生变化。")
+            if require_complete and not acquired and not core and not summary:
+                raise MemoryBackendError("本地路由正在更新，无法确认记忆为空。")
+            if core and (revision is None or (not require_complete and self._core_memory_revision() != revision)):
                 core = ""
             if acquired:
                 self._recall_cache = (revision, core, summary)
@@ -2989,55 +3003,119 @@ _MEMORY_END = "--- MEMORY END ---"
 _MEMORY_BLOCK_RE = re.compile(
     r"--- (?:EXTERNAL )?MEMORY START ---.*?--- (?:EXTERNAL )?MEMORY END ---", re.DOTALL,
 )
-_MEMSENSE_HISTORY_PREFIX = "memsense_memory:"
-_MEMSENSE_HISTORY_EMPTY = "当前 MemSense 记忆为空。此前自动注入的 MemSense 记忆快照已失效。"
+_MEMORY_HISTORY_PREFIX = "memsense_memory:"
+
+
+def is_memory_history_message(message: Message) -> bool:
+    """按运行时元数据识别快照，用户输入里的同名文字不能冒充快照。"""
+    return (message.role == "user" and message.source == "runtime"
+            and bool(message.name and message.name.startswith(_MEMORY_HISTORY_PREFIX)))
 
 
 def is_memsense_history_message(message: Message) -> bool:
-    """按运行时元数据识别快照，用户输入里的同名文字不能冒充快照。"""
-    return (message.role == "user" and message.source == "runtime"
-            and bool(message.name and message.name.startswith(_MEMSENSE_HISTORY_PREFIX)))
+    """保留直连快照识别入口，排除使用同一命名空间的其他后端。"""
+    return is_memory_history_message(message) and ":" not in message.name.removeprefix(_MEMORY_HISTORY_PREFIX)
 
 
-class _MemsenseHistory:
+class MemoryHistory:
     """本轮候选只暂存在内存，已交付的快照以会话历史为准。"""
 
-    def __init__(self, base_url: str, tenant_id: str, user_id: str) -> None:
-        scope = hashlib.sha256(json.dumps([base_url.rstrip("/"), tenant_id, user_id]).encode()).hexdigest()
-        self.name = _MEMSENSE_HISTORY_PREFIX + scope
+    def __init__(self, backend: str, scope: tuple | None = None) -> None:
+        self.backend = backend
+        self.label = {"memsense": "MemSense", "desktop": "桌面", "local": "本地"}[backend]
+        self.empty = f"当前 {self.label} 记忆为空。此前自动注入的 {self.label} 记忆快照已失效。"
+        self.set_scope(scope)
+
+    def set_scope(self, scope: tuple | None) -> None:
+        # 沿用已有快照命名空间，让认识此标记的旧版本也能过滤新后端快照。
+        kind = "" if self.backend == "memsense" else f"{self.backend}:"
+        digest = hashlib.sha256(json.dumps(scope).encode()).hexdigest() if scope is not None else None
+        self.name = _MEMORY_HISTORY_PREFIX + kind + digest if digest else None
         self.pending: Message | None = None
+
+    def message(self, block: str, *, name: str | None = None) -> Message:
+        from .schema import Message
+
+        content = (f"以下为运行时提供的最新 {self.label} 记忆快照，仅作背景。"
+                   f"此前自动注入的 {self.label} 记忆快照已被取代。\n" + block if block else self.empty)
+        if name is None:
+            name = self.name
+            if self.backend == "desktop" and name is not None:
+                # 裁剪只改变发出的正文，仍能按完整召回内容去重。
+                name += ":" + hashlib.sha256(content.encode()).hexdigest()
+        return Message(role="user", source="runtime", name=name, content=content)
 
     def stage(self, block: str | None) -> None:
         """None 表示无法核实，空字符串才表示成功读到空记忆。"""
-        from .schema import Message
+        self.pending = self.message(block) if block is not None and self.name is not None else None
 
-        if block is None:
-            self.pending = None
-            return
-        content = ("以下为运行时提供的最新 MemSense 记忆快照，仅作背景。"
-                   "此前自动注入的 MemSense 记忆快照已被取代。\n" + block
-                   if block else _MEMSENSE_HISTORY_EMPTY)
-        self.pending = Message(role="user", source="runtime", name=self.name, content=content)
+    def accepts(self, message: Message) -> bool:
+        name = self.name
+        if name is None or not is_memory_history_message(message):
+            return False
+        if self.backend == "desktop":
+            return message.name.startswith(name + ":")
+        return message.name == name
 
     def _latest(self, messages: list[Message]) -> Message | None:
         return next((msg for msg in reversed(messages)
-                     if is_memsense_history_message(msg) and msg.name == self.name), None)
+                     if self.accepts(msg)), None)
 
     def updates(self, messages: list[Message]) -> tuple[Message, ...]:
         """只与最近一次比，允许内容从 B 恢复成之前的 A。"""
-        if self.pending is None:
+        pending = self.pending
+        if pending is None:
             return ()
         latest = self._latest(messages)
-        previous = latest.content if latest is not None else _MEMSENSE_HISTORY_EMPTY
-        return () if previous == self.pending.content else (self.pending,)
+        if latest is None:
+            return () if pending.content == self.empty else (pending,)
+        same = latest.name == pending.name if self.backend == "desktop" else latest.content == pending.content
+        return () if same else (pending,)
 
     def restore(self, original: list[Message], compacted: list[Message]) -> list[Message]:
         """压缩后只追加最新快照，失败时沿用最近一次核实的内容。"""
         latest = self._latest(original)
-        current = self.pending if self.pending is not None else latest
-        if current is not None and (current.content != _MEMSENSE_HISTORY_EMPTY or latest is not None):
+        update = self.updates(original)
+        current = update[0] if update else latest
+        if update and self.backend == "desktop" and current.content != self.empty:
+            # 新桌面快照在下一次请求投影时按预算裁剪后再写入。
+            return compacted
+        if current is not None:
             return [*compacted, current]
         return compacted
+
+
+_local_history: ContextVar[tuple[MemoryManager, MemoryHistory] | None] = ContextVar("local_memory_history", default=None)
+
+
+def local_memory_history(manager: MemoryManager) -> MemoryHistory:
+    return MemoryHistory("local", (str(manager.memory_dir.resolve()),))
+
+
+def active_local_memory_history(manager: Any) -> MemoryHistory | None:
+    state = _local_history.get()
+    return state[1] if state is not None and state[0] is manager else None
+
+
+def refresh_local_memory(manager: MemoryManager, history: MemoryHistory) -> None:
+    try:
+        history.stage(manager.recall(require_complete=True))
+    except Exception as error:
+        logger.warning("memory backend=local operation=recall reason=%s", type(error).__name__)
+
+
+def uses_memory_history(manager: Any) -> bool:
+    return isinstance(manager, MemoryManager) or getattr(manager, "memory_history", None) is not None
+
+
+def external_memory_block(content: str, limit: int) -> str:
+    # 外部正文里的边界保留为普通文本，方便安全地识别记忆区块。
+    content = content[:limit]
+    for marker in (_MEMORY_START, _MEMORY_END, MEMORY_CONTEXT_SLOT,
+                   "--- EXTERNAL MEMORY START ---", "--- EXTERNAL MEMORY END ---"):
+        content = content.replace(marker, "[记忆边界]")
+    return (f"{_MEMORY_START}\n以下是历史记忆数据；当前用户要求优先，实时事实需要重新验证。\n"
+            + content + f"\n{_MEMORY_END}") if content.strip() else ""
 
 
 def place_memory_block(prompt: str, block: str, *, reserve: bool = False) -> str:
@@ -3335,7 +3413,7 @@ class MemsenseMemoryBackend(ExternalMemoryBackend):
         super().__init__(*args, **kwargs)
         self.capabilities = frozenset({"recall", "read", "search", "save", "write", "edit"})
         if self.backend_type == "memsense":
-            self.memsense_history = _MemsenseHistory(self.config.base_url, self.tenant_id, self.user_id)
+            self.memory_history = MemoryHistory("memsense", (self.config.base_url.rstrip("/"), self.tenant_id, self.user_id))
         # 会话装配会复制后端；记录仅用于显式先读校验，不成为新的持久化状态源。
         self._core_read_records: dict[str, dict[str, Any]] = {}
         self._core_file_locks = {path: asyncio.Lock() for path in self.core_tool_paths}
@@ -3677,7 +3755,7 @@ class MemoryRuntime:
         return nullcontext()
 
     async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
-        history = getattr(self.backend, "memsense_history", None)
+        history = getattr(self.backend, "memory_history", None)
         if history is not None:
             history.stage(None)
         if getattr(session, "cancelled", False):
@@ -3686,7 +3764,7 @@ class MemoryRuntime:
         self._refresh_cancel = asyncio.Event()
         self._refresh_task = asyncio.create_task(self.backend.load_context(
             query=turn.user, timestamp=turn.timestamp, **self.backend.log_context,
-            **({"require_complete": True} if history is not None else {}),
+            **({"require_complete": True} if self.backend.backend_type == "memsense" and history is not None else {}),
         ), name="memory-refresh")
         cancelled = asyncio.create_task(self._refresh_cancel.wait())
         try:
@@ -3702,19 +3780,13 @@ class MemoryRuntime:
             await asyncio.gather(self._refresh_task, cancelled, return_exceptions=True)
             self._refresh_task = None
             self._refresh_cancel = None
-        if history is not None and content is None:
-            return
-        content = (content or "")[:self.backend.config.context_max_chars]
-        # 外部内容不能伪装成槽位或块边界，避免下一轮替换时误删其他提示。
-        for marker in (_MEMORY_START, _MEMORY_END, MEMORY_CONTEXT_SLOT,
-                       "--- EXTERNAL MEMORY START ---", "--- EXTERNAL MEMORY END ---"):
-            content = content.replace(marker, "[记忆边界]")
-        block = (f"{_MEMORY_START}\n"
-                 "以下是历史记忆数据；当前用户要求优先，实时事实需要重新验证。\n"
-                 + content + f"\n{_MEMORY_END}") if content.strip() else ""
+        block = external_memory_block(content or "", self.backend.config.context_max_chars)
         if history is not None:
-            history.stage(block)
-            session.memory_block = block or None
+            if content is not None:
+                history.stage(block)
+                session.memory_block = block if history.name is not None and block else None
+            elif history.name is None:
+                session.memory_block = None
             return
         # 只替换本能力拥有的块；失败时清除旧值，避免身份或内容过期后仍被使用。
         session.agent.set_system_prompt(
@@ -3736,7 +3808,7 @@ class MemoryRuntime:
 
     def end_turn(self, turn: _MemoryTurn) -> None:
         """清除本轮候选，已交付的运行时消息仍由会话历史持有。"""
-        history = getattr(self.backend, "memsense_history", None)
+        history = getattr(self.backend, "memory_history", None)
         if history is not None:
             history.stage(None)
 
@@ -3781,7 +3853,18 @@ async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
     """宿主声明真实用户轮次，内部续跑复用同一边界。"""
     runtime = getattr(session, "memory_runtime", None)
     if runtime is None:
-        yield None
+        manager = getattr(session, "memory_manager", None)
+        if not isinstance(manager, MemoryManager) or active_local_memory_history(manager) is not None:
+            yield None
+            return
+        history = local_memory_history(manager)
+        if not getattr(session, "cancelled", False):
+            await asyncio.to_thread(refresh_local_memory, manager, history)
+        token = _local_history.set((manager, history))
+        try:
+            yield None
+        finally:
+            _local_history.reset(token)
         return
     if runtime.active is not None:
         yield runtime.active

@@ -14,8 +14,11 @@ import pytest
 
 from box_agent.acp import BoxACPAgent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.context_input import DefaultContextEngine
 from box_agent.llm import SessionBoundLLM
-from box_agent.memory import MemoryManager, write_context_file
+from box_agent.memory import MemoryManager, is_memory_history_message, write_context_file
+from box_agent.schema import Message
+from box_agent.tools.engine.preparation import prepare_tools
 from tests.test_memory_promotion import _entry  # reuse helper
 
 
@@ -129,8 +132,10 @@ async def test_memory_proposal_list_waits_off_event_loop(tmp_path: Path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("core_change", ["unchanged", "rewritten", "deleted"])
-async def test_session_recall_only_reuses_unchanged_core_while_memory_is_busy(tmp_path: Path, core_change):
+async def test_user_snapshot_uses_current_core_and_cached_routing_while_memory_is_busy(tmp_path: Path, core_change, monkeypatch):
     agent, mgr = _make_agent(tmp_path)
+    # 单独验证自动预载，排除按问题召回纠错条目的索引读锁。
+    monkeypatch.setattr(mgr, "recall_corrections", lambda *args, **kwargs: [])
     mgr.write_context("- project memory", topic="project")
     mgr.write_core("- cached preference")
     assert "cached preference" in mgr.recall()
@@ -157,10 +162,17 @@ async def test_session_recall_only_reuses_unchanged_core_while_memory_is_busy(tm
         )
         assert not release_transaction.is_set()
         assert not holder.done()
-        prompt = agent._sessions[session.sessionId].agent.system_prompt
-        assert "updated preference" not in prompt
-        assert ("cached preference" in prompt) == (core_change == "unchanged")
-        assert "`project`" in prompt
+        state = agent._sessions[session.sessionId]
+        engine = DefaultContextEngine()
+        engine.bind_memory(state.memory_manager)
+        projection = await asyncio.wait_for(engine.aprepare_request(
+            [Message(role="system", content=state.agent.system_prompt), Message(role="user", content="continue")],
+            prepared_tools=prepare_tools([]), token_limit=20000,
+        ), timeout=2)
+        snapshot, = [message for message in projection.messages if is_memory_history_message(message)]
+        assert ("updated preference" in snapshot.content) == (core_change == "rewritten")
+        assert ("cached preference" in snapshot.content) == (core_change == "unchanged")
+        assert "`project`" in snapshot.content
     finally:
         release_transaction.set()
         await asyncio.wait_for(holder, timeout=2.0)

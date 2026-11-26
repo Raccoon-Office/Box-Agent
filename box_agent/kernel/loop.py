@@ -454,18 +454,8 @@ async def _auto_match_memory_for_latest_prompt(
     new task.  This avoids depending on the model deciding to call
     ``memory_search`` while keeping the memory signal non-authoritative.
     """
-    if current_turn_text is not None:
-        user_text = current_turn_text
-    else:
-        latest_user = next((msg for msg in reversed(messages) if msg.role == "user"), None)
-        if latest_user is None:
-            return None, None
-
-        user_text = (
-            latest_user.content
-            if isinstance(latest_user.content, str)
-            else str(latest_user.content)
-        )
+    # 自动匹配只使用真实用户输入，恢复会话时也不能把运行时消息当成查询。
+    user_text = _latest_user_text(messages) if current_turn_text is None else current_turn_text
     if not user_text.strip():
         return None, None
     try:

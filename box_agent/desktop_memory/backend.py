@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from uuid import UUID
 
 from ..config import DesktopMemoryConfig, ExternalMemoryConfig
-from ..memory import MemsenseMemoryBackend, MemoryEditError
+from ..memory import MemsenseMemoryBackend, MemoryEditError, MemoryHistory
 from ..tools.base import check_tool_cancellation
 from .evidence import _redact
 from .transport import MemoryHostTransport, MemoryProxyError
@@ -147,7 +147,10 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         self.log_context: dict[str, str] = {}
         self.capabilities = frozenset({"recall", "read", "search", "save", "write", "edit"})
         self.transport = MemoryHostTransport(Path(config.bootstrap_file), config.identity_epoch, on_revoked=self._revoked)
-        self.model_input_guard = DesktopInputGuard(self._visibility, self._preload, can_read=self._can_read_core)
+        self.memory_history = MemoryHistory("desktop")
+        self.model_input_guard = DesktopInputGuard(
+            self._visibility, self._preload, history=self.memory_history, can_read=self._can_read_core,
+        )
         self.current_scope: TurnScope | None = None
         self._sections: dict[str, Any] = {}
         self._serial = 0
@@ -208,6 +211,7 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         self._records.clear()
         self.current_scope = None
         self._sections = {}
+        self.memory_history.set_scope(None)
         if not getattr(self, "context_attempt_durable", True):
             raise MemoryProxyError("MEMORY_ATTEMPT_NOT_DURABLE")
         self._serial += 1
@@ -224,16 +228,23 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         content = _format_sections(data.get("sections"), scope)
         self.current_scope = scope
         self._sections = data["sections"]
+        binding = scope.binding
+        if binding["automaticAtStart"] and binding["source"] != "unavailable" and not any(
+            isinstance(view, dict) and view.get("status") == "error" for view in self._sections.values()
+        ):
+            # 轮次和请求标识每次都变。仅按宿主确认的身份、来源与授权版本隔离快照。
+            self.memory_history.set_scope(tuple(binding.get(key) for key in (
+                "accountKey", "officeIdentity", "identityEpoch", "subject", "source",
+                "memoryGeneration", "automaticRevision", "onlineAtStart",
+            )))
         return content
 
     def _preload(self, limit: int) -> str:
-        if self.current_scope is None or limit < 1:
+        # 工作线程计算预算时，事件循环可能同时清理本轮授权。
+        scope, sections = self.current_scope, self._sections
+        if scope is None or limit < 1:
             return ""
-        text = _format_sections(self._sections, self.current_scope, max_chars=limit, trim_priority=True)
-        for marker in ("--- MEMORY START ---", "--- MEMORY END ---", "{MEMORY_CONTEXT}",
-                       "--- EXTERNAL MEMORY START ---", "--- EXTERNAL MEMORY END ---"):
-            text = text.replace(marker, "[记忆边界]")
-        return text
+        return _format_sections(sections, scope, max_chars=limit, trim_priority=True)
 
     def _visibility(self, read: CoreRead, active: bool, request_id: str) -> asyncio.Task | None:
         prior = self._records.get(read.read_id)
@@ -399,6 +410,7 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         self._records.clear()
         self.current_scope = None
         self._sections = {}
+        self.memory_history.set_scope(None)
         self._serial += 1
 
     async def aclose(self) -> None:
