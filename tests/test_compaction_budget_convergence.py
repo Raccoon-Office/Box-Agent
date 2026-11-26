@@ -249,7 +249,9 @@ async def test_exhausted_hard_budget_preserves_summary_and_replays_all_user_orig
 
     root = tmp_path / "sessions"
     with closing(SessionLog.create(root, session_id="degraded-archive", cwd=tmp_path)) as log:
-        log.replace_surface(exhausted.messages[1:], turn=1, step=1)
+        log.append_unlogged_messages(case.history[1:], turn=1, step=1)
+        logged, _ = await case.compact(headroom=case.hard_limit - 1)
+        log.commit_compaction(logged.plan, turn=1, step=1)
         log.flush()
     with closing(SessionLog.open(root, session_id="degraded-archive", cwd=tmp_path)) as log:
         replayed = log.replay().messages
@@ -327,5 +329,5 @@ async def test_reactive_degradation_retries_main_request_and_records_outcome(tmp
     assert len(initial_ids) - len(resumed_ids) >= 2 * summary.degradation["droppedRounds"]
     assert _summary(resumed).content.startswith(context_engine._SUMMARY_MESSAGE_PREFIX + provider.summary)
     assert any(message.content == "Continue the current task." for message in resumed)
-    (record,) = [record["data"] for record in records if record["type"] == "compaction/summary"]
+    (record,) = [record["data"] for record in records if record["type"] == "compaction/end"]
     assert record["degradation"] == summary.degradation

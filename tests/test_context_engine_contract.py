@@ -146,7 +146,10 @@ async def test_compaction_recovers_sources_and_user_constraints_in_messages_only
     assert outcome.mode == ("fallback" if fallback else "summary")
     assert outcome.messages[0] is system
     if fallback:
-        assert outcome.messages == history and outcome.summary_calls == 5
+        assert outcome.summary_calls == 5
+        assert outcome.plan.head.compaction_node == "fallback_head"
+        assert outcome.plan.head.content.endswith(history[-1].content)
+        assert outcome.plan.head.earlier_user_messages == [history[-1].content]
         return
     recovery = outcome.messages[1]
     assert recovery.source == "runtime" and recovery.role == "user"
@@ -155,7 +158,8 @@ async def test_compaction_recovers_sources_and_user_constraints_in_messages_only
     assert "Before reusing facts in the next artifact mutation, use a tool" in recovery.content
     assert "not a per-record status mapping" in recovery.content
     assert "Explicit user prohibitions still apply" in recovery.content
-    assert outcome.messages[-1] is history[-1]
+    assert recovery.earlier_user_messages == [history[-1].content]
+    assert history[-1].content in recovery.content
 
 
 @pytest.mark.asyncio

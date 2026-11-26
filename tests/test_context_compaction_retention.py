@@ -150,6 +150,7 @@ async def test_three_compactions_keep_original_user_text_across_session_replay(t
                     Message(role="assistant", content=f"Answer {batch}-{index}"),
                 ])
             messages.insert(-1, Message(role="user", source="runtime", content="Injected runtime guidance"))
+            session.append_unlogged_messages(messages[1:], turn=batch + 1, step=1)
             outcome = await context_engine._maybe_summarize(
                 _SummaryProvider(), messages, 14_000, 0, False, force=True,
             )
@@ -164,7 +165,7 @@ async def test_three_compactions_keep_original_user_text_across_session_replay(t
             assert "host guidance" not in original_section.content
             assert "Injected runtime guidance" not in original_section.content
             assert _latest_user_text(outcome.messages) == originals[-1]
-            session.replace_surface(outcome.messages[1:], turn=batch + 1, step=1)
+            session.commit_compaction(outcome.plan, turn=batch + 1, step=1)
             session.flush()
         finally:
             session.close()
@@ -200,6 +201,7 @@ async def test_runtime_state_gives_all_large_sections_a_fair_share():
     state = await context_engine._restore_runtime_state(
         [], {label: State(label) for label in ("Todo", "Goal", "Plan")},
     )
+    assert state.compaction_node == "appended" and state.model_content() == state.content
     sections = state.content.split("\n\n## ")
     assert [section.splitlines()[0] for section in sections[1:]] == ["Goal", "Plan", "Todo"]
     assert len(state.content) <= 12_000
@@ -256,7 +258,7 @@ async def test_latest_user_before_cut_keeps_whitespace_and_attachments_after_reo
     inline_path = log.path.parent / refs[0]["contentRef"]
     assert str(inline_path) in archive.content and str(workspace_image) in archive.content
     assert refs[1]["contentRef"] not in archive.content and context_engine._EARLIER_USER_MIDDLE not in archive.content
-    log.replace_surface(result.messages[1:], turn=1, step=2)
+    log.commit_compaction(result.plan, turn=1, step=2)
     log.flush()
     replayed = log.replay().messages
     assert not image_blocks(ImageContext(log).prepare(replayed, llm=RecordingLLM()).messages)

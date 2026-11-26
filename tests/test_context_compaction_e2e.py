@@ -209,7 +209,7 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
         compacted_summary.content
     )
     assert old_user not in llm.normal_messages
-    assert large_execution not in llm.normal_messages
+    assert any(message is large_execution for message in llm.normal_messages)
     assert latest_user in llm.normal_messages
 
     assert agent.messages[-1].role == "assistant"
@@ -506,7 +506,8 @@ async def test_compaction_rebases_usage_before_rebuilding_request():
     )
 
     assert outcome.messages is not None
-    assert all(message.usage is None for message in outcome.messages)
+    assert any(message is old_response for message in outcome.messages)
+    assert old_response.usage.prompt_tokens == 5_000
     assert request_input_tokens(outcome.messages, {}) == _fallback_context_estimate(
         outcome.messages, {}
     )

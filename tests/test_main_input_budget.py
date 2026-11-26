@@ -255,7 +255,12 @@ async def test_underestimated_unicode_user_input_is_blocked_without_provider_cal
     assert any(isinstance(event, SummarizationEvent) for event in events)
     assert any(isinstance(event, ErrorEvent) for event in events)
     assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR for event in events)
-    assert any(message.role == "user" and message.content == original for message in messages)
+    if previous_usage:
+        assert messages[-2].source == "user" and messages[-2].content == original
+    else:
+        head = messages[1]
+        assert head.compaction_node == "fallback_head" and head.earlier_user_messages == [original]
+        assert original in head.model_content()
 
 
 @pytest.mark.parametrize("change", ["same", "removed", "duplicate", "text", "role", "image"])

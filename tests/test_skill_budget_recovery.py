@@ -492,7 +492,7 @@ async def test_loop_unrecoverable_selection_compacts_at_most_once_and_never_deli
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["compaction/summary", "compaction/flush", "request/context", "request/flush"])
+@pytest.mark.parametrize("failure", ["compaction/end", "compaction/flush", "request/context", "request/flush"])
 async def test_loop_recovery_write_failure_propagates_without_skill_delivery(runtime, tmp_path, failure):
     history = crowded_history(runtime)
     runtime.select(["demo"])

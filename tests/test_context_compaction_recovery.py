@@ -224,8 +224,11 @@ async def test_summary_service_failure_ends_turn_with_main_request_error_and_pre
         assert events[-1].stop_reason == StopReason.ERROR
         assert len(provider.requests) == 2
         assert history == original and log.replay().messages == original[1:]
-        log_text = log.path.read_text(encoding="utf-8")
-        assert '"compaction/start"' in log_text and '"compaction/end"' not in log_text
+        attempts = [e for e in log.events if e["type"].startswith("compaction/")]
+        assert [e["type"] for e in attempts] == ["compaction/start", "compaction/end"]
+        assert all(e["data"]["format"] == 2 for e in attempts)
+        assert attempts[-1]["data"]["stage"] == "summary" and attempts[-1]["data"]["error"]
+        assert not any("surfaceOp" in e for e in log.events[attempts[0]["seq"] + 1:])
     finally:
         log.close()
 
@@ -328,7 +331,8 @@ async def test_reactive_reprojects_in_same_step_and_never_retries_output(tmp_pat
     provider = _ReactiveProvider(rejected, partial=partial)
     agent = _agent(tmp_path, provider, max_steps=1, session_log=log)
     try:
-        agent.messages.extend(_history(rounds=9, size=35)[1:])
+        # Leave enough removable history for two progressively smaller targets.
+        agent.messages.extend(_history(rounds=9, size=100)[1:])
         events = [event async for event in agent.run_events()]
         assert len(provider.main_requests) == calls
         assert sum(isinstance(event, StepStart) for event in events) == 1
@@ -336,7 +340,7 @@ async def test_reactive_reprojects_in_same_step_and_never_retries_output(tmp_pat
         traced = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
         accepted = [entry for entry in traced if entry.get("type") == "assistant/message"
                     and "modelRound" in entry["data"]]
-        compactions = [entry for entry in traced if entry.get("type") == "compaction/summary"]
+        compactions = [entry for entry in traced if entry.get("type") == "compaction/end"]
         if not partial:
             assert len(compactions) == 2
             assert len(provider.summary_provider.requests) == 2
@@ -344,8 +348,8 @@ async def test_reactive_reprojects_in_same_step_and_never_retries_output(tmp_pat
                        for entry in compactions)
             assert all(entry["data"]["summaryPath"] == "shared" for entry in compactions)
             assert all(event.summary_path == "shared" for event in events if isinstance(event, SummarizationEvent))
-            assert all("Current task" in [m.content for m in request]
-                       for request in provider.main_requests)
+            assert all(any(m.content == "Current task" or "Current task" in (m.earlier_user_messages or ())
+                           for m in request) for request in provider.main_requests)
             assert len(provider.main_requests[1]) < len(provider.main_requests[0])
         else:
             assert not compactions
@@ -436,7 +440,8 @@ async def test_fallback_keeps_the_latest_complete_group_and_omits_large_older_ou
         _Summary([("bad format", "stop")] * 5), history, 30_000, 0, False, force=True,
     )
     assert result.mode == "fallback"
-    assert result.messages[:-1] == [history[0], *history[-4:]]
+    assert result.messages[1].compaction_node == "fallback_head"
+    assert result.messages[2:-1] == history[-4:]
     assert result.messages[-1].runtime_kind == "compaction_notice"
     assert not any(context_engine._is_summary_marker(m) for m in result.messages)
 
@@ -541,7 +546,7 @@ async def test_third_summary_request_still_contains_the_fact_from_the_first_summ
         history = [*result.messages, *_history(rounds=7, size=10)[1:]]
 
 
-async def _fallback(history, *, log=None, limit=50_000, llm=None):
+async def _fallback(history, *, log=None, limit=65_536, llm=None):
     provider = llm or _Summary()
     provider.outcomes = [("malformed", "stop")] * 5
     return await context_engine._maybe_summarize(
@@ -549,7 +554,7 @@ async def _fallback(history, *, log=None, limit=50_000, llm=None):
     )
 
 
-async def test_fallback_summary_anchor_is_byte_identical_and_repeated_notices_keep_omitted_seqs(tmp_path):
+async def test_fallback_embeds_legacy_summary_and_repeated_notices_keep_structured_omissions(tmp_path):
     system = Message(role="system", content="system")
     log = SessionLog.create(tmp_path, session_id="notice", cwd=tmp_path)
     try:
@@ -561,14 +566,19 @@ async def test_fallback_summary_anchor_is_byte_identical_and_repeated_notices_ke
         log.flush()
         seq = log.surface_message_sequence(history[1:], dropped)
         first = await _fallback(history, log=log)
-        assert first.mode == "fallback" and first.messages[:-1] == [system, summary, *work]
-        assert first.messages[1] is summary
+        assert first.mode == "fallback" and first.messages[2:-1] == work
+        assert first.plan.cut_seq == work[0]._surface_seq
+        assert first.plan.head.content.endswith(summary.content)
+        assert first.plan.head.omitted_ranges == [(seq, seq)]
         notice = first.messages[-1]
         assert notice.runtime_kind == "compaction_notice" and notice.source == "runtime"
         assert f"seq ranges: {seq}." in notice.content and str(log.path) in notice.content
         assert "Only if continuing the current task requires" in notice.content
         assert notice.model_content().startswith("[Host runtime reference source=runtime kind=compaction_notice]")
-        log.replace_surface(first.messages[1:], turn=1, step=2)
+        # Even a notice rendered in another language must carry the same omissions forward.
+        notice.content = "Omitted session log seq ranges: 999999."
+        first.plan.head.content = "Localized fallback head"
+        log.commit_compaction(first.plan, turn=1, step=2)
         log.flush()
         request = Message(role="user", content="newest task")
         tail = Message(role="assistant", content="work after the latest request")
@@ -576,13 +586,63 @@ async def test_fallback_summary_anchor_is_byte_identical_and_repeated_notices_ke
         log.append_unlogged_messages(second_history[1:], turn=2, step=1)
         log.flush()
         second = await _fallback(second_history, log=log)
-        assert second.messages[:-1] == [system, request, tail]
+        assert second.messages[2:-1] == [request, tail]
+        assert second.plan.cut_seq == request._surface_seq
         assert second.messages[-1].content.count("could not generate a summary") == 1
-        assert second.messages[-1].content.startswith(notice.content.split("seq ranges:")[0])
-        assert str(seq) in second.messages[-1].content.split("seq ranges: ")[1].split(".")[0].split(", ")
+        assert any(lo <= seq <= hi for lo, hi in second.plan.head.omitted_ranges)
+        assert second.messages[-1].omitted_ranges == second.plan.head.omitted_ranges
+        assert "999999" not in second.messages[-1].content
         assert not context_engine._is_real_user_message(second.messages[-1])
     finally:
         log.close()
+
+
+async def test_fallback_cannot_retain_rounds_before_previous_compaction_appends(tmp_path):
+    system = Message(role="system", content="system")
+    primary = Message(role="user", content="Continue")
+    original = Message(role="user", content="Read diagram", input_facts={
+        "context": {"files": [{"name": "diagram.png", "path": "/ws/diagram.png", "mimeType": "image/png"}]},
+    })
+    old_round = _history(rounds=1, size=10)[2:4]
+    state = Message(role="user", source="runtime", compaction_node="appended", content="previous state")
+    with closing(SessionLog.create(tmp_path, session_id="fallback-cut", cwd=tmp_path)) as log:
+        log.append_unlogged_messages([original, *old_round, state, primary], turn=1, step=1)
+        history = [system, *log.replay().messages]
+        result = await _fallback(history, log=log, llm=_FallbackCounter())
+        assert result.plan.cut_seq == primary._surface_seq
+        assert result.plan.head.content.endswith(
+            "Read diagram\nAttachments: image diagram.png → /ws/diagram.png (re-open with inspect_images if needed)"
+        )
+        assert result.plan.head.omitted_ranges == [(old_round[0]._surface_seq, state._surface_seq)]
+        assert result.messages[2:-1] == [primary]
+        log.commit_compaction(result.plan, turn=1, step=2)
+        log.flush()
+        assert log.replay().messages[1]._surface_seq == primary._surface_seq
+
+
+async def test_fallback_reuses_structured_summary_and_user_after_both_cross_the_cut(tmp_path):
+    system = Message(role="system", content="system")
+    user = Message(role="user", content="Latest original")
+    state = Message(role="user", source="runtime", compaction_node="appended", content="previous state")
+    with closing(SessionLog.create(tmp_path, session_id="mixed-anchor", cwd=tmp_path)) as log:
+        hint = context_engine._session_log_hint(log, None)
+        summary = context_engine._summary_with_users("BODY", ["hidden", "visible"], [], True, hint)
+        # The renderer must use the stored body and visibility, even if an old
+        # client changed how it presented that information.
+        summary.content = "stale translated rendering"
+        log.append_unlogged_messages([summary, user, state], turn=1, step=1)
+        history = [system, *log.replay().messages]
+        first = await _fallback(history, log=log, llm=_FallbackCounter())
+        assert first.plan.head.fallback_user_count == 1
+        assert first.plan.head.earlier_user_messages == ["hidden", "visible", user.content]
+        assert first.plan.head.content.endswith(user.content)
+        assert "BODY" in first.plan.head.content and "2. visible" in first.plan.head.content
+        assert "hidden" not in first.plan.head.content and "stale" not in first.plan.head.content
+        log.commit_compaction(first.plan, turn=1, step=2)
+        log.flush()
+        second = await _fallback([system, *log.replay().messages], log=log, llm=_FallbackCounter())
+        assert second.plan.head.content == first.plan.head.content
+        assert second.plan.head.omitted_ranges == first.plan.head.omitted_ranges
 
 
 @pytest.mark.parametrize("over", [0, 1])
@@ -597,7 +657,9 @@ async def test_fallback_takes_a_contiguous_suffix_at_exactly_12000_local_tokens(
     call[1].content = "x" * (12_000 - context_engine._fallback_context_estimate(call, None, llm=llm) + over)
     history = [Message(role="system", content="system"), anchor, old, *call]
     outcome = await _fallback(history, llm=llm)
-    assert outcome.messages[:-1] == ([history[0], anchor] if over else [history[0], anchor, *call])
+    assert outcome.plan.head.earlier_user_messages == [anchor.content]
+    assert outcome.messages[2:-1] == ([] if over else call)
+    assert outcome.plan.cut_index == (len(history) if over else 3)
     assert "session.jsonl" not in outcome.messages[-1].content and "query_jsonl" not in outcome.messages[-1].content
 
 
@@ -614,10 +676,12 @@ async def test_fallback_drops_interactions_then_older_archived_users_and_preserv
     assert full.messages[-1].runtime_kind == "compaction_notice"
 
 
-async def test_fallback_without_omissions_records_latest_anchor_with_no_notice():
+async def test_fallback_embeds_a_leading_anchor_to_make_a_nonempty_replace_without_a_notice():
     history = _history(rounds=1, size=10)
     outcome = await _fallback(history)
-    assert outcome.mode == "fallback" and outcome.messages == history
+    assert outcome.mode == "fallback"
+    assert outcome.plan.cut_index == 2 and outcome.plan.head.earlier_user_messages == [history[1].content]
+    assert outcome.messages[2:] == history[2:] and not outcome.plan.appends
 
 
 async def test_fallback_reports_omission_without_directing_an_unbounded_log_search(tmp_path):
@@ -658,11 +722,19 @@ async def test_fallback_keeps_a_large_previous_anchor_outside_the_interaction_al
         first, last = (log.surface_message_sequence(history[1:], message) for message in old)
         result = await _fallback(history, llm=llm, log=log)
         assert result.mode == "fallback" and result.degradation is None
-        assert result.messages[:-1] == [system, previous, *middle, *recent, primary]
-        assert result.messages[1] is previous
+        assert result.messages[2:-1] == [*middle, *recent, primary]
+        assert previous.content in result.plan.head.content
+        assert result.plan.cut_seq == middle[0]._surface_seq
         notice = result.messages[-1]
         assert notice.runtime_kind == "compaction_notice"
         assert f"seq ranges: {first}-{last}." in notice.content and str(log.path) in notice.content
+
+
+def _expected_fallback_head(embedded_text):
+    content = "Earlier conversation context was omitted."
+    if embedded_text is not None:
+        content += "\n\n" + embedded_text
+    return Message(role="user", source="runtime", content=content)
 
 
 async def test_fallback_drops_previous_summary_users_in_order_before_dropping_its_body(tmp_path):
@@ -692,7 +764,8 @@ async def test_fallback_drops_previous_summary_users_in_order_before_dropping_it
         ]
         for retained, omitted, dropped_rounds, dropped_users in cases:
             notice = context_engine._omission_notice([omitted], log.path)
-            expected = [system, *retained, primary, notice]
+            expected_head = _expected_fallback_head(retained[0].content if retained else None)
+            expected = [system, expected_head, *retained[1:], primary, notice]
             limit = context_engine._fallback_context_estimate(expected, None, llm=llm)
             result = await _fallback(history, llm=llm, log=log, limit=limit)
             assert result.mode == "fallback"
@@ -715,10 +788,12 @@ async def test_fallback_drops_previous_real_user_as_a_whole_after_interactions()
     history = [system, previous, work, primary]
     notice = context_engine._omission_notice([], None)
     for kept, dropped_users in (([previous], 0), ([], 1)):
-        expected = [system, *kept, primary, notice]
+        expected_head = _expected_fallback_head(kept[0].content if kept else None)
+        expected = [system, expected_head, primary, notice]
         limit = context_engine._fallback_context_estimate(expected, None, llm=llm)
         result = await _fallback(history, llm=llm, limit=limit)
-        assert result.mode == "fallback" and result.messages == expected
+        assert result.mode == "fallback"
+        assert [m.content for m in result.messages] == [m.content for m in expected]
         assert result.messages[-2] is primary
         assert result.degradation == {
             "droppedRounds": 1, "droppedEarlierUsers": dropped_users,
@@ -726,7 +801,7 @@ async def test_fallback_drops_previous_real_user_as_a_whole_after_interactions()
         }
 
 
-async def test_fallback_logs_the_notice_or_latest_anchor_before_reopening(tmp_path):
+async def test_fallback_commits_one_prefix_replace_and_only_appends_a_notice_on_omission(tmp_path):
     from box_agent.runtime import run_agent_loop
 
     class Provider(_Summary):
@@ -751,12 +826,72 @@ async def test_fallback_logs_the_notice_or_latest_anchor_before_reopening(tmp_pa
         assert events[-1].stop_reason == StopReason.END_TURN
         log.close()
         with closing(SessionLog.open(tmp_path, session_id=sid, cwd=tmp_path)) as reopened:
-            (record,) = [e["data"] for e in reopened.events if e["type"] == "compaction/summary"]
-            assert (record["mode"], record["summaryPath"]) == ("fallback", "deterministic")
-            assert (record["message"].get("runtime_kind") == "compaction_notice") == omit
-            if not omit:
-                assert record["message"]["content"] == "Current task"
+            events = reopened.events
+            start = next(i for i, event in enumerate(events) if event["type"] == "compaction/start")
+            stop = next(i for i, event in enumerate(events) if event["type"] == "compaction/end")
+            changes = events[start + 1:stop]
+            assert [event["type"] for event in changes] == ["user/message"] * (1 + int(omit))
+            assert changes[0]["data"]["compaction_node"] == "fallback_head"
+            assert changes[0]["surfaceOp"]["op"] == "replace"
+            if omit:
+                assert changes[-1]["data"]["runtime_kind"] == "compaction_notice"
+                assert changes[-1]["surfaceOp"] == "append"
+            assert events[stop]["data"]["mode"] == "fallback"
+            assert events[stop]["data"]["summaryPath"] == "deterministic"
             assert reopened.replay().messages == history[1:]
+
+
+async def test_second_kernel_fallback_covers_previous_head_and_appends_and_keeps_one_original_suffix(tmp_path):
+    from box_agent.runtime import run_agent_loop
+
+    class Provider(_Summary):
+        context_window = 128_000
+        max_output_tokens = 2_048
+
+        async def generate_stream(self, messages, *, call_kind="", **kwargs):
+            if call_kind == "context_summary":
+                yield StreamEvent(type="text", delta="malformed")
+                yield StreamEvent(type="finish", finish_reason="stop")
+            else:
+                yield StreamEvent(type="text", delta="reply")
+                yield StreamEvent(type="finish", finish_reason="stop", usage=TokenUsage(total_tokens=100_000))
+
+    history = _history(rounds=2, size=10)[:-1]
+    old_call, old_result = history[-2:]
+    old_call.usage = TokenUsage(total_tokens=100_000)
+    with closing(SessionLog.create(tmp_path, session_id="twice", cwd=tmp_path)) as log:
+        provider = Provider()
+        for turn in (1, 2):
+            if turn == 2:
+                history.append(Message(role="user", content="Continue"))
+            events = [e async for e in run_agent_loop(
+                llm=provider, messages=history, tools={}, session_log=log,
+                session_turn=turn, token_limit=65_536, max_steps=1,
+            )]
+            assert events[-1].stop_reason == StopReason.END_TURN
+            assert [e.mode for e in events if isinstance(e, SummarizationEvent)] == ["fallback"]
+
+        first, second = [e for e in log.events if e["type"] == "compaction/end"]
+        first_surface = log.replay(through_seq=first["seq"]).messages
+        assert [m._surface_seq for m in first_surface[-3:-1]] == [old_call._surface_seq, old_result._surface_seq]
+        assert first_surface[-1].compaction_node == "appended"
+        start2, = [e for e in log.events[first["seq"] + 1:second["seq"]] if e["type"] == "compaction/start"]
+        before = log.replay(through_seq=start2["seq"]).messages
+        after = log.replay(through_seq=second["seq"]).messages
+        edits = [e for e in log.events[start2["seq"] + 1:second["seq"]] if "surfaceOp" in e]
+        head, notice = edits
+        assert head["surfaceOp"] == {"op": "replace", "start": first_surface[0]._surface_seq,
+                                     "end": first_surface[-1]._surface_seq}
+        assert head["sourceEventSeqs"] == [m._surface_seq for m in first_surface]
+        assert head["data"]["earlier_user_messages"] == ["Original request 1"]
+        assert notice["surfaceOp"] == "append" and notice["data"]["runtime_kind"] == "compaction_notice"
+        tail = before[len(first_surface):]
+        assert [m.content for m in tail] == ["reply", "Continue"]
+        assert all(m.compaction_node is None for m in tail)
+        assert second["data"]["cutSeq"] == tail[0]._surface_seq
+        assert [m._surface_seq for m in after[1:-1]] == [m._surface_seq for m in tail]
+        omitted = after[-1].omitted_ranges
+        assert any(lo <= old_call._surface_seq <= old_result._surface_seq <= hi for lo, hi in omitted)
 
 
 async def test_step_after_fallback_can_run_a_new_summary_in_the_same_turn():

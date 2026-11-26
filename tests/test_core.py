@@ -6740,7 +6740,9 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
     assert skip_next is False
     assert outcome.mode == "fallback"
     assert "one <summary>" in outcome.error
-    assert new_msgs[:-1] == [msgs[0], msgs[1], msgs[-1]]
+    assert new_msgs[1].compaction_node == "fallback_head"
+    assert new_msgs[1].earlier_user_messages == [msgs[1].content]
+    assert new_msgs[2:-1] == [msgs[-1]]
     assert new_msgs[-1].runtime_kind == "compaction_notice"
     assert "earlier conversation was omitted" in new_msgs[-1].content
     assert sum(len(str(m.content)) for m in new_msgs) < sum(len(str(m.content)) for m in msgs)
@@ -6768,7 +6770,8 @@ async def test_maybe_summarize_inserts_summary_marker():
     assert "brief" in new_msgs[1].content
     assert "<summary>" not in str(new_msgs[1].content)
     assert "</summary>" not in str(new_msgs[1].content)
-    assert str(new_msgs[1].content).endswith(_SUMMARY_MESSAGE_SUFFIX)
+    assert _SUMMARY_MESSAGE_SUFFIX in new_msgs[1].content
+    assert new_msgs[1].earlier_user_messages == [msgs[1].content]
     assert "solely because compaction occurred" in str(new_msgs[1].content)
     assert "use the normal user-input or decision tool" in str(
         new_msgs[1].content
@@ -6779,7 +6782,7 @@ async def test_maybe_summarize_inserts_summary_marker():
     assert "pick up the last task as if the break never happened." in str(
         new_msgs[1].content
     )
-    assert new_msgs[2:] == msgs[1:]
+    assert new_msgs[2:] == msgs[2:]
     assert all(
         sent is original
         for sent, original in zip(llm.calls[0]["messages"][:-1], msgs)
@@ -6793,8 +6796,8 @@ async def test_maybe_summarize_collapses_orphan_summary_markers():
     msgs = [
         Message(role="system", content="sys"),
         Message(role="user", content="round 0 prompt"),
-        Message(role="user", content=f"{_SUMMARY_MARKER}\n\nold summary 1"),
-        Message(role="user", content=f"{_SUMMARY_MARKER}\n\nold summary 2"),  # orphan
+        Message(role="user", source="runtime", content=f"{_SUMMARY_MARKER}\n\nold summary 1"),
+        Message(role="user", source="runtime", content=f"{_SUMMARY_MARKER}\n\nold summary 2"),  # orphan
         Message(role="user", content="round 3 prompt"),
         Message(role="assistant", content="z" * 5000),
     ]
@@ -6814,7 +6817,7 @@ async def test_second_compaction_sends_prior_summary_in_original_message_prefix(
     prior_fact = "IMPORTANT_PRIOR_FACT_42"
     msgs = [
         Message(role="system", content="sys"),
-        Message(role="user", content=f"{_SUMMARY_MARKER}\n\n{prior_fact}"),
+        Message(role="user", source="runtime", content=f"{_SUMMARY_MARKER}\n\n{prior_fact}"),
         Message(role="user", content="current request"),
         Message(role="assistant", content="new execution " * 5_000),
     ]
@@ -6844,12 +6847,12 @@ async def test_second_compaction_treats_runtime_state_as_metadata_not_real_user(
 
     real_user = Message(role="user", content="current request")
     old_runtime_state = Message(
-        role="user",
+        role="user", source="runtime",
         content="[Post-Compaction Runtime State]\n\n## Todo\nstale",
     )
     messages = [
         Message(role="system", content="sys"),
-        Message(role="user", content="[Assistant Execution Summary]\n\nold summary"),
+        Message(role="user", source="runtime", content="[Assistant Execution Summary]\n\nold summary"),
         real_user,
         Message(role="assistant", content="new execution " * 5_000),
         old_runtime_state,
@@ -7147,7 +7150,8 @@ async def test_provider_prompt_pressure_uses_one_shot_summary_and_retains_recent
 
     assert outcome.mode == "summary"
     assert outcome.messages is not None
-    assert outcome.messages[2:] == msgs[1:]
+    assert outcome.messages[1].earlier_user_messages == [latest_user.content]
+    assert outcome.messages[2:] == msgs[2:]
     assert all(
         sent is original
         for sent, original in zip(llm.calls[0]["messages"][:-1], msgs)
@@ -7370,7 +7374,7 @@ def test_latest_user_text_ignores_post_compaction_runtime_state():
         Message(role="system", content="system"),
         Message(role="user", content="继续"),
         Message(
-            role="user",
+            role="user", source="runtime",
             content="[Post-Compaction Runtime State]\n\n## Todo\nactive",
         ),
     ]

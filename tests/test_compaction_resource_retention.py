@@ -84,7 +84,8 @@ def test_same_task_or_ambiguous_continuation_keeps_method(tmp_path, new_turn):
     compacted = [history[0], Message(role='user', content='continue')]
     result = context.compact_history(history, compacted)
     assert 'ANALYSIS_BODY' in str(result)
-    assert context.compact_history(history, result) == result
+    with pytest.raises(AssertionError, match="previous Invoked Skills"):
+        context.compact_history(history, result)
     context.prepare_request(result, budget_chars=50000)
     assert context.read('analysis').raw_output['skill_reference']['reused']
 
@@ -292,7 +293,7 @@ def test_compaction_includes_updated_restored_reference_after_confirmed_delivery
     assert 'ANALYSIS_BODY' in str(request.messages)
     request.on_committed()
     request.on_response()
-    result = context.compact_history(history, history)
+    result = context.compact_history(history, history[:2])
     assert 'ANALYSIS_BODY' in result[-1].content
 
 

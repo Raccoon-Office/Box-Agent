@@ -325,9 +325,8 @@ async def test_workflow_text_in_midturn_updates_survives_fresh_edits_compaction_
         result = await _maybe_summarize(RecordingModel(), history, 20_000, 0, False, force=True, session_log=log)
         assert result.mode == "summary"
         assert injected in result.messages and runtime in result.messages
-        log.append("compaction/summary", {"mode": "summary", "message": result.messages[1].model_dump()})
-        log.replace_surface(result.messages[1:], turn=1, step=2)
-        log.append("compaction/end", {"mode": "summary"})
+        log.commit_compaction(result.plan, turn=1, step=2)
+        log.append("compaction/end", {"format": 2, "mode": "summary"})
         log.flush()
     with closing(SessionLog.open(tmp_path, session_id="workflow-text", cwd=tmp_path)) as log:
         assert log.replay().messages == result.messages[1:]
