@@ -11,13 +11,13 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar
 from uuid import uuid4
@@ -30,16 +30,38 @@ from .windows_session_lock import WINDOWS_LOCK_CONTENTION, WindowsSessionLock
 
 _log = logging.getLogger(__name__)
 _session_io_pool = ThreadPoolExecutor(thread_name_prefix="session-io")
+_session_io_worker = threading.local()
 _T = TypeVar("_T")
+
+
+def run_on_session_loop(callback: Callable[..., _T], /, *args: Any) -> _T:
+    """Run a synchronous, loop-owned callback at the same point in a session write."""
+    loop = getattr(_session_io_worker, "loop", None)
+    if loop is None:
+        return callback(*args)
+
+    async def invoke() -> _T:
+        return callback(*args)
+
+    # The caller is a disk worker. The owner loop awaits it asynchronously and
+    # remains free to run the callback, including during cancellation cleanup.
+    return asyncio.run_coroutine_threadsafe(invoke(), loop).result()
 
 
 async def run_session_io(operation: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
     """Settle file work before cancellation can release its session ownership."""
+    loop = asyncio.get_running_loop()
+
+    def run() -> _T:
+        _session_io_worker.loop = loop
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            del _session_io_worker.loop
+
     # Windows stdout uses the loop's default executor. Slow disk work must not
     # consume the threads needed to deliver a different session's notifications.
-    worker = asyncio.get_running_loop().run_in_executor(
-        _session_io_pool, copy_context().run, partial(operation, *args, **kwargs),
-    )
+    worker = loop.run_in_executor(_session_io_pool, copy_context().run, run)
     cancellation: asyncio.CancelledError | None = None
     while True:
         try:
