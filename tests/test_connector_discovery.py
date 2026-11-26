@@ -128,21 +128,57 @@ async def test_unconnected_discovery_returns_candidates_without_activating_or_gr
 
 
 @pytest.mark.asyncio
-async def test_decline_filters_unready_and_skipped_candidates_before_ranking():
+@pytest.mark.parametrize("ready_only,expected_ids", [
+    (False, ["legal-1", "legal-2", "legal-3"]),
+    (True, ["reference"]),
+])
+async def test_decline_keeps_other_candidates_unless_only_ready_capabilities_are_requested(ready_only, expected_ids):
     # The only ready alternative would normally rank behind the four exact names.
     ready_state = {"configured": True, "enabled": True, "status": "connected", "execution_ready": True}
     entries = [entry(f"legal-{index}", name="Law", description="Law", **ready_state if index == 0 else {})
                for index in range(4)]
     entries.append(entry("reference", name="Public references", description="Law", **ready_state))
     discovery, search, _, _ = search_fixture(entries, selected={"legal-0", "reference"})
-    discovery.update(snapshot(entries), skipped_connector_id="legal-0")
-    assert [item["id"] for item in discovery.search(["law"])] == ["reference"]
+    discovery.update(snapshot(entries), skipped_connector_id="legal-0", ready_only=ready_only)
+    assert [item["id"] for item in discovery.search(["law"])] == expected_ids
     result = await search.execute(query="law")
-    assert [item["id"] for item in json.loads(result.content)["connector_candidates"]] == ["reference"]
+    assert [item["id"] for item in json.loads(result.content)["connector_candidates"]] == expected_ids
     assert not discovery.permitted("legal-0")
     discovery.update(snapshot(entries))
     assert discovery.permitted("legal-0")
     assert [item["id"] for item in discovery.search(["law"])] == ["legal-0", "legal-1", "legal-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference", ["jinshuju", "金数据"])
+async def test_decline_blocks_that_connector_by_id_or_name_but_allows_another_setup(reference):
+    catalog = MCPToolCatalog()
+    tool = FakeMCPTool("mcp__jinshuju__query", "jinshuju", "查询表单", connector_id="jinshuju")
+    catalog.replace_server("jinshuju", [tool])
+    entries = [entry("jinshuju", name="金数据", kind="mcp", skills=[], configured=True,
+                     enabled=True, status="connected", execution_ready=True),
+               entry("klingai-cn", name="可灵 AI", kind="mcp", skills=[])]
+    discovery, search, manager, active = search_fixture(
+        entries, selected={"jinshuju"}, live={"jinshuju"}, catalog=catalog,
+    )
+    discovery.update(snapshot(entries), skipped_connector_id="jinshuju")
+
+    skipped = await search.execute(connector=reference)
+    payload = json.loads(skipped.content)
+    assert skipped.raw_output is None and not search.ends_turn_after_success(skipped)
+    assert not payload.get("connector_candidates") and not payload["activated"]
+    assert "this connector" in payload["notice"].lower()
+    assert "Do not request connector setup in this continuation" not in payload["notice"]
+    assert not active and not manager._stable_refs
+    assert manager.validate_call(tool.name, None, tool) is not None
+
+    following = await search.execute(connector="klingai-cn")
+    assert following.raw_output == {"type": "connector_action_required", "version": 1,
+                                    "connector_id": "klingai-cn", "action": "connect",
+                                    "state_revision": 1, "wait_for_user": True}
+    assert search.ends_turn_after_success(following)
+    assert not json.loads(following.content)["activated"]
+    assert not discovery.permitted("jinshuju") and not discovery.permitted("klingai-cn")
 
 
 @pytest.mark.asyncio
