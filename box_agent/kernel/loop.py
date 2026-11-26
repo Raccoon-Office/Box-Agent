@@ -2618,6 +2618,16 @@ async def _run_agent_loop_impl(
             yield DoneEvent(stop_reason=StopReason.MAX_TOKENS, final_content=msg)
             return
 
+        if step_budget_exhausted and not response.tool_calls and not response.content.strip():
+            # A wrap-up without a visible answer (whitespace or thinking only)
+            # is not saved; fall back to the exhausted-loop notice below.
+            elapsed = perf_counter() - step_start
+            total = perf_counter() - run_start
+            if hook_mgr.hooks:
+                await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            break
+
         # ── Append assistant message (non-truncated path) ───
         await run_session_write(session_log, commit_model_response, assistant_msg)
 
@@ -2630,9 +2640,6 @@ async def _run_agent_loop_impl(
 
         # ── No tool calls → done (or continue if injected) ──
         if not response.tool_calls:
-            if step_budget_exhausted and not response.content.strip():
-                # Reuse the exhausted-loop fallback when no summary was produced.
-                break
             if (
                 force_plan_for_turn
                 and not step_budget_exhausted
