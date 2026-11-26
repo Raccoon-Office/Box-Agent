@@ -267,6 +267,7 @@ async def _create_summary(
     strict_format: bool = False,
     tools: tuple[ToolDefinitionView, ...] | None = None,
     client_is_capped: bool = False,
+    calibration: ContextTokenCalibration | None = None,
 ) -> str:
     """Append one instruction to the exact history so provider KV cache survives."""
 
@@ -302,7 +303,7 @@ async def _create_summary(
 
         if input_token_limit is None:
             break
-        input_tokens = _fallback_context_estimate(summary_messages, budget_tools, llm=summary_llm)
+        input_tokens = _calibrated_context_estimate(summary_messages, budget_tools, llm=summary_llm, calibration=calibration)
         if input_tokens > input_token_limit:
             raise _SummaryInputBudgetExceeded("Summary request exceeds the safe input budget")
         if window is None:
@@ -358,7 +359,9 @@ async def _create_summary(
     return summary
 
 
-def _truncate_summary_source(messages: list[Message], llm: Any) -> list[Message] | None:
+def _truncate_summary_source(
+    messages: list[Message], llm: Any, calibration: ContextTokenCalibration | None = None,
+) -> list[Message] | None:
     """Drop about one fifth of the removable source, leaving protocol groups intact."""
     latest_user = next((message for message in reversed(messages) if _is_real_user_message(message)), None)
     groups: list[tuple[range, int]] = []
@@ -370,7 +373,7 @@ def _truncate_summary_source(messages: list[Message], llm: Any) -> list[Message]
         if first.source == "runtime" and first.content == _SUMMARY_TRUNCATION_MARKER:
             removed.update(group)
             continue
-        tokens = _fallback_context_estimate(messages[group.start:group.stop], None, llm=llm)
+        tokens = _calibrated_context_estimate(messages[group.start:group.stop], None, llm=llm, calibration=calibration)
         groups.append((group, tokens))
     if not groups:
         return None
@@ -497,7 +500,9 @@ def _budget_image_tokens(content: Any) -> int:
     )
 
 
-def _transient_followup_token_estimate(blocks: list[dict[str, Any]], *, llm: Any = None) -> int:
+def _transient_followup_token_estimate(
+    blocks: list[dict[str, Any]], *, llm: Any = None, calibration: ContextTokenCalibration | None = None,
+) -> int:
     """Estimate canonical request-only content without counting image base64."""
     for block in blocks:
         block_type = block.get("type")
@@ -514,7 +519,7 @@ def _transient_followup_token_estimate(blocks: list[dict[str, Any]], *, llm: Any
         ):
             raise ValueError("invalid canonical transient input_image block")
     return request_input_tokens(
-        [Message(role="user", source="runtime", content=blocks)], {}, llm=llm,
+        [Message(role="user", source="runtime", content=blocks)], {}, llm=llm, calibration=calibration,
     )
 
 
@@ -525,6 +530,7 @@ def _validate_transient_followup_result(
     llm: Any,
     token_limit: int,
     pending_token_estimate: int,
+    calibration: ContextTokenCalibration | None = None,
 ) -> tuple[ToolResult, list[dict[str, Any]] | None, int]:
     blocks = result.transient_followup_content
     if not result.success or not blocks:
@@ -553,7 +559,7 @@ def _validate_transient_followup_result(
             0,
         )
     try:
-        estimate = _transient_followup_token_estimate(blocks, llm=llm)
+        estimate = _transient_followup_token_estimate(blocks, llm=llm, calibration=calibration)
     except ValueError as exc:
         return (
             ToolResult(
@@ -693,6 +699,17 @@ class ContextTokenCalibration:
     def ratio(self, llm: Any) -> float:
         return self._ratios.get(_usage_route(llm), 1.0)
 
+    def provider_tokens(self, llm: Any, local_tokens: int) -> int:
+        return math.ceil(local_tokens * self.ratio(llm))
+
+
+def _calibrated_context_estimate(
+    messages: list[Message], tools: dict[str, Any] | None, *, llm: Any,
+    calibration: ContextTokenCalibration | None,
+) -> int:
+    local = _fallback_context_estimate(messages, tools, llm=llm)
+    return calibration.provider_tokens(llm, local) if calibration is not None else local
+
 
 def reported_input_tokens(usage: TokenUsage) -> int:
     """Read actual input tokens, returning zero when only a total is known."""
@@ -734,7 +751,6 @@ def _estimate_context_from_latest_response(
     """Prefer matched provider usage and estimate only new request material."""
 
     route = _usage_route(llm) if llm is not None else None
-    ratio = calibration.ratio(llm) if calibration is not None else 1.0
     unmatched_snapshot = False
     for index in range(len(messages) - 1, -1, -1):
         usage = messages[index].usage
@@ -771,9 +787,9 @@ def _estimate_context_from_latest_response(
                 name: tool for name, tool in (tools or {}).items()
                 if snapshot.tools.get(name) != sha256_fingerprint(tool.to_openai_schema())
             }
-            delta = (_fallback_context_estimate(unmeasured_messages, changed_tools, llm=llm)
+            delta = (_calibrated_context_estimate(unmeasured_messages, changed_tools, llm=llm, calibration=calibration)
                      if unmeasured_messages or changed_tools else 0)
-            return usage.context_tokens + math.ceil(delta * ratio), "usage"
+            return usage.context_tokens + delta, "usage"
         if usage._request_route_unverified:
             unmatched_snapshot = True
             continue
@@ -782,7 +798,7 @@ def _estimate_context_from_latest_response(
             continue
         added_messages = messages[index + 1 :]
         added_tokens = (
-            _fallback_context_estimate(added_messages, tools, llm=llm)
+            _calibrated_context_estimate(added_messages, tools, llm=llm, calibration=calibration)
             if added_messages or tools
             else 0
         )
@@ -792,7 +808,7 @@ def _estimate_context_from_latest_response(
         )
         # Without schema fingerprints, offered schemas may be new; charge
         # them conservatively without replacing the provider's usage anchor.
-        return durable_usage_tokens + math.ceil(added_tokens * ratio), "usage"
+        return durable_usage_tokens + added_tokens, "usage"
 
     # Backward-compatible low-level callers may still provide a usage total
     # without response metadata attached to a Message.
@@ -803,7 +819,7 @@ def _estimate_context_from_latest_response(
     )
     if provided_usage > 0 and not unmatched_snapshot:
         return provided_usage, "usage"
-    return _fallback_context_estimate(messages, tools, llm=llm), "fallback"
+    return _calibrated_context_estimate(messages, tools, llm=llm, calibration=calibration), "fallback"
 
 
 def _select_recent_messages(
@@ -974,7 +990,7 @@ async def _fit_compacted_history(
     original: list[Message], retained: dict[int, Message], summary: Message,
     runtime_sections: list[tuple[str, str]], *,
     llm: Any, budget_tools: dict[str, Any] | None, target: int,
-    projector: CompactedHistoryProjector | None,
+    projector: CompactedHistoryProjector | None, calibration: ContextTokenCalibration | None = None,
 ) -> tuple[list[Message], int, CompactionDegradation | None]:
     """Rebuild and measure after each removal, keeping the summary and current user."""
     degradation: CompactionDegradation = {
@@ -1009,7 +1025,7 @@ async def _fit_compacted_history(
             kwargs = {"max_skill_bodies": max_skill_bodies} if can_limit_skills else {}
             projected = projector(history, **kwargs)
             history = await projected if inspect.isawaitable(projected) else projected
-        return history, request_input_tokens(history, budget_tools, llm=llm)
+        return history, _calibrated_context_estimate(history, budget_tools, llm=llm, calibration=calibration)
 
     history, tokens = await rebuild()
     if tokens <= target:
@@ -1127,8 +1143,10 @@ async def _maybe_summarize(
     log_hint = _session_log_hint(session_log, tools)
     count_tokens = context_text_counter(llm)
     hint_tokens = count_tokens(log_hint) if log_hint else 0
-    prefix_tokens = _fallback_context_estimate(messages[:1], budget_tools, llm=llm)
-    recent_limit = max(1, min(_RECENT_GROUP_TOKEN_LIMIT, token_limit - prefix_tokens - 512 - hint_tokens))
+    prefix_tokens = _calibrated_context_estimate(messages[:1], budget_tools, llm=llm, calibration=calibration)
+    ratio = calibration.ratio(llm) if calibration is not None else 1.0
+    local_room = math.floor((token_limit - prefix_tokens - 512) / ratio) - hint_tokens
+    recent_limit = max(1, min(_RECENT_GROUP_TOKEN_LIMIT, local_room))
     try:
         retained_messages, retained_indices = _select_recent_messages(messages, llm=llm, token_limit=recent_limit)
     except InvalidToolHistory as exc:
@@ -1197,7 +1215,7 @@ async def _maybe_summarize(
                 session_id=session_id, turn_id=turn_id, title=title,
                 summary_projector=summary_projector, session_log=session_log,
                 input_token_limit=summary_input_token_limit, strict_format=strict,
-                tools=tools, client_is_capped=True,
+                tools=tools, client_is_capped=True, calibration=calibration,
             )
             if not content.strip():
                 raise _SummaryOutputInvalid("summary provider returned empty content")
@@ -1223,7 +1241,7 @@ async def _maybe_summarize(
                 if summary_calls < _SUMMARY_CALL_LIMIT - 1:
                     if ((isinstance(exc, _SummaryInputBudgetExceeded) or category == "context_length")
                             and head_retries < _SUMMARY_HEAD_RETRY_LIMIT):
-                        truncated = _truncate_summary_source(attempt_source, summary_client)
+                        truncated = _truncate_summary_source(attempt_source, summary_client, calibration)
                         if truncated is not None:
                             attempt_source = truncated
                             head_retries += 1
@@ -1270,7 +1288,7 @@ async def _maybe_summarize(
     retained = dict(zip(sorted(retained_indices), retained_messages))
     new_messages, estimated_after, degradation = await _fit_compacted_history(
         messages, retained, summary_message, runtime_sections, llm=llm,
-        budget_tools=budget_tools, target=target, projector=compacted_history_projector,
+        budget_tools=budget_tools, target=target, projector=compacted_history_projector, calibration=calibration,
     )
     if estimated_after > token_limit:
         mode = "blocked"
@@ -1354,4 +1372,5 @@ def skill_reference_budget_chars(messages: list[Message], tools: Any, token_limi
     """
     estimated = request_input_tokens(messages, tools, llm=llm, calibration=calibration)
     spare_tokens = max(0, token_limit - estimated - REQUEST_INPUT_HEADROOM_TOKENS)
-    return min(SKILL_REFERENCE_BUDGET_CHARS, spare_tokens * 4)
+    ratio = calibration.ratio(llm) if calibration is not None else 1.0
+    return min(SKILL_REFERENCE_BUDGET_CHARS, math.floor(spare_tokens / ratio) * 4)

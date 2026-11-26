@@ -90,7 +90,11 @@ class CoreVisibilityGuard(ModelInputGuard):
         self._reads[read.path] = read
 
     def _input_tokens(self, messages, definitions) -> int:
-        return request_input_tokens(messages, definitions)
+        context = self._context
+        return request_input_tokens(
+            messages, definitions, llm=context.llm if context else None,
+            calibration=context.token_calibration if context else None,
+        )
 
     async def require(self, path: str) -> CoreRead:
         if path not in self._active or path not in self._reads:
@@ -183,7 +187,7 @@ class DesktopInputGuard(CoreVisibilityGuard):
                    "tools": [tool.to_openai_schema() for tool in definitions]}
         byte_bound = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         byte_bound += sum(_budget_image_tokens(message.content) for message in messages)
-        return max(request_input_tokens(messages, definitions), byte_bound)
+        return max(super()._input_tokens(messages, definitions), byte_bound)
 
     def prepare_context(self, projection: PreparedContext) -> PreparedContext:
         if self._read_recovery_pending:

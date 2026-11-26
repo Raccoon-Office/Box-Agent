@@ -469,3 +469,54 @@ async def test_compaction_circuit_breakers_span_turns(tmp_path, summary_fails):
         assert error.error_code == "CONTEXT_COMPACTION_THRASHING"
         assert "分块读取" in error.message
         assert len(provider.main_requests) == 3
+
+
+@pytest.mark.parametrize("ratio", [1.0, 1.4])
+async def test_each_successful_request_gets_a_new_reactive_budget_in_provider_units(ratio):
+    from box_agent.context_input import DefaultContextEngine
+    from box_agent.runtime import run_agent_loop
+
+    class Echo(Tool):
+        name = "echo"
+        description = "Echo a receipt."
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs):
+            return ToolResult(success=True, content="receipt")
+
+    class Provider(_Summary):
+        main_calls = 0
+        max_output_tokens = 1_000
+
+        async def generate_stream(self, messages, *, call_kind="", **kwargs):
+            if call_kind == "context_summary":
+                async for chunk in super().generate_stream(messages, **kwargs):
+                    yield chunk
+                return
+            self.main_calls += 1
+            if self.main_calls % 2:
+                raise _ContextOverflow("maximum input length is 12000 tokens")
+            if self.main_calls < 6:
+                call = ToolCall(id=f"echo-{self.main_calls}", type="function",
+                                function=FunctionCall(name="echo", arguments={"value": self.main_calls}))
+                yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[call])
+            else:
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    class Context(DefaultContextEngine):
+        def prepare_request(self, messages, **kwargs):
+            limits.append(kwargs["token_limit"])
+            return super().prepare_request(messages, **kwargs)
+
+    llm = Provider()
+    limits = []
+    context = Context(llm=llm)
+    context.token_calibration.record(llm, int(ratio * 100), 100)
+    events = [event async for event in run_agent_loop(
+        llm=llm, messages=_history(rounds=7, size=40), tools={"echo": Echo()},
+        max_steps=3, token_limit=20_000, context_engine=context,
+    )]
+    assert events[-1].stop_reason == StopReason.END_TURN, events[-1].final_content
+    assert llm.main_calls == 6 and len(llm.requests) == 3
+    assert limits.count(12_000 - 1_000 - context_engine.REQUEST_INPUT_HEADROOM_TOKENS) == 3

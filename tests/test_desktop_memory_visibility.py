@@ -89,6 +89,22 @@ async def test_utf8_full_read_at_the_real_conservative_budget_boundary(monkeypat
     assert await guard.require(record.path) is record
 
 
+@pytest.mark.parametrize("desktop", [True, False])
+async def test_memory_read_admission_uses_the_bound_route_ratio(desktop):
+    record = read_record(text="x" * 1_500)
+    model = SimpleNamespace(model="metered", estimate_text_tokens=lambda text: len(text.encode("utf-8")))
+    guard = DesktopInputGuard(lambda *args: None, lambda _: "") if desktop else CoreVisibilityGuard(lambda *args: None)
+    engine = DefaultContextEngine(llm=model)
+    engine.configure_run()
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    messages = [Message(role="system", content="base"), Message(role="user", content="remember")]
+    engine.prepare_request(messages, prepared_tools=prepare_tools([]), token_limit=3_100)
+    guard.admit(record)
+    engine.token_calibration.record(model, 1400, 1000)
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(record)
+
+
 async def test_successful_http_read_alone_never_qualifies_mutation(bound):
     guard, _, _, _ = bound
     record = read_record()

@@ -58,6 +58,7 @@ from ..events import (
 from .context_engine import (
     ContextTokenCalibration,
     REQUEST_INPUT_HEADROOM_TOKENS,
+    _calibrated_context_estimate,
     _estimate_context_from_latest_response,
     _fallback_context_estimate,
     _is_real_user_message,
@@ -1060,7 +1061,7 @@ async def _run_agent_loop_impl(
     def validate_followup(result, tool, pending):
         accepted, blocks, tokens = _validate_transient_followup_result(
             result=result, tool=tool, llm=llm, token_limit=token_limit,
-            pending_token_estimate=pending,
+            pending_token_estimate=pending, calibration=calibration,
         )
         if blocks and context_engine is not None:
             context_engine.reserve_followup(blocks)
@@ -1516,10 +1517,10 @@ async def _run_agent_loop_impl(
             if pending_transient_followup_blocks
             else None
         )
-        extra_tokens = (request_input_tokens(request_context_messages, {}, llm=llm)
+        extra_tokens = (request_input_tokens(request_context_messages, {}, llm=llm, calibration=calibration)
                         if request_context_messages else 0)
         transient_tokens = (max(pending_transient_followup_tokens,
-            request_input_tokens([transient_message], {}, llm=llm)) if transient_message is not None else 0)
+            request_input_tokens([transient_message], {}, llm=llm, calibration=calibration)) if transient_message is not None else 0)
         history_token_limit = max(
             1,
             token_limit - extra_tokens - transient_tokens,
@@ -2210,14 +2211,17 @@ async def _run_agent_loop_impl(
                         reactive_compaction_attempts += 1
                         if type(reported_window) is int:
                             reactive_window = min(reported_window, reactive_window or reported_window)
-                        projected_tokens = (
-                            projected_input_tokens(projection)
-                            if context_engine is not None else request_local_input_tokens
+                        # The failed request may just have changed the route ratio. Recount
+                        # its projected input on the same scale as the durable history.
+                        projected_tokens = request_input_tokens(
+                            provider_request_messages, budget_tools_by_name, llm=llm, calibration=calibration,
                         )
-                        fixed_tokens = _fallback_context_estimate(messages[:1], budget_tools_by_name, llm=llm)
+                        fixed_tokens = _calibrated_context_estimate(
+                            messages[:1], budget_tools_by_name, llm=llm, calibration=calibration,
+                        )
                         log_hint = _session_log_hint(session_log, tools)
                         if log_hint:
-                            fixed_tokens += context_text_counter(llm)(log_hint)
+                            fixed_tokens += calibration.provider_tokens(llm, context_text_counter(llm)(log_hint))
                         history_tokens = request_input_tokens(messages, budget_tools_by_name, llm=llm,
                                                              calibration=calibration)
                         request_reserve = max(extra_tokens + transient_tokens, projected_tokens - history_tokens)
@@ -2228,9 +2232,8 @@ async def _run_agent_loop_impl(
                                 configured_max_output if type(configured_max_output) is int else 0,
                                 OUTPUT_RESERVE_CAP_TOKENS,
                             )
-                            observed_room = (reactive_window - output_reserve - REQUEST_INPUT_HEADROOM_TOKENS
-                                             ) / calibration.ratio(llm)
-                            reactive_input_limit = max(1, min(token_limit, int(observed_room)))
+                            observed_room = reactive_window - output_reserve - REQUEST_INPUT_HEADROOM_TOKENS
+                            reactive_input_limit = max(1, min(token_limit, observed_room))
                             tightened_limit = min(tightened_limit, reactive_input_limit - request_reserve)
                         tightened_limit = max(1, min(tightened_limit, history_token_limit))
                         result, summarization_event = await compact_context(
@@ -2362,6 +2365,8 @@ async def _run_agent_loop_impl(
         if advance_step:
             continue
 
+        # A completed provider response starts a new reactive retry budget, even without usage.
+        reactive_compaction_attempts = 0
         # ── Token tracking ──────────────────────────────────
         if response.usage:
             api_total_tokens = response.usage.total_tokens

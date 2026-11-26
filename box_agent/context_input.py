@@ -221,7 +221,9 @@ class DefaultContextEngine:
             limit = self._token_limit if token_limit is None else min(self._token_limit, token_limit)
 
             def budget(messages: list[Message]) -> int:
-                return skill_reference_budget_chars(messages, definitions, limit, llm=self.llm) // 4
+                return skill_reference_budget_chars(
+                    messages, definitions, limit, llm=self.llm, calibration=self.token_calibration,
+                ) // 4
 
             kwargs = {} if defer_skill_budget else {"budget_tokens": budget}
             compacted = self.references.compact_history(
@@ -382,7 +384,7 @@ class DefaultContextEngine:
             extra_messages = (*extra_messages, correction_context)
         self._extra_messages = (*extra_messages, *request_tail)
         self._token_limit, self._output_tokens = token_limit, output_tokens
-        transient_input_tokens = (request_input_tokens([transient_message], {}, llm=self.llm)
+        transient_input_tokens = (request_input_tokens([transient_message], {}, llm=self.llm, calibration=self.token_calibration)
                                   if transient_message is not None else 0)
         self._transient_tokens = (max(transient_tokens, transient_input_tokens)
                                   if transient_message is not None else 0)
@@ -436,7 +438,7 @@ class DefaultContextEngine:
             blocked_reason = projection.blocked_reason
             budget_blocked = projection.budget_blocked
             reader_required = projection.reader_required
-            required_reference_tokens = projection.required_reference_tokens
+            required_reference_tokens = self.token_calibration.provider_tokens(self.llm, projection.required_reference_tokens)
             on_committed = projection.on_committed
             on_response = projection.on_response
             self._request_reference_tokens = projection.input_tokens
@@ -459,13 +461,14 @@ class DefaultContextEngine:
                     acknowledge()
 
                 on_committed = commit_materialized
-        actual_input_tokens = base_input_tokens + self._request_reference_tokens
+        reference_tokens = self.token_calibration.provider_tokens(self.llm, self._request_reference_tokens)
+        actual_input_tokens = base_input_tokens + reference_tokens
         if getattr(self.references.runtime if self.references else None, "append_only_context", False):
             actual_input_tokens = request_input_tokens(
                 [*context_messages, *request_tail],
                 prepared_tools.definitions, llm=self.llm, calibration=self.token_calibration,
             ) + self._transient_reserve_tokens
-        total_input_tokens = max(base_input_tokens + self._request_reference_tokens, actual_input_tokens)
+        total_input_tokens = max(base_input_tokens + reference_tokens, actual_input_tokens)
         if not blocked_reason and total_input_tokens > token_limit:
             blocked_reason = "Model input exceeds the safe context budget. Compact context before retrying."
             budget_blocked = True
@@ -554,8 +557,8 @@ class DefaultContextEngine:
         projection = PreparedContext(
             provider_messages, context_messages, references,
             self._request_reference_tokens,
-            self._request_reference_tokens + self._transient_tokens
-            + (image_projection.input_tokens if image_projection else 0),
+            reference_tokens + self._transient_tokens
+            + (self.token_calibration.provider_tokens(self.llm, image_projection.input_tokens) if image_projection else 0),
             blocked_reason, on_committed, budget_blocked, on_response,
             reader_required,
             image_projection.manifest if image_projection else None,

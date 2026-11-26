@@ -98,7 +98,7 @@ def test_total_only_usage_still_includes_assistant_tokens_after_replay(tmp_path)
 
 
 @pytest.mark.parametrize(("actual", "ratio"), [(10, 0.5), (150, 1.5), (260, 2.0)])
-def test_calibration_uses_real_inputs_per_route_and_scales_only_delta(actual, ratio):
+def test_calibration_scales_local_estimates_without_rescaling_measured_usage(actual, ratio):
     route = _llm("primary")
     other = _llm("secondary")
     calibration = ContextTokenCalibration()
@@ -120,7 +120,7 @@ def test_calibration_uses_real_inputs_per_route_and_scales_only_delta(actual, ra
     assert source == "usage"
     assert estimate == actual + 10 + math.ceil(local_delta * ratio)
     assert _estimate_context_from_latest_response([initial], None, llm=route, calibration=calibration) == (
-        _fallback_context_estimate([initial], None), "fallback",
+        math.ceil(_fallback_context_estimate([initial], None) * ratio), "fallback",
     )
 
 
@@ -203,3 +203,27 @@ async def test_openai_stream_usage_anchors_cached_and_total_only_responses(usage
         usage._request_snapshot = capture_request_usage([initial], 1, [], client)
         assert _estimate_context_from_latest_response([initial, reply], None, llm=client) == (1_230, "usage")
         assert reported_input_tokens(usage) == usage_fields.get("prompt_tokens", 0)
+
+
+@pytest.mark.asyncio
+async def test_rebuilt_history_without_usage_is_charged_in_provider_tokens():
+    from box_agent.kernel.context_engine import _maybe_summarize, request_input_tokens
+    from tests.test_context_compaction_recovery import _Summary
+
+    llm = _Summary()
+    history = [
+        Message(role="system", content="system"), Message(role="user", content="request"),
+        Message(role="assistant", content="証拠" * 900), Message(role="assistant", content="done"),
+    ]
+    full = await _maybe_summarize(llm, history, 20_000, 0, False, force=True)
+    local = _fallback_context_estimate(full.messages, None, llm=llm)
+    calibration = ContextTokenCalibration()
+    calibration.record(llm, 140, 100)
+    assert request_input_tokens(full.messages, {}, llm=llm, calibration=calibration) == math.ceil(local * 1.4)
+    result = await _maybe_summarize(
+        llm, history, 20_000, 0, False, force=True, calibration=calibration,
+        request_headroom_tokens=20_000 - local,
+    )
+    assert result.degradation["droppedRounds"] == 1
+    assert result.estimated_after == math.ceil(_fallback_context_estimate(result.messages, None, llm=llm) * 1.4)
+    assert result.estimated_after <= local
