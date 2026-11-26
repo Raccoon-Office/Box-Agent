@@ -72,7 +72,7 @@ BUILD_TOOLS_CACHE = Path.home() / ".cache" / "box-agent-build-tools"
 # Mutable per-user configuration is never part of a published runtime.
 _RUNTIME_CONFIG_FILES = frozenset({
     "config-example.yaml", "isolated-profile-example.yaml", "mcp-example.json",
-    "system_prompt.md", "analysis_prompt.md", "code_prompt.md",
+    "system_prompt.md", "analysis_prompt.md", "code_prompt.md", "memory_block_default.md",
 })
 _RUNTIME_RESOURCE_JUNK = frozenset({
     "node_modules", "__pycache__", ".git", ".venv", "venv", ".pytest_cache",

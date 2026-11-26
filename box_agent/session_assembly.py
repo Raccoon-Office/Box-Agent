@@ -352,16 +352,21 @@ async def prepare_tools(resources: SessionResources) -> None:
 
 async def _prepare_memory_prompt(resources: SessionResources, prompt: str) -> str:
     """共享槽位装配只负责位置，具体内容仍由现有 memory 能力提供。"""
-    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block, uses_memory_history
+    from .memory import (
+        ExternalMemoryBackend, MEMORY_BLOCK_SLOT, MEMORY_CONTEXT_SLOT, place_memory_block, uses_memory_history,
+    )
 
     manager = resources.memory_manager
     if resources.context.options.utility or manager is None:
-        return prompt.replace(MEMORY_CONTEXT_SLOT, "")
+        return (place_memory_block(prompt, "") if MEMORY_BLOCK_SLOT in prompt
+                else prompt.replace(MEMORY_CONTEXT_SLOT, ""))
     if uses_memory_history(manager):
         # 迁移宿主传入的旧记忆块，避免其留在固定系统前缀中。
         return place_memory_block(prompt, "")
     external = isinstance(manager, ExternalMemoryBackend)
-    if _prepared(resources) and not external and MEMORY_CONTEXT_SLOT not in prompt:
+    if _prepared(resources) and not external and not any(
+        slot in prompt for slot in (MEMORY_BLOCK_SLOT, MEMORY_CONTEXT_SLOT)
+    ):
         # 已装配宿主继续拥有本地提示，仅在显式给出新槽位时填充。
         return prompt
     memory = await asyncio.to_thread(manager.recall)
@@ -681,6 +686,7 @@ _MODE_PROMPT_MAP = {
 
 def _child_prompt_template(template: str) -> str:
     """Project only the packaged template before mixing in caller content."""
+    from .memory import MEMORY_BLOCK_SLOT, MEMORY_CONTEXT_SLOT, place_memory_block
     from .tools.skill_loader import SKILL_SLOT_SENTINEL
 
     packaged = (Config.get_bundled_config_dir() / "system_prompt.md").read_text(encoding="utf-8")
@@ -691,7 +697,8 @@ def _child_prompt_template(template: str) -> str:
         end = template.index("</workflow>", start) + len("</workflow>")
         template = template[:start] + template[end:]
     # These are builder-owned insertion slots, never a search over user data.
-    return template.replace("{SKILLS_METADATA}", "").replace("{MEMORY_CONTEXT}", "")
+    template = template.replace("{SKILLS_METADATA}", "").replace(MEMORY_CONTEXT_SLOT, "")
+    return place_memory_block(template, "") if MEMORY_BLOCK_SLOT in template else template
 
 
 def _compose_session_prompt(
@@ -720,7 +727,12 @@ def _compose_session_prompt(
     unknown) gates tool-specific guidance so the prompt never instructs the
     model to call a tool this session lacks.
     """
+    from .memory import MEMORY_BLOCK_SLOT, place_memory_block
+
     child_template = _child_prompt_template(template) if child_prompt_segments is not None else ""
+    if MEMORY_BLOCK_SLOT in template:
+        # 组装基础提示时先渲染规则。实际模型请求再填入当天记忆正文。
+        template = place_memory_block(template, "")
     if skills_slot:
         from .tools.skill_loader import SKILL_SLOT_SENTINEL
 

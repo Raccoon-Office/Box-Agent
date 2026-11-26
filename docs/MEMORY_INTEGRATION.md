@@ -136,21 +136,26 @@ exists=false 时只允许 write 创建，不允许 edit。
 
 ### 自动记忆的注入位置
 
-六种内置后端把自动预载的记忆追加到实际发给模型的 `system` 消息。
+六种内置后端把自动预载的记忆放入实际发给模型的 `system` 消息。
+内置 system prompt 用 `{MEMORY_BLOCK}` 指定位置，默认模板
+`box_agent/config/memory_block_default.md` 提供 `Memory Rules` 和 `Memory Content`。
+后端提供的记忆正文填入 `{MEMORY_CONTENT}`。例如 `local` 的正文包含核心记忆和搜索路由摘要，
+直连 `memsense` 和 `desktop` 的正文保留各自的分区。自定义提示可使用同一占位符指定位置，
+旧模板继续支持原有的正文注入方式。
 新会话首轮或按 Box-Agent 运行环境的本地日期跨天后首轮加载。同一会话当天复用同一份正文，
-当天重新打开会话时从 Session Log 恢复。确认空结果时，system prompt 省略记忆块。
-首次加载失败时记录日志，当天运行中的会话省略该范围的记忆，同日重新打开可再次尝试。
+当天重新打开会话时从 Session Log 恢复。当正文为空、记忆关闭或 Desktop 授权不可用时，
+默认模板仍提供记忆规则，`Memory Content` 留空。首次加载失败只记录日志，
+当天运行中的会话留空该范围的记忆，同日重新打开可再次尝试。
 历史压缩会排除自动记忆，新模型请求会继续使用当天的快照。旧版追加的自动记忆用户消息
 会从模型请求和摘要中滤掉。自动记忆快照也不会作为用户发言提交到记忆后端。
 
 `local` 预载 `MEMORY.md` 和 `memory_summary.md`，按记忆目录隔离。按问题自动匹配的项目经验
 仍是本轮请求上下文。`desktop` 每轮调用宿主的 `context` 接口确认当前授权和来源。
-授权不可用时本轮省略记忆块，切换到新授权范围时加载该范围当天的快照。模型预算不足时
-也可能临时省略记忆块。
+授权不可用时本轮留空记忆正文，切换到新授权范围时加载该范围当天的快照。模型预算不足时
+也可能临时省略正文。
 
 `generic`、`mem0` 和 `memu` 配置 `recall` 后才加载，外部请求使用各自的 HTTP 映射。
-快照按后端、身份和召回连接配置隔离。内置后端会移除旧提示模板中的 `{MEMORY_CONTEXT}` 及旧记忆块。
-默认 system prompt 的 `Memory Rules` 约束回复和产物中的记忆表述。
+快照按后端、身份和召回连接配置隔离。默认模板的 `Memory Rules` 约束回复和产物中的记忆表述。
 
 MemSense 块包含 `User Profile`、`Long-term Memory`、`Recent Date Memory`
 三个非空分区及使用规则。日期按旧到新排列，

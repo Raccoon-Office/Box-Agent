@@ -265,7 +265,9 @@ async def test_compaction_keeps_memory_in_system_and_out_of_the_summary(tmp_path
     if backend_type == "generic":
         settings.memory_external.recall = MemoryHttpOperation(path="/context", response_path="text")
         memory_http.handler = lambda request, payload: httpx.Response(200, json={"text": memory_http.profile})
-    session, llm = await managed_session(tmp_path, settings, llm=SummaryLLM("最终回答"))
+    session, llm = await managed_session(
+        tmp_path, settings, llm=SummaryLLM("最终回答"), prompt="前置规则\n{MEMORY_BLOCK}\n后置规则",
+    )
     session.agent.token_limit = 104_400
     try:
         if backend_type == "local":
@@ -281,6 +283,12 @@ async def test_compaction_keeps_memory_in_system_and_out_of_the_summary(tmp_path
         await run(session, "继续任务", "run-2")
         system = llm.requests[-1]["messages"][0]
         assert "用户偏好中文" in system.content
+        assert system.content.count("## Memory Rules") == 1
+        assert (
+            system.content.index("## Memory Content")
+            < system.content.index("用户偏好中文")
+            < system.content.index("后置规则")
+        )
         assert not history_snapshots(llm.requests[-1]["messages"])
         session.agent.messages.extend([
             Message(role="user", content="先完成一次运行"),
@@ -292,7 +300,8 @@ async def test_compaction_keeps_memory_in_system_and_out_of_the_summary(tmp_path
         assert not any("用户偏好中文" in str(msg.content) for msg in llm.summary_messages)
         assert not any("上个版本追加的快照" in str(msg.content) for msg in llm.summary_messages)
         assert llm.requests[-1]["messages"][0] == system
-        assert "用户偏好中文" not in session.agent.messages[0].content
+        durable = session.agent.messages[0].content
+        assert "## Memory Content\n后置规则" in durable and "用户偏好中文" not in durable
         await run(session, "继续下一轮", "run-4")
         assert llm.requests[-1]["messages"][0] == system
     finally:
@@ -592,11 +601,13 @@ async def test_shared_prompt_slot_respects_local_and_disabled_sessions(tmp_path,
     """三种宿主和旧资源装配路径使用同一个槽位规则，关闭后不泄漏占位符。"""
     config = session_config(tmp_path)
     config.agent = backend_settings(tmp_path) if mode == "memsense" else AgentConfig(
-        enable_memory=mode != "disabled", memory_dir=str(tmp_path / "memory"), enable_memory_extraction=False)
+        enable_memory=mode != "disabled", memory_dir=str(tmp_path / "memory"),
+        enable_memory_extraction=False, memory_maintainer_enabled=False)
     backend = create_memory_backend(config.agent)
     if mode == "local":
         backend.write_core("原有本地记忆")
-    prompt = "之前\n{MEMORY_CONTEXT}\n之后"
+        backend.write_context("项目规则来自本地搜索索引", topic="project")
+    prompt = "之前\n{MEMORY_BLOCK}\n之后"
     llm = RecordingLLM()
     session = await AgentSession.open(config=config, host=HostBindings(
         llm_client=llm, system_prompt=prompt, tools=[] if prepared else None,
@@ -604,13 +615,16 @@ async def test_shared_prompt_slot_respects_local_and_disabled_sessions(tmp_path,
     ), options=SessionOptions(workspace_dir=tmp_path, profile=profile, utility=mode == "utility"))
     try:
         result = session.agent.system_prompt
-        assert "{MEMORY_CONTEXT}" not in result
+        assert "{MEMORY_BLOCK}" not in result and "{MEMORY_CONTENT}" not in result
+        assert result.count("## Memory Rules") == 1
+        assert "## Memory Content\n之后" in result
         if mode == "local":
             assert result.index("之前") < result.index("之后")
             assert "原有本地记忆" not in result
             await run(session, "使用本地记忆")
             snapshot = llm.requests[-1]["messages"][0]
             assert snapshot.role == "system" and "[Core Memory]" in snapshot.content
+            assert "[Memory Search Routing]" in snapshot.content and "`project`" in snapshot.content
             assert "原有本地记忆" in snapshot.content and not history_snapshots(session.agent.messages)
         else:
             assert "--- MEMORY START ---" not in result
@@ -626,6 +640,18 @@ def test_explicit_memory_slot_takes_precedence_over_old_blocks():
     prompt = f"前{old}中{{MEMORY_CONTEXT}}后{{MEMORY_CONTEXT}}"
     assert place_memory_block(prompt, block) == f"前中{block}后"
     assert place_memory_block(f"前{old}后", block) == f"前{block}后"
+
+
+def test_empty_memory_content_keeps_rules_and_the_text_after_the_slot():
+    """历史快照中的同名槽位只是正文，清理时保留模板规则和后置提示。"""
+    prompt = "前置\n{MEMORY_BLOCK}\n后置"
+    empty = place_memory_block(prompt, "")
+    old_snapshot = "--- MEMORY START ---\n旧快照 {MEMORY_BLOCK}\n--- MEMORY END ---"
+    populated = place_memory_block(empty, old_snapshot)
+
+    assert "## Memory Content\n--- MEMORY START ---" in populated
+    assert populated.endswith("\n后置")
+    assert place_memory_block(populated, "") == empty
 
 
 @pytest.mark.asyncio

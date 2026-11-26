@@ -636,7 +636,7 @@ async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_tu
     model = RecordingLLM()
     log = SessionLog.create(tmp_path / "logs", session_id="session-1", cwd=tmp_path)
     session = await AgentSession.open(config=config, host=HostBindings(
-        llm_client=model, memory_manager=manager, tools=[], system_prompt="BASE", session_log=log,
+        llm_client=model, memory_manager=manager, tools=[], system_prompt="BASE\n{MEMORY_BLOCK}", session_log=log,
     ), options=SessionOptions(workspace_dir=tmp_path, profile="acp"))
 
     async def turn(number):
@@ -645,6 +645,8 @@ async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_tu
         assert (await handle.result()).status.value == "completed"
         messages = model.requests[-1]["messages"]
         assert messages[0].role == "system"
+        assert messages[0].content.count("## Memory Rules") == 1
+        assert "## Memory Content" in messages[0].content
         assert not any(is_memory_history_message(message) for message in messages)
         return messages[0].content
 
@@ -673,8 +675,13 @@ async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_tu
         host.sections = {"profile": {"content": "不同授权的画像"}}
         new_scope = await turn(8)
         assert "不同授权的画像" in new_scope and "更新后的桌面画像" not in new_scope
+        host.source = "unavailable"
+        empty = await turn(9)
+        assert "## Memory Content" in empty and "--- MEMORY START ---" not in empty
+        assert "不同授权的画像" not in empty
+        host.source = "cloud"
         host.automatic = False
-        assert "--- MEMORY START ---" not in await turn(9)
+        assert await turn(10) == empty
         snapshots = [event["data"] for event in log.events_of_type("memory/system-snapshot")]
         assert len(snapshots) == 3
         assert [row["day"] for row in snapshots] == ["2026-11-26", "2026-11-27", "2026-11-27"]

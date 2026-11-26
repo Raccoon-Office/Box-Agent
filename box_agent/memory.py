@@ -22,7 +22,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from functools import wraps
+from functools import lru_cache, wraps
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
@@ -2998,6 +2998,8 @@ class MemoryExtractor:
 # 外部后端仍属于现有 memory 能力；生命周期和传输不进入稳定内核。
 _MEMORY_HTTP_REQUEST: ContextVar[bool] = ContextVar("memory_http_request", default=False)
 MEMORY_CONTEXT_SLOT = "{MEMORY_CONTEXT}"
+MEMORY_BLOCK_SLOT = "{MEMORY_BLOCK}"
+_MEMORY_CONTENT_SLOT = "{MEMORY_CONTENT}"
 _MEMORY_START = "--- MEMORY START ---"
 _MEMORY_END = "--- MEMORY END ---"
 _MEMORY_BLOCK_RE = re.compile(
@@ -3188,7 +3190,7 @@ def uses_memory_history(manager: Any) -> bool:
 
 def _escape_memory_boundaries(content: str) -> str:
     # 正文里的边界保留为普通文本，保证压缩时可以完整移除记忆区块。
-    for marker in (_MEMORY_START, _MEMORY_END, MEMORY_CONTEXT_SLOT,
+    for marker in (_MEMORY_START, _MEMORY_END, MEMORY_CONTEXT_SLOT, MEMORY_BLOCK_SLOT, _MEMORY_CONTENT_SLOT,
                    "--- EXTERNAL MEMORY START ---", "--- EXTERNAL MEMORY END ---"):
         content = content.replace(marker, "[记忆边界]")
     return content
@@ -3200,8 +3202,32 @@ def external_memory_block(content: str, limit: int) -> str:
             + content + f"\n{_MEMORY_END}") if content.strip() else ""
 
 
+@lru_cache(maxsize=1)
+def _default_memory_block_template() -> str:
+    """读取随运行时发布的默认记忆模板。"""
+    from .config import Config
+
+    return (Config.get_bundled_config_dir() / "memory_block_default.md").read_text(encoding="utf-8")
+
+
 def place_memory_block(prompt: str, block: str, *, reserve: bool = False) -> str:
-    """在模板指定位置更新记忆；空槽保留边界，旧模板仍可自动追加。"""
+    """在指定位置渲染记忆块，兼容旧模板的正文槽位和追加方式。"""
+    template = _default_memory_block_template()
+    # 基础提示保存已渲染的空模板。只替换该位置紧跟的正文，移除正文时保留规则。
+    empty = template.replace(_MEMORY_CONTENT_SLOT, "", 1).rstrip()
+    if empty in prompt:
+        before, _, after = prompt.partition(empty)
+        existing = _MEMORY_BLOCK_RE.match(after, len(after) - len(after.lstrip("\n")))
+        if existing is not None:
+            after = after[existing.end():]
+        return before + template.replace(_MEMORY_CONTENT_SLOT, block, 1).rstrip() + after
+    if MEMORY_BLOCK_SLOT in prompt:
+        cleaned = _MEMORY_BLOCK_RE.sub("", prompt).replace(MEMORY_CONTEXT_SLOT, "")
+        before, slot, after = cleaned.partition(MEMORY_BLOCK_SLOT)
+        if slot:
+            rendered = template.replace(_MEMORY_CONTENT_SLOT, block, 1).rstrip()
+            return before + rendered + after.replace(MEMORY_BLOCK_SLOT, "")
+
     replacement = block or (f"{_MEMORY_START}\n{_MEMORY_END}" if reserve else "")
     if MEMORY_CONTEXT_SLOT in prompt:
         # 显式占位优先，清除旧块和重复占位，避免记忆不断累积。
