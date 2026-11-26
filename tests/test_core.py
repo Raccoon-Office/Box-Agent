@@ -3391,25 +3391,81 @@ async def test_cancellation_interrupts_opted_in_event_tool():
 
 
 @pytest.mark.asyncio
-async def test_max_steps():
-    """Reaching max_steps yields Done(MAX_STEPS)."""
-    # Each response has a tool call, so the loop continues
+@pytest.mark.parametrize("max_steps", [1, 3])
+async def test_max_steps_requests_and_persists_summary_with_existing_tools(tmp_path, max_steps):
+    """Exhausted work gets one summary request without claiming completion."""
+    class SummaryLLM(CapturingStreamLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if self._idx == max_steps:
+                assert [tool.name for tool in tools] == ["echo"]
+                assert "步数预算已用尽" in messages[-1].content
+            async for event in super().generate_stream(messages, tools=tools, **kwargs):
+                yield event
+
     responses = [
         LLMResponse(
             content="",
             tool_calls=[ToolCall(id=f"t{i}", type="function", function=FunctionCall(name="echo", arguments={"text": str(i)}))],
             finish_reason="tool",
         )
-        for i in range(3)
+        for i in range(max_steps)
     ]
-    llm = MockLLM(responses)
+    summary = "已完成初步检查；还有两项未验证，结果保存在已有记录中。"
+    responses.append(LLMResponse(content=summary, finish_reason="stop"))
+    llm = SummaryLLM(responses)
+    messages = _msgs()
+    log = SessionLog.create(tmp_path / "sessions", session_id="step-summary", cwd=tmp_path)
+    log.append("turn/start", {"turn": 1})
+    log.append_unlogged_messages(messages[1:], turn=1, step=None)
     events = await collect(
-        run_agent_loop(llm=llm, messages=_msgs(), tools={"echo": EchoTool()}, max_steps=3)
+        run_agent_loop(
+            llm=llm, messages=messages, tools={"echo": EchoTool()},
+            max_steps=max_steps, max_tool_calls=max_steps, session_log=log, session_turn=1,
+            workspace_dir=str(tmp_path),
+        )
     )
 
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert len(done) == 1
     assert done[0].stop_reason == StopReason.MAX_STEPS
+    assert done[0].final_content == summary
+    assert llm._idx == max_steps + 1
+    assert any(isinstance(e, ContentEvent) and summary in e.content for e in events)
+    assert any(m.role == "assistant" and m.content == summary for m in log.replay().messages)
+    assert all(e.step <= e.max_steps for e in events if isinstance(e, StepStart))
+    log.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requests_tool", [False, True])
+async def test_step_summary_does_not_retry_or_execute_more_tools(requests_tool):
+    """An empty/invalid wrap-up stays bounded and leaves valid tool history."""
+    llm = CapturingStreamLLM([
+        LLMResponse(content="", tool_calls=_echo_tool_calls(1), finish_reason="tool_calls"),
+        LLMResponse(
+            content="", thinking="Cannot finish.",
+            tool_calls=_echo_tool_calls(2)[1:] if requests_tool else None,
+            finish_reason="tool_calls" if requests_tool else "stop",
+        ),
+    ])
+    echo = CountingEchoTool()
+    messages = _msgs()
+    events = await collect(run_agent_loop(
+        llm=llm, messages=messages, tools={"echo": echo}, max_steps=1,
+    ))
+    assert echo.calls == 1
+    assert llm._idx == 2
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert len(done) == 1
+    if requests_tool:
+        rejected = [e for e in events if isinstance(e, ToolCallResult)][-1]
+        assert not rejected.success
+        assert "步数预算已用尽" in rejected.error
+        assert messages[-1].role == "tool"
+        assert messages[-1].tool_call_id == "t1"
+    assert done[0].stop_reason == StopReason.MAX_STEPS
+    assert done[0].final_content == "Task couldn't be completed after 1 steps."
+    assert not any(isinstance(event, ErrorEvent) for event in events)
 
 
 @pytest.mark.asyncio

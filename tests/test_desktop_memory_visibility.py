@@ -559,7 +559,7 @@ async def test_real_kernel_qualifies_only_the_full_read_seen_by_successful_model
         # upper bound (~45 KB), including request framing and headroom.
         tools={"memory_read": Reader()}, memory_manager=lookup, max_steps=2, token_limit=60000,
         truncation_continuation_enabled=False, logger=None)]
-    assert len(provider.requests) == 2
+    assert len(provider.requests) == (3 if result_kind == "truncated" else 2)
     if result_kind == "success":
         assert await guard.require(record.path) is record
     else:

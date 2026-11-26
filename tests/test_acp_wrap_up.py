@@ -39,6 +39,7 @@ class Model:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.requests = []
+        self.summary = "Saved results; remaining work is documented."
 
     async def generate_stream(self, messages, tools=None, **kwargs):
         self.requests.append([message.model_copy(deep=True) for message in messages])
@@ -51,18 +52,40 @@ class Model:
                 )),
             ])
         else:
-            yield StreamEvent(type="text", delta="Saved results; remaining work is documented.")
+            yield StreamEvent(type="text", delta=self.summary)
             yield StreamEvent(type="finish", finish_reason="stop")
 
 
-def make_agent(tmp_path):
+def make_agent(tmp_path, *, max_steps=4):
     config = Config(
         llm=LLMConfig(api_key="test"),
-        agent=AgentConfig(max_steps=4, workspace_dir=str(tmp_path), goal_autopilot_max_turns=2),
+        agent=AgentConfig(max_steps=max_steps, workspace_dir=str(tmp_path), goal_autopilot_max_turns=2),
         tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
     )
     model, conn = Model(), Conn()
     return BoxACPAgent(conn, config, model, [CheckTool()], "system"), model, conn
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_summary", [False, True])
+async def test_step_budget_delivers_summary_and_preserves_limit_stop_reason(tmp_path, empty_summary):
+    agent, model, conn = make_agent(tmp_path, max_steps=1)
+    if empty_summary:
+        model.summary = ""
+    model.release.set()
+    try:
+        session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
+        response = await asyncio.wait_for(agent.prompt(**acp_params(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "Check the report"}],
+        ))), 5)
+        assert len(model.requests) == 2
+        assert "步数预算已用尽" in str(model.requests[-1])
+        if not empty_summary:
+            assert model.summary in str(conn.updates)
+        assert response.stopReason == "max_turn_requests"
+        assert response.field_meta["lastStopReason"] == "max_steps"
+    finally:
+        await agent.aclose()
 
 
 @pytest.mark.asyncio
