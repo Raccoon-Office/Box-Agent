@@ -1788,6 +1788,72 @@ async def test_pending_approval_survives_reopen_and_is_consumed_without_hiding_r
 
 
 @pytest.mark.asyncio
+async def test_legacy_approval_without_descriptor_waits_for_actionable_update(tmp_path):
+    from box_agent.schema import Message
+    from box_agent.session_log import SessionLog
+
+    async def request(*args):
+        return {}
+
+    log = SessionLog.create(tmp_path / "log", session_id="p", cwd=tmp_path)
+    broker = DeviceDelegations("p", request, lambda: "parent", log)
+    try:
+        broker.save({**target(), "operationId": "op", "parentTurnId": "parent",
+                     "status": "accepted", "seq": 0})
+        broker.end("parent")
+        envelope = {"version": 1, "sessionId": "p"}
+        frame = {**target(), "operationId": "op", "seq": 1, "status": "approval_required"}
+        assert broker.event({**envelope, "event": frame}) == {"recorded": True}
+        assert broker.operations["op"]["status"] == "waiting_approval"
+        assert broker.next_wake() is None
+        injection = broker.request_injections([])[0]
+        assert broker.response_receipts([Message(
+            role="user", source="runtime", content=injection.model_content(),
+        )]) == {}
+
+        restored = DeviceDelegations("p", request, lambda: "next", log)
+        assert restored.next_wake() is None
+        assert restored.event({**envelope, "event": {
+            **frame, "seq": 2, "status": "waiting_approval", "approval": approval(),
+        }}) == {"recorded": True}
+        assert restored.next_wake() is not None
+        actionable = restored.request_injections([])[0]
+        assert approval()["approvalRequestId"] in actionable.content
+        receipts = restored.response_receipts([Message(
+            role="user", source="runtime", content=actionable.model_content(),
+        )])
+        assert receipts
+        restored.confirm_receipts(receipts)
+        assert restored.next_wake() is None
+    finally:
+        await broker.aclose()
+        log.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_approval_snapshot_without_descriptor_remains_readable():
+    from box_agent.device_delegation import current_snapshot
+
+    snapshot = {**target(), "status": "approval_required", "seq": 1,
+                "complete": False, "source": "device"}
+    with pytest.raises(ValueError, match="approval descriptor"):
+        current_snapshot({**snapshot, "status": "waiting_approval"})
+
+    async def request(_, params):
+        if params["operation"] == "session.wait":
+            return {"timedOut": False, "results": [snapshot]}
+        return snapshot
+
+    broker = DeviceDelegations("p", request, lambda: "parent", Log())
+    broker.save({**target(), "operationId": "op", "parentTurnId": "parent",
+                 "status": "accepted", "seq": 0})
+    result = await broker.query("session.get_turn", target())
+    assert result["status"] == "waiting_approval" and "approval" not in result
+    waited = await broker.query("session.wait", {"targets": [target()]})
+    assert waited["results"] == [result]
+
+
+@pytest.mark.asyncio
 async def test_box_cannot_submit_permission_decision_from_tool_or_extension(tmp_path):
     from box_agent.acp import BoxACPAgent
     from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
