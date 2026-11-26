@@ -25,4 +25,5 @@ class DefaultCompactEngine:
             calibration=inputs.calibration,
             summary_tools=inputs.summary_tools,
             summary_request_history=inputs.summary_request_history,
+            durable_history=inputs.durable_history,
         )

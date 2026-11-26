@@ -231,8 +231,9 @@ class DefaultContextEngine:
                 max_skill_bodies=max_skill_bodies, **kwargs,
             )
         latest_date = _latest_current_date(original)
-        if latest_date is not None and _latest_current_date(compacted) != latest_date:
-            return [*compacted, latest_date]
+        retained_date = _latest_current_date(compacted)
+        if latest_date is not None and (retained_date is None or retained_date.content != latest_date.content):
+            return [*compacted, latest_date.model_copy(update={"compaction_node": "appended"})]
         return compacted
 
     async def acompact_history(

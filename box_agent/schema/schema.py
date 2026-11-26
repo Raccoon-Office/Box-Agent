@@ -190,6 +190,11 @@ class Message(BaseModel):
         """Number of retained nodes with obsolete usage before a plan is replayed."""
         return None
 
+    @cached_property
+    def _legacy_compaction_append(self) -> bool:
+        """A pre-format-2 writer restored this runtime message during compaction."""
+        return False
+
     def model_content(self) -> str | list[dict[str, Any]]:
         """Label host references without rewriting persisted message content."""
         # The date record already has a durable name in the Session Log.

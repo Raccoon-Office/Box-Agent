@@ -405,15 +405,12 @@ class SkillReferenceContext:
 
         rebuilt = []
         for message in compacted:
-            if _is_invoked_skills(message):
-                continue
+            assert not _is_invoked_skills(message), "compaction cut must follow the previous Invoked Skills"
             parsed = self._compaction_reference(message)
             if parsed is not None:
-                if message.role == "tool":
-                    # The result's tool identity stays in the protected group.
-                    rebuilt.append(message.model_copy(update={"content": self._compaction_receipt(parsed[0])}))
-            else:
-                rebuilt.append(message)
+                # Replace both tool reads and materialized runtime pages in place.
+                message = message.model_copy(update={"content": self._compaction_receipt(parsed[0])})
+            rebuilt.append(message)
 
         chunks = [_INVOKED_SKILLS_HEADER]
         entries = []
@@ -454,11 +451,13 @@ class SkillReferenceContext:
             )})
         if entries:
             invoked = Message(role="user", source="runtime", name=_INVOKED_SKILLS,
-                              content="".join(chunks), skill_compaction_ranges=tuple(entries))
+                              compaction_node="appended", content="".join(chunks), skill_compaction_ranges=tuple(entries))
             insert_at = next((index for index, message in enumerate(rebuilt)
-                              if message.role == "user" and message.source == "runtime"
-                              and isinstance(message.content, str)
-                              and message.content.startswith(_RUNTIME_STATE_MARKER)), len(rebuilt))
+                              if message.compaction_node == "appended" or (
+                                  message.role == "user" and message.source == "runtime"
+                                  and isinstance(message.content, str)
+                                  and message.content.startswith(_RUNTIME_STATE_MARKER)
+                              )), len(rebuilt))
             rebuilt.insert(insert_at, invoked)
         return rebuilt
 

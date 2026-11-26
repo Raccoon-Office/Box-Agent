@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..events import CompactionDegradation, ErrorEvent
@@ -79,6 +79,19 @@ class CompactionInput:
     calibration: ContextTokenCalibration | None = None
     summary_tools: tuple[ToolDefinitionView, ...] | None = None
     summary_request_history: tuple[Message, ...] | None = None
+    durable_history: tuple[Message, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionPlan:
+    """Replace the prefix before cut_index (which includes the system slot)."""
+
+    head: Message
+    cut_index: int
+    cut_seq: int | None
+    rewrites: dict[int, Message]
+    appends: list[Message]
+    source_seqs: tuple[int | None, ...]
 
 
 @dataclass(frozen=True)
@@ -106,6 +119,9 @@ class CompactionOutcome:
     summary_path: str | None = None
     degradation: CompactionDegradation | None = None
     provider_error: ErrorEvent | None = None
+    plan: CompactionPlan | None = None
+    summary_input: tuple[int, int] | None = None
+    summary_omitted: list[tuple[int, int]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         blocked = self.mode == "blocked"

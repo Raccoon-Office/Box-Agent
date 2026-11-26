@@ -1038,7 +1038,7 @@ class MCPToolExposureManager:
             # one complete, deterministic descriptor, not all search receipts.
             if descriptions:
                 restored.append(Message(role="user", source="runtime", name="tool_descriptions",
-                                        runtime_kind="tool_descriptions",
+                                        runtime_kind="tool_descriptions", compaction_node="appended",
                                         content=min(descriptions)))
         return restored
 

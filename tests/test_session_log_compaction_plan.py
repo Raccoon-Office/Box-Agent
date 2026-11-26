@@ -117,3 +117,35 @@ def test_compaction_metadata_is_excluded_from_request_traces_and_desktop_memory_
     assert _trace_request_message(head) == _trace_request_message(rendered)
     guard = DesktopInputGuard(lambda *_: None, lambda _: "")
     assert guard._input_tokens([head], []) == guard._input_tokens([rendered], [])
+
+
+@pytest.mark.parametrize("kind", ["current_date", "tool_descriptions"])
+def test_first_new_compaction_cuts_after_a_legacy_runtime_append(tmp_path, kind):
+    from box_agent.kernel.context_engine import _select_recent_messages
+
+    runtime = Message(role="user", source="runtime", name=kind, content="host reference",
+                      runtime_kind="tool_descriptions" if kind == "tool_descriptions" else None)
+    user = Message(role="user", content="previous request")
+    answer = Message(role="assistant", content="previous answer")
+    head = Message(role="user", source="runtime", content="legacy summary", earlier_user_messages=["older"])
+    # Reproduce the old writer: dates and descriptions were skipped during
+    # selection and re-appended by the projector, possibly with surfaceDerived.
+    with closing(SessionLog.create(tmp_path, session_id="legacy", cwd=tmp_path)) as log:
+        log.append_unlogged_messages([runtime, user, answer], turn=1, step=1)
+        log.append("compaction/start", {})
+        log.append("compaction/summary", {"message": head.model_dump()})
+        log.replace_surface([head, user, answer, runtime], turn=1, step=2)
+        log.append("compaction/end", {})
+        new_turn = [user.model_copy(update={"content": "next request"}), runtime.model_copy(), answer]
+        [current, _, _] = log.append_unlogged_messages(
+            [*log.replay().messages, *new_turn], turn=2, step=1,
+        )
+        log.flush()
+    with closing(SessionLog.open(tmp_path, session_id="legacy", cwd=tmp_path)) as log:
+        replayed = log.replay().messages
+        latest = replayed[-3:]
+        assert replayed[3]._legacy_compaction_append and not latest[1]._legacy_compaction_append
+        assert replayed[3].model_dump() == latest[1].model_dump()
+        system = Message(role="system", content="system")
+        retained, _ = _select_recent_messages([system, *replayed])
+        assert [m._surface_seq for m in retained] == [current["seq"], current["seq"] + 1, current["seq"] + 2]

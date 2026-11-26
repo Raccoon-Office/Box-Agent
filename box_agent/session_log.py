@@ -280,8 +280,20 @@ def _normalize_cwd(cwd: str | Path) -> str:
 _SURFACE_MESSAGE_TYPES = {"user/message", "assistant/message", "tool/result"}
 
 
+def _compaction_format(event: dict[str, Any], current: int | None) -> int | None:
+    kind = event["type"]
+    if kind == "compaction/start":
+        return 2 if event["data"].get("format") == 2 else None
+    if kind == "compaction/summary" and current != 2:
+        # Old writers only started emitting copies after a successful summary.
+        return 1
+    if kind in ("compaction/end", "surface/reset", "turn/start"):
+        return None
+    return current
+
+
 def _apply_surface_message(
-    surface: list[tuple[int, Message]], event: dict[str, Any],
+    surface: list[tuple[int, Message]], event: dict[str, Any], *, compaction_format: int | None,
 ) -> Message:
     data = event["data"]
     message_data = data if event["type"] == "user/message" else data.get("message")
@@ -295,6 +307,9 @@ def _apply_surface_message(
     node = (seq, message)
     operation = event.get("surfaceOp")
     if operation == "append":
+        if (compaction_format == 1 and message.role == "user" and message.source == "runtime"
+                and (message.name in ("current_date", "tool_descriptions") or message.runtime_kind == "tool_descriptions")):
+            message._legacy_compaction_append = True
         surface.append(node)
         return message
     if not isinstance(operation, dict) or operation.get("op") != "replace":
@@ -382,6 +397,7 @@ class SessionLog:
         self._durable_event_count = len(events)
         self._surface: list[tuple[int, Message]] = []
         self._surface_cursor: int | None = None if events else 0
+        self._surface_compaction_format: int | None = None
         self._handle = handle
         self._write_lock = asyncio.Lock()
         self._lock_handle = lock_handle
@@ -1047,8 +1063,10 @@ class SessionLog:
             )
 
         # Some callers supply newly projected objects for already logged inputs.
-        for (seq, _), message in zip(nodes, messages):
+        for (seq, saved), message in zip(nodes, messages):
             message._surface_seq = seq
+            if saved._legacy_compaction_append:
+                message._legacy_compaction_append = True
         appended: list[dict[str, Any]] = []
         for message, payload in zip(
             messages[len(persisted_payloads) :],
@@ -1102,19 +1120,23 @@ class SessionLog:
         if self._surface_cursor is None:
             surface: list[tuple[int, Message]] = []
             events = self._active_events()
+            compaction_format = None
         else:
             surface = self._surface
             events = self._events[self._surface_cursor:end]
+            compaction_format = self._surface_compaction_format
 
         # A partial refresh after corruption must not be reused.
         self._surface_cursor = None
         for event in events:
+            compaction_format = _compaction_format(event, compaction_format)
             if event["type"] == "surface/reset":
                 surface.clear()
             elif event["type"] in _SURFACE_MESSAGE_TYPES:
-                _apply_surface_message(surface, event)
+                _apply_surface_message(surface, event, compaction_format=compaction_format)
         self._surface = surface
         self._surface_cursor = end
+        self._surface_compaction_format = compaction_format
         return surface
 
     def history_messages(
@@ -1123,27 +1145,17 @@ class SessionLog:
     ) -> list[tuple[int, Message, dict[str, Any]]]:
         """Replay original effective history, excluding model compaction copies."""
         history = []
-        legacy_compaction = False
-        format_two = False
+        compaction_format = None
         if events is None:
             events = self._active_events(checkpoint=checkpoint)
         for event in events:
             if checkpoint is not None:
                 checkpoint()
             kind, data = event["type"], event["data"]
+            compaction_format = _compaction_format(event, compaction_format)
             if kind == "surface/reset":
                 history.clear()
-                legacy_compaction = format_two = False
-            elif kind == "compaction/start":
-                format_two = data.get("format") == 2
-                legacy_compaction = False
-            elif kind == "compaction/summary" and not format_two:
-                # Old writers started emitting copies only after the summary
-                # succeeded. A failed attempt could leave a start on its own.
-                legacy_compaction = True
-            elif kind == "compaction/end":
-                legacy_compaction = format_two = False
-            elif (not legacy_compaction and kind in _SURFACE_MESSAGE_TYPES
+            elif (compaction_format != 1 and kind in _SURFACE_MESSAGE_TYPES
                   and event.get("surfaceOp") == "append" and not data.get("surfaceDerived")):
                 data = deepcopy(data)
                 payload = data if kind == "user/message" else data["message"]
@@ -1370,9 +1382,11 @@ class SessionLog:
         images: dict[str, dict[str, Any]] = {}
         model_round = 0
         latest_image_request: tuple[int, list[str], list[str]] | None = None
+        compaction_format = None
         for event in self._active_events(through_seq=through_seq):
             event_type = event.get("type")
             data = event["data"]
+            compaction_format = _compaction_format(event, compaction_format)
             if event_type == "surface/reset":
                 surface.clear()
                 images.clear()
@@ -1488,7 +1502,7 @@ class SessionLog:
                 skills = deepcopy(value) if isinstance(value, list) else []
                 continue
             if event_type in _SURFACE_MESSAGE_TYPES:
-                message = _apply_surface_message(surface, event)
+                message = _apply_surface_message(surface, event, compaction_format=compaction_format)
                 _restore_context_usage(message, data.get("contextUsage"))
         messages = [message for _, message in surface]
         latest_snapshot_seen = False
