@@ -134,17 +134,20 @@ async def test_compaction_recovers_sources_and_user_constraints_in_messages_only
             instruction = kwargs["messages"][-1].content
             assert "explicit user prohibitions" in instruction
             assert "source paths" in instruction
-            yield StreamEvent(type="text", delta="<summary>Excluded records are listed in analysis.json.</summary>")
+            yield StreamEvent(type="text", delta="invalid" if fallback else "<summary>Excluded records are listed in analysis.json.</summary>")
             yield StreamEvent(type="finish", finish_reason="stop")
 
     system = Message(role="system", content="Stable system prefix")
     history = [system, Message(role="user", content="Continue the report without installing dependencies.")]
     outcome = await _maybe_summarize(
         SummaryProvider(), history, token_limit=10000, api_total_tokens=0,
-        skip_check=False, force=True, allow_llm_summary=not fallback,
+        skip_check=False, force=True,
     )
     assert outcome.mode == ("fallback" if fallback else "summary")
     assert outcome.messages[0] is system
+    if fallback:
+        assert outcome.messages == history and outcome.summary_calls == 5
+        return
     recovery = outcome.messages[1]
     assert recovery.source == "runtime" and recovery.role == "user"
     assert "reopen the relevant source" in recovery.content
@@ -156,7 +159,7 @@ async def test_compaction_recovers_sources_and_user_constraints_in_messages_only
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra_chars", [20_000, 125_000])
+@pytest.mark.parametrize("extra_chars", [20_000, 125_000, 160_000])
 async def test_summary_checks_complete_projected_input_against_its_own_capacity(extra_chars):
     from types import SimpleNamespace
 
@@ -191,7 +194,8 @@ async def test_summary_checks_complete_projected_input_against_its_own_capacity(
         llm, history, token_limit=45_000, api_total_tokens=0, skip_check=False,
         summary_input_token_limit=45_000, summary_projector=context.prepare_summary,
     )
-    if extra_chars == 20_000:
+    if extra_chars < 160_000:
+        assert result.head_truncated == (extra_chars == 125_000)
         assert result.mode == "summary" and result.summary_calls == 1
         assert len(llm.calls) == 1
     else:

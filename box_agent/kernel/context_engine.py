@@ -1203,7 +1203,6 @@ async def _maybe_summarize(
     api_prompt_tokens: int | None = None,
     tools: dict[str, Tool] | None = None,
     summary_llm: Any | None = None,
-    allow_llm_summary: bool = True,
     session_log: SessionLog | None = None,
     session_turn: int | None = None,
     session_step: int | None = None,
@@ -1298,7 +1297,7 @@ async def _maybe_summarize(
     summary_path = "shared"
     mode = "summary"
     summary_client = cap_auxiliary_client(summary_client, _summary_output_tokens(summary_client))
-    while allow_llm_summary:
+    while True:
         try:
             summary_calls += 1
             summary = await _create_summary(
@@ -1351,8 +1350,6 @@ async def _maybe_summarize(
                 Message(role="system", content=_INDEPENDENT_SUMMARY_SYSTEM),
                 *(message for message in attempt_source if message.role != "system"),
             ]
-    else:
-        error, error_type = "LLM summary disabled", "RuntimeError"
 
     if error is not None:
         mode = "fallback"

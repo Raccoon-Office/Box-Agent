@@ -26,22 +26,15 @@ class ContextCompactionState:
     step: int = 0
     last_compaction_step: int | None = None
     rapid_refills: int = 0
-    consecutive_failures: int = 0
 
     @property
     def refilled_rapidly(self) -> bool:
         return self.last_compaction_step is not None and 0 < self.step - self.last_compaction_step <= 3
 
-    def record(self, mode: str, *, applied: bool) -> bool:
-        if applied and (self.last_compaction_step is None or self.step > self.last_compaction_step):
+    def record(self) -> None:
+        if self.last_compaction_step is None or self.step > self.last_compaction_step:
             self.rapid_refills = self.rapid_refills + 1 if self.refilled_rapidly else 0
             self.last_compaction_step = self.step
-        if mode == "summary":
-            self.consecutive_failures = 0
-        elif mode in {"fallback", "blocked"}:
-            self.consecutive_failures += 1
-            return self.consecutive_failures == 3
-        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +64,6 @@ class CompactionInput:
     api_total_tokens: int = 0
     api_prompt_tokens: int | None = None
     skip_check: bool = False
-    allow_llm_summary: bool = True
     session_id: str = ""
     turn_id: str = ""
     title: str = ""

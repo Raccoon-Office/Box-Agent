@@ -7149,31 +7149,6 @@ async def test_provider_prompt_pressure_uses_one_shot_summary_and_retains_recent
     assert outcome.summary_calls == 1
 
 
-@pytest.mark.asyncio
-async def test_summary_cooldown_uses_local_fallback_without_provider_call():
-    from box_agent.core import _maybe_summarize
-
-    llm = _FakeSummaryLLM("should not be called")
-    outcome = await _maybe_summarize(
-        llm,
-        [
-            Message(role="system", content="sys"),
-            Message(role="user", content="old task"),
-            Message(role="assistant", content="large " * 10_000),
-            Message(role="user", content="task"),
-        ],
-        token_limit=5_000,
-        api_total_tokens=0,
-        skip_check=False,
-        allow_llm_summary=False,
-    )
-
-    assert outcome.mode == "fallback"
-    assert outcome.summary_calls == 0
-    assert outcome.error_type == "RuntimeError"
-    assert llm.calls == []
-
-
 def test_context_pressure_uses_latest_response_usage_plus_new_messages():
     from box_agent.core import (
         _estimate_context_from_latest_response,

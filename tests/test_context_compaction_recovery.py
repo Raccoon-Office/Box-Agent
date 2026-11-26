@@ -419,11 +419,11 @@ async def test_cancelling_a_reactive_summary_keeps_the_uncompacted_surface(tmp_p
 def test_same_step_compactions_do_not_count_as_rapid_refills():
     state = ContextCompactionState(step=1)
     for _ in range(3):
-        state.record("summary", applied=True)
+        state.record()
     assert state.rapid_refills == 0
     state.step += 2
     assert state.refilled_rapidly and state.rapid_refills < 2
-    state.record("summary", applied=True)
+    state.record()
     assert state.rapid_refills == 1
     assert not state.refilled_rapidly
 
@@ -443,10 +443,10 @@ async def test_fallback_keeps_the_latest_complete_group_and_omits_large_older_ou
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_fails", [False, True])
-async def test_compaction_circuit_breakers_span_turns(tmp_path, summary_fails):
+async def test_fourth_compaction_uses_summary_after_failures_and_stops_only_for_rapid_refills(tmp_path, summary_fails):
     provider = _ReactiveProvider(0)
     if summary_fails:
-        provider.summary_provider.outcomes = [("malformed", "stop")] * 15
+        provider.summary_provider.outcomes = [("malformed", "stop")] * 12
     agent = _agent(tmp_path, provider, token_limit=20_000, max_steps=1)
     outcomes = []
     for turn in range(4):
@@ -465,8 +465,10 @@ async def test_compaction_circuit_breakers_span_turns(tmp_path, summary_fails):
         e.summary_calls for events in outcomes for e in events if isinstance(e, SummarizationEvent)
     )
     if summary_fails:
-        assert all(any(isinstance(event, SummarizationEvent) and event.mode == "fallback"
-                       for event in events) for events in outcomes)
+        assert [e.mode for events in outcomes for e in events if isinstance(e, SummarizationEvent)] == [
+            "fallback", "fallback", "fallback", "summary",
+        ]
+        assert len(provider.summary_provider.requests) == 13
         assert not any(isinstance(event, ErrorEvent) and event.is_fatal for event in outcomes[-1])
     else:
         error = next(event for event in outcomes[-1] if isinstance(event, ErrorEvent) and event.is_fatal)
@@ -676,3 +678,40 @@ async def test_fallback_logs_the_notice_or_latest_anchor_before_reopening(tmp_pa
             if not omit:
                 assert record["message"]["content"] == "Current task"
             assert reopened.replay().messages == history[1:]
+
+
+async def test_step_after_fallback_can_run_a_new_summary_in_the_same_turn():
+    from box_agent.runtime import run_agent_loop
+
+    class Provider(_Summary):
+        context_window = 80_000
+        max_output_tokens = 1_000
+        main_calls = 0
+
+        async def generate_stream(self, messages, *, call_kind="", **kwargs):
+            if call_kind == "context_summary":
+                async for event in super().generate_stream(messages, **kwargs):
+                    yield event
+                return
+            self.main_calls += 1
+            if self.main_calls == 1:
+                call = ToolCall(id="read-count", type="function", function=FunctionCall(name="count", arguments={"n": 1}))
+                yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[call],
+                                  usage=TokenUsage(prompt_tokens=18_000, total_tokens=18_003, completion_tokens=3))
+            else:
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    class Count(Tool):
+        name = "count"
+        description = "Count."
+        parameters = {"type": "object"}
+
+        async def execute(self, n):
+            return ToolResult(success=True, content=str(n))
+
+    provider = Provider([("bad", "stop")] * 5)
+    events = [e async for e in run_agent_loop(llm=provider, messages=_history(size=900), tools={"count": Count()},
+                                              max_steps=2, token_limit=10_000)]
+    assert [e.mode for e in events if isinstance(e, SummarizationEvent)] == ["fallback", "summary"]
+    assert events[-1].stop_reason == StopReason.END_TURN and len(provider.requests) == 6

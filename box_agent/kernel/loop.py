@@ -865,7 +865,6 @@ async def _run_agent_loop_impl(
 
     api_total_tokens = 0
     api_prompt_tokens = 0
-    summary_failure_cooldown_steps = 0
     reactive_compaction_attempts = 0
     reactive_window: int | None = None
     run_start = perf_counter()
@@ -1225,7 +1224,6 @@ async def _run_agent_loop_impl(
             api_prompt_tokens=api_prompt_tokens, tools=tools,
             summary_llm=(initial_context_transition.summary_llm
                          if initial_context_transition is not None else summary_llm),
-            allow_llm_summary=(summary_failure_cooldown_steps == 0 and compaction_state.consecutive_failures < 3),
             before_summary=before_summary, session_log=session_log,
             force=force, estimate_tools=estimate_tools,
             skip_check=skip_check,
@@ -1256,20 +1254,7 @@ async def _run_agent_loop_impl(
 
     def commit_compaction(result: CompactionOutcome):
         """Publish the approved compaction through the durable surface."""
-        nonlocal api_total_tokens, api_prompt_tokens, summary_failure_cooldown_steps
-        if result.mode == "fallback" and result.summary_calls > 0 and result.error:
-            summary_failure_cooldown_steps = (
-                max_steps
-                if result.error_type
-                in {
-                    "BadRequestError",
-                    "AuthenticationError",
-                    "PermissionDeniedError",
-                }
-                else 3
-            )
-        elif summary_failure_cooldown_steps > 0:
-            summary_failure_cooldown_steps -= 1
+        nonlocal api_total_tokens, api_prompt_tokens
         event = None
         new_msgs, _skip_next_token_check, est_before = result
         if new_msgs is not None:
@@ -1375,10 +1360,7 @@ async def _run_agent_loop_impl(
             # new provider response arrives, estimate it from that surface.
             api_total_tokens = 0
             api_prompt_tokens = 0
-        if result.error_code != _COMPACTION_THRASHING_CODE and compaction_state.record(
-            result.mode, applied=new_msgs is not None,
-        ):
-            _log.warning("context summary model disabled after three compaction failures session=%s", session_id)
+            compaction_state.record()
         return event
 
     async def compact_context(

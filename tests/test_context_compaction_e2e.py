@@ -498,9 +498,11 @@ async def test_compaction_rebases_usage_before_rebuilding_request():
         Message(role="user", content="request"),
         old_response,
     ]
+    from tests.test_context_compaction_recovery import _Summary
+
     outcome = await _maybe_summarize(
-        None, messages, token_limit=1_000, api_total_tokens=0,
-        skip_check=False, allow_llm_summary=False,
+        _Summary([("invalid", "stop")] * 5), messages, token_limit=1_000, api_total_tokens=0,
+        skip_check=False,
     )
 
     assert outcome.messages is not None
