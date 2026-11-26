@@ -60,6 +60,10 @@ def project_artifacts(value: dict, required: bool) -> dict:
     refs = artifact_refs(result, value.get("deviceId", ""))
     if isinstance(result, dict) and "artifactRefs" in result:
         value = {**value, "result": {**result, "artifactRefs": refs}}
-    if required and value.get("status") == "succeeded" and not (refs and all("cloudFileRef" in r for r in refs)):
-        return {**value, "status": "running", "deliveryStatus": "pending", "complete": False}
+    if required and value.get("status") == "succeeded":
+        if not refs:
+            return {**value, "status": "failed", "deliveryStatus": "failed",
+                    "complete": True, "error": "NO_DELIVERABLE_ARTIFACTS"}
+        if any("cloudFileRef" not in r for r in refs):
+            return {**value, "status": "running", "deliveryStatus": "pending", "complete": False}
     return value
