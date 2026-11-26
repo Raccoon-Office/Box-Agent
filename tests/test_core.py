@@ -3463,10 +3463,9 @@ async def test_step_summary_does_not_retry_or_execute_more_tools(requests_tool):
         assert "步数预算已用尽" in rejected.error
         assert messages[-1].role == "tool"
         assert messages[-1].tool_call_id == "t1"
-        assert done[0].stop_reason == StopReason.MAX_STEPS
-    else:
-        assert done[0].stop_reason == StopReason.ERROR
-        assert "未生成最终答复" in done[0].final_content
+    assert done[0].stop_reason == StopReason.MAX_STEPS
+    assert done[0].final_content == "Task couldn't be completed after 1 steps."
+    assert not any(isinstance(event, ErrorEvent) for event in events)
 
 
 @pytest.mark.asyncio

@@ -314,7 +314,9 @@ existing execution gate, without running the tools. For example,
 The summary is streamed and saved, but the stop reason remains `max_steps`
 (`max_turn_requests` in ACP); this does not certify task completion. This also
 applies to children using the general loop. Cancellation and provider failures
-retain their existing handling; an empty summary does not trigger more requests.
+retain their existing handling. An empty summary falls back to the original step-limit
+notice with `max_steps`, without more requests. The CLI prints a short limit notice
+after an already displayed summary instead of repeating its content.
 
 The same `provider_stale_seconds` budget bounds the total wait for the non-streaming
 completion check; `BOX_AGENT_PROVIDER_STALE_SECONDS` overrides it. A timeout returns

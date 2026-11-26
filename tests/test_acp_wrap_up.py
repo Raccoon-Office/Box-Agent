@@ -39,6 +39,7 @@ class Model:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.requests = []
+        self.summary = "Saved results; remaining work is documented."
 
     async def generate_stream(self, messages, tools=None, **kwargs):
         self.requests.append([message.model_copy(deep=True) for message in messages])
@@ -51,7 +52,7 @@ class Model:
                 )),
             ])
         else:
-            yield StreamEvent(type="text", delta="Saved results; remaining work is documented.")
+            yield StreamEvent(type="text", delta=self.summary)
             yield StreamEvent(type="finish", finish_reason="stop")
 
 
@@ -66,8 +67,11 @@ def make_agent(tmp_path, *, max_steps=4):
 
 
 @pytest.mark.asyncio
-async def test_step_budget_delivers_summary_and_preserves_limit_stop_reason(tmp_path):
+@pytest.mark.parametrize("empty_summary", [False, True])
+async def test_step_budget_delivers_summary_and_preserves_limit_stop_reason(tmp_path, empty_summary):
     agent, model, conn = make_agent(tmp_path, max_steps=1)
+    if empty_summary:
+        model.summary = ""
     model.release.set()
     try:
         session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
@@ -76,7 +80,8 @@ async def test_step_budget_delivers_summary_and_preserves_limit_stop_reason(tmp_
         ))), 5)
         assert len(model.requests) == 2
         assert "步数预算已用尽" in str(model.requests[-1])
-        assert "Saved results; remaining work is documented." in str(conn.updates)
+        if not empty_summary:
+            assert model.summary in str(conn.updates)
         assert response.stopReason == "max_turn_requests"
         assert response.field_meta["lastStopReason"] == "max_steps"
     finally:

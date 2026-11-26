@@ -99,6 +99,7 @@ class CliRenderer:
 
     def __init__(self) -> None:
         self.streaming_active = False
+        self._step_content_rendered = False
 
     def render(self, event: AgentEvent) -> None:  # noqa: C901 — legacy flat mapping
         """Translate one ``AgentEvent`` into terminal output."""
@@ -138,6 +139,7 @@ class CliRenderer:
                     )
 
             case StepStart(step=s, max_steps=mx):
+                self._step_content_rendered = False
                 box_width = 58
                 step_text = f"{Colors.BOLD}{Colors.BRIGHT_CYAN}💭 Step {s}/{mx}{Colors.RESET}"
                 step_display_width = calculate_display_width(step_text)
@@ -163,8 +165,10 @@ class CliRenderer:
                 else:
                     print(f"{event.content}", end="", flush=True)
                     self.streaming_active = True
+                    self._step_content_rendered |= bool(event.content.strip())
 
             case ContentEvent(content=text):
+                self._step_content_rendered |= bool(text.strip())
                 print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")
                 print(f"{text}")
 
@@ -258,7 +262,12 @@ class CliRenderer:
                 if reason == StopReason.CANCELLED:
                     print(f"\n{Colors.BRIGHT_YELLOW}⚠️  Task cancelled by user.{Colors.RESET}")
                 elif reason == StopReason.MAX_STEPS:
-                    print(f"\n{Colors.BRIGHT_YELLOW}⚠️  {event.final_content}{Colors.RESET}")
+                    notice = (
+                        "Step limit reached; see the output above for partial results."
+                        if self._step_content_rendered else event.final_content
+                    )
+                    print(f"\n{Colors.BRIGHT_YELLOW}⚠️  {notice}{Colors.RESET}")
+                self._step_content_rendered = False
 
             case _:
                 pass

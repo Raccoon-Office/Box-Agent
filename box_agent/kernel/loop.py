@@ -2630,6 +2630,9 @@ async def _run_agent_loop_impl(
 
         # ── No tool calls → done (or continue if injected) ──
         if not response.tool_calls:
+            if step_budget_exhausted and not response.content.strip():
+                # Reuse the exhausted-loop fallback when no summary was produced.
+                break
             if (
                 force_plan_for_turn
                 and not step_budget_exhausted
