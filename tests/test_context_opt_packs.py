@@ -135,3 +135,44 @@ def test_oracles_pass_on_ideal_evidence_and_fail_on_a_violation(tmp_path):
     self_check = specs["h-self-check-only"]["checks"]
     rule = next(r for r in self_check if r["kind"] == "tool_args_not_matching")
     assert qb.check_rule(rule, tmp_path, turn_only) and not qb.check_rule(rule, tmp_path, good)
+
+
+def _generated_csv_rows():
+    _, specs = pack_cases(TABLE_PACK)
+    return [c["value"] for c in specs["t-generate-csv"]["checks"] if c["kind"] == "contains"]
+
+
+def test_generate_csv_oracle_is_derived_from_the_markdown_fixture():
+    rows = []
+    for line in (TABLE_PACK / "expenses.md").read_text(encoding="utf-8").splitlines():
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) == 3 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", cells[0]):
+            amount = Decimal(cells[2].lstrip("¥").replace(",", "")).quantize(Decimal("0.01"))
+            rows.append(f"{cells[0]},{cells[1]},{amount}")
+    assert _generated_csv_rows() == ["date,category,amount", *rows]
+
+
+def test_generate_csv_oracle_accepts_crlf_and_rejects_unnormalized_amounts(tmp_path):
+    _, specs = pack_cases(TABLE_PACK)
+    checks = specs["t-generate-csv"]["checks"]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "expenses.csv"
+    target.write_bytes(("\r\n".join(_generated_csv_rows()) + "\r\n").encode("utf-8"))
+    assert all(qb.check_rule(rule, tmp_path, []) for rule in checks)
+    target.write_text("\n".join(_generated_csv_rows()).replace("3500.00", "¥3,500"), encoding="utf-8")
+    assert not all(qb.check_rule(rule, tmp_path, []) for rule in checks)
+
+
+def test_generate_csv_request_does_not_trigger_the_table_input_gate(tmp_path):
+    # The target CSV does not exist when the turn starts, so validate_table is
+    # neither exposed nor required; only explicit existing inputs trigger it.
+    from box_agent.tools.file.read_tool import ReadTool
+    from box_agent.tools.file.validate_table_tool import _input_paths
+
+    records, _ = pack_cases(TABLE_PACK)
+    query = next(record["query"] for record in records if record["id"] == "t-generate-csv")
+    (tmp_path / "expenses.md").write_text((TABLE_PACK / "expenses.md").read_text(encoding="utf-8"), encoding="utf-8")
+    assert _input_paths(query, ReadTool(str(tmp_path))) == set()
+    (tmp_path / "expenses.csv").write_text("date,category,amount\n", encoding="utf-8")
+    assert _input_paths(query, ReadTool(str(tmp_path)))  # an existing CSV would be an input
