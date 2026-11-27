@@ -12,6 +12,82 @@ import pytest
 from box_agent.acp import stdio_compat
 
 
+@pytest.mark.parametrize("platform,stdin,ignored", [
+    ("win32", io.BytesIO(), True),
+    ("win32", None, True),
+    ("win32", SimpleNamespace(isatty=lambda: True), False),
+    ("darwin", io.BytesIO(), False),
+])
+def test_only_pipe_hosted_windows_acp_ignores_console_interrupts(monkeypatch, platform, stdin, ignored):
+    from unittest.mock import Mock
+    import box_agent.acp as acp
+
+    signals = SimpleNamespace(SIGINT=2, SIGBREAK=21, SIG_IGN=1, signal=Mock())
+    installer = Mock(return_value=True)
+    monkeypatch.setattr(acp, "signal", signals)
+    monkeypatch.setattr(acp, "sys", SimpleNamespace(platform=platform, stdin=stdin))
+    monkeypatch.setattr(acp, "_install_windows_console_ctrl_handler", installer)
+    assert acp._ignore_windows_console_interrupts() is ignored
+    expected = [(2, 1), (21, 1)] if ignored else []
+    assert [call.args for call in signals.signal.call_args_list] == expected
+    assert installer.call_count == (1 if ignored else 0)
+
+
+@pytest.mark.parametrize("native_installed", [True, False], ids=["native-registered", "native-rejected"])
+def test_windows_pipe_hosted_acp_in_worker_uses_only_native_console_handler(monkeypatch, native_installed):
+    from unittest.mock import Mock
+    import box_agent.acp as acp
+
+    installer = Mock(return_value=native_installed)
+    signals = SimpleNamespace(SIGINT=2, SIGBREAK=21, SIG_IGN=1, signal=Mock(wraps=acp.signal.signal))
+    monkeypatch.setattr(acp, "_install_windows_console_ctrl_handler", installer)
+    monkeypatch.setattr(acp, "sys", SimpleNamespace(platform="win32", stdin=io.BytesIO()))
+    monkeypatch.setattr(acp, "signal", signals)
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        enabled = worker.submit(acp._ignore_windows_console_interrupts).result(timeout=5)
+
+    installer.assert_called_once_with()
+    signals.signal.assert_not_called()
+    assert enabled is native_installed
+
+
+def test_windows_console_ctrl_handler_swallows_only_ctrl_c_and_break(monkeypatch):
+    import ctypes
+    import box_agent.acp as acp
+
+    registered = []
+    should_succeed = True
+
+    def fake_set_handler(handler, add):
+        registered.append((handler, add))
+        return 1 if should_succeed else 0
+
+    fake_kernel32 = SimpleNamespace(SetConsoleCtrlHandler=fake_set_handler)
+    monkeypatch.setattr(acp, "_windows_console_ctrl_handler", None)
+    monkeypatch.setattr(ctypes, "WINFUNCTYPE", lambda *_: (lambda fn: fn), raising=False)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, use_last_error=False: fake_kernel32, raising=False)
+
+    should_succeed = False
+    assert acp._install_windows_console_ctrl_handler() is False
+    assert acp._windows_console_ctrl_handler is None
+
+    should_succeed = True
+    assert acp._install_windows_console_ctrl_handler() is True
+    assert acp._windows_console_ctrl_handler is not None
+    # Idempotent: subsequent calls do not register duplicate handlers.
+    assert acp._install_windows_console_ctrl_handler() is True
+    assert len(registered) == 2
+
+    handler, add = registered[-1]
+    assert add == 1
+    assert handler(0) == 1  # CTRL_C_EVENT
+    assert handler(1) == 1  # CTRL_BREAK_EVENT
+    assert handler(2) == 0  # CTRL_CLOSE_EVENT
+    assert handler(5) == 0  # CTRL_LOGOFF_EVENT
+    assert handler(6) == 0  # CTRL_SHUTDOWN_EVENT
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [128 * 1024, stdio_compat._READ_LIMIT, stdio_compat._READ_LIMIT + 1])
 async def test_sdk_transport_enforces_complete_frame_limit(size):

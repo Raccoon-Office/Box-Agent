@@ -349,6 +349,45 @@ async def test_request_cleanup_preserves_interleaved_sessions_and_host_permissio
 
 
 @pytest.mark.asyncio
+async def test_console_interrupt_and_tool_exit_preserve_peer_session_and_host_shutdown():
+    # Give ACP a private console so the broadcast below cannot reach pytest.
+    bootstrap = """import ctypes
+kernel = ctypes.windll.kernel32
+kernel.FreeConsole()
+assert kernel.AllocConsole()
+from tests.desktop_runtime_fixture import main
+main()
+"""
+    workspace = Path(__file__).resolve().parents[1] / "workspace"
+    workspace.mkdir(exist_ok=True)
+    with TemporaryDirectory(prefix="console-owner-", dir=workspace) as directory:
+        root = Path(directory)
+        args = ["-c", bootstrap] if os.name == "nt" else ["-m", "tests.desktop_runtime_fixture"]
+        env = {"BOX_AGENT_DESKTOP_TEST_ROOT": str(root), "PYTHONUTF8": "1",
+               "BOX_AGENT_DESKTOP_TEST_SHELL_EXIT": "1"}
+        probe = AcpHostProbe(command=[sys.executable, *args], cwd=root, env=env)
+        await probe.start()
+        try:
+            await probe.initialize()
+            first = await probe.session_new(cwd=str(root / "profile/workspaces/first"))
+            peer = await probe.session_new(cwd=str(root / "profile/workspaces/peer"))
+            if os.name == "nt":
+                # Without the ACP guard this raises KeyboardInterrupt or exits
+                # on CTRL_BREAK_EVENT before the next reply.
+                assert await probe.ext_request("fixture_console_interrupt") == {"sent": [True, True]}
+            assert (await probe.session_prompt(first, "fixture:shell_exit"))["stopReason"] == "end_turn"
+            updates = collect_session_updates(probe.drain_notifications())
+            assert any(item.get("status") == "failed" for item in updates)
+            assert "Command failed with exit code 23" in message_text_from_updates(updates)
+            assert (await probe.session_prompt(peer, "fixture:normal"))["stopReason"] == "end_turn"
+            probe._proc.stdin.close()
+            assert await asyncio.wait_for(probe._proc.wait(), 5) == 0
+            assert not probe._protocol.parse_errors
+        finally:
+            await probe.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["idle", "permission", "stream_wait"])
 @pytest.mark.parametrize("shutdown", ["eof", "sigterm", "eof_and_sigterm"])
 async def test_desktop_fixture_closes_resources_when_host_disconnects(mode, shutdown):

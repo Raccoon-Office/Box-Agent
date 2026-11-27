@@ -42,7 +42,7 @@ from contextlib import AsyncExitStack, aclosing, suppress
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
-from threading import Event
+from threading import Event, current_thread, main_thread
 from time import perf_counter
 from typing import Any
 from uuid import uuid4, uuid5
@@ -6703,8 +6703,77 @@ async def _close_acp_connection(
             await asyncio.gather(closing, return_exceptions=True)
 
 
+_WIN_CTRL_C_EVENT = 0
+_WIN_CTRL_BREAK_EVENT = 1
+_windows_console_ctrl_handler: Any = None
+
+
+def _install_windows_console_ctrl_handler() -> bool:
+    """Register a process-lifetime Win32 console handler ignoring Ctrl+C/Break.
+
+    Windows delivers CTRL_BREAK_EVENT to every process on the console and
+    UCRT's ``signal(SIGBREAK, SIG_IGN)`` does not stop the default console
+    handler from terminating the process. A registered ``SetConsoleCtrlHandler``
+    routine swallows Ctrl+C and Ctrl+Break while allowing CLOSE/LOGOFF/SHUTDOWN
+    to proceed normally.
+    """
+    global _windows_console_ctrl_handler
+    if _windows_console_ctrl_handler is not None:
+        return True
+    import ctypes
+
+    handler_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint32)
+    handler = handler_type(
+        lambda ctrl_type: 1 if ctrl_type in (_WIN_CTRL_C_EVENT, _WIN_CTRL_BREAK_EVENT) else 0
+    )
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_handler = kernel32.SetConsoleCtrlHandler
+    set_handler.argtypes = (handler_type, ctypes.c_int)
+    set_handler.restype = ctypes.c_int
+    if not set_handler(handler, 1):
+        return False
+    _windows_console_ctrl_handler = handler
+    return True
+
+
+def _ignore_windows_console_interrupts() -> bool:
+    """Keep console control events from stopping a pipe-hosted Windows ACP.
+
+    Windows delivers Ctrl+C / Ctrl+Break to every process attached to a console,
+    and asyncio cannot route them to the shutdown event there, so one tool's
+    interrupt would cancel every session in this process. A host that drives
+    ACP over pipes stops it by closing stdin or terminating the process tree;
+    an interactive console keeps its keyboard interrupt.
+    Return whether the native handler was installed or any signal was set to SIG_IGN.
+    """
+    if sys.platform != "win32":
+        return False
+    stdin = sys.stdin
+    try:
+        if stdin is not None and stdin.isatty():
+            return False
+    except (OSError, ValueError):
+        pass
+    try:
+        enabled = _install_windows_console_ctrl_handler()
+    except (AttributeError, OSError):
+        enabled = False
+    if current_thread() is not main_thread():
+        return enabled
+
+    for console_signal in (signal.SIGINT, signal.SIGBREAK):
+        try:
+            signal.signal(console_signal, signal.SIG_IGN)
+        except ValueError:
+            # A subinterpreter's main thread also cannot set process-wide signals.
+            continue
+        enabled = True
+    return enabled
+
+
 async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
+    _ignore_windows_console_interrupts()
     config = config or Config.load()
     from ..desktop_memory.launch import desktop_launch_agent
 

@@ -116,6 +116,13 @@ SDK 默认 NDJSON transport 会拼接 `readuntil` 超限分段，故 reader 的 
 Windows 输出在 transport 创建时绑定原 stdout，避免 stdout 重定向后协议写入 stderr；
 写失败向上抛出，由 transport 通知断连。
 
+Windows 上，如果 ACP 的 stdin 不是控制台（即由宿主通过管道托管），ACP 会通过 Win32
+`SetConsoleCtrlHandler` 与 `SIGINT`/`SIGBREAK` 忽略控制台 Ctrl+C 和 Ctrl+Break（同时放行
+`CTRL_CLOSE_EVENT` / `CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT`），避免某个工具触发的
+控制台中断停掉整个进程及其中的其他会话。宿主应通过关闭 stdin 请求正常退出，或终止进程树。
+从交互式控制台启动的 ACP 保留键盘中断。Git Bash、PowerShell 和 Jupyter 内核以
+`CREATE_NO_WINDOW` 启动，各自使用独立的隐藏控制台。宿主无需设置额外标记。
+
 旧 SDK 的请求 state store / sender 适配已删除。0.12.1 只保存未完成回包，
 但接收循环会在等待下一帧时保留上一条消息。`request_state.release_received_frames`
 使用单实例的 `_process_message` 钩子：浅拷贝消息封套交给 SDK，然后清空接收循环持有的封套。

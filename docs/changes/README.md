@@ -6,6 +6,21 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## Windows ACP console interrupts
+
+On Windows, a pipe-hosted ACP process (stdin is not a console) installs a Win32
+`SetConsoleCtrlHandler` routine (plus `SIG_IGN` for `SIGINT`/`SIGBREAK`) to
+ignore console Ctrl+C and Ctrl+Break while allowing `CTRL_CLOSE_EVENT` /
+`CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT` through, so a console control event
+raised by one tool cannot stop the process and every other session in it. Git
+Bash, PowerShell and Jupyter kernels start with `CREATE_NO_WINDOW`, which gives
+each one its own hidden console. Hosts stop ACP by closing stdin or terminating
+its process tree, as before. No host flag or paired desktop release is needed.
+ACP started from an interactive console keeps its keyboard interrupt. macOS and
+Linux are unchanged. Rollback is a runtime revert. See the
+[host contract](../integration/acp-sdk-0.12.md#长驻进程约束) and the
+[native Windows checks](../../.github/workflows/windows-acp.yml).
+
 ## 2026-11-27 — Context compaction display notice
 
 - **Change:** The `codex/context-compaction-notice` contribution adds optional ACP
@@ -392,6 +407,7 @@ decision, read those entries together.
 
 | Area | Affected paths or keywords | Current effective decision | Relationship | Details |
 | --- | --- | --- | --- | --- |
+| Windows ACP console interrupts | `run_acp_server`, `bash_tool.py`, `jupyter_tool.py` | Pipe-hosted Windows ACP ignores console Ctrl+C/Break via Win32 `SetConsoleCtrlHandler` + `SIG_IGN`; shell and kernel children get their own hidden console (`CREATE_NO_WINDOW`). | Runtime-only; no host contract change. | [Console interrupts](#windows-acp-console-interrupts) |
 | Session reasoning and hosted thinking | `llm/reasoning.py`, `model_profiles.py`, `reasoning_effort`, `raccoon_thinking_level`, `raccoonThinkingModels` | PR #257 adds isolated native effort and capability-gated hosted preferences; utilities retain disabled policy and unmanaged entries retain native routing. | Companion record precedes implementation; coordinates host/backend/runtime adoption and rollback, without changing existing data. | [PR #257 contract and rollout](#five-level-session-reasoning-and-unified-hosted-thinking-pr-257) |
 | Product directory access | `PermissionEngine`, `shell_inspection.py`, `BOX_AGENT_CLIENT_ROOT`, `BOX_AGENT_CLIENT_DATA_ROOT`, restricted ACP | Actual product roots default to read/write; Bash product symlink traversal is accepted while canonical file checks and recognized builtin Skill write guards remain. | Supersedes physical containment for Bash product access; paired desktop path propagation and runtime rollout remain separate. | [PR #264](#product-directory-defaults-and-bash-traversal-pr-264) |
 | ACP structured input | `input_context.py`, `selection_context`, `database_context`, history edit, `_inject` | Agent validates and projects host facts; semantic context participates in idempotency without granting tool access. | Paired host contract; prompts without new context retain their fingerprint. | [PR #246](#structured-input-and-selection-ownership-pr-246) |
