@@ -281,6 +281,39 @@ def test_context_port_owns_projection_and_skill_port_exposes_source_facts() -> N
     inspect.signature(SkillRuntime.read).bind(None, "shared", budget_chars=100)
 
 
+@pytest.mark.parametrize(("options", "expected_time"), [
+    ({}, 1_800_000_000_000),
+    ({"timestamp_ms": None}, 1_800_000_000_000),
+    ({"timestamp_ms": 0}, 0),
+    ({"timestamp_ms": 1_700_000_000_123}, 1_700_000_000_123),
+])
+def test_session_store_port_preserves_optional_event_timestamps(
+    tmp_path, monkeypatch, options, expected_time,
+) -> None:
+    from box_agent.kernel.ports import SessionStorePort
+    from box_agent.session_log import SessionLog
+
+    monkeypatch.setattr("box_agent.session_log.time.time", lambda: 1_800_000_000)
+    log = SessionLog.create(tmp_path, session_id="timestamps", cwd=tmp_path)
+    store: SessionStorePort = log
+    try:
+        # The declared port must accept the same call as its default store.
+        inspect.signature(SessionStorePort.append).bind(
+            store, "turn/start", {"turn": 1}, **options,
+        )
+        event = store.append("turn/start", {"turn": 1}, **options)
+        store.flush()
+        assert event["time"] == expected_time
+    finally:
+        log.close()
+
+    reopened = SessionLog.open(tmp_path, session_id="timestamps", cwd=tmp_path)
+    try:
+        assert reopened.events[0]["time"] == expected_time
+    finally:
+        reopened.close()
+
+
 def test_production_defaults_match_port_call_shapes() -> None:
     from box_agent.cli_permissions import CLIPermissionNegotiator
     from box_agent.hooks import HookManager
