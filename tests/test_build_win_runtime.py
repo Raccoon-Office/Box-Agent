@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CalledProcessError, CompletedProcess
 from unittest.mock import Mock
 
 import pytest
 
 from scripts import build_runtime, build_win_runtime
+
+
+RENDERER = Path("skills/presentation-design/skills/sn-ppt-dsl")
 
 
 @pytest.fixture(autouse=True)
@@ -23,8 +27,51 @@ def resource_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     skills.mkdir()
     (skills / "_manifest.json").write_text('{"skills": []}', encoding="utf-8")
     (skills / "SKILL.md").write_text("new Skill", encoding="utf-8")
+    renderer = project / "box_agent" / RENDERER
+    renderer.mkdir(parents=True)
+    (renderer / "package-lock.json").write_text("{}", encoding="utf-8")
+
+    def install_test_renderer(runtime_dir: Path, plat: str, arch: str) -> None:
+        module = runtime_dir / RENDERER
+        assert (module / "package-lock.json").is_file()
+        dependencies = module / "node_modules"
+        dependencies.mkdir()
+        (dependencies / "target.txt").write_text(f"{plat}-{arch}", encoding="utf-8")
+
+    monkeypatch.setattr(build_runtime, "install_ppt_design_dependencies", install_test_renderer)
     monkeypatch.setattr(build_win_runtime, "PROJECT_ROOT", project)
     return project
+
+
+@pytest.mark.parametrize("has_uv, use_pip_fallback", [(True, False), (False, True)])
+def test_windows_installers_use_locked_versions_for_the_runtime_and_freezer(
+    monkeypatch, has_uv, use_pip_fallback
+):
+    installs = []
+    bootstraps = []
+    monkeypatch.setattr(build_win_runtime.shutil, "which", lambda name: "uv" if has_uv else None)
+
+    def run(command, **kwargs):
+        if command[-1] == "uv":
+            bootstraps.append(command)
+        elif "export" in command:
+            assert "--frozen" in command and "--no-emit-project" in command
+            assert kwargs["cwd"] == build_win_runtime.PROJECT_ROOT
+            Path(command[command.index("--output-file") + 1]).write_text("package==1.0")
+        else:
+            constraints = Path(command[command.index("--constraint") + 1])
+            assert constraints.read_text() == "package==1.0"
+            assert f"{build_win_runtime.PROJECT_ROOT}[runtime]" in command and "pyinstaller" in command
+            installs.append(constraints)
+            if use_pip_fallback and "--python" in command:
+                return CompletedProcess(command, 1)
+        return CompletedProcess(command, 0)
+
+    monkeypatch.setattr(build_win_runtime.subprocess, "run", run)
+    build_win_runtime._install_runtime_extras()
+    assert len(bootstraps) == (0 if has_uv else 1)
+    assert len(installs) == (2 if use_pip_fallback else 1)
+    assert len(set(installs)) == 1
 
 
 def test_windows_builder_uses_shared_pyinstaller_contract() -> None:
@@ -43,6 +90,25 @@ def test_windows_builder_uses_shared_pyinstaller_contract() -> None:
     assert "PIL.Image" in hidden
     assert "ipykernel" not in hidden
     assert "sklearn" not in collect
+
+
+@pytest.mark.parametrize("user_install", [False, True])
+def test_build_interpreter_can_import_paths_added_by_new_wheels(tmp_path, monkeypatch, user_install):
+    system_site = tmp_path / "site-packages"
+    user_site = tmp_path / "user-site"
+    wheel_site = user_site if user_install else system_site
+    library = wheel_site / "win32" / "lib"
+    library.mkdir(parents=True)
+    (library / "windows_wheel_probe.py").touch()
+    (wheel_site / "probe.pth").write_text("win32/lib\n", encoding="utf-8")
+
+    monkeypatch.setattr(build_win_runtime.sys, "path", list(build_win_runtime.sys.path))
+    monkeypatch.setattr(build_win_runtime.sysconfig, "get_path", lambda name: str(system_site))
+    monkeypatch.setattr(build_win_runtime.site, "ENABLE_USER_SITE", user_install)
+    monkeypatch.setattr(build_win_runtime.site, "getusersitepackages", lambda: str(user_site))
+    assert importlib.util.find_spec("windows_wheel_probe") is None
+    build_win_runtime._load_build_dependencies()
+    assert importlib.util.find_spec("windows_wheel_probe").origin == str(library / "windows_wheel_probe.py")
 
 
 def test_windows_legacy_bundle_remains_explicitly_available() -> None:
@@ -131,6 +197,8 @@ def test_windows_build_entry_preserves_selected_profile_and_existing_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bundled: bool, exe_only: bool
 ) -> None:
     runtime_dir = tmp_path / "output" / "box-agent-runtime"
+    check_pdf = Mock()
+    monkeypatch.setattr(build_win_runtime, "_check_bundled_pdf_lookup", check_pdf)
     python_exe = runtime_dir / "runtime" / "python" / "python.exe"
     old_node = runtime_dir / "runtimes" / "node" / "existing.txt"
     if exe_only:
@@ -184,6 +252,7 @@ def test_windows_build_entry_preserves_selected_profile_and_existing_tools(
     if not exe_only:
         assert called_bin == runtime_dir / "bin"
     assert build.call_args.kwargs == {"external_python_sandbox": not bundled}
+    assert (runtime_dir / RENDERER / "node_modules/target.txt").read_text() == "win32-x64"
     assert (runtime_dir / "skills/SKILL.md").read_text() == "new Skill"
     assert (runtime_dir / "config/config-example.yaml").read_text() == "new resource config-example.yaml"
     manifest = json.loads((runtime_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -197,6 +266,7 @@ def test_windows_build_entry_preserves_selected_profile_and_existing_tools(
         else:
             installer.assert_not_called()
     if exe_only and bundled:
+        check_pdf.assert_called_once_with(python_exe)
         assert python_exe.read_bytes() == b"existing python"
         assert old_node.read_bytes() == b"existing node"
     elif not bundled:
@@ -292,6 +362,8 @@ def test_exe_only_rejects_unknown_profiles_before_modifying_the_runtime(
 def test_exe_only_install_preserves_tools_in_a_matching_target(tmp_path, monkeypatch, external):
     runtime_dir = tmp_path / "output" / "box-agent-runtime"
     target_dir = tmp_path / "installed-runtime"
+    check_pdf = Mock()
+    monkeypatch.setattr(build_win_runtime, "_check_bundled_pdf_lookup", check_pdf)
     for root in (runtime_dir, target_dir):
         (root / "bin").mkdir(parents=True)
         (root / "bin" / "box-agent-acp.exe").write_bytes(b"original exe")
@@ -321,13 +393,68 @@ def test_exe_only_install_preserves_tools_in_a_matching_target(tmp_path, monkeyp
     build_win_runtime.main()
 
     assert (target_dir / "bin" / "box-agent-acp.exe").read_bytes() == b"rebuilt exe"
+    assert (target_dir / RENDERER / "node_modules/target.txt").read_text() == "win32-x64"
     assert (target_dir / "skills/SKILL.md").read_text() == "new Skill"
     assert (target_dir / "config/config-example.yaml").read_text() == "new resource config-example.yaml"
     manifest = json.loads((target_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["version"] == "0.9.7"
     assert manifest["external_python_sandbox"] is external
     if external:
+        check_pdf.assert_not_called()
         assert not (target_dir / "runtime").exists()
         assert not (target_dir / "runtimes").exists()
     else:
+        assert [call.args[0] for call in check_pdf.call_args_list] == [
+            root / "runtime/python/python.exe" for root in (runtime_dir, target_dir)
+        ]
         assert (target_dir / "runtime" / "PortableGit" / "usr" / "bin" / "bash.exe").read_bytes() == b"existing bash"
+
+
+def test_exe_only_rejects_standalone_python_without_pdf_lookup_before_build(tmp_path, monkeypatch):
+    runtime_dir = tmp_path / "box-agent-runtime"
+    runtime_dir.mkdir()
+    build_win_runtime._write_manifest(runtime_dir, "old", external_python_sandbox=False)
+    manifest = (runtime_dir / "manifest.json").read_bytes()
+    monkeypatch.setattr(build_win_runtime, "_ensure_win", lambda: None)
+    monkeypatch.setattr(build_win_runtime.sys, "argv", [
+        "build_win_runtime.py", "--exe-only", "--bundled-python-sandbox", "--output", str(tmp_path),
+    ])
+    build = Mock()
+    monkeypatch.setattr(build_win_runtime, "_install_runtime_extras", build)
+    with pytest.raises(SystemExit) as error:
+        build_win_runtime.main()
+    assert error.value.code == 2
+    assert (runtime_dir / "manifest.json").read_bytes() == manifest
+    build.assert_not_called()
+
+
+def test_exe_only_failed_renderer_install_keeps_both_existing_copies(tmp_path, monkeypatch):
+    output = tmp_path / "output"
+    installed = tmp_path / "installed"
+    existing = (output / "box-agent-runtime", installed)
+    for root in existing:
+        root.mkdir(parents=True)
+        build_win_runtime._write_manifest(root, "previous")
+        dependencies = root / RENDERER / "node_modules"
+        dependencies.mkdir(parents=True)
+        (dependencies / "target.txt").write_text("previous renderer")
+
+    def fail_install(*args):
+        raise CalledProcessError(1, "npm ci")
+
+    monkeypatch.setattr(build_win_runtime, "_ensure_win", lambda: None)
+    monkeypatch.setattr(build_win_runtime, "_install_runtime_extras", lambda: None)
+    monkeypatch.setattr(build_win_runtime, "_load_build_dependencies", lambda: None)
+    monkeypatch.setattr(build_win_runtime, "BUILD_TOOLS_CACHE", tmp_path / "cache", raising=False)
+    monkeypatch.setattr(build_win_runtime, "_run_pyinstaller", Mock())
+    monkeypatch.setattr(build_runtime, "install_ppt_design_dependencies", fail_install)
+    monkeypatch.setattr(build_win_runtime.sys, "argv", [
+        "build_win_runtime.py", "--exe-only", "--output", str(output), "--install-to", str(installed),
+    ])
+    with pytest.raises(CalledProcessError):
+        build_win_runtime.main()
+
+    for root in existing:
+        assert (root / "VERSION").read_text().strip() == "previous"
+        assert (root / RENDERER / "node_modules/target.txt").read_text() == "previous renderer"
+    assert not list(output.glob("*.tar.gz"))

@@ -1,0 +1,52 @@
+name: Windows PPT design package
+
+on:
+  pull_request:
+    paths:
+      - 'box_agent/skills/presentation-design/**'
+      - 'scripts/build_runtime.py'
+      - 'scripts/build_win_runtime.py'
+      - 'scripts/verify_ppt_design_runtime.py'
+      - 'tests/test_build_win_runtime.py'
+      - 'tests/test_runtime_resource_layout.py'
+      - '.github/workflows/ppt-design-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build and install a clean runtime
+        run: >-
+          python scripts/build_win_runtime.py --version ci-clean --no-tar
+          --output "$env:RUNNER_TEMP/ppt-build" --install-to "$env:RUNNER_TEMP/ppt-installed"
+      - name: Prepare the interpreter that runs installed Skills
+        shell: pwsh
+        run: |
+          $env:PIP_CONSTRAINT = "$env:RUNNER_TEMP/ppt-runtime-constraints.txt"
+          # The Windows desktop dependency bundle ships this PyMuPDF wheel.
+          'pymupdf==1.26.7' | Set-Content -Encoding ascii $env:PIP_CONSTRAINT
+          python -c "from pathlib import Path; import sys; from scripts.build_runtime import _install_portable_python_win; _install_portable_python_win(Path(sys.argv[1]))" "$env:RUNNER_TEMP/ppt-host"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "BOX_AGENT_PYTHON=$env:RUNNER_TEMP/ppt-host/runtime/python/python.exe" >> $env:GITHUB_ENV
+      - name: Export the indexed PDF figure and caption from the clean install
+        run: python scripts/verify_ppt_design_runtime.py "$env:RUNNER_TEMP/ppt-installed" ci-clean
+      - name: Update the same installation
+        run: >-
+          python scripts/build_win_runtime.py --version ci-update --exe-only --no-tar
+          --output "$env:RUNNER_TEMP/ppt-build" --install-to "$env:RUNNER_TEMP/ppt-installed"
+      - name: Export the indexed PDF figure and caption from the updated install
+        run: python scripts/verify_ppt_design_runtime.py "$env:RUNNER_TEMP/ppt-installed" ci-update

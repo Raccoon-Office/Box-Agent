@@ -77,9 +77,17 @@ def test_resource_copy_refuses_a_link_outside_the_source_tree(tmp_path):
     assert foreign.read_text() == "must not be packaged"
 
 
+def test_windows_packaging_rejects_npm_success_without_the_native_renderer(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_runtime.shutil, "which", lambda name: "npm")
+    monkeypatch.setattr(build_runtime.subprocess, "run", lambda cmd, **kwargs: CompletedProcess(cmd, 0))
+    with pytest.raises(RuntimeError, match="@img/sharp-win32-x64"):
+        build_runtime.install_ppt_design_dependencies(tmp_path, "win32", "x64")
+
+
 def test_linux_assembly_keeps_resources_beside_bin_and_mcp_inside_the_frozen_package(tmp_path, monkeypatch):
     project = source_tree(tmp_path / "source")
     captured = []
+    renderer_installs = []
 
     def fake_run(command, **kwargs):
         captured.extend(command)
@@ -94,6 +102,7 @@ def test_linux_assembly_keeps_resources_beside_bin_and_mcp_inside_the_frozen_pac
     monkeypatch.setattr(build_runtime, "PROJECT_ROOT", project)
     monkeypatch.setattr(build_runtime, "require_supported_build_process", lambda *args: None)
     monkeypatch.setattr(build_runtime, "verify_entry_binary_arch", lambda *args, **kwargs: None)
+    monkeypatch.setattr(build_runtime, "install_ppt_design_dependencies", lambda *args: renderer_installs.append(args))
     monkeypatch.setattr(build_runtime.subprocess, "run", fake_run)
     archive = build_runtime.build_runtime("test-version", tmp_path / "output", target="linux-x64")
 
@@ -101,6 +110,7 @@ def test_linux_assembly_keeps_resources_beside_bin_and_mcp_inside_the_frozen_pac
     pairs = list(zip(captured, captured[1:]))
     assert ("--collect-data", "box_agent.mcp_servers") in pairs
     runtime = archive.parent / "box-agent-runtime"
+    assert renderer_installs == [(runtime, "linux", "x64")]
     assert (runtime / "bin/box-agent-acp").read_bytes() == b"frozen program"
     assert verify_linux_runtime._verify_external_resources(runtime) == runtime / "config/config-example.yaml"
     with tarfile.open(archive) as handle:

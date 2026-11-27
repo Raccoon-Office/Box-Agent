@@ -22,7 +22,7 @@ metadata:
 
 **其他新任务没有明确指定快速模式、设计模式或动态演示时，本轮先调用 `request_user_decision`，
 调用成功即结束本轮。收到用户选择或宿主 30 秒超时回复后，下一轮才能加载制作后端。**
-推荐模式不是确认模式：说“推荐设计模式”之后，下一步仍是调用选择卡，不能加载 `sn-ppt-entry`。
+推荐设计模式后仍须调用选择卡，收到选择结果后再加载制作后端。
 下方 JSON 是该工具的参数示例，不是要发给用户的回复。将 JSON、Markdown 选项或
 “请选择”写进正文不会产生选择卡，也不算完成模式选择。选择前不要加载后端、委派制作
 或开始生成；不能以需求详细、路线明显或用户说“继续”为由替用户选模式。
@@ -72,7 +72,7 @@ metadata:
      "decision_kind": "presentation_mode",
      "options": [
        {"id": "fast", "label": "快速模式", "description": "AI 基于现有主题和版式完成整份 PPT，也支持沿用或修改已有 PPTX。适合常规汇报和需要保持原有风格的任务，可按需导出可编辑 PPTX。"},
-       {"id": "design", "label": "设计模式", "description": "AI 根据内容组织叙事、设计页面，完成整份演示。适合希望对页面布局和视觉表达做更多设计的任务，支持简洁商务风格及动态演示，通常需要更多设计与检查。静态交付 HTML 和 PPTX，动态交付可播放的 HTML。"}
+       {"id": "design", "label": "设计模式", "description": "按内容设计构图、图表和配色，直接生成 PowerPoint 文件并逐页看图。明确需要网页演示时可交付 HTML。"}
      ],
      "default_option_id": "fast",
      "requested_auto_submit_seconds": 30,
@@ -97,26 +97,14 @@ metadata:
 | 模式 | 加载的 Skill | 交接 |
 |---|---|---|
 | `fast` 快速模式 | `get_skill(skill_name="ppt-fast")` | 按已有主题、版式和编辑流程制作。用户要求 PPT/PPTX 文件时明确交接“导出 .pptx”；HTML 交付不能代替所需文件。 |
-| `design` 设计模式 | `get_skill(skill_name="sn-ppt-entry")` | Entry 整理材料，Story 维护唯一大纲，Standard 或 Dazzle 制作，Tools/Doctor 提供工具和检查。 |
+| `design` 设计模式（新建 PPT/PPTX，或继续 XML 项目） | `get_skill(skill_name="sn-ppt-design-entry")` | Entry 整理材料，Story 维护唯一大纲，DSL 生成逐页 XML 和整册 PPTX，再回渲并检查最终页面。 |
+| `design` 设计模式（明确要求网页或续作原 HTML 项目） | `get_skill(skill_name="sn-ppt-entry")` | 静态网页交给 Standard，动态网页交给 Dazzle，沿用已选的交付格式。 |
 
-进入设计模式后，沿用已经明确的动态要求；否则默认制作静态页面：
-`choices.output="static_html"`、`ppt_mode="standard"`，
-`static_postprocess=["pptx"]`。用户只要 HTML 时为 `[]`。用户明确要求动态演示、动效或
-Dazzle 时交接 `choices.output="dynamic_html"`、`ppt_mode="dazzle"`，交付带动效的
-`deck.html`；不承诺导出带同样动画的原生 PPTX。若用户明确要求 PowerPoint 内播放动画，
-先说明此出口的能力并确认可接受的交付格式。明确的动态制作请求按上方规则直接进入
-设计模式的动态出口；仅要求静态不能跳过模式选择。已明确的内部出口不再重复询问。
-设计模式对外描述 PPTX 文件交付，不宣传或承诺可编辑、原位编辑能力。
+用户选设计模式且需要新建 PowerPoint 文件时，默认采用 `choices.output="xml_pptx"`、`ppt_mode="dsl"`。最终交付同一任务目录中的 `.pptx`，按 DSL 的预览和看图流程完成验收。把素材和原题一并交给设计入口。Standard / Deep 完成大纲后沿用客户端大纲确认卡，收到批准后开始写页；用户已明确要求跳过大纲确认时直接继续。最终回复提供经过看图检查的 PPTX 的可点击文件链接。
 
-设计模式的静态任务始终交付同一 `deck_dir` 下的整册 `present.html`：父级按 Standard 执行
-包含 build/audit 的 `deck.py review-prep`，检查最终全册像素并确认全部页面可播放后，
-在最终回复给出真实 HTML 链接。已完成上述验收且此后视觉源未变化时复用结果，不重复收尾；
-视觉源变化后重新待审和验收。
-逐页 HTML/PNG、全生图页面或 PPTX 导出成功都不能代替该入口；缺失时补齐收尾，失败则
-保留产物并说明未完成，不伪造链接。动态任务沿用完整的 `deck.html` 及其本地资源。
+用户明确要求 HTML 文件（包括同时需要 HTML 和 PPTX）时，交给原网页入口。静态网页用 `static_html` / `standard`，交付审阅通过的整册 `present.html`，同时要求 PPTX 时运行对应导出。静态网页沿用 Standard 的 `deck.py review-prep`，检查最终全册像素；已有相同版本验收时不重复准备，并给出真实 HTML 链接。可播放的动态网页用 `dynamic_html` / `dazzle`，交付 `deck.html`。要求在 PowerPoint 内播放原生动画时，先澄清可接受的播放格式。
 
-恢复已有设计模式任务时复用 `task_pack.json` 的绝对 `deck_dir`、模式和出口，不用上述默认值
-覆盖已有选择。`sn-deep-research` 是可选外部 Skill，先确认可用再使用。
+继续已确认的设计任务时，复用 `task_pack.json` 的绝对 `deck_dir` 和已有输出。`xml_pptx` 继续 DSL 流程，`static_html` / `dynamic_html` 继续原网页流程。已有大纲、附件和用户确认随原任务传递。`sn-deep-research` 是可选外部 Skill，先确认可用再使用。
 
 内部后端按名称加载，只执行选中的一条链路。后端禁用、缺失或失败时说明实际阻碍，保留
 已有产物；不要自行启用 Skill 或悄悄换模式。用户选择设计模式却要求原位编辑已有 PPTX

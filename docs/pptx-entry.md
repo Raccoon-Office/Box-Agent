@@ -5,10 +5,13 @@
 | 用户模式 | 内部 Skill | 默认交付 |
 |---|---|---|
 | 快速模式 | `ppt-fast` | 沿用原主题、版式和编辑流程；请求 PPTX 时导出文件 |
-| 设计模式：静态 | `sn-ppt-entry` → `sn-ppt-story` → `sn-ppt-standard` | 静态 HTML 和 PPTX |
+| 设计模式：新建 PPTX | `sn-ppt-design-entry` → `sn-ppt-design-story` → `sn-ppt-dsl` | 0.6.6 原生 PPTX，由写稿模型逐页看图 |
+| 设计模式：明确需要静态 HTML 或继续旧网页任务 | `sn-ppt-entry` → `sn-ppt-story` → `sn-ppt-standard` | 静态 HTML 和 PPTX |
 | 设计模式：动态 | `sn-ppt-entry` → `sn-ppt-story` → `sn-ppt-dazzle` | 带动效的 HTML，不是原生 PowerPoint 动画 |
 
-Tools 和 Doctor 为设计模式提供共用工具和检查。Standard 自带静态页面与 PPTX exporter，
+新建 PowerPoint 采用 0.6.6。作者在大纲中确定各页的短标题、主图用途与来源。PDF 附件中的图片和文字按页编号，可以直接提取原图，也可以连同图注裁出选区。最终 PPTX 回渲后，由写稿模型用 `inspect_images` 的 `native` 模式审阅各页。冻结来源记录在 `presentation-design/source.json`。
+
+以下 HTML 交付规则适用于明确要求网页或继续既有网页项目的任务。Standard 自带静态页面与 PPTX exporter，
 保留源代码模块结构及字体许可。
 设计模式的 PPTX 是文件导出，不宣传或承诺编辑能力。
 静态字段为 `static_html` / `standard` / `static_postprocess`；默认要求 HTML 和 PPTX
@@ -147,3 +150,14 @@ uv run pytest -q tests/test_pptx_entry.py tests/test_presentation_suite_bundle.p
 macOS 包使用 `publish:electron-mac-unsigned`；`:test` 会编入测试服务地址。用户在新包内
 登录正式环境后，客户端自动同步 Box-Agent 登录态。源测试、包内协议探针、真实模型
 生成和视觉质量分别验收，不能互相替代。
+
+
+### 源码运行设计模式
+
+客户端运行时在构建时按锁文件安装导出依赖。从源码或 Python wheel 启动 Box-Agent 时，在实际安装目录的 `box_agent/skills/presentation-design/skills/sn-ppt-dsl` 下先执行一次 `npm ci --omit=dev --include=optional --ignore-scripts --no-bin-links`。写页、导出和看图时直接使用已安装的依赖。
+
+PDF 按编号取图使用执行 Skill 脚本的 Python。使用客户端独立 Python 的宿主，应在配置该解释器时安装 `sn-ppt-design-entry/requirements.txt`，并提供 Pillow 以生成带编号的原页预览。若缺少 PyMuPDF，解析结果的 `figure_index_warning` 会说明原因，正文和内嵌图片仍由 pypdf 提取。
+
+Windows 独立包通过 `--bundled-python-sandbox` 安装 PyMuPDF。旧独立包若缺少取图能力，须用这个参数完整重建，增量更新会在替换文件前提示。
+
+验收安装包时运行 `python scripts/verify_ppt_design_runtime.py <安装目录> <版本> --skill-python <客户端的Python路径>`。脚本让指定解释器按编号裁出 PDF 中的图片和图注、导出一页 PPTX，再打开成品检查两者。Windows 独立包会自动选用包内 Python。

@@ -1,0 +1,21 @@
+{
+  "version": "0.6.6",
+  "release_manifest_sha256": "d94edabea932950c20558c5a92a551b265147580d81882dce1bf182646451f20",
+  "integration_overrides": [
+    "skills/sn-ppt-dsl/SKILL.md",
+    "skills/sn-ppt-dsl/references/qa.md"
+  ],
+  "skill_names": {
+    "sn-ppt-entry": "sn-ppt-design-entry",
+    "sn-ppt-story": "sn-ppt-design-story",
+    "sn-ppt-tools": "sn-ppt-design-tools",
+    "sn-ppt-doctor": "sn-ppt-design-doctor"
+  },
+  "omitted": [
+    "node_modules (installed from the pinned lock at build time)",
+    "runtime.local.json",
+    "runtime.local.original.json"
+  ],
+  "base_version": "0.6.5",
+  "base_release_manifest_sha256": "393918a149b30d38df12cc63355f8010bec9d0fd8c87ee75362e7a4fa425f4ed"
+}

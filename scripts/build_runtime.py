@@ -107,8 +107,31 @@ def copy_runtime_resources(project_root: Path, runtime_dir: Path) -> None:
             raise RuntimeError(f"Runtime resource is missing: {required}")
 
 
-# ── Platform detection ───────────────────────────────────────
+def install_ppt_design_dependencies(runtime_dir: Path, plat: str, arch: str) -> None:
+    """Install the locked renderer and native image library for the target once."""
+    module = runtime_dir / "skills/presentation-design/skills/sn-ppt-dsl"
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if not npm:
+        raise RuntimeError("Building the PPT design renderer requires npm on the build host")
+    subprocess.run(
+        [npm, "ci", "--omit=dev", "--include=optional", "--ignore-scripts", "--no-bin-links",
+         "--no-audit", "--no-fund", "--os=" + plat, "--cpu=" + arch],
+        check=True, cwd=module,
+    )
+    if plat == "win32":
+        # npm may exit successfully even when the optional native package was skipped.
+        native = f"sharp-win32-{arch}"
+        if not (module / "node_modules" / "@img" / native / "lib" / f"{native}.node").is_file():
+            raise RuntimeError(f"npm ci did not install @img/{native}, required for PPT image export")
 
+
+def assemble_runtime_resources(project_root: Path, runtime_dir: Path, plat: str, arch: str) -> None:
+    """Stage clean Skill sources, then install the renderer for the target platform."""
+    copy_runtime_resources(project_root, runtime_dir)
+    install_ppt_design_dependencies(runtime_dir, plat, arch)
+
+
+# ── Platform detection ───────────────────────────────────────
 
 ARCH_ALIASES = {
     "x86_64": "x64",
@@ -799,7 +822,7 @@ def build_runtime(
         else:
             shutil.copy2(item, dest)
 
-    copy_runtime_resources(project_root, runtime_dir)
+    assemble_runtime_resources(project_root, runtime_dir, plat, arch)
 
     # Ensure entry is executable
     entry_bin = bin_dir / "box-agent-acp"
@@ -1022,13 +1045,8 @@ def _install_portable_python_win(runtime_dir: Path) -> None:
     _install_sandbox_packages_win(python_exe)
 
 
-# Pre-installed into the bundled Python's site-packages so that the frozen
-# Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
-# etc. without spawning pip at first run. Mirrors
-# Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
-# only if the underlying portable Python already has these wheels. Mirror
-# ``box_agent.tools.jupyter_tool.SANDBOX_DEFAULT_PACKAGES`` + ``ipykernel``.
-_SANDBOX_BUNDLED_PACKAGES = (*SANDBOX_DEFAULT_PACKAGES, "ipykernel")
+# The standalone Windows interpreter runs the kernel and the built-in PDF figure CLI.
+_SANDBOX_BUNDLED_PACKAGES = (*SANDBOX_DEFAULT_PACKAGES, "ipykernel", "pymupdf>=1.24.3,<2")
 
 
 def _install_sandbox_packages_win(python_exe: Path) -> None:

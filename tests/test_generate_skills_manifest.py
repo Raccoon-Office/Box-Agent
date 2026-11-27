@@ -23,6 +23,8 @@ EXPECTED_BUILTIN_SKILLS = {
     "ppt-fast": "document-skills/pptx/SKILL.md",
     **{f"sn-ppt-{module}": f"presentation-suite/skills/sn-ppt-{module}/SKILL.md"
        for module in ("entry", "tools", "story", "standard", "dazzle", "doctor")},
+    **{name: f"presentation-design/skills/{name}/SKILL.md" for name in
+       ("sn-ppt-design-entry", "sn-ppt-design-story", "sn-ppt-design-tools", "sn-ppt-design-doctor", "sn-ppt-dsl")},
     "research-synthesis": "research-synthesis/SKILL.md",
     "roadmap": "roadmap/SKILL.md",
     "scheduled-task": "scheduled-task/SKILL.md",

@@ -37,8 +37,10 @@ import argparse
 import json
 import os
 import shutil
+import site
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import time
@@ -65,36 +67,29 @@ def _ensure_win() -> None:
 
 
 def _install_runtime_extras() -> None:
-    """Install build extras into the interpreter running this script."""
-    requirement = f"{PROJECT_ROOT}[runtime]"
-    pip_cmd = [
-        sys.executable, "-m", "pip", "install", "--quiet", requirement,
-    ]
+    """Install the project's locked runtime and freezer in the build interpreter."""
+    pip = [sys.executable, "-m", "pip", "install", "--quiet"]
     uv_bin = shutil.which("uv")
     if uv_bin:
-        uv_cmd = [
-            uv_bin,
-            "pip",
-            "install",
-            "--python",
-            sys.executable,
-            "--quiet",
-            requirement,
-        ]
-        result = subprocess.run(uv_cmd, cwd=str(PROJECT_ROOT))
-        if result.returncode == 0:
-            return
-        print(
-            "uv failed to install runtime extras; retrying with pip...",
-            file=sys.stderr,
-        )
+        uv = [uv_bin]
+    else:
+        subprocess.run([*pip, "uv"], check=True)
+        uv = [sys.executable, "-m", "uv"]
 
-    result = subprocess.run(pip_cmd, cwd=str(PROJECT_ROOT))
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Failed to install runtime extras into "
-            f"{sys.executable} (exit code {result.returncode})"
+    with tempfile.TemporaryDirectory(prefix="box-agent-build-constraints-") as folder:
+        constraints = Path(folder) / "constraints.txt"
+        subprocess.run(
+            [*uv, "export", "--frozen", "--extra", "runtime", "--group", "dev",
+             "--no-emit-project", "--no-hashes", "--output-file", str(constraints)],
+            cwd=PROJECT_ROOT, check=True, stdout=subprocess.DEVNULL,
         )
+        packages = ["--constraint", str(constraints), f"{PROJECT_ROOT}[runtime]", "pyinstaller"]
+        result = subprocess.run(
+            [*uv, "pip", "install", "--python", sys.executable, "--quiet", *packages], cwd=PROJECT_ROOT
+        )
+        if result.returncode:
+            print("Retrying the locked Windows build dependencies with pip...", file=sys.stderr)
+            subprocess.run([*pip, *packages], cwd=PROJECT_ROOT, check=True)
 
 
 def _load_build_dependencies() -> None:
@@ -107,6 +102,15 @@ def _load_build_dependencies() -> None:
     global _install_portable_python_win
     global _install_sandbox_packages_win
     global _relativize_node_manifest
+
+    # The installer ran in a child process. Activate wheel .pth entries written
+    # since this interpreter started (pywin32 registers win32/lib this way).
+    sites = [sysconfig.get_path("purelib")]
+    if site.ENABLE_USER_SITE:
+        sites.append(site.getusersitepackages())
+    for directory in sites:
+        if Path(directory).is_dir():
+            site.addsitedir(directory)
 
     from scripts import build_runtime
     from box_agent.tools.runtime import (
@@ -268,6 +272,20 @@ def _write_manifest(
     (runtime_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
 
 
+def _check_bundled_pdf_lookup(python: Path) -> None:
+    try:
+        subprocess.run(
+            [str(python), "-I", "-c", "import pymupdf\nwith pymupdf.open() as doc:\n"
+             "    doc.new_page().get_image_info(hashes=True, xrefs=True)"],
+            capture_output=True, check=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(
+            f"The retained Python at {python} cannot index PDF figures. "
+            "Run a clean build with --bundled-python-sandbox and without --exe-only."
+        ) from exc
+
+
 def _validate_exe_only_profile(runtime_dir: Path, *, external_python_sandbox: bool) -> None:
     """Reject an in-place rebuild that would mislabel retained runtime files."""
     rebuild_hint = "Run a clean build without --exe-only to create or switch profiles."
@@ -285,6 +303,8 @@ def _validate_exe_only_profile(runtime_dir: Path, *, external_python_sandbox: bo
             f"--exe-only profile mismatch at {runtime_dir}: existing {existing_name}, "
             f"requested {requested_name}. {rebuild_hint}"
         )
+    if not external_python_sandbox:
+        _check_bundled_pdf_lookup(runtime_dir / "runtime" / "python" / "python.exe")
 
 
 def _create_tar(output_dir: Path, runtime_dir: Path, version: str) -> Path:
@@ -424,13 +444,14 @@ def main() -> None:
     print(f"Output: {runtime_dir}")
     print(f"Mode: {'exe-only' if args.exe_only else 'full'}")
 
+    from scripts.build_runtime import assemble_runtime_resources
+
     if args.exe_only:
         # Prepare the whole versioned payload before replacing existing files.
-        from scripts.build_runtime import copy_runtime_resources
         with tempfile.TemporaryDirectory(prefix=".box-agent-build-", dir=output_dir) as folder:
             staging = Path(folder)
             _run_pyinstaller(staging / "bin", external_python_sandbox=external_python_sandbox)
-            copy_runtime_resources(PROJECT_ROOT, staging)
+            assemble_runtime_resources(PROJECT_ROOT, staging, "win32", "x64")
             _write_manifest(staging, version, external_python_sandbox=external_python_sandbox)
             _replace_exe_only_payload(staging, runtime_dir)
     else:
@@ -441,8 +462,7 @@ def main() -> None:
         bin_dir = runtime_dir / "bin"
         bin_dir.mkdir()
         _run_pyinstaller(bin_dir, external_python_sandbox=external_python_sandbox)
-        from scripts.build_runtime import copy_runtime_resources
-        copy_runtime_resources(PROJECT_ROOT, runtime_dir)
+        assemble_runtime_resources(PROJECT_ROOT, runtime_dir, "win32", "x64")
         _write_manifest(runtime_dir, version, external_python_sandbox=external_python_sandbox)
         # bash + python + sandbox packages + node
         if not external_python_sandbox:
