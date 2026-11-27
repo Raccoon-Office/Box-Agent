@@ -712,6 +712,37 @@ async def test_history_resource_fallback_preserves_other_failures(tmp_path, monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('error_data', ['uri', None, {}], ids=['uri-only', 'no-data', 'empty-data'])
+async def test_history_keeps_resource_parameter_error_when_replacement_page_exists(
+    tmp_path, monkeypatch, error_data,
+):
+    async with environment(tmp_path, monkeypatch) as (host, _, _, backend, session_id, record):
+        entry = (await host.ext_method('mcp/apps/snapshot', request(session_id)))['resourceUri']
+        tool = next(t for t in backend.tools if t.remote_name == 'list_flights')
+        tool.mcp_ui_resource_uri = 'ui://flight-fixture/new.html'
+        mcp_loader._replace_server_catalog(backend)
+        seen = []
+
+        async def read(uri):
+            seen.append(uri)
+            if uri == entry:
+                raise McpError(types.ErrorData(
+                    code=-32602, message='Invalid resource parameters: locale is required',
+                    data={'uri': uri} if error_data == 'uri' else error_data,
+                ))
+            return types.ReadResourceResult.model_validate({'contents': [{
+                'uri': uri, 'mimeType': 'text/html;profile=mcp-app', 'text': '<p>New page</p>',
+                '_meta': {'ui': {}},
+            }]})
+
+        monkeypatch.setattr(backend.session, 'read_resource', read)
+        with pytest.raises(RequestError, match='MCP_APP_UNAVAILABLE'):
+            await host.ext_method('mcp/apps/resource', request(session_id, uri=entry))
+        assert seen == [entry]
+        assert len(calls(record)) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('resource_case', ['unchanged_ui', 'non_entry', 'tool_removed', 'no_ui', 'both_invalid'])
 async def test_bare_invalid_params_only_retries_a_changed_historical_ui(tmp_path, monkeypatch, resource_case):
     async with environment(tmp_path, monkeypatch) as (host, conn, llm, backend, session_id, record):

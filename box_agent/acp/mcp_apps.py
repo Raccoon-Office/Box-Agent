@@ -263,7 +263,9 @@ class McpAppsACP:
                         "arguments": snapshot["arguments"], "result": snapshot["result"]}
             if method == "mcp/apps/resource":
                 from box_agent.tools.mcp_apps import McpAppError
-                from box_agent.tools.mcp_loader import read_mcp_app_resource, resolve_mcp_app_tool
+                from box_agent.tools.mcp_loader import (
+                    is_mcp_app_resource_not_found, read_mcp_app_resource, resolve_mcp_app_tool,
+                )
                 uri = _string(params.get("uri"), limit=2048)
                 initial_ui = uri == snapshot["resourceUri"]
 
@@ -293,13 +295,13 @@ class McpAppsACP:
                 try:
                     result = await read(uri)
                 except (McpAppError, McpError) as exc:
-                    # Newer servers may report a missing URI as bare Invalid Params.
-                    # Only retry a saved entry against this tool's changed UI below;
-                    # do not reclassify arbitrary resource parameter errors as missing.
-                    missing = isinstance(exc, McpAppError) and exc.code == "APP_RESOURCE_NOT_FOUND"
-                    bare_invalid_uri = (isinstance(exc, McpError) and exc.error.code == -32602
-                                        and exc.error.data in (None, {}))
-                    if not initial_ui or not (missing or bare_invalid_uri):
+                    if not initial_ui:
+                        raise
+                    if isinstance(exc, McpError):
+                        missing = is_mcp_app_resource_not_found(exc.error, uri, historical_entry=True)
+                    else:
+                        missing = exc.code == "APP_RESOURCE_NOT_FOUND"
+                    if not missing:
                         raise
                     self._resolve(params)
                     try:

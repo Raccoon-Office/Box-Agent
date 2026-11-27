@@ -73,12 +73,11 @@ ACP 根据有效 Session Log 中的原调用定位当前已选服务。首次打
 原工具改名、下线或移除 UI 声明时，原页面仍可由当前 MCP 提供。
 
 `resources/read` 返回资源不存在时，从同一工具的当前 descriptor 取得新 URI，
-重新检查本次请求的连接和历史后最多读取一次。兼容旧代码 `-32002`；对 `-32602`，
-按官方 TypeScript SDK 的 `ResourceNotFoundError` 约定识别精确的 `data: {"uri": 请求 URI}`，
-同时保留已有精确英文 missing-resource 消息的兼容。
-对于没有 `data` 或仅有空对象的 `-32602`，历史入口也允许尝试同一工具当前声明的新 URI，
-不依赖错误消息的语言。只有入口地址确实变化才重试一次，不将普通资源读取的参数错误
-统一认定为缺页；新地址仍失败时不再回退。URI 不匹配或带有其他诊断字段的错误不因此回退。
+重新检查本次请求的连接和历史后最多读取一次。旧错误码 `-32002` 表示缺页。
+`-32602` 同时用于缺页和其他参数错误，`data.uri` 只标明请求的资源。
+历史入口只有在收到已识别的缺页消息（包括 `Resource not found`、`未知卡片资源`、
+`リソースが見つかりません`）且工具已声明新地址时才回退一次。
+缺少必填参数、无法识别的消息、URI 不匹配或附带其他诊断字段时，保留读取错误。
 参见 [MCP Resources 错误约定](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#error-handling)
 及 [SDK ResourceNotFoundError](https://ts.sdk.modelcontextprotocol.io/v2/api/index/@modelcontextprotocol/client/#resourcenotfounderror)。
 鉴权失败、传输 HTTP 404、超时、空内容、MIME/正文不合法和普通内部错误不触发回退。
