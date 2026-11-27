@@ -293,14 +293,14 @@ async def test_streamable_http_mcp1_passes_transport_configuration(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("private,host,attaches_session", [
+@pytest.mark.parametrize("private,host,attaches_headers", [
     (False, "example.com", False),
     (False, "pre.xiaohuanxiong.com", True),
-    (True, "example.com", False),
-    (True, "pre.xiaohuanxiong.com", False),
+    (True, "example.com", True),
+    (True, "pre.xiaohuanxiong.com", True),
 ])
 async def test_streamable_http_mcp2_uses_preconfigured_http_client(
-    monkeypatch, private, host, attaches_session,
+    monkeypatch, private, host, attaches_headers,
 ):
     url = f"https://{host}/mcp"
     monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
@@ -359,7 +359,17 @@ async def test_streamable_http_mcp2_uses_preconfigured_http_client(
     assert captured["http_client"] is fake_http_client
     assert captured["auth"] is not conn.auth
     assert fake_http_client.follow_redirects is not private
-    assert bool(fake_http_client.event_hooks.get("request")) is attaches_session
+    hooks = fake_http_client.event_hooks.get("request", [])
+    assert bool(hooks) is attaches_headers
+    request = httpx.Request("POST", url, json={"method": "tools/call", "params": {
+        "name": "lookup", "_meta": {"box_agent_org": "team-one", "box_agent_session_id": "session-one"},
+    }})
+    for hook in hooks:
+        await hook(request)
+    assert request.headers.get("X-Org-Code") == ("team-one" if attaches_headers else None)
+    # Private deployments forward org without enabling automatic MCP correlation.
+    assert request.headers.get("X-RACCOON-Session-ID") == (
+        "session-one" if attaches_headers and not private else None)
 
 
 @pytest.mark.asyncio

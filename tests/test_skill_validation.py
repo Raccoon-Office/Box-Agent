@@ -11,7 +11,7 @@ import pytest
 from box_agent.context_input import DefaultContextEngine
 from box_agent.schema import Message
 from box_agent.skill_context import SkillReferenceContext
-from box_agent.skill_dependencies import SkillDependencyError
+from box_agent.skill_dependencies import SkillDependencyError, resolve_required_skills
 from box_agent.skill_runtime import SkillRuntime
 from box_agent.tools.engine.preparation import prepare_tools
 from box_agent.tools.base import ToolInvocationContext
@@ -505,3 +505,110 @@ async def test_caller_reader_refreshes_required_dependency_scope_before_returnin
     assert not result.success
     assert "outside this task" in result.error
     assert "CALLER_METHOD" not in (result.model_context or "")
+
+
+def make_market_dependency_loader(tmp_path, *, installed_id="A", required=("market-method",)):
+    root = tmp_path / "user"
+    path = write_skill(root, "market-method", "MARKET_METHOD")
+    marker = path.parent / ".skill-installation.json"
+    marker.write_text(json.dumps({"source": "hub", "skillId": installed_id}))
+    write_skill(root, "member-root", "MEMBER_METHOD", required=required)
+    loader = SkillLoader(sources=[(root, "user")], skill_settings_path=tmp_path / "settings.json")
+    loader.discover_skills()
+    return loader, marker
+
+
+@pytest.mark.parametrize("expected_ids", [{"B"}, {"A", "B"}])
+def test_market_dependency_constraints_follow_roots_without_poisoning_shared_skill(tmp_path, expected_ids):
+    base, _ = make_market_dependency_loader(tmp_path)
+    write_skill(tmp_path / "user", "wrapper", required=["member-root"])
+    base.maybe_reload()
+    loader = base.with_expert_skill_sources(
+        [], dependency_market_skill_bindings={"member-root": {"market-method": expected_ids}},
+    )
+    assert loader is not base
+    assert not loader.get_skill("member-root").broken
+    assert not loader.get_skill("market-method").broken
+    assert [skill.name for skill in resolve_required_skills(base, ["member-root"])] == [
+        "market-method", "member-root",
+    ]
+    validation = loader.validate_references(("member-root", "market-method"))
+    assert "MARKET_METHOD" in validation.resolve("market-method").prompt
+    for catalog in (loader, validation.catalog):
+        for names in (["member-root"], ["wrapper"], ["market-method", "member-root"],
+                      ["member-root", "market-method"]):
+            with pytest.raises(SkillDependencyError) as error:
+                resolve_required_skills(catalog, names)
+            assert error.value.code == "SKILL_DEPENDENCY_IDENTITY_MISMATCH"
+            assert error.value.details["skill"] == "market-method"
+            assert error.value.details["rootSkill"] == "member-root"
+
+
+@pytest.mark.asyncio
+async def test_market_dependency_constraints_survive_clone_and_can_be_explicitly_cleared(tmp_path):
+    base, _ = make_market_dependency_loader(tmp_path)
+    bindings = {"member-root": {"market-method": {"B"}}}
+    loader = await base.awith_expert_skill_sources([], dependency_market_skill_bindings=bindings)
+    bindings["member-root"]["market-method"].clear()
+    extra = tmp_path / "extra"
+    write_skill(extra, "additional")
+    clone = loader.with_expert_skill_sources(["additional"], skill_directories=[extra])
+    assert clone is not loader
+    for constrained in (loader, clone):
+        with pytest.raises(SkillDependencyError) as error:
+            constrained.validate_references(("member-root",)).resolve("member-root")
+        assert error.value.code == "SKILL_DEPENDENCY_IDENTITY_MISMATCH"
+    cleared = clone.with_expert_skill_sources([], dependency_market_skill_bindings={})
+    assert cleared is not clone
+    assert "MEMBER_METHOD" in cleared.validate_references(("member-root",)).resolve("member-root").prompt
+    assert "MEMBER_METHOD" in base.validate_references(("member-root",)).resolve("member-root").prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["replace", "delete"])
+async def test_market_installation_change_revalidates_dependency_only_constraints(tmp_path, change):
+    base, marker = make_market_dependency_loader(tmp_path, installed_id="B")
+    loader = base.with_expert_skill_sources(
+        [], dependency_market_skill_bindings={"member-root": {"market-method": {"B"}}},
+    )
+    tool = GetSkillTool(loader)
+    assert (await tool.execute("member-root")).success
+    if change == "delete":
+        marker.unlink()
+    else:
+        marker.write_text(json.dumps({"source": "hub", "skillId": "other-market-id"}))
+    rejected = await tool.execute("member-root")
+    assert not rejected.success
+    assert rejected.raw_output["code"] == "SKILL_DEPENDENCY_IDENTITY_MISMATCH"
+    assert (await tool.execute("market-method")).success
+    marker.write_text(json.dumps({"source": "hub", "skillId": "B"}))
+    assert (await tool.execute("member-root")).success
+
+
+@pytest.mark.asyncio
+async def test_refreshed_dependency_conflict_cannot_reuse_cached_success(tmp_path, monkeypatch):
+    base, _ = make_market_dependency_loader(tmp_path, required=())
+    loader = base.with_expert_skill_sources(
+        [], dependency_market_skill_bindings={"member-root": {"market-method": {"B"}}},
+    )
+    assert "MEMBER_METHOD" in loader.validate_references(("member-root",)).resolve("member-root").prompt
+    write_skill(tmp_path / "user", "member-root", "MEMBER_METHOD", required=["market-method"])
+    assert loader.maybe_reload()
+    # A published conflict must beat the previous successful body cache, even
+    # when the next source scan times out and preparation permits stale reads.
+    original_scan = loader._source_signature
+    entered, release, _ = block_scan(loader, monkeypatch)
+    try:
+        validation = await loader.avalidate_references(("member-root",), allow_stale=True)
+        assert entered.is_set()
+        assert validation.timed_out
+        for result in (validation, loader._cached_validation(("member-root",))):
+            with pytest.raises(SkillDependencyError) as error:
+                result.resolve("member-root")
+            assert error.value.code == "SKILL_DEPENDENCY_IDENTITY_MISMATCH"
+    finally:
+        await finish_worker(loader, release)
+    monkeypatch.setattr(loader, "_source_signature", original_scan)
+    write_skill(tmp_path / "user", "member-root", "MEMBER_METHOD", required=())
+    restored = await loader.avalidate_references(("member-root",), allow_stale=False)
+    assert "MEMBER_METHOD" in restored.resolve("member-root").prompt

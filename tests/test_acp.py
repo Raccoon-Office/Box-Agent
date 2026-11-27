@@ -3578,7 +3578,7 @@ async def test_acp_research_prompt_catalog_and_reader_follow_current_turn_policy
 
 
 @pytest.mark.asyncio
-async def test_acp_expert_selection_respects_global_disabled_catalog_and_reads(tmp_path):
+async def test_acp_expert_selection_rejects_disabled_dependencies_without_enabling_skills(tmp_path):
     from box_agent.tools.skill_catalog_tool import ListSkillsTool
     from box_agent.tools.skill_tool import GetSkillTool
 
@@ -3599,10 +3599,21 @@ async def test_acp_expert_selection_respects_global_disabled_catalog_and_reads(t
         tools=ToolsConfig(enable_sub_agent=False, enable_todo=False)), llm,
         [GetSkillTool(loader), ListSkillsTool(loader)],
         f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
+    with pytest.raises(RequestError) as raised:
+        await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={
+            "session_mode": "general",
+            "expert": {"id": "expert-a", "name": "Expert", "required_skills": [
+                "disabled-method", "available-method"]},
+        })))
+    assert raised.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert raised.value.data["dependencies"][0]["name"] == "disabled-method"
+    assert raised.value.data["dependencies"][0]["state"] == "disabled"
+    assert not adapter._sessions
+    assert loader.get_skill("disabled-method") is None
+
     session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={
         "session_mode": "general",
-        "expert": {"id": "expert-a", "name": "Expert", "required_skills": [
-            "disabled-method", "available-method"]},
+        "expert": {"id": "expert-a", "name": "Expert", "required_skills": ["available-method"]},
     })))
     state = adapter._sessions[session.sessionId]
     catalog = state.agent.tools["list_skills"]
@@ -8014,7 +8025,7 @@ async def test_acp_can_cancel_pending_injected_message(tmp_path):
     )
     cancelled = await agent.ext_method(
         "cancel_inject",
-        {"sessionId": session.sessionId, "injectionId": "inj-2"},
+        {"sessionId": session.sessionId, "injectionId": "inj-2", "_meta": {"org": 123}},
     )
 
     assert injected == {"ok": True, "injectionId": "inj-2", "status": "pending"}

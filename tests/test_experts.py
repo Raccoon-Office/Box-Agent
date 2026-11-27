@@ -1,6 +1,7 @@
 
 from tests.acp_helpers import acp_params
 from acp.schema import SessionNotification
+from acp import RequestError
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,16 @@ class DummyConn:
     async def session_update(self, session_id, update, **meta):
         payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
         self.updates.append(payload)
+
+
+def _agent_with_selected_pptx(config, tmp_path):
+    skills = tmp_path / "installed-skills"
+    skills.mkdir()
+    _write_skill(skills, "pptx")
+    loader = SkillLoader(skills)
+    loader.discover_skills()
+    return BoxACPAgent(DummyConn(), config, DoneLLM(),
+                       [GetSkillTool(loader), ListSkillsTool(loader)], "base system", skill_loader=loader)
 
 
 def _write_skill(root, name: str, description: str = "") -> None:
@@ -155,7 +166,7 @@ async def test_acp_session_injects_expert_prompt_and_returns_meta(tmp_path) -> N
         agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_mcp=False),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "base system")
+    agent = _agent_with_selected_pptx(config, tmp_path)
 
     session = await agent.new_session(
         **acp_params(SimpleNamespace(
@@ -186,7 +197,7 @@ async def test_acp_expert_context_is_session_scoped(tmp_path) -> None:
         agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_mcp=False),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "base system")
+    agent = _agent_with_selected_pptx(config, tmp_path)
 
     expert_session = await agent.new_session(
         **acp_params(SimpleNamespace(
@@ -250,7 +261,7 @@ async def test_acp_expert_context_is_session_scoped(tmp_path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("globally_disabled", [True, False])
-async def test_acp_expert_explicit_selection_only_overrides_profile_block(
+async def test_expert_profile_conflict_is_rejected_without_changing_ordinary_explicit_selection(
     tmp_path, globally_disabled,
 ) -> None:
     from box_agent.tools.skill_catalog_tool import ListSkillsTool
@@ -285,19 +296,24 @@ async def test_acp_expert_explicit_selection_only_overrides_profile_block(
         skill_loader=skill_loader,
     )
 
-    session = await agent.new_session(
-        **acp_params(SimpleNamespace(
-            cwd=str(tmp_path),
-            field_meta={
-                "execution_profile": "fast",
-                "expert": {
-                    "id": "research-expert",
-                    "name": "研究专家",
-                    "defaultSkills": [skill_name],
-                },
+    params = acp_params(SimpleNamespace(
+        cwd=str(tmp_path),
+        field_meta={
+            "execution_profile": "fast",
+            "expert": {
+                "id": "research-expert",
+                "name": "研究专家",
+                "defaultSkills": [skill_name],
             },
-        ))
-    )
+        },
+    ))
+    with pytest.raises(RequestError) as error:
+        await agent.new_session(**params)
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert not agent._sessions
+    # Ordinary Fast sessions retain the existing per-turn explicit override.
+    params.pop("expert")
+    session = await agent.new_session(**params)
 
     state = agent._sessions[session.sessionId]
     get_skill = state.agent.tools["get_skill"]
@@ -528,7 +544,7 @@ def test_expert_package_ignores_global_disable_but_preserves_builtin_protection(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("package_kind", ["expert", "expert_team"])
 @pytest.mark.parametrize("disabled", [False, True])
-async def test_expert_source_ignores_global_disable_but_obeys_fast_profile(tmp_path, package_kind, disabled):
+async def test_expert_source_keeps_local_bindings_but_rejects_fast_profile_conflict(tmp_path, package_kind, disabled):
     user, package = tmp_path / "user", tmp_path / "package"
     user.mkdir()
     package.mkdir()
@@ -565,22 +581,25 @@ async def test_expert_source_ignores_global_disable_but_obeys_fast_profile(tmp_p
         DummyConn(), config, DoneLLM(), [GetSkillTool(loader), ListSkillsTool(loader)],
         f"base system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader,
     )
+    with pytest.raises(RequestError) as error:
+        await agent.new_session(**acp_params(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={**meta, "execution_profile": "fast"},
+        )))
+    assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+    assert not agent._sessions
     session = await agent.new_session(**acp_params(SimpleNamespace(
-        cwd=str(tmp_path), field_meta={**meta, "execution_profile": "fast"},
+        cwd=str(tmp_path), field_meta={**meta, "execution_profile": "standard"},
     )))
     state = agent._sessions[session.sessionId]
-    assert "research-synthesis" not in state.skill_selector.matched_skill_names
     for _ in range(2):
         await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "继续完成任务"}])))
         for name in names[:2]:
             result = await state.agent.tools["get_skill"].execute(name)
-            available = name == "pptx"
-            assert result.success is available
-            if available:
-                assert str(package / name) in result.content
+            assert result.success
+            assert str(package / name) in result.content
             catalog = await state.agent.tools["list_skills"].execute(query=name)
             assert catalog.success
-            assert ('"available": true' in catalog.content) is available
+            assert '"available": true' in catalog.content
         assert (await state.agent.tools["get_skill"].execute("unbound")).success
     normal = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     if disabled:
@@ -895,9 +914,16 @@ async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(
                     tools=ToolsConfig(enable_mcp=False))
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [GetSkillTool(loader)],
                         SKILL_SLOT_SENTINEL, skill_loader=loader)
-    session = await agent.new_session(**acp_params(SimpleNamespace(
-        cwd=str(tmp_path), field_meta={package_kind: profile},
-    )))
+    params = acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={package_kind: profile}))
+    if initial_failure:
+        with pytest.raises(RequestError) as error:
+            await agent.new_session(**params)
+        assert error.value.data["code"] == "EXPERT_DEPENDENCIES_NOT_READY"
+        assert not agent._sessions
+        assert loader.get_skill("pptx").source == "builtin"
+        await agent.aclose()
+        return
+    session = await agent.new_session(**params)
     state = agent._sessions[session.sessionId]
     skill = state.skill_loader.get_skill("pptx")
     assert skill.source == "expert"
@@ -905,12 +931,6 @@ async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(
     assert loader.get_skill("pptx").source == "builtin"
     normal = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     assert agent._sessions[normal.sessionId].skill_loader.get_skill("pptx").source == "builtin"
-    if initial_failure:
-        assert skill.broken
-        assert state.skill_loader.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") is None
-        result = await state.agent.tools["get_skill"].execute("pptx")
-        assert not result.success and result.raw_output["code"] == "SKILL_BROKEN"
-        return
     assert state.skill_loader.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") == (
         package / "selected/scripts/sync_image_manifest_status.js"
     ).resolve()
@@ -972,3 +992,85 @@ def test_equally_bound_team_packages_preserve_existing_order(tmp_path):
         skill_bindings_by_directory={directory: {"pptx"} for directory in directories},
     )
     assert loader.get_skill("pptx").skill_path == directories[0] / "pptx/SKILL.md"
+
+@pytest.mark.parametrize("team_key", ["expert_team", "expertTeam"])
+@pytest.mark.parametrize("member_key", ["memberId", "member_id"])
+def test_expert_team_rejects_undefined_required_members(team_key, member_key):
+    team = {
+        "id": "review-team", "name": "Review team",
+        "leader": {"id": "lead", "name": "Lead"},
+        "members": [{"id": "present", "name": "Present"}],
+        "orchestration": {"workstreams": [
+            {member_key: " missing ", "title": "Required review", "required": True},
+            {member_key: "missing", "title": "Second review", "required": True},
+            {member_key: "another", "title": "Required delivery", "required": True},
+            {member_key: "optional", "title": "Optional review", "required": False},
+        ]},
+    }
+    with pytest.raises(ValueError) as error:
+        ExpertSessionContext.from_meta({team_key: team})
+    assert error.value.code == "EXPERT_TEAM_INVALID_MEMBER_REFERENCE"
+    assert error.value.team_id == "review-team"
+    assert error.value.missing_member_ids == ["missing", "another"]
+
+
+def test_expert_team_accepts_required_leader_and_member_workstreams():
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "review-team", "name": "Review team",
+        "leader": {"id": " lead ", "name": "Lead"},
+        "members": [{"id": "member", "name": "Member"}],
+        "orchestration": {"workstreams": [
+            {"memberId": "lead", "title": "Framing", "required": True},
+            {"memberId": " member ", "title": "Review", "required": True},
+        ]},
+    }})
+    assert context.team.leader.id == "lead"
+    assert [stream.member_id for stream in context.team.orchestration.workstreams] == ["lead", "member"]
+
+
+@pytest.mark.parametrize("required", [None, False])
+def test_expert_team_preserves_optional_undeclared_workstreams(required):
+    stream = {"memberId": "not-declared", "title": "Optional review"}
+    if required is not None:
+        stream["required"] = required
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "review-team", "name": "Review team",
+        "orchestration": {"workstreams": [stream]},
+    }})
+    assert context.team.orchestration.workstreams[0].member_id == "not-declared"
+    assert context.team.orchestration.workstreams[0].required is False
+
+
+def test_expert_team_without_orchestration_keeps_existing_profile_behavior():
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "legacy-team", "name": "Legacy team", "workflow": ["Review the task."],
+    }})
+    assert context.team.id == "legacy-team"
+    assert context.team.orchestration is None
+
+
+@pytest.mark.parametrize("workstream", [
+    {"memberId": "lead", "required": True},
+    {"member_id": "lead", "title": "  ", "required": "true"},
+    {"title": "Review", "required": True},
+    {"memberId": " ", "title": "Review", "required": True},
+])
+def test_expert_team_rejects_incomplete_required_workstreams(workstream):
+    with pytest.raises(ValueError) as error:
+        ExpertSessionContext.from_meta({"expert_team": {
+            "id": "review-team", "name": "Review team",
+            "leader": {"id": "lead", "name": "Lead"},
+            "orchestration": {"workstreams": [workstream]},
+        }})
+    assert error.value.code == "EXPERT_TEAM_INVALID_WORKSTREAM"
+    assert error.value.team_id == "review-team"
+    assert "memberId" in str(error.value) and "title" in str(error.value)
+
+
+@pytest.mark.parametrize("required", [None, False])
+def test_incomplete_optional_workstream_keeps_legacy_ignored_behavior(required):
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "review-team", "name": "Review team",
+        "orchestration": {"workstreams": [{"memberId": "lead", "required": required}]},
+    }})
+    assert context.team.orchestration is None

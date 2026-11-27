@@ -210,12 +210,15 @@ async def test_prompt_failure_keeps_sanitized_diagnostics_and_releases_reservati
             logger.exception("session/prompt", exc, session_id="s-1")
             raise
 
-    stub = SimpleNamespace(_config=config, _require_accepting_requests=lambda: None,
-                           _session_bindings_in_progress={}, _sessions={"s-1": state},
-                           _prompt_for_session=fail_prompt)
+    adapter = BoxACPAgent.__new__(BoxACPAgent)
+    adapter._config = config
+    adapter._closing = False
+    adapter._session_bindings_in_progress = {}
+    adapter._sessions = {"s-1": state}
+    monkeypatch.setattr(adapter, "_prompt_for_session", fail_prompt)
     try:
         with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
-            await BoxACPAgent.prompt(stub, session_id="s-1", prompt=[{"type": "text", "text": "original request"}])
+            await adapter.prompt(session_id="s-1", prompt=[{"type": "text", "text": "original request"}])
         assert not state._prompt_in_progress
         assert state._prompt_finished.done()
         output = capsys.readouterr().err

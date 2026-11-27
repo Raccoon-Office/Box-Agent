@@ -189,7 +189,7 @@ async def test_cancel_load_by_request_id_releases_writer_before_resume(tmp_path,
         assert not updates
 
         receipt = await asyncio.wait_for(host.ext_method("cancel_session_replay", {
-            "sessionId": session_id, "requestId": 42,
+            "sessionId": session_id, "requestId": 42, "_meta": {"org": ""},
         }), 5)
         assert receipt == {"settled": True}
         # Acquire the writer immediately after the cancellation receipt.

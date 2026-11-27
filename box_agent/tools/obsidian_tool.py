@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import re
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -410,9 +411,12 @@ class ObsidianDailyNoteTool(_ObsidianToolBase):
         return result
 
 
+def obsidian_tool_registrations(env_context: Any = None) -> Iterator[tuple[str, Callable[[], Tool]]]:
+    """Declare the same tools for resource-free preflight and construction."""
+    yield "obsidian_create_note", lambda: ObsidianCreateNoteTool(env_context=env_context)
+    yield "obsidian_update_note", lambda: ObsidianUpdateNoteTool(env_context=env_context)
+    yield "obsidian_daily_note", lambda: ObsidianDailyNoteTool(env_context=env_context)
+
+
 def create_obsidian_tools(env_context: Any = None) -> list[Tool]:
-    return [
-        ObsidianCreateNoteTool(env_context=env_context),
-        ObsidianUpdateNoteTool(env_context=env_context),
-        ObsidianDailyNoteTool(env_context=env_context),
-    ]
+    return [create() for _, create in obsidian_tool_registrations(env_context)]
