@@ -31,6 +31,20 @@ memory_read(path="memory.md")
 
 遇到 `CORE_READ_REQUIRED` 时，先对同一虚拟路径调用 `memory_read`，查看结果后再重试。遇到格式错误时，将出错的参数改为完整的 `<mem>正文</mem>` 条目后再重试。
 
+## 用户要求忘记某条记忆
+
+当用户明确要求忘记或删除某条已保存的记忆，且当前会话提供按路径编辑的记忆工具时，按以下步骤处理。
+
+1. 根据用户指明的内容，用 `memory_read` 读取 `user.md` 或 `memory.md`，定位对应条目。指代不清或有多个可能的匹配时，先确认具体要删除哪条。
+2. 对唯一匹配且可编辑的条目，用 `memory_edit` 编辑同一路径。将读取到的原正文完整包在 `<mem>...</mem>` 中传给 `old_text`，并传入 `new_text=""`。
+3. 再用 `memory_read` 读取同一路径，确认条目已删除后再告知用户。未找到条目、条目受保护、当前工具无法删除或无法验证结果时，如实说明。
+
+```python
+memory_read(path="user.md")
+memory_edit(path="user.md", old_text="<mem>用户希望被称为 W。</mem>", new_text="")
+memory_read(path="user.md")
+```
+
 ## 按类别写入记忆
 
 如果当前的 `memory_write` 工具提供 `category` 参数，用 `core` 保存用户明确表达的身份信息、偏好和长期行为规则。用 `context` 保存长期项目背景、重复出现的任务模式和经过验证的决定。写入时遵循当前工具的参数定义。
