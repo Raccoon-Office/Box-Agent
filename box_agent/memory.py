@@ -3087,7 +3087,7 @@ class MemoryHistory:
         self.prompt_type = prompt_type
         if scope is not None and prompt_type == "memsense":
             # 升级后重新生成当天的分区快照，避免复用含旧分区的正文。
-            scope = (*scope, "memsense-prompt-v1")
+            scope = (*scope, "memsense-prompt-v2" if self.backend == "desktop" else "memsense-prompt-v1")
         digest = hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest() if scope is not None else None
         self.name = _MEMORY_HISTORY_PREFIX + kind + digest if digest else None
         self.pending: Message | None = None

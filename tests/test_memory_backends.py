@@ -456,6 +456,7 @@ async def test_memsense_prompt_and_read_tool_keep_entries_without_storage_attrib
         assert '<mem>称呼 <p>W</p> &lt;用户&gt;。\n第二行</mem>' in prompt
         assert "### User Profile" in prompt and "### Long-term Memory" in prompt
         assert prompt.index("### Long-term Memory") < prompt.index("### User Profile")
+        assert all(text not in prompt for text in ("### User-maintained Memory", "{USER_ITEMS}", "用户主动维护"))
         assert "### 最近几天的记忆摘要" not in prompt
         assert "time=" not in prompt and "priority=" not in prompt
         assert "回复和产物中不主动提及记忆" in prompt

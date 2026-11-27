@@ -535,7 +535,9 @@ async def test_real_session_keeps_single_frozen_block_and_same_batch_mutation_is
         text = last.content
         assert text.count("## Memory Rules") == 1 and "--- MEMORY START ---" not in text
         assert "profile-unique-data" in text and "automatic-unique-data" in text and "dates-unique-data" in text
-        assert "experience-unique-data" not in text and "user_items-unique-data" not in text
+        assert "user_items-unique-data" in text and "{USER_ITEMS}" not in text
+        assert text.index("### User Profile") < text.index("### User-maintained Memory") < text.index("### 最近几天的记忆摘要")
+        assert "experience-unique-data" not in text
         failed = next(message for message in llm.requests[-1]["messages"] if message.role == "tool" and message.name == "memory_edit")
         assert "CORE_READ_REQUIRED" in str(failed.content)
         assert not any(operation == "core/mutate" for operation, _ in host.calls)
@@ -640,7 +642,37 @@ async def test_desktop_cloud_preloads_only_nonempty_system_sections(host):
         assert "### Long-term Memory" in content and "automatic-unique-data" in content
         assert "### 最近几天的记忆摘要" in content and "dates-unique-data" in content
         assert "### User Profile" not in content
-        assert "experience-unique-data" not in content and "user_items-unique-data" not in content
+        assert "### User-maintained Memory" in content and "user_items-unique-data" in content
+        assert "experience-unique-data" not in content
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.parametrize("user_items", [
+    pytest.param(None, id="absent"),
+    pytest.param({"content": ""}, id="empty"),
+    pytest.param({"content": "  \n  ", "revision": "v1"}, id="whitespace"),
+    pytest.param({"content": "不可用的正文", "status": "missing"}, id="missing"),
+    pytest.param({"content": "", "status": "error"}, id="error"),
+    pytest.param({"content": "过期的正文", "status": "stale"}, id="stale"),
+])
+async def test_desktop_cloud_omits_the_entire_unavailable_user_items_section(host, user_items):
+    manager = backend(host)
+    try:
+        if user_items is None:
+            host.sections.pop("user_items")
+        else:
+            host.sections["user_items"] = user_items
+        content = await manager.load_context(
+            query="question", session_id="session-1", turn_id="turn-1", for_system_prompt=True,
+        )
+        assert manager.memory_history.prompt_type == "memsense"
+        assert manager.memory_history.needs_system_refresh()
+        assert "### Long-term Memory" in content and "automatic-unique-data" in content
+        assert "### User Profile" in content and "profile-unique-data" in content
+        assert "### 最近几天的记忆摘要" in content and "dates-unique-data" in content
+        for absent in ("### User-maintained Memory", "{USER_ITEMS}", "用户主动维护", "不可用的正文", "过期的正文"):
+            assert absent not in content
     finally:
         await manager.aclose()
 
@@ -662,6 +694,7 @@ async def test_desktop_revocation_removes_memory_from_an_already_prepared_system
         ]
         prepared = engine.prepare_request(messages, prepared_tools=prepare_tools([]), token_limit=40_000)
         assert "profile-unique-data" in prepared.messages[0].content
+        assert "user_items-unique-data" in prepared.messages[0].content
         assert "--- MEMORY START ---" not in prepared.messages[0].content
 
         manager.end_turn()
@@ -672,6 +705,8 @@ async def test_desktop_revocation_removes_memory_from_an_already_prepared_system
             assert system.content.startswith("位于记忆前的规则")
             assert "profile-unique-data" not in system.content
             assert "### User Profile" not in system.content
+            assert "user_items-unique-data" not in system.content
+            assert "### User-maintained Memory" not in system.content
     finally:
         await manager.aclose()
 
@@ -687,6 +722,14 @@ async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_tu
     manager = backend(host)
     model = RecordingLLM()
     log = SessionLog.create(tmp_path / "logs", session_id="session-1", cwd=tmp_path)
+    # 模拟升级前同一天已经保存的三分区快照。
+    old_scope = ("account-1", "personal", host.bootstrap["identity_epoch"], "subject-1", "cloud",
+                 host.generation, 0, True, "memsense-prompt-v1")
+    old_digest = hashlib.sha256(json.dumps(old_scope, sort_keys=True).encode()).hexdigest()
+    log.append("memory/system-snapshot", {
+        "day": today.isoformat(), "scope": "memsense_memory:desktop:" + old_digest, "block": "旧版三分区快照",
+    }, ignorable=True)
+    log.flush()
     session = await AgentSession.open(config=config, host=HostBindings(
         llm_client=model, memory_manager=manager, tools=[], system_prompt="BASE\n{MEMORY_BLOCK}", session_log=log,
     ), options=SessionOptions(workspace_dir=tmp_path, profile="acp"))
@@ -709,13 +752,16 @@ async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_tu
     try:
         first = await turn(1)
         assert "profile-unique-data" in first
+        assert "user_items-unique-data" in first and "旧版三分区快照" not in first
         assert await turn(2) == first
         host.sections["profile"]["content"] = "更新后的桌面画像"
+        host.sections["user_items"]["content"] = "更新后的用户维护条目"
         assert await turn(3) == first
         assert sum(operation == "context" for operation, _ in host.calls) == 3
         set_memory_date(monkeypatch, today + timedelta(days=1))
         updated = await turn(4)
         assert "更新后的桌面画像" in updated and "profile-unique-data" not in updated
+        assert "更新后的用户维护条目" in updated and "user_items-unique-data" not in updated
         host.before = timeout
         assert "--- MEMORY START ---" not in await turn(5)
         host.before = None
@@ -735,7 +781,8 @@ async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_tu
         host.source = "cloud"
         host.automatic = False
         assert await turn(10) == empty
-        snapshots = [event["data"] for event in log.events_of_type("memory/system-snapshot")]
+        old_snapshot, *snapshots = [event["data"] for event in log.events_of_type("memory/system-snapshot")]
+        assert old_snapshot["scope"] != snapshots[0]["scope"]
         assert len(snapshots) == 3
         assert [row["day"] for row in snapshots] == ["2026-11-26", "2026-11-27", "2026-11-27"]
         assert snapshots[0]["scope"] == snapshots[1]["scope"] != snapshots[2]["scope"]
@@ -1676,7 +1723,7 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
             assert request["data"]["messages"] == expected
             system = request["data"]["messages"][0]
             assert system["role"] == "system" and "profile-unique-data" in system["content"]
-            assert "user_items-unique-data" not in system["content"] and "experience-unique-data" not in system["content"]
+            assert "user_items-unique-data" in system["content"] and "experience-unique-data" not in system["content"]
             assert not any(m["role"] == "user" and "user_items-unique-data" in m["content"]
                            for m in request["data"]["messages"] if isinstance(m.get("content"), str))
         assert requests[0]["llm_call_id"] != requests[1]["llm_call_id"]

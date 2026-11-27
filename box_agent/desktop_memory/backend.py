@@ -72,7 +72,8 @@ def _scope(data: dict[str, Any], epoch: str, session: str, turn: str) -> TurnSco
 _SECTIONS = (("user_items", "用户维护记忆", 6000), ("profile", "用户画像", 2000),
              ("automatic", "自动长期记忆", 3000), ("dates", "近期日期内容（UTC）", 2000),
              ("experience", "本轮相关经验", 3000))
-_MEMSENSE_SLOTS = {"profile": "{USER_PROFILE}", "automatic": "{LONG_TERM_MEMORY}", "dates": "{DATE_MEMORY_BLOCK}"}
+_MEMSENSE_SLOTS = {"profile": "{USER_PROFILE}", "automatic": "{LONG_TERM_MEMORY}",
+                   "dates": "{DATE_MEMORY_BLOCK}", "user_items": "{USER_ITEMS}"}
 
 
 def _format_sections(sections: Any, scope: TurnScope, *, max_chars: int = 15400,
@@ -96,13 +97,15 @@ def _format_sections(sections: Any, scope: TurnScope, *, max_chars: int = 15400,
                 or "continuation" in view and not isinstance(view["continuation"], dict)):
             raise MemoryProxyError("MEMORY_PROXY_INVALID_RESPONSE")
         text = view["content"].strip() if memsense_prompt else view["content"]
-        if not text or view.get("status") in {"missing", "error"}:
+        status = view.get("status", "ok")
+        if not text or status in {"missing", "error"}:
             continue
-        if memsense_prompt and key not in _MEMSENSE_SLOTS:
+        # 用户维护条目读取失败时宿主可能返回旧片段，生成快照时省略这一节。
+        if memsense_prompt and (key not in _MEMSENSE_SLOTS or key == "user_items" and status == "stale"):
             continue
         revision = view.get("revision", "")
         header = "" if memsense_prompt else "## " + label
-        if view.get("status") == "stale":
+        if status == "stale":
             header += " [stale]"
         if revision:
             header += " [" + revision.replace("\n", " ").replace("\r", " ") + "]"
@@ -242,9 +245,11 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         self.current_scope = scope
         self._sections = data["sections"]
         binding = scope.binding
+        # 云端的用户维护条目可独立省略，该字段的错误不使其余分区的快照失效。
         if binding["automaticAtStart"] and binding["source"] != "unavailable" and not any(
             isinstance(view, dict) and view.get("status") == "error"
-            for key, view in self._sections.items() if not memsense_prompt or key in _MEMSENSE_SLOTS
+            for key, view in self._sections.items()
+            if not memsense_prompt or (key in _MEMSENSE_SLOTS and key != "user_items")
         ):
             # 轮次和请求标识每次都变。仅按宿主确认的身份、来源与授权版本隔离快照。
             self.memory_history.set_scope(tuple(binding.get(key) for key in (

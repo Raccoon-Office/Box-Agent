@@ -144,7 +144,8 @@ exists=false 时只允许 write 创建，不允许 edit。
 `desktop` 的 `legacy_read_only` 和 `unavailable` 来源使用默认模板。
 自定义提示可使用同一占位符指定位置，旧模板继续支持原有的正文注入方式。
 新会话首轮或按 Box-Agent 运行环境的本地日期跨天后首轮加载。同一会话当天复用同一份正文，
-当天重新打开会话时从 Session Log 恢复。升级模板后，首次打开旧会话会重新获取当天的云端快照。
+当天重新打开会话时从 Session Log 恢复。已有 Desktop cloud 会话首次使用包含用户维护记忆的模板时，
+会重新生成当天的快照。
 当正文为空时，当前模板保留记忆规则，`Memory Content` 留空。记忆关闭或 Desktop 授权不可用时，
 使用默认模板并留空正文。首次加载失败只记录日志，
 当天运行中的会话留空该范围的记忆，同日重新打开可再次尝试。
@@ -159,11 +160,12 @@ exists=false 时只允许 write 创建，不允许 edit。
 `generic`、`mem0` 和 `memu` 配置 `recall` 后才加载，外部请求使用各自的 HTTP 映射。
 快照按后端、身份和召回连接配置隔离。默认模板的 `Memory Rules` 约束回复和产物中的记忆表述。
 
-云端模板依次渲染 `Long-term Memory`、`User Profile`、`最近几天的记忆摘要`。
-各分区有正文才显示标题和使用规则，正文放在 Markdown 围栏内。
-直连 MemSense 从 `memory://memory.md`、`memory://user.md` 和日期文件读取。
-Desktop cloud 对应宿主的 `automatic`、`profile` 和 `dates` 三个字段，
-用户维护记忆和召回经验仍可按需检索。直连 MemSense 的日期按旧到新排列，
+云端模板依次渲染 `Long-term Memory`、`User Profile`、`User-maintained Memory` 和 `最近几天的记忆摘要`。
+各分区有正文才显示标题、Markdown 正文围栏和使用规则。
+直连 MemSense 从 `memory://memory.md`、`memory://user.md` 和日期文件读取，省略用户维护记忆分区。
+Desktop cloud 对应宿主的 `automatic`、`profile`、`user_items` 和 `dates`。生成快照时，
+`user_items` 为空、读取失败或只返回过期片段，会省略整节。召回经验可按需检索。
+直连 MemSense 的日期按旧到新排列，
 自动注入只保留日期标题和摘要正文；模型工具不开放日期文件的显式读取或修改。
 `date_memory_load_days` 仅用于 MemSense，默认 3，范围 0～31。新会话首轮或按
 Box-Agent 本地日期跨天后的首轮，随记忆快照加载 `memory://date-memory/YYYY-MM-DD.md`。
