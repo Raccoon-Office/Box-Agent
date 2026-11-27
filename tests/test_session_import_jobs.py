@@ -12,7 +12,9 @@ from uuid import uuid4
 
 import pytest
 
-from box_agent.session_import_jobs import HistoryImportJobError, HistoryImportJobs
+from box_agent.session_import_jobs import (
+    HistoryImportJobError, HistoryImportJobs, _worker_launch, worker_command,
+)
 from tests.acp_host.probe import AcpHostProbe, _send
 
 
@@ -27,6 +29,49 @@ while not (root / 'release').exists(): time.sleep(.01)
 handle = 'acp-v1-' + base64.urlsafe_b64encode(request['token'].encode()).decode().rstrip('=')
 print(json.dumps({'result': {'sessionId': handle}}), flush=True)
 """
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows venv process identity")
+@pytest.mark.asyncio
+async def test_windows_worker_retains_venv_dependencies_and_direct_parent_identity():
+    script = f"""
+import json, os, sys, pywintypes
+from box_agent.session_import_worker import _watch_parent
+_watch_parent({os.getpid()})
+print(json.dumps({{'pid': os.getpid(), 'ppid': os.getppid(),
+    'prefix': sys.prefix, 'executable': sys.executable, 'dependency': pywintypes.__file__}}))
+"""
+    command, env = _worker_launch([sys.executable, "-c", script])
+    child = await asyncio.create_subprocess_exec(
+        *command, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        output, error = await asyncio.wait_for(child.communicate(), 10)
+        assert child.returncode == 0, error.decode(errors="replace")
+        identity = json.loads(output)
+        assert identity["pid"] == child.pid
+        assert identity["ppid"] == os.getpid()
+        assert Path(identity["prefix"]) == Path(sys.prefix)
+        assert Path(identity["executable"]) == Path(sys.executable)
+        assert Path(identity["dependency"]).is_file()
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
+
+
+def test_worker_rejects_an_unrelated_parent():
+    from box_agent.session_import_worker import _watch_parent
+
+    with pytest.raises(RuntimeError, match="Import parent changed before startup"):
+        _watch_parent(os.getpid())
+
+
+def test_frozen_worker_keeps_its_runtime_entry_and_environment(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    command, env = _worker_launch(worker_command())
+    assert command == [sys.executable, "--history-import-worker"]
+    assert env is None
 
 
 @pytest.mark.parametrize("stage", ["read", "parse", "write", "file_sync", "verify", "directory_sync"])
@@ -214,8 +259,11 @@ async def run():
     await jobs.run(sys.argv[1], sys.argv[2])
 asyncio.run(run())
 """
-    parent = await asyncio.create_subprocess_exec(sys.executable, "-c", script, str(uuid4()), str(uuid4()),
-        env=os.environ | {"IMPORT_JOB_TEST_ROOT": str(tmp_path)}, stderr=asyncio.subprocess.DEVNULL)
+    # Retain the actual owner handle, not a Windows venv redirector's handle.
+    command, env = _worker_launch([sys.executable, "-c", script, str(uuid4()), str(uuid4())])
+    parent = await asyncio.create_subprocess_exec(*command,
+        env=(env or dict(os.environ)) | {"IMPORT_JOB_TEST_ROOT": str(tmp_path)},
+        stderr=asyncio.subprocess.DEVNULL)
     pid = None
     child_handle = None
     kernel = None

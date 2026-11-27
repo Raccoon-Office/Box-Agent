@@ -25,6 +25,18 @@ def worker_command() -> list[str]:
     return [sys.executable, "-m", "box_agent.session_import_worker"]
 
 
+def _worker_launch(command: list[str]) -> tuple[list[str], dict[str, str] | None]:
+    # Match multiprocessing's Windows venv launch: avoid the redirector so the
+    # process handle, Job membership and PPID all identify the actual worker.
+    # __PYVENV_LAUNCHER__ retains venv site-packages and .pth initialization.
+    if sys.platform == "win32" and not getattr(sys, "frozen", False):
+        base = getattr(sys, "_base_executable", None)
+        if (base and os.path.normcase(command[0]) == os.path.normcase(sys.executable)
+                and os.path.normcase(base) != os.path.normcase(sys.executable)):
+            return [base, *command[1:]], os.environ | {"__PYVENV_LAUNCHER__": sys.executable}
+    return command, None
+
+
 class _WindowsImportJob:
     """One kill-on-close Job, armed before its child receives write authority."""
 
@@ -144,8 +156,9 @@ class HistoryImportJobs:
         reporter = asyncio.create_task(self._progress(job)) if progress else None
         response = None
         try:
+            command, env = _worker_launch(self._command())
             process = await asyncio.create_subprocess_exec(
-                *self._command(), stdin=asyncio.subprocess.PIPE,
+                *command, env=env, stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=None, limit=65536,
             )
             job.process = process
