@@ -487,6 +487,7 @@ async def _auto_match_memory_for_latest_prompt(
     new task.  This avoids depending on the model deciding to call
     ``memory_search`` while keeping the memory signal non-authoritative.
     """
+    # 自动匹配只使用真实用户输入，恢复会话时也不能把运行时消息当成查询。
     user_text = current_turn_text if current_turn_text is not None else _latest_user_text(messages)
     if not user_text.strip():
         return None, None

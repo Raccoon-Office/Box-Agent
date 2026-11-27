@@ -31,6 +31,7 @@ import box_agent.tools.runtime as runtime_module
 import box_agent.tools.setup as tools_setup
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
 from box_agent.env_context import EnvContext
+from box_agent.memory import MemoryManager
 from box_agent.plugins.builtins import SessionResources
 from box_agent.session_context import HostBindings, SessionContext, SessionOptions
 from box_agent.tools.image_generation_tool import _API_KEY_ENV, _ENDPOINT_ENV
@@ -83,16 +84,6 @@ CASES = {
 # Cases assembled with an officev3-style filesystem policy (the ACP main path).
 POLICY_CASES = {"acp_general_with_policy"}
 EXTRA_ALLOWED_DIRECTORY = "/Users/demo/Documents"
-
-
-class _Memory:
-    def read_core(self) -> str:
-        return "name: snapshot user, prefers concise answers in Chinese"
-
-    def recall(self) -> str:
-        from box_agent.memory import MemoryManager
-
-        return MemoryManager.build_memory_block("# Core Memory\n- 姓名：快照用户\n- 偏好：中文回复")
 
 
 def _template() -> str:
@@ -152,7 +143,8 @@ async def _assemble(name: str, workspace: Path, *, workspace_layout=None, child:
     )
     host = HostBindings(system_prompt=_template() if profile == "acp" else None)
     resources = SessionResources(context=SessionContext(config=config, options=options, host=host))
-    resources.memory_manager = _Memory()
+    resources.memory_manager = MemoryManager(str(workspace.parent / "memory"))
+    resources.memory_manager.write_core("- 姓名：快照用户\n- 偏好：中文回复")
     resources.tools = [SimpleNamespace(name=tool) for tool in sorted(tools)]
     await session_assembly.prepare_prompt(resources)
     return resources.state["child_system_prompt"] if child else resources.system_prompt
@@ -184,6 +176,8 @@ async def test_session_prompt_has_no_unrendered_placeholders(name, tmp_path, pin
     prompt = await _assemble(name, workspace)
 
     assert not re.findall(r"\{[A-Z_]{3,}\}|\{\{\.[A-Za-z]+\}\}", prompt)
+    assert "## Memory Rules" in prompt
+    assert "--- MEMORY START ---" not in prompt and "快照用户" not in prompt
 
 
 # Every tool name a session could have. A backticked mention of one of these is
@@ -353,6 +347,7 @@ async def test_sub_agent_inherited_prompt_matches_snapshot(name, tmp_path, pinne
 INHERITED_CONSTRAINTS = (
     "<safety_guardrails>", "<language_principles>", "### Factual & Search Reliability", "### Safety",
     "### File & Bash Operations", "## File Access Context", "- Current workspace: `", "## Skill Runtime Context",
+    "## Memory Rules",
 )
 
 
@@ -361,7 +356,7 @@ async def test_sub_agent_drops_parent_only_blocks_and_keeps_constraints(name, tm
     from box_agent.tools.sub_agent_tool import _child_safe_parent_prompt
 
     parent_markers = (
-        "--- MEMORY START ---\n", "<workflow>\n", "# Role\n",
+        "<workflow>\n", "# Role\n",
         "## 用户引导提示 (Action Hint)\n", "## 后续建议（仅供本地 Agent 输入框使用）\n",
         "## Native Image Generation\n", "## Available Skills\n",
     )
@@ -382,7 +377,7 @@ async def test_sub_agent_drops_parent_only_blocks_and_keeps_constraints(name, tm
         assert marker not in child
     # (The Attention rule's conditional "若 `request_user_input` 可用" stays; a
     # child never has that tool, so the condition is simply false.)
-    parent_only_text = ["request_user_decision", "action_hint", "快照用户", "商汤小浣熊，由商汤科技研发，定位为",
+    parent_only_text = ["request_user_decision", "action_hint", "商汤小浣熊，由商汤科技研发，定位为",
                         "parent-only catalog"]
     if name == "acp_general_follow_up":
         parent_only_text.append("follow_up_suggestions")

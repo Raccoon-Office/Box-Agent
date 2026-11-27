@@ -295,6 +295,7 @@ class AgentSession:
 
     def build_run_options(self, **overrides: Any) -> AgentRunOptions:
         """Bind session state before applying explicit host turn overrides."""
+        from .memory import MemoryManager
 
         values = {
             "summary_llm": self.summary_llm,
@@ -303,7 +304,8 @@ class AgentSession:
         }
         if self.memory_extractor is not None:
             values["memory_extractor"] = self.memory_extractor
-        if self.memory_runtime is not None and self.memory_manager is not None:
+        # 本地预载也独立于自动提取开关。
+        if self.memory_manager is not None and (self.memory_runtime is not None or isinstance(self.memory_manager, MemoryManager)):
             values["memory_manager"] = self.memory_manager
         values.update(overrides)
         return replace(self.agent.default_run_options(), **values)

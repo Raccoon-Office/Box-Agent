@@ -1,61 +1,75 @@
 ---
 name: memory-guide
-description: Guides the agent to proactively save user information to long-term memory and search context when needed. Load this skill to understand when and how to use memory_write, memory_read, and memory_search.
+description: 指导助手主动将用户信息保存到长期记忆，并在需要时检索相关上下文。加载此技能可了解何时以及如何使用 memory_write、memory_read 和 memory_search。
 keywords: [memory, remember, 记忆, 记住, 保存, 长期记忆, 偏好]
 ---
 
-# Memory Guide
+# 记忆指南
 
-Use the memory tools exposed in the current session. Check the tool schema before choosing how to save.
+使用当前会话提供的记忆工具。决定如何保存之前，先查看工具的参数定义。
 
-## Path-Based Memory Tools
+## 按路径读写记忆
 
-Use this workflow when `memory_read` and `memory_write` require `path`.
+当 `memory_read` 和 `memory_write` 都要求传入 `path` 时，使用以下流程。
 
-- `user.md` holds stable user identity, preferences, and collaboration habits supported by explicit user statements.
-- `memory.md` holds confirmed long-term rules, project context the user asks to keep, and confirmed decisions that will affect future work.
+- `user.md` 保存用户明确表达的稳定身份信息、偏好和协作习惯。
+- `memory.md` 保存已经确认的长期规则、用户要求保留的项目背景，以及会影响后续工作的已确认决定。
 
-These are virtual memory paths. Access them through the memory tools.
+这两个路径是虚拟记忆路径，通过记忆工具访问。
 
-Read the same path before editing and follow the rules returned by the read. For an existing path, prefer `memory_edit` to append, replace, or delete individual entries. Each non-empty `old_text` or `new_text` must contain complete `<mem>...</mem>` entries with non-empty bodies and plain tags. For replacement or deletion, copy the exact bodies of the existing consecutive entries into `old_text` and match them uniquely. Leave `old_text` empty to append or `new_text` empty to delete. Respect protected entries.
+编辑前先读取同一路径，并遵循读取结果返回的规则。对于已存在的路径，优先用 `memory_edit` 追加、替换或删除单个条目。每个非空的 `old_text` 或 `new_text` 都必须包含完整的 `<mem>...</mem>` 条目，正文不能为空，标签不带属性。替换或删除时，把原有连续条目的正文原样复制到 `old_text` 中，并确保能唯一匹配。追加时将 `old_text` 留空，删除时将 `new_text` 留空。遵守受保护条目的修改限制。
 
-Example for an existing `memory.md`:
+以下示例向已有的 `memory.md` 追加一条记忆。
 
 ```python
 memory_read(path="memory.md")
-memory_edit(path="memory.md", old_text="", new_text="<mem>The user confirmed that status reports should include a risks section.</mem>")
+memory_edit(path="memory.md", old_text="", new_text="<mem>用户已确认，进度报告应包含风险一节。</mem>")
 memory_read(path="memory.md")
 ```
 
-If the read reports `exists=false`, create that path with `memory_write(path="memory.md", content="<mem>Confirmed long-term rule</mem>")`. A full rewrite requires all entries and is allowed only when the read rules permit it. After a successful write or edit, read the same path again to verify the result and before making another change.
+如果读取结果显示 `exists=false`，用 `memory_write(path="memory.md", content="<mem>已确认的长期规则</mem>")` 创建该路径。全文覆写必须包含全部条目，并且需要读取结果中的规则允许。写入或编辑成功后，先再次读取同一路径验证结果，再做下一次修改。
 
-On `CORE_READ_REQUIRED`, call `memory_read` for the same virtual path and review the result before retrying. On a format error, fix the offending argument using a complete `<mem>body</mem>` entry before retrying.
+遇到 `CORE_READ_REQUIRED` 时，先对同一虚拟路径调用 `memory_read`，查看结果后再重试。遇到格式错误时，将出错的参数改为完整的 `<mem>正文</mem>` 条目后再重试。
 
-## Category-Based Memory Tools
+## 用户要求忘记某条记忆
 
-When the active `memory_write` schema exposes `category`, use `core` for explicit user identity, preferences, and durable behavioral rules. Use `context` for long-term project context, recurring task patterns, and verified decisions. Follow the active tool schema for the write.
+当用户明确要求忘记或删除某条已保存的记忆，且当前会话提供按路径编辑的记忆工具时，按以下步骤处理。
 
-## When to Search
+1. 根据用户指明的内容，用 `memory_read` 读取 `user.md` 或 `memory.md`，定位对应条目。指代不清或有多个可能的匹配时，先确认具体要删除哪条。
+2. 对唯一匹配且可编辑的条目，用 `memory_edit` 编辑同一路径。将读取到的原正文完整包在 `<mem>...</mem>` 中传给 `old_text`，并传入 `new_text=""`。
+3. 再用 `memory_read` 读取同一路径，确认条目已删除后再告知用户。未找到条目、条目受保护、当前工具无法删除或无法验证结果时，如实说明。
 
-Call `memory_search` when the current request may depend on context that is not in core memory:
-
+```python
+memory_read(path="user.md")
+memory_edit(path="user.md", old_text="<mem>用户希望被称为 W。</mem>", new_text="")
+memory_read(path="user.md")
 ```
-# Before writing a weekly report
-memory_search(query="weekly report")
+
+## 按类别写入记忆
+
+如果当前的 `memory_write` 工具提供 `category` 参数，用 `core` 保存用户明确表达的身份信息、偏好和长期行为规则。用 `context` 保存长期项目背景、重复出现的任务模式和经过验证的决定。写入时遵循当前工具的参数定义。
+
+## 什么时候搜索记忆
+
+当本轮请求可能依赖核心记忆之外的上下文时，调用 `memory_search`。
+
+```python
+# 写周报之前
+memory_search(query="周报")
 memory_search(query="Q2")
 
-# Before analyzing a document
-memory_search(query="document format")
+# 分析文档之前
+memory_search(query="文档格式")
 ```
 
-Also search for requests that may depend on saved user preferences, prior decisions, repo conventions, previous pitfalls, specific paths/errors, or recurring workflows. Skip memory for one-off simple questions, trivial rewrites, current time/date, or requests fully answered by the visible conversation.
+如果请求可能依赖已保存的用户偏好、此前的决定、仓库约定、过去踩过的坑、具体路径或报错，以及重复使用的工作流程，也应搜索记忆。对一次性的简单问题、轻量改写、询问当前时间或日期，以及凭当前可见对话就能完整回答的请求，跳过记忆。
 
-When you search, do not pass the full user sentence if it contains action words like "send", "write", "help", "发我", or "帮我". Extract 1-3 stable noun phrases and search those first: project/product names, repo/module paths, exact errors, workflows, artifact types, or prior decisions. For example, "排产平台融资 ppt 的演讲稿发我" should search "排产平台", "融资路演", or "ppt" instead of the full sentence.
+如果用户原话包含 `send`、`write`、`help`、「发我」或「帮我」等动作词，搜索时省略动作词，从中提取 1 到 3 个含义稳定的名词短语，例如项目名、产品名、仓库或模块路径、原始报错、工作流程、产物类型或此前的决定。比如用户说「排产平台融资 ppt 的演讲稿发我」，可以搜「排产平台」「融资路演」或「ppt」。
 
-## When NOT to Save
+## 哪些内容不应保存
 
-- Ephemeral task details ("read file X", "fix this bug")
-- Code patterns derivable from the codebase
-- Secrets, credentials, tokens, or private keys
-- Anything already in memory (check with `memory_read` first when uncertain)
-- Inferences about the user that they did not explicitly confirm
+- 临时任务细节，例如「读一下文件 X」或「修这个 bug」
+- 从代码库本身就能得出的代码模式
+- 密钥、凭证、令牌或私钥
+- 已经保存的内容。如果不确定，先用 `memory_read` 核实
+- 关于用户的推断中，用户未明确确认的内容
