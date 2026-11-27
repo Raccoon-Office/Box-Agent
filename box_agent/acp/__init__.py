@@ -1103,7 +1103,6 @@ class SessionState(AgentSession):
     _history_cancel_requested: bool = field(default=False, init=False, repr=False)
     _history_restore_failed: bool = field(default=False, init=False, repr=False)
     _mcp_apps_closing: bool = field(default=False, init=False, repr=False)
-    _mcp_apps_nonce: str = field(default_factory=lambda: uuid4().hex, init=False, repr=False)
     trace_writer: SessionTraceWriter | None = None
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None

@@ -3579,6 +3579,26 @@ def resolve_mcp_app_tool(
     return tool
 
 
+def is_mcp_app_resource_not_found(
+    error: types.ErrorData, resource_uri: str, *, historical_entry: bool = False,
+) -> bool:
+    """Distinguish a missing resource from other JSON-RPC Invalid Params errors."""
+    if error.code == -32002:
+        return True
+    if error.code != -32602 or error.data not in (None, {}, {"uri": resource_uri}):
+        return False
+    if error.message in {
+        "Resource not found", f"Resource not found: {resource_uri}",
+        f"Resource {resource_uri} not found", f"Unknown resource: {resource_uri}",
+    }:
+        return True
+    # Some App servers omit data for a retired entry page. Ordinary reads still
+    # require the matching URI for these messages.
+    return (historical_entry or error.data == {"uri": resource_uri}) and error.message in {
+        "Unknown UI resource", "未知卡片资源", "リソースが見つかりません",
+    }
+
+
 async def read_mcp_app_resource(
     server_name: str,
     resource_uri: str,
@@ -3613,19 +3633,7 @@ async def read_mcp_app_resource(
         except Exception as exc:
             if _mcp_auth_status(exc) is not None:
                 raise McpAppError("APP_AUTH_REQUIRED") from exc
-            if not isinstance(exc, McpError):
-                raise
-            error = exc.error
-            # -32002 is the legacy resource-not-found code. Newer servers use
-            # Invalid Params; require a precise missing-resource message. data.uri
-            # identifies the failed resource, not whether it is missing.
-            missing = error.code == -32002 or (
-                error.code == -32602 and error.message in {
-                    "Resource not found", f"Resource not found: {resource_uri}",
-                    f"Resource {resource_uri} not found", f"Unknown resource: {resource_uri}",
-                }
-            )
-            if missing:
+            if isinstance(exc, McpError) and is_mcp_app_resource_not_found(exc.error, resource_uri):
                 raise McpAppError("APP_RESOURCE_NOT_FOUND") from exc
             raise
         value = response.model_dump(mode="json", by_alias=True, exclude_none=True)

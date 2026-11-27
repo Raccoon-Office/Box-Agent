@@ -1,7 +1,7 @@
 """Host-only MCP App snapshots and deterministic ACP interactions.
 
-The Session Log owns durable facts. Bindings are derived from the original
-call and the current connection; no independent persistent App registry exists.
+The Session Log owns durable facts. Each request resolves the original call
+against the current connection; no persistent connection handle is required.
 """
 from __future__ import annotations
 
@@ -11,20 +11,21 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
-from hmac import compare_digest
 import json
 import logging
-from secrets import token_hex
+from traceback import walk_tb
 from typing import Any
 
 from acp import RequestError
+import httpx
+from mcp.shared.exceptions import McpError
+from pydantic import ValidationError
 
 from box_agent.composition import standalone_tool_hooks
 from box_agent.kernel.hook_types import copy_data
 from box_agent.session_log import run_session_write
 from box_agent.tools.base import ToolInvocationContext
 from box_agent.tools.chat_references import ChatReferences
-from box_agent.tools.completion_checks import CompletionChecks, CompletionContext
 from box_agent.tools.model_tool_context import set_model_tool_context, reset_model_tool_context
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,49 @@ INTERACTION_EVENT = "mcp-app/interaction"
 
 def _error(code: str) -> RequestError:
     return RequestError(-32000, code, {"code": code})
+
+
+def _log_resource_failure(exc: Exception, *, session_id: str, snapshot: dict[str, Any],
+                          resource_uri: str, initial_ui: bool, fallback: bool) -> None:
+    """Keep protocol codes and stack locations without remote messages or payloads."""
+    from box_agent.tools.mcp_apps import McpAppError
+
+    errors = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen and len(errors) < 4:
+        seen.add(id(current))
+        detail: dict[str, Any] = {
+            "type": f"{type(current).__module__}.{type(current).__name__}",
+            # Formatting the exception itself would include response bodies,
+            # validation inputs or credentials. Do not include source lines/locals.
+            "frames": [{"module": frame.f_globals.get("__name__", ""),
+                        "function": frame.f_code.co_name, "line": line}
+                       for frame, line in walk_tb(current.__traceback__)][-8:],
+        }
+        if isinstance(current, McpError):
+            detail["mcp_code"] = current.error.code
+        if isinstance(current, McpAppError):
+            detail["app_code"] = current.code
+        if isinstance(current, httpx.HTTPStatusError):
+            detail["http_status"] = current.response.status_code
+        if isinstance(current, ValidationError):
+            detail["validation_types"] = [item["type"] for item in current.errors(
+                include_url=False, include_context=False, include_input=False)][:8]
+        errors.append(detail)
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    log.warning("MCP App resource read failed %s", json.dumps({
+        "session_id": session_id,
+        "tool_call_id": snapshot["toolCallId"],
+        "server_name": snapshot["serverName"],
+        "tool_name": snapshot["tool"]["name"],
+        # Even a ui:// URI may embed private path/query/fragment values.
+        "resource_uri_hash": sha256(resource_uri.encode()).hexdigest(),
+        "initial_ui": initial_ui,
+        "fallback": fallback,
+        "errors": errors,
+        "payload_redacted": True,
+    }, ensure_ascii=True))
 
 
 def _string(value: Any, *, limit: int = 256) -> str:
@@ -97,7 +141,6 @@ class McpAppsACP:
         self._on_reconnect = on_reconnect
         from box_agent.tools.mcp_apps import set_mcp_apps_host_capability
         set_mcp_apps_host_capability(True)
-        self._epoch = token_hex(32)
         self._interactions: dict[tuple[str, str], _Interaction] = {}
 
     def capture(self, state: Any):
@@ -141,7 +184,7 @@ class McpAppsACP:
         if "connectorContext" not in params:
             return frozenset(getattr(state, "selected_connector_ids", set()))
         # Only the native host supplies this request-local snapshot. It is not
-        # model/session state and never changes the App binding or other requests.
+        # model/session state and never changes other requests.
         from . import (
             _connector_ids_from_meta, _connector_statuses_from_meta,
             _connector_status_unavailable_from_meta,
@@ -170,7 +213,7 @@ class McpAppsACP:
             raise _error("MCP_APP_SNAPSHOT_UNAVAILABLE")
         return session_id, state, snapshot
 
-    def _resolve(self, params: dict[str, Any], *, bound: bool):
+    def _resolve(self, params: dict[str, Any], *, opening: bool = False):
         from box_agent.tools.mcp_apps import McpAppError
         from box_agent.tools.mcp_loader import current_mcp_app_binding
         session_id, state, snapshot = self._history(params)
@@ -181,17 +224,12 @@ class McpAppsACP:
         except McpAppError as exc:
             # A credential update may revoke the old epoch just before its
             # replacement is published. A new open can retry this transition.
-            if not bound and exc.code == "APP_SERVER_CHANGED":
+            if opening and exc.code == "APP_SERVER_CHANGED":
                 raise _error("APP_SERVER_UNAVAILABLE") from exc
             raise
-        material = json.dumps([
-            self._epoch, session_id, state._mcp_apps_nonce, snapshot["toolCallId"],
-            binding.server_identity, binding.generation, snapshot["resourceUri"],
-        ], separators=(",", ":"))
-        binding_id = sha256(material.encode()).hexdigest()
-        if bound and not compare_digest(_string(params.get("bindingId")), binding_id):
-            raise _error("MCP_APP_BINDING_EXPIRED")
-        return session_id, state, snapshot, binding, binding_id
+        # Capture the current connection for this request only. An open App
+        # continues on the replacement connection after a reconnect.
+        return session_id, state, snapshot, binding
 
     def _assert_current(self, session_id: str, state: Any) -> None:
         if (self.sessions.get(session_id) is not state or getattr(state, "_closed", False)
@@ -218,14 +256,16 @@ class McpAppsACP:
 
                 await prepare_mcp_app_connection(saved["serverName"], selected_connectors, self._on_reconnect)
                 self._assert_current(session_id, state)
-            session_id, state, snapshot, binding, binding_id = self._resolve(params, bound=method != "mcp/apps/snapshot")
+            session_id, state, snapshot, binding = self._resolve(params, opening=method == "mcp/apps/snapshot")
             if method == "mcp/apps/snapshot":
-                return {"version": VERSION, "bindingId": binding_id,
+                return {"version": VERSION,
                         "resourceUri": snapshot["resourceUri"], "tool": snapshot["tool"],
                         "arguments": snapshot["arguments"], "result": snapshot["result"]}
             if method == "mcp/apps/resource":
                 from box_agent.tools.mcp_apps import McpAppError
-                from box_agent.tools.mcp_loader import read_mcp_app_resource, resolve_mcp_app_tool
+                from box_agent.tools.mcp_loader import (
+                    is_mcp_app_resource_not_found, read_mcp_app_resource, resolve_mcp_app_tool,
+                )
                 uri = _string(params.get("uri"), limit=2048)
                 initial_ui = uri == snapshot["resourceUri"]
 
@@ -233,21 +273,37 @@ class McpAppsACP:
                     return self._allowed_connectors(state, params)
 
                 async def read(resource_uri: str, *, fallback: bool = False):
-                    return await read_mcp_app_resource(
-                        snapshot["serverName"], resource_uri, server_identity=binding.server_identity,
-                        generation=binding.generation, allowed_connector_ids=allowed_connectors,
-                        require_ui=initial_ui,
-                        # Only the original, persisted call authorizes a historical entry point.
-                        saved_ui_uri=snapshot["resourceUri"] if initial_ui else None,
-                        ui_tool_name=snapshot["tool"]["name"] if fallback else None,
-                    )
+                    try:
+                        return await read_mcp_app_resource(
+                            snapshot["serverName"], resource_uri, server_identity=binding.server_identity,
+                            generation=binding.generation, allowed_connector_ids=allowed_connectors,
+                            require_ui=initial_ui,
+                            # Only the original, persisted call authorizes a historical entry point.
+                            saved_ui_uri=snapshot["resourceUri"] if initial_ui else None,
+                            ui_tool_name=snapshot["tool"]["name"] if fallback else None,
+                        )
+                    except Exception as exc:
+                        try:
+                            _log_resource_failure(exc, session_id=session_id, snapshot=snapshot,
+                                                  resource_uri=resource_uri, initial_ui=initial_ui,
+                                                  fallback=fallback)
+                        except Exception:
+                            # Diagnostics must not replace the original error or fallback.
+                            pass
+                        raise
 
                 try:
                     result = await read(uri)
-                except McpAppError as exc:
-                    if not initial_ui or exc.code != "APP_RESOURCE_NOT_FOUND":
+                except (McpAppError, McpError) as exc:
+                    if not initial_ui:
                         raise
-                    self._resolve(params, bound=True)
+                    if isinstance(exc, McpError):
+                        missing = is_mcp_app_resource_not_found(exc.error, uri, historical_entry=True)
+                    else:
+                        missing = exc.code == "APP_RESOURCE_NOT_FOUND"
+                    if not missing:
+                        raise
+                    self._resolve(params)
                     try:
                         tool = resolve_mcp_app_tool(
                             snapshot["serverName"], snapshot["tool"]["name"], server_identity=binding.server_identity,
@@ -262,7 +318,7 @@ class McpAppsACP:
                     uri = tool.mcp_ui_resource_uri
                     result = await read(uri, fallback=True)
                 self._assert_current(session_id, state)
-                self._resolve(params, bound=True)
+                self._resolve(params)
                 if initial_ui:
                     # Host-owned metadata; never trust a server-supplied resolved URI.
                     return {**result, "resolvedResourceUri": uri}
@@ -270,7 +326,10 @@ class McpAppsACP:
             if method == "mcp/apps/call":
                 result = await self._call(session_id, state, snapshot, binding, params)
                 self._assert_current(session_id, state)
-                self._resolve(params, bound=True)
+                # Keep completed receipts, but do not deliver a reply across a
+                # connection replacement within this request.
+                if self._resolve(params)[3] != binding:
+                    raise _error("APP_BINDING_EXPIRED")
                 return result
             raise _error("MCP_APP_METHOD_UNSUPPORTED")
         except RequestError:
@@ -375,7 +434,7 @@ class McpAppsACP:
 
         async def apply_hooks(dispatch, base):
             if dispatch is None or base is None:
-                raise _error("MCP_APP_AUTHORIZATION_UNAVAILABLE")
+                raise _error("MCP_APP_UNAVAILABLE")
             context = replace(
                 base, event="tool.before_execution", tool_call_id=interaction_id,
                 is_cancelled=is_cancelled,
@@ -388,13 +447,6 @@ class McpAppsACP:
 
         if active is None:
             options = agent.default_run_options()
-            checks = await CompletionChecks.create(
-                agent.tools, CompletionContext(
-                    tuple(agent.messages), is_cancelled, agent.session_log, resume_scope=agent.messages,
-                ), include_inputs=False,
-            )
-            if checks.failures:
-                raise _error("MCP_APP_AUTHORIZATION_UNAVAILABLE")
             async with standalone_tool_hooks({
                 "llm": options.llm, "tools": agent.tools, "hooks": options.hooks,
                 "plugins": options.plugins, "session_id": options.session_id or session_id,
@@ -403,23 +455,19 @@ class McpAppsACP:
                 "tool_exposure_manager": agent.mcp_tool_exposure, "skill_engine": agent.skill_runtime,
             }) as bus:
                 arguments = await apply_hooks(bus, bus.context)
-            gates = tuple(checks.gates.values())
         else:
             if active.policy_error(tool_name, arguments):
                 raise _error("MCP_APP_TOOL_DENIED")
             arguments = await apply_hooks(active.hook_dispatch, active.hook_context)
-            gates = tuple(active.completion_gates.values())
 
         def still_authorized():
             return (agent.tool_run_context_generation == generation
                     and agent.active_tool_run_context is active) and (
-                not self._turn_is_preparing(state) if active is None else (
-                    tuple(active.completion_gates.values()) == gates
-                    and not active.policy_error(tool_name, arguments)
-                )
+                not self._turn_is_preparing(state) if active is None
+                else not active.policy_error(tool_name, arguments)
             )
 
-        return arguments, gates, still_authorized
+        return arguments, still_authorized
 
     async def _execute(self, session_id, state, snapshot, binding, interaction_id, interaction: _Interaction,
                        name, tool_name, arguments, allowed_connectors):
@@ -454,15 +502,15 @@ class McpAppsACP:
             interaction.cancellable = True
             await run_session_write(session_log, checkpoint, "started")
             with self._execution_scope(session_id, state):
-                arguments, gates, still_authorized = await self._authorize(
+                arguments, still_authorized = await self._authorize(
                     state, session_id, tool_name, interaction_id, arguments, revoked,
                 )
+                # App interactions carry session policy independently of model task completion.
                 context = ToolInvocationContext(
                     parent_tool_call_id=interaction_id,
                     chat_references=await run_session_write(
                         session_log, ChatReferences, state.agent.workspace_dir, state.agent.messages, session_log,
                     ),
-                    capability_gates=gates,
                 )
                 result = await call_mcp_app_tool(
                     snapshot["serverName"], name, arguments,

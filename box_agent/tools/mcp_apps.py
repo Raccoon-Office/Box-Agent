@@ -29,20 +29,9 @@ assume that the card has rendered or that the user's task is complete.
 - Final business result or failure: report the verified outcome and relevant
   result truthfully; this takes precedence over the handoff wording below.
   A failed status query alone does not prove the business operation failed.
-- User action required: discover a model-visible read-only status query that
-  can observe the action using an ID returned by the service. If available,
-  first invite the user to act in the card in a visible progress message and
-  say you will briefly check for an update. Give them a 30-second interaction
-  window from that invitation before handing off for lack of progress.
-  Actually wait between checks using an available tool; an immediate status
-  query followed by a final reply is not sufficient. Space checks at least
-  5 seconds apart, or longer if the service specifies a larger interval.
-  Do not restart the window for unchanged or intermediate results. When the
-  required user action completes, continue from the new result; a terminal
-  result, cancellation or an existing global limit ends the wait early.
-  If the window expires, or no suitable query, returned ID or permitted wait
-  mechanism is available, hand off. Never approve on the user's behalf,
-  bypass App-only visibility, or replace the card with a second confirmation.
+- User action required: invite the user to act in the card and hand off.
+  Never approve on the user's behalf, bypass App-only visibility, or replace
+  the card with a second confirmation.
 - Already submitted and running: if useful, discover and use model-visible
   status-query tools with IDs returned by the service. Continue through the
   existing Agent tool loop; honor any stated polling interval and existing
