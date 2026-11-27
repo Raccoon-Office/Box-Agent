@@ -98,3 +98,38 @@ def test_environment_opt_out_sends_the_historical_request(monkeypatch, value):
     params = client._request_body_params(*client._convert_messages(_conversation()), TOOLS, thinking_enabled=False)
     assert params["system"] == "系统指令"
     assert _markers(params) == 0
+
+
+ONE_HOUR = {"type": "ephemeral", "ttl": "1h"}
+
+
+def _params_for(content, monkeypatch):
+    monkeypatch.delenv("BOX_AGENT_PROMPT_CACHE", raising=False)
+    client = _client()
+    messages = [Message(role="system", content="系统指令"), Message(role="user", content=content)]
+    return client._request_body_params(*client._convert_messages(messages), TOOLS, thinking_enabled=False)
+
+
+def test_caller_with_four_breakpoints_is_left_at_four(monkeypatch):
+    blocks = [{"type": "text", "text": f"doc{i}", "cache_control": EPHEMERAL} for i in range(4)]
+    params = _params_for([*blocks, {"type": "text", "text": "问题"}], monkeypatch)
+    assert _markers(params) == 4
+    assert params["system"] == "系统指令"
+
+
+def test_caller_one_hour_tail_is_not_overwritten(monkeypatch):
+    params = _params_for([{"type": "text", "text": "问题", "cache_control": ONE_HOUR}], monkeypatch)
+    assert params["messages"][-1]["content"][-1]["cache_control"] == ONE_HOUR
+    assert _markers(params) == 1
+
+
+def test_no_shorter_ttl_is_inserted_before_a_caller_one_hour_breakpoint(monkeypatch):
+    params = _params_for([{"type": "text", "text": "文档", "cache_control": ONE_HOUR},
+                          {"type": "text", "text": "问题"}], monkeypatch)
+    assert params["system"] == "系统指令"
+    assert [block.get("cache_control") for block in params["messages"][-1]["content"]] == [ONE_HOUR, None]
+
+
+def test_mentioning_cache_control_in_text_does_not_disable_breakpoints(monkeypatch):
+    params = _params_for([{"type": "text", "text": 'Explain the "cache_control" field'}], monkeypatch)
+    assert _markers(params) == 2

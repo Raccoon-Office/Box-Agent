@@ -50,6 +50,15 @@ def prompt_cache_enabled(env: Any = None) -> bool:
     return value.strip().lower() not in {"0", "false", "off", "no"}
 
 
+def _has_cache_control(value: Any) -> bool:
+    """True when any block already sets cache_control (a key, not message text)."""
+    if isinstance(value, dict):
+        return "cache_control" in value or any(_has_cache_control(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_cache_control(item) for item in value)
+    return False
+
+
 def apply_cache_breakpoints(params: dict[str, Any]) -> None:
     """Mark the stable prefix and the conversation tail as cache breakpoints.
 
@@ -59,7 +68,14 @@ def apply_cache_breakpoints(params: dict[str, Any]) -> None:
     the previous step's prefix. At most two of Anthropic's four breakpoints
     are used. Blocks are copied before marking: message content may be shared
     with stored conversation history and must not be mutated.
+
+    A request that already carries any cache_control (a caller's own
+    breakpoints, possibly with a 1h TTL) is left untouched: adding ours could
+    exceed the four-breakpoint limit, put a shorter TTL ahead of a longer one,
+    or overwrite the caller's TTL.
     """
+    if _has_cache_control([params.get("tools"), params.get("system"), params.get("messages")]):
+        return
     system = params.get("system")
     if isinstance(system, str) and system:
         params["system"] = [{"type": "text", "text": system, "cache_control": _EPHEMERAL}]
