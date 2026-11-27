@@ -2,6 +2,7 @@
 
 import inspect
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 from time import monotonic
@@ -34,6 +35,57 @@ logger = logging.getLogger(__name__)
 # larger than this rarely improve answer quality for agentic workflows and
 # waste tokens. Tune here if we ever expose it as config.
 _THINKING_BUDGET = 8000
+
+
+_PROMPT_CACHE_ENV = "BOX_AGENT_PROMPT_CACHE"
+_EPHEMERAL = {"type": "ephemeral"}
+# Anthropic rejects cache_control on these blocks; empty text blocks are
+# invalid with or without it.
+_UNCACHEABLE_BLOCKS = frozenset({"thinking", "redacted_thinking"})
+
+
+def prompt_cache_enabled(env: Any = None) -> bool:
+    """Prompt-cache breakpoints are on unless BOX_AGENT_PROMPT_CACHE disables them."""
+    value = (os.environ if env is None else env).get(_PROMPT_CACHE_ENV, "")
+    return value.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def apply_cache_breakpoints(params: dict[str, Any]) -> None:
+    """Mark the stable prefix and the conversation tail as cache breakpoints.
+
+    Prefix order is tools -> system -> messages, so one breakpoint on the
+    system block covers both fixed tool schemas and the system prompt, and a
+    rolling breakpoint on the last cacheable message block lets each step read
+    the previous step's prefix. At most two of Anthropic's four breakpoints
+    are used. Blocks are copied before marking: message content may be shared
+    with stored conversation history and must not be mutated.
+    """
+    system = params.get("system")
+    if isinstance(system, str) and system:
+        params["system"] = [{"type": "text", "text": system, "cache_control": _EPHEMERAL}]
+    elif params.get("tools"):
+        tools = params["tools"]
+        params["tools"] = [*tools[:-1], {**tools[-1], "cache_control": _EPHEMERAL}]
+    messages = params.get("messages") or []
+    for index in range(len(messages) - 1, -1, -1):
+        content = messages[index].get("content")
+        if isinstance(content, str):
+            if not content:
+                continue
+            blocks = [{"type": "text", "text": content}]
+        elif isinstance(content, list):
+            blocks = list(content)
+        else:
+            continue
+        for position in range(len(blocks) - 1, -1, -1):
+            block = blocks[position]
+            if not isinstance(block, dict) or block.get("type") in _UNCACHEABLE_BLOCKS:
+                continue
+            if block.get("type") == "text" and not block.get("text"):
+                continue
+            blocks[position] = {**block, "cache_control": _EPHEMERAL}
+            messages[index] = {**messages[index], "content": blocks}
+            return
 
 
 async def _await_if_needed(value: Any) -> Any:
@@ -137,6 +189,8 @@ class AnthropicClient(LLMClientBase):
                     "to leave room for the final response"
                 )
             params["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        if prompt_cache_enabled():
+            apply_cache_breakpoints(params)
         return params
 
     def preflight_image_request(
