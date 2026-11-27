@@ -141,6 +141,8 @@ exists=false 时只允许 write 创建，不允许 edit。
 `box_agent/config/memory_block_default.md` 提供 `Memory Rules` 和 `Memory Content`。
 默认模板的 `{MEMORY_CONTENT}` 接收后端正文，例如 `local` 的核心记忆和搜索路由摘要。
 直连 `memsense` 和 `desktop` 的 `cloud` 来源共用 `box_agent/config/memory_block_memsense.md`。
+用户明确要求删除某条记忆时，该模板引导模型先加载 `memory-guide` 并用当前会话的工具处理，
+验证删除成功后才确认结果。
 `desktop` 的 `legacy_read_only` 和 `unavailable` 来源使用默认模板。
 自定义提示可使用同一占位符指定位置，旧模板继续支持原有的正文注入方式。
 新会话首轮或按 Box-Agent 运行环境的本地日期跨天后首轮加载。同一会话当天复用同一份正文，

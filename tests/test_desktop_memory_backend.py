@@ -534,6 +534,7 @@ async def test_real_session_keeps_single_frozen_block_and_same_batch_mutation_is
         assert not any(is_memory_history_message(message) for message in llm.requests[-1]["messages"])
         text = last.content
         assert text.count("## Memory Rules") == 1 and "--- MEMORY START ---" not in text
+        assert "先加载 `memory-guide`" in text.partition("## Memory Content")[0]
         assert "profile-unique-data" in text and "automatic-unique-data" in text and "dates-unique-data" in text
         assert "user_items-unique-data" in text and "{USER_ITEMS}" not in text
         assert text.index("### User Profile") < text.index("### User-maintained Memory") < text.index("### 最近几天的记忆摘要")

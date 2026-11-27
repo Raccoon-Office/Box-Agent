@@ -491,6 +491,10 @@ async def test_memsense_daily_empty_snapshot_and_read_failure_keep_the_main_task
             and (failed_path is None or payload["path"] == failed_path) else None)
         assert (await run(session, "读取失败", "run-3")).final_content == "最终回答"
         assert "--- MEMORY START ---" not in llm.requests[-1]["messages"][0].content
+        for request in llm.requests:
+            rules, _, _ = request["messages"][0].content.partition("## Memory Content")
+            assert "先加载 `memory-guide`" in rules
+            assert "验证删除成功后再告知用户" in rules
         assert "operation=recall" in caplog.text and "status=400" in caplog.text
         memory_http.handler = None
         set_memory_date(monkeypatch, today + timedelta(days=2))
@@ -573,8 +577,13 @@ async def test_memsense_context_budget_keeps_complete_entry_boundaries(tmp_path,
     assert content.count("<mem>") == content.count("</mem>")
     if content and for_system_prompt:
         assert content.startswith("### Long-term Memory\n\n```markdown\n")
-        assert "\n### User Profile\n\n```markdown\n" in content
-        assert "完整内容请用 memory_read 读取 user.md" in content
+        _, profile_heading, profile = content.partition("\n### User Profile\n\n```markdown\n")
+        # 标题和规则占用预算。预算充足时应保留画像，大条目仍只显示续读提示。
+        if budget >= 800:
+            assert profile_heading
+        if profile_heading:
+            assert "完整内容请用 memory_read 读取 user.md" in profile
+            assert "\n```\n" in profile
         assert "--- MEMORY START ---" not in content and "{USER_PROFILE}" not in content
     elif content:
         assert content.startswith("# Memory Context") and content.endswith("用户询问记忆来源时如实说明。")
