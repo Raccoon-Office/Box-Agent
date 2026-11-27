@@ -33,6 +33,25 @@ def test_only_pipe_hosted_windows_acp_ignores_console_interrupts(monkeypatch, pl
     assert installer.call_count == (1 if ignored else 0)
 
 
+@pytest.mark.parametrize("native_installed", [True, False], ids=["native-registered", "native-rejected"])
+def test_windows_pipe_hosted_acp_in_worker_uses_only_native_console_handler(monkeypatch, native_installed):
+    from unittest.mock import Mock
+    import box_agent.acp as acp
+
+    installer = Mock(return_value=native_installed)
+    signals = SimpleNamespace(SIGINT=2, SIGBREAK=21, SIG_IGN=1, signal=Mock(wraps=acp.signal.signal))
+    monkeypatch.setattr(acp, "_install_windows_console_ctrl_handler", installer)
+    monkeypatch.setattr(acp, "sys", SimpleNamespace(platform="win32", stdin=io.BytesIO()))
+    monkeypatch.setattr(acp, "signal", signals)
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        enabled = worker.submit(acp._ignore_windows_console_interrupts).result(timeout=5)
+
+    installer.assert_called_once_with()
+    signals.signal.assert_not_called()
+    assert enabled is native_installed
+
+
 def test_windows_console_ctrl_handler_swallows_only_ctrl_c_and_break(monkeypatch):
     import ctypes
     import box_agent.acp as acp

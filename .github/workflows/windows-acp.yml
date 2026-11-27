@@ -33,6 +33,7 @@ jobs:
           uv run --no-sync pytest -q --tb=short
           tests/test_desktop_runtime_fixture.py::test_console_interrupt_and_tool_exit_preserve_peer_session_and_host_shutdown
           tests/test_acp_stdio.py::test_only_pipe_hosted_windows_acp_ignores_console_interrupts
+          tests/test_acp_stdio.py::test_windows_pipe_hosted_acp_in_worker_uses_only_native_console_handler
           tests/test_acp_stdio.py::test_windows_console_ctrl_handler_swallows_only_ctrl_c_and_break
           tests/test_bash_tool.py::test_windows_spawn_logs_filter_command_before_the_preview_cut
           tests/test_jupyter_runtime_python.py::test_windows_kernel_launch_isolates_console_and_keeps_parent_lifetime

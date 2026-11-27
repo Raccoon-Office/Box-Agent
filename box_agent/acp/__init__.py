@@ -42,7 +42,7 @@ from contextlib import AsyncExitStack, aclosing, suppress
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
-from threading import Event
+from threading import Event, current_thread, main_thread
 from time import perf_counter
 from typing import Any
 from uuid import uuid4, uuid5
@@ -6744,6 +6744,7 @@ def _ignore_windows_console_interrupts() -> bool:
     interrupt would cancel every session in this process. A host that drives
     ACP over pipes stops it by closing stdin or terminating the process tree;
     an interactive console keeps its keyboard interrupt.
+    Return whether the native handler was installed or any signal was set to SIG_IGN.
     """
     if sys.platform != "win32":
         return False
@@ -6754,12 +6755,20 @@ def _ignore_windows_console_interrupts() -> bool:
     except (OSError, ValueError):
         pass
     try:
-        _install_windows_console_ctrl_handler()
+        enabled = _install_windows_console_ctrl_handler()
     except (AttributeError, OSError):
-        pass
+        enabled = False
+    if current_thread() is not main_thread():
+        return enabled
+
     for console_signal in (signal.SIGINT, signal.SIGBREAK):
-        signal.signal(console_signal, signal.SIG_IGN)
-    return True
+        try:
+            signal.signal(console_signal, signal.SIG_IGN)
+        except ValueError:
+            # A subinterpreter's main thread also cannot set process-wide signals.
+            continue
+        enabled = True
+    return enabled
 
 
 async def run_acp_server(config: Config | None = None) -> None:
