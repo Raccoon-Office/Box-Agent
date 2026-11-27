@@ -22,10 +22,14 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+
 from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
 from .output_capture import CapturedOutput, OutputCapture, bound_output_text
 from .python_environment import probe_python
+from .runtime_versions import RUNTIME_PYTHON_VERSION, constraints_path, validate_packages
 from .skill_scratch import (
     SKILL_SCRATCH_ENV,
     SessionSkillScratch,
@@ -492,6 +496,7 @@ class SandboxEnvironment:
         self._ready_lock = asyncio.Lock()
         self._bundled_override = False
         self._explicit_python = python_path is not None
+        self._install_python_version: str | None = None
         self.python_override_path: Path | None = None
 
         # Host/runtime override: point at an already-prepared interpreter
@@ -586,14 +591,19 @@ class SandboxEnvironment:
         if on_progress:
             on_progress(f"Creating sandbox environment at {self.venv_dir}...")
 
+        if platform.python_version() == RUNTIME_PYTHON_VERSION:
+            command = [sys.executable, "-m", "venv", "--without-pip", str(self.venv_dir)]
+        elif uv_path := shutil.which("uv"):
+            # uv can provision the exact interpreter without changing the CLI's Python.
+            command = [uv_path, "venv", "--python", RUNTIME_PYTHON_VERSION, str(self.venv_dir)]
+        else:
+            # pip installations include uv even when its console script is not on PATH.
+            command = [sys.executable, "-m", "uv", "venv", "--python",
+                       RUNTIME_PYTHON_VERSION, str(self.venv_dir)]
         self.venv_dir.parent.mkdir(parents=True, exist_ok=True)
 
         proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "venv",
-            "--without-pip",
-            str(self.venv_dir),
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -619,7 +629,7 @@ class SandboxEnvironment:
             on_progress(f"Installing default packages: {', '.join(SANDBOX_DEFAULT_PACKAGES)}...")
 
         proc = await asyncio.create_subprocess_exec(
-            *self._venv_install_command(SANDBOX_DEFAULT_PACKAGES),
+            *await self._venv_install_command(SANDBOX_DEFAULT_PACKAGES),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -663,7 +673,7 @@ class SandboxEnvironment:
         await self._ensure_pip_available(on_progress, None)
 
         proc = await asyncio.create_subprocess_exec(
-            *self._venv_install_command(["ipykernel"]),
+            *await self._venv_install_command(["ipykernel"]),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -755,13 +765,14 @@ class SandboxEnvironment:
             ]
             RUNTIME_PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
             install_command += [
+                *await self._install_constraints(),
                 "--target",
                 str(RUNTIME_PACKAGES_DIR),
                 "--no-warn-script-location",
                 *missing,
             ]
         else:
-            install_command = self._venv_install_command(missing)
+            install_command = await self._venv_install_command(missing)
 
         proc = await asyncio.create_subprocess_exec(
             *install_command,
@@ -803,8 +814,38 @@ class SandboxEnvironment:
         if on_progress:
             on_progress(f"Re-installed: {', '.join(missing)}")
 
-    def _venv_install_command(self, packages: list[str]) -> list[str]:
+    async def _install_constraints(self) -> list[str]:
+        """Choose constraints from the actual target, without migrating older environments."""
+        if self._install_python_version is None:
+            if IS_FROZEN and not self._bundled_override:
+                self._install_python_version = platform.python_version()
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    str(self.python_path), "-E", "-c",
+                    "import json, sys; print(json.dumps(list(sys.version_info[:3])))",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await _communicate_sandbox_process(
+                    proc, operation="Sandbox Python version probe",
+                    timeout=_SANDBOX_PROBE_TIMEOUT_SECONDS,
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Cannot inspect sandbox Python version: {stderr.decode(errors='replace')[:500]}")
+                try:
+                    version = json.loads(stdout)
+                    if not isinstance(version, list) or len(version) != 3 or any(type(v) is not int for v in version):
+                        raise ValueError("expected three version numbers")
+                except (ValueError, UnicodeError) as exc:
+                    raise RuntimeError("Invalid sandbox Python version response") from exc
+                self._install_python_version = ".".join(map(str, version))
+        if self._install_python_version == RUNTIME_PYTHON_VERSION:
+            return ["--constraint", str(constraints_path())]
+        return []
+
+    async def _venv_install_command(self, packages: list[str]) -> list[str]:
         """Prefer uv for fast local-venv installs, with pip as a fallback."""
+        constraints = await self._install_constraints()
         uv_path = shutil.which("uv")
         if uv_path is not None:
             return [
@@ -814,6 +855,7 @@ class SandboxEnvironment:
                 "--python",
                 str(self.python_path),
                 "--quiet",
+                *constraints,
                 *packages,
             ]
         return [
@@ -827,6 +869,7 @@ class SandboxEnvironment:
             "15",
             "--retries",
             "1",
+            *constraints,
             *packages,
         ]
 
@@ -869,6 +912,7 @@ class SandboxEnvironment:
         if proc.returncode == 0:
             return
 
+        constraints = await self._install_constraints()
         if on_progress:
             on_progress("Sandbox Python: bootstrapping pip...")
         proc = await asyncio.create_subprocess_exec(
@@ -898,7 +942,7 @@ class SandboxEnvironment:
                 "install",
                 "--python",
                 str(self.python_path),
-                "pip",
+                *constraints, "pip",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -915,6 +959,21 @@ class SandboxEnvironment:
                     f"ensurepip={ensurepip_error}; "
                     f"uv={uv_stderr.decode(errors='replace')[:500]}"
                 )
+        elif constraints:
+            # ensurepip supplies a bootstrap installer, then align this new pip
+            # with the same pins as other newly installed sandbox packages.
+            proc = await asyncio.create_subprocess_exec(
+                str(self.python_path), "-m", "pip", "install",
+                *constraints, "pip",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            _, stderr = await _communicate_sandbox_process(
+                proc, operation="Sandbox pinned pip bootstrap", timeout=_SANDBOX_INSTALL_TIMEOUT_SECONDS,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"Failed to install pinned pip: {stderr.decode(errors='replace')[:500]}")
 
         proc = await asyncio.create_subprocess_exec(
             str(self.python_path), "-c", "import pip",
@@ -978,6 +1037,16 @@ class SandboxEnvironment:
         Returns:
             (success, message) tuple.
         """
+        try:
+            validate_packages(packages)
+            constraints = await self._install_constraints()
+            if constraints:
+                known = ALLOWED_RUNTIME_PACKAGES | set(SANDBOX_DEFAULT_PACKAGES) | {"pip", "ipykernel"}
+                if any(canonicalize_name(Requirement(p).name) not in known for p in packages):
+                    return False, "PACKAGE_VERSION_NOT_ALLOWED: package has no maintained runtime constraint"
+        except (ValueError, RuntimeError) as exc:
+            return False, str(exc)
+
         if self._bundled_override and not self._explicit_python:
             return await self._runtime_python_install(packages, enforce_allowlist=IS_FROZEN)
 
@@ -986,7 +1055,7 @@ class SandboxEnvironment:
 
         proc = await asyncio.create_subprocess_exec(
             str(self.python_path), *(["-E"] if self._explicit_python else []), "-m", "pip", "install",
-            *packages,
+            *constraints, *packages,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1019,6 +1088,7 @@ class SandboxEnvironment:
             "-m",
             "pip",
             "install",
+            *await self._install_constraints(),
             "--target",
             str(RUNTIME_PACKAGES_DIR),
             "--quiet",
@@ -1087,6 +1157,8 @@ class SandboxEnvironment:
 
         args = [
             "install",
+            *(["--constraint", str(constraints_path())]
+              if platform.python_version() == RUNTIME_PYTHON_VERSION else []),
             "--target", target_str,
             "--quiet",
             "--disable-pip-version-check",
@@ -1107,8 +1179,17 @@ class SandboxEnvironment:
 
     @staticmethod
     def _blocked_runtime_packages(packages: list[str]) -> list[str]:
-        allowed_lower = {p.lower() for p in ALLOWED_RUNTIME_PACKAGES}
-        return [p for p in packages if p.lower() not in allowed_lower]
+        allowed = {canonicalize_name(p) for p in ALLOWED_RUNTIME_PACKAGES}
+        blocked = []
+        for package in packages:
+            try:
+                name = canonicalize_name(Requirement(package).name)
+            except InvalidRequirement:
+                blocked.append(package)
+                continue
+            if name not in allowed:
+                blocked.append(package)
+        return blocked
 
     @staticmethod
     def _package_not_allowed_message(blocked: list[str]) -> str:
@@ -1690,6 +1771,21 @@ class JupyterSandboxTool(Tool):
             self.__class__._sandbox_env = SandboxEnvironment(runtime_env=self.runtime_env)
             self.__class__._sandbox_env_key = key
         return self.__class__._sandbox_env
+
+    async def prepare_environment(self, on_progress: Any = None) -> None:
+        """Prepare before a CLI task, outside the execute_code preparation deadline."""
+        env = self._get_sandbox_env()
+        await env.ensure_ready(on_progress)
+        # Preserve packaged-runtime readiness checks, including the Windows
+        # host's avoidance of short-lived import probes under security DLLs.
+        if IS_FROZEN or (sys.platform == "win32" and env._bundled_override):
+            return
+        # Local automatic repair is best effort during execution. At startup,
+        # do not report readiness if that repair left required packages missing.
+        missing = await env._missing_required_packages(env._subprocess_env())
+        if missing:
+            env._ready = False
+            raise RuntimeError(f"Required Python packages are still missing: {', '.join(missing)}")
 
     def _sandbox_env_cache_key(self) -> str:
         for env_name in ("BOX_AGENT_SANDBOX_PYTHON", "BOX_AGENT_BUNDLED_PYTHON"):

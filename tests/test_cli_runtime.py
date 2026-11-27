@@ -1331,3 +1331,64 @@ def test_resumed_cli_uses_log_goal_and_leaves_workspace_goal_unchanged(tmp_path,
         assert cli._load_goal_state(workspace).objective == "workspace goal"
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize("sandbox_mode,failed", [(True, False), (True, True), (False, False)])
+def test_cli_checks_packages_before_starting_user_task(tmp_path, monkeypatch, capsys, sandbox_mode, failed):
+    from box_agent.tools.jupyter_tool import JupyterSandboxTool
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("api_key: test\n")
+    workspace = tmp_path / "workspace"
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=1, workspace_dir=str(workspace), enable_memory=False,
+            enable_memory_extraction=False, memory_maintainer_enabled=False,
+            memory_promotion_proposal_enabled=False,
+        ),
+        tools=ToolsConfig(
+            enable_file_tools=False, enable_bash=False, enable_todo=False,
+            enable_plan=False, enable_sub_agent=False, enable_mcp=False,
+            enable_skills=False, allow_full_access=True,
+        ),
+    )
+    events = []
+
+    async def prepare(self, on_progress=None):
+        events.append("prepare")
+        on_progress("Checking required packages")
+        if failed:
+            raise RuntimeError("Required Python packages are still missing: numpy")
+        events.append("ready")
+
+    class StartupLLM(_CaptureStreamLLM):
+        async def generate_stream(self, **kwargs):
+            events.append("task")
+            async for event in super().generate_stream(**kwargs):
+                yield event
+
+    async def base_tools(*args, **kwargs):
+        return [], None, None, None
+
+    def workspace_tools(tools, *_args, **_kwargs):
+        # Keep a sandbox tool even in --no-sandbox mode to check the CLI gate.
+        tools.append(JupyterSandboxTool(workspace_dir=str(workspace)))
+
+    monkeypatch.setattr(cli.Config, "get_default_config_path", staticmethod(lambda: config_path))
+    monkeypatch.setattr(cli.Config, "from_yaml", staticmethod(lambda _: config))
+    monkeypatch.setattr(cli, "LLMClient", StartupLLM)
+    monkeypatch.setattr(cli, "initialize_base_tools", base_tools)
+    monkeypatch.setattr(cli, "add_workspace_tools", workspace_tools)
+    monkeypatch.setattr(JupyterSandboxTool, "prepare_environment", prepare)
+
+    code = asyncio.run(cli.run_agent(
+        workspace, task="say hello", sandbox_mode=sandbox_mode, verify_api=False,
+        goal_autopilot_enabled=False,
+    ))
+    assert code == (1 if failed else 0)
+    assert events == (["prepare"] if failed else ["prepare", "ready", "task"] if sandbox_mode else ["task"])
+    output = capsys.readouterr().out
+    if failed:
+        assert "Required Python packages are still missing: numpy" in output
+        assert "Python sandbox packages ready" not in output

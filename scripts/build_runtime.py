@@ -37,6 +37,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from box_agent.tools.runtime import DEFAULT_NODE_VERSION, NodeRuntimeManager
 from box_agent.tools.jupyter_tool import SANDBOX_DEFAULT_PACKAGES
+from box_agent.tools.runtime_versions import RUNTIME_PYTHON_VERSION, constraints_path
 from box_agent.tools.mcp_bootstrap import MANAGED_MCP_CONFIG_VERSION
 
 # ── Win-only bundled tool versions ────────────────────────────
@@ -54,7 +55,7 @@ PORTABLE_GIT_SHA256 = "dedae83f4d0851bcbf473c516701e2da6a5d7c574d694d5eceec46d13
 
 # Standalone CPython distribution with full stdlib + venv + ensurepip.
 # install_only build is what we need.
-PYTHON_STANDALONE_VERSION = "3.12.6"
+PYTHON_STANDALONE_VERSION = RUNTIME_PYTHON_VERSION
 PYTHON_STANDALONE_RELEASE = "20240909"
 PYTHON_STANDALONE_URL = (
     f"https://github.com/indygreg/python-build-standalone/releases/download/"
@@ -73,6 +74,7 @@ BUILD_TOOLS_CACHE = Path.home() / ".cache" / "box-agent-build-tools"
 _RUNTIME_CONFIG_FILES = frozenset({
     "config-example.yaml", "isolated-profile-example.yaml", "mcp-example.json",
     "system_prompt.md", "analysis_prompt.md", "code_prompt.md",
+    "runtime-constraints.txt",
 })
 _RUNTIME_RESOURCE_JUNK = frozenset({
     "node_modules", "__pycache__", ".git", ".venv", "venv", ".pytest_cache",
@@ -723,14 +725,15 @@ def build_runtime(
     uv_bin = shutil.which("uv")
     if not external_python_sandbox:
         if uv_bin:
-            extras_cmd_uv = [uv_bin, "pip", "install", "--quiet", f"{project_root}[runtime]"]
+            extras_cmd_uv = [uv_bin, "pip", "install", "--quiet", "--python", sys.executable,
+                             f"{project_root}[runtime]"]
             result = subprocess.run(extras_cmd_uv, cwd=str(project_root), capture_output=True)
         else:
             result = subprocess.CompletedProcess(args=["uv"], returncode=1)
         if result.returncode != 0:
             result = subprocess.run(extras_cmd_pip, cwd=str(project_root))
         if result.returncode != 0:
-            print("Warning: failed to install runtime extras", file=sys.stderr)
+            raise RuntimeError("Failed to install runtime extras into the build interpreter")
 
     # ── Step 1: PyInstaller ──────────────────────────────────
     dist_dir = output_dir / "pyinstaller_out"
@@ -1022,13 +1025,9 @@ def _install_portable_python_win(runtime_dir: Path) -> None:
     _install_sandbox_packages_win(python_exe)
 
 
-# Pre-installed into the bundled Python's site-packages so that the frozen
-# Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
-# etc. without spawning pip at first run. Mirrors
-# Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
-# only if the underlying portable Python already has these wheels. Mirror
-# ``box_agent.tools.jupyter_tool.SANDBOX_DEFAULT_PACKAGES`` + ``ipykernel``.
-_SANDBOX_BUNDLED_PACKAGES = (*SANDBOX_DEFAULT_PACKAGES, "ipykernel")
+# Pre-install the sandbox defaults, kernel and pinned installer into the
+# bundled Python so execute_code can import them without installing at first run.
+_SANDBOX_BUNDLED_PACKAGES = (*SANDBOX_DEFAULT_PACKAGES, "ipykernel", "pip")
 
 
 def _install_sandbox_packages_win(python_exe: Path) -> None:
@@ -1055,6 +1054,7 @@ def _install_sandbox_packages_win(python_exe: Path) -> None:
     result = subprocess.run(
         [
             str(python_exe), "-I", "-m", "pip", "install",
+            "--constraint", str(constraints_path()),
             "--no-warn-script-location",
             "--disable-pip-version-check",
             *_SANDBOX_BUNDLED_PACKAGES,

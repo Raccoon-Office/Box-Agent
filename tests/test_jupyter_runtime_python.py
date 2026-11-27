@@ -38,6 +38,8 @@ def _write_python_executable(path: Path, body: str, monkeypatch) -> None:
 
     async def create_process(executable, *args, **kwargs):
         if str(executable) == str(path):
+            if args[:2] == ("-E", "-c"):
+                return await spawn(sys.executable, *args, **kwargs)
             return await spawn(sys.executable, str(path), *args, **kwargs)
         return await spawn(executable, *args, **kwargs)
 
@@ -258,7 +260,8 @@ def test_required_modules_cover_officev3_provisioned_package_surface() -> None:
         assert required[module_name] == package_name
 
 
-def test_local_sandbox_prefers_uv_for_package_install(
+@pytest.mark.asyncio
+async def test_local_sandbox_prefers_uv_for_package_install(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -270,7 +273,8 @@ def test_local_sandbox_prefers_uv_for_package_install(
     )
     env = SandboxEnvironment(base_dir=tmp_path / "sandbox")
 
-    command = env._venv_install_command(["pandas", "numpy"])
+    env._install_python_version = jupyter_tool.RUNTIME_PYTHON_VERSION
+    command = await env._venv_install_command(["pandas", "numpy"])
 
     assert command == [
         str(uv_path),
@@ -279,8 +283,8 @@ def test_local_sandbox_prefers_uv_for_package_install(
         "--python",
         str(env.python_path),
         "--quiet",
-        "pandas",
-        "numpy",
+        "--constraint", str(jupyter_tool.constraints_path()),
+        "pandas", "numpy",
     ]
 
 
@@ -499,3 +503,49 @@ def test_frozen_without_host_python_keeps_in_process_fallback(
     session = tool._create_session("session", tmp_path / "workspace", env)
 
     assert isinstance(session, InProcessKernelSession)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", [[], ["numpy"]])
+async def test_startup_package_check_reports_incomplete_repair(tmp_path, monkeypatch, missing):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(jupyter_tool, "IS_FROZEN", False)
+    env = SandboxEnvironment(base_dir=tmp_path)
+    env._bundled_override = False
+    env._ready = True
+    prepare = AsyncMock()
+    check = AsyncMock(return_value=missing)
+    monkeypatch.setattr(env, "ensure_ready", prepare)
+    monkeypatch.setattr(env, "_missing_required_packages", check)
+    tool = JupyterSandboxTool(workspace_dir=str(tmp_path))
+    monkeypatch.setattr(tool, "_get_sandbox_env", lambda: env)
+    if missing:
+        with pytest.raises(RuntimeError, match="still missing: numpy"):
+            await tool.prepare_environment()
+        assert not env._ready
+    else:
+        await tool.prepare_environment()
+    prepare.assert_awaited_once()
+    check.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_preparation_is_independent_of_execute_code_deadline(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(jupyter_tool, "IS_FROZEN", False)
+    monkeypatch.setattr(jupyter_tool, "_SANDBOX_PREPARE_TIMEOUT_SECONDS", 0.001)
+    env = SandboxEnvironment(base_dir=tmp_path)
+    env._bundled_override = False
+
+    async def prepare(on_progress=None):
+        await asyncio.sleep(0.01)
+        env._ready = True
+
+    monkeypatch.setattr(env, "ensure_ready", prepare)
+    monkeypatch.setattr(env, "_missing_required_packages", AsyncMock(return_value=[]))
+    tool = JupyterSandboxTool(workspace_dir=str(tmp_path))
+    monkeypatch.setattr(tool, "_get_sandbox_env", lambda: env)
+    await tool.prepare_environment()
+    assert env._ready
