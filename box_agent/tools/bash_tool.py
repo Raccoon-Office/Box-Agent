@@ -1237,6 +1237,7 @@ class BashTool(Tool):
                 return await asyncio.create_subprocess_exec(
                     self._bundled_win_bash, "-c", guarded_command,
                     stdin=asyncio.subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=stderr,
                     cwd=self.workspace_dir,
@@ -1249,6 +1250,7 @@ class BashTool(Tool):
             return await asyncio.create_subprocess_exec(
                 self._powershell_executable, "-NoProfile", "-Command", command,
                 stdin=asyncio.subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,

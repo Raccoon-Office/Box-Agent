@@ -102,6 +102,15 @@ class FixtureLLM:
             for message in messages if message.role == "user")
         has_results = any(message.role == "tool" for message in messages)
         mode = scenario.get()
+        if mode == "shell_exit":
+            if not has_results:
+                invocation = call("bash", {"command": "exit 23"}, 0)
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[invocation])
+            else:
+                result = next(message for message in messages if message.role == "tool")
+                yield StreamEvent(type="text", delta=str(result.content))
+                yield StreamEvent(type="finish", finish_reason="stop")
+            return
         if mode == "file_inputs":
             record_lifecycle("file_model_input", messages=[message.model_dump(mode="json") for message in messages])
             files = {}
@@ -305,6 +314,15 @@ def install_fixture(acp, root):
             return self._llm
 
         async def ext_method(self, method, params):
+            if method == "fixture_console_interrupt" and os.name == "nt":
+                # Broadcast to every process on this console, as a tool would.
+                import ctypes
+                import signal
+                kernel = ctypes.windll.kernel32
+                sent = [bool(kernel.GenerateConsoleCtrlEvent(event, 0))
+                        for event in (signal.CTRL_C_EVENT, signal.CTRL_BREAK_EVENT)]
+                await asyncio.sleep(1)  # Console handlers run on their own thread.
+                return {"sent": sent}
             if method == "fixture_host_request":
                 return await self._conn.ext_method(params["method"], params["params"])
             if method == "fixture_rpc_state":
@@ -420,7 +438,8 @@ def main():
         agent=AgentConfig(workspace_dir=str(root / "profile/workspaces"), max_steps=5,
                           enable_memory=False, enable_memory_extraction=False,
                           memory_maintainer_enabled=False, memory_promotion_proposal_enabled=False),
-        tools=ToolsConfig(enable_file_tools=os.environ.get("BOX_AGENT_DESKTOP_TEST_FILE_INPUTS") == "1", enable_bash=False, enable_todo=False,
+        tools=ToolsConfig(enable_file_tools=os.environ.get("BOX_AGENT_DESKTOP_TEST_FILE_INPUTS") == "1",
+                          enable_bash=os.environ.get("BOX_AGENT_DESKTOP_TEST_SHELL_EXIT") == "1", enable_todo=False,
                           enable_plan=False, enable_sub_agent=True, enable_skills=False, enable_mcp=False),
     )
     config.tool_limits.general.max_delegated_tool_calls = 3

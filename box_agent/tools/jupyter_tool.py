@@ -118,7 +118,11 @@ async def _start_sandbox_kernel(
 ) -> None:
     """Start a Jupyter kernel without blocking the host event loop forever."""
     async_start = getattr(kernel_manager, "_async_start_kernel", None)
-    start_kwargs = {"env": dict(env)} if env is not None else {}
+    start_kwargs: dict[str, Any] = {"env": dict(env)} if env is not None else {}
+    if sys.platform == "win32":
+        # Give the kernel its own hidden console so its console control events
+        # never reach ACP. Jupyter interrupts through its own Win32 event.
+        start_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
         if callable(async_start):
             await asyncio.wait_for(async_start(**start_kwargs), timeout=timeout)

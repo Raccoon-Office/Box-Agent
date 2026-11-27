@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import asyncio
+import os
 import threading
 from pathlib import Path
 
@@ -125,7 +126,7 @@ async def test_sandbox_kernel_startup_timeout_is_bounded() -> None:
         def __init__(self) -> None:
             self.shutdown_called = False
 
-        async def _async_start_kernel(self) -> None:
+        async def _async_start_kernel(self, **kwargs) -> None:
             await jupyter_tool.asyncio.Event().wait()
 
         async def _async_shutdown_kernel(self, now: bool = False) -> None:
@@ -137,6 +138,39 @@ async def test_sandbox_kernel_startup_timeout_is_bounded() -> None:
         await _start_sandbox_kernel(manager, timeout=0.01)
 
     assert manager.shutdown_called is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [True, False])
+async def test_windows_kernel_launch_isolates_console_and_keeps_parent_lifetime(monkeypatch, asynchronous):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    start = AsyncMock() if asynchronous else Mock()
+    manager = SimpleNamespace(**{"_async_start_kernel" if asynchronous else "start_kernel": start})
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(jupyter_tool.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    await _start_sandbox_kernel(manager, env={"BOX_AGENT_TEST": "1"})
+    start.assert_called_once_with(env={"BOX_AGENT_TEST": "1"}, creationflags=0x08000000)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_kernel_survives_its_own_python_interrupt(tmp_path):
+    from jupyter_client import AsyncKernelManager
+
+    manager = AsyncKernelManager(connection_file=str(tmp_path / "kernel.json"))
+    await _start_sandbox_kernel(manager, env={**os.environ, "IPYTHONDIR": str(tmp_path / "ipython")})
+    client = manager.client()
+    try:
+        client.start_channels()
+        await client.wait_for_ready(timeout=15)
+        interrupted = await client.execute_interactive("raise KeyboardInterrupt()", timeout=10, output_hook=lambda _: None)
+        assert interrupted["content"]["ename"] == "KeyboardInterrupt"
+        resumed = await client.execute_interactive("assert 2 + 2 == 4", timeout=10, output_hook=lambda _: None)
+        assert resumed["content"]["status"] == "ok"
+    finally:
+        client.stop_channels()
+        await manager.shutdown_kernel(now=True)
 
 
 def test_sandbox_env_accepts_host_python_on_non_windows(
