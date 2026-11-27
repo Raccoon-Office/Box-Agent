@@ -303,5 +303,6 @@ Windows 保持文件同步和原子发布，不执行目录 fsync。
 
 桌面主进程统一管理 60 秒无实际进展判定，排除系统休眠；有持续进展的大会话没有固定总时长限制。
 来源准备、运行时导入和数据库登记依次执行，取消后不自动重做；提交结果不明确时保留快照和日志，
-只有确认写入者停止后才核验已提交结果。Windows 真机验证见
-[历史导入隔离验证指南](WINDOWS_HISTORY_IMPORT_VERIFICATION_CN.md)。
+只有确认写入者停止后才核验已提交结果。Windows 真机与冻结运行时尚未完成验证。在 Windows 上运行
+`tests/test_session_import_jobs.py` 可覆盖 venv 进程身份和父进程退出回收；设置
+`BOX_AGENT_IMPORT_TEST_RUNTIME` 指向已构建的运行时，可额外覆盖冻结运行时导入。
