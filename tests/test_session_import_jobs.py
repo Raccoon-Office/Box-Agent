@@ -240,39 +240,43 @@ async def test_stalled_import_can_be_cancelled_without_stopping_another_acp_sess
 async def test_import_worker_exits_when_its_acp_parent_is_killed(tmp_path, monkeypatch):
     monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "profile"))
     script = """
-import asyncio, json, os, sys
-from pathlib import Path
+import asyncio, sys
 from box_agent.session_import_jobs import HistoryImportJobs
 worker = '''
-import os, time
-from pathlib import Path
+import os, threading
 import box_agent.session_import as importer
 def blocked(token):
-    Path(os.environ['IMPORT_JOB_TEST_ROOT'], 'worker-pid').write_text(str(os.getpid()))
-    while True: time.sleep(.01)
+    importer._checkpoint("worker_pid", os.getpid())
+    threading.Event().wait()
 importer._read_snapshot = blocked
 from box_agent.session_import_worker import main
 main()
 '''
+async def report_worker_pid(update):
+    if update.get("stage") == "worker_pid":
+        print(update["completed"], flush=True)
+
 async def run():
-    jobs = HistoryImportJobs(command=lambda: [sys.executable, '-c', worker])
+    jobs = HistoryImportJobs(report_worker_pid, command=lambda: [sys.executable, '-c', worker])
     await jobs.run(sys.argv[1], sys.argv[2])
 asyncio.run(run())
 """
     # Retain the actual owner handle, not a Windows venv redirector's handle.
     command, env = _worker_launch([sys.executable, "-c", script, str(uuid4()), str(uuid4())])
-    parent = await asyncio.create_subprocess_exec(*command,
-        env=(env or dict(os.environ)) | {"IMPORT_JOB_TEST_ROOT": str(tmp_path)},
-        stderr=asyncio.subprocess.DEVNULL)
+    parent = await asyncio.create_subprocess_exec(*command, env=env, stdout=asyncio.subprocess.PIPE)
     pid = None
     child_handle = None
     kernel = None
     try:
-        async def started():
-            while not (tmp_path / "worker-pid").exists():
-                await asyncio.sleep(.01)
-        await asyncio.wait_for(started(), 5)
-        pid = int((tmp_path / "worker-pid").read_text())
+        # Both interpreters cold-start before the worker holds the write lock and enters the read.
+        try:
+            ready = await asyncio.wait_for(parent.stdout.readline(), timeout=30)
+        except asyncio.TimeoutError:
+            pytest.fail("Import worker did not reach the snapshot read within 30 seconds")
+        if not ready:
+            code = await asyncio.wait_for(parent.wait(), timeout=5)
+            pytest.fail(f"Import parent exited with code {code} before the worker reached the snapshot read")
+        pid = int(ready)
         if os.name == "nt":
             import ctypes as c
             kernel = c.WinDLL("kernel32", use_last_error=True)
