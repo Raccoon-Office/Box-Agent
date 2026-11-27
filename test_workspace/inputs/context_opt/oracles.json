@@ -212,6 +212,45 @@
    "mutable_inputs": [
     "orders_small.csv"
    ]
+  },
+  {
+   "id": "t-generate-csv",
+   "split": "holdout",
+   "checks": [
+    {
+     "kind": "contains",
+     "path": "expenses.csv",
+     "value": "date,category,amount"
+    },
+    {
+     "kind": "contains",
+     "path": "expenses.csv",
+     "value": "2026-03-01,房租,3500.00"
+    },
+    {
+     "kind": "contains",
+     "path": "expenses.csv",
+     "value": "2026-03-05,餐饮,128.50"
+    },
+    {
+     "kind": "contains",
+     "path": "expenses.csv",
+     "value": "2026-03-09,交通,45.00"
+    },
+    {
+     "kind": "contains",
+     "path": "expenses.csv",
+     "value": "2026-03-15,水电,216.30"
+    },
+    {
+     "kind": "contains",
+     "path": "expenses.csv",
+     "value": "2026-03-22,娱乐,89.00"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
   }
  ]
 }
