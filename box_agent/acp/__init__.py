@@ -1366,6 +1366,8 @@ class BoxACPAgent:
         lite_llm: LLMClient | None = None,
     ):
         self._conn = conn
+        from box_agent.session_import_jobs import HistoryImportJobs
+        self._history_imports = HistoryImportJobs(self._notify_history_import_progress)
         self._plugin_runtime = create_application_runtime()
         self._config = config
         self._llm = llm
@@ -1417,6 +1419,7 @@ class BoxACPAgent:
         """Release sessions and application plugins, retaining interrupted owners."""
         self._closing = True
         async with self._close_lock:
+            await self._history_imports.aclose()
             await self._mcp_apps.close()
             await self._close_sessions()
 
@@ -1839,6 +1842,8 @@ class BoxACPAgent:
             "raccoon_thinking": {"protocol_version": 1},
             "connector_discovery": {"versions": [1]},
             "session_replay": {"protocol_version": 1},
+            "history_import": {"protocol_version": 1},
+            "history_import_control": {"protocol_version": 1},
         }
         if skills is not None:
             # Pydantic alias: _meta ↔ field_meta
@@ -4223,8 +4228,26 @@ class BoxACPAgent:
 
         return {"error": f"unknown_action: {action}"}
 
+    async def _notify_history_import_progress(self, progress: dict[str, Any]) -> None:
+        notify = getattr(self._conn, "ext_notification", None)
+        if notify is not None:
+            await notify("history/import_progress", progress)
+
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
+        if method in {"history/import", "history/import_cancel"}:
+            from box_agent.session_import_jobs import HistoryImportJobError
+
+            self._require_accepting_requests()
+            try:
+                if method == "history/import_cancel":
+                    return await self._history_imports.cancel(params.get("token"), params.get("attemptId"))
+                return await self._history_imports.run(params.get("token"), params.get("attemptId"))
+            except HistoryImportJobError as exc:
+                raise RequestError(-32602 if exc.code == "HISTORY_IMPORT_FAILED" else -32000,
+                                   exc.code, {"code": exc.code}) from exc
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                raise RequestError(-32602, "HISTORY_IMPORT_FAILED") from exc
         if method == "cancel_session_replay":
             session_id, request_id = params.get("sessionId"), params.get("requestId")
             if not isinstance(session_id, str) or type(request_id) is not int or request_id < 1:

@@ -799,6 +799,7 @@ class SessionLog:
         surface_op: str | dict[str, Any] | None = None,
         source_event_seqs: list[int] | None = None,
         ignorable: bool = False,
+        timestamp_ms: int | None = None,
     ) -> dict[str, Any]:
         if self._closed:
             raise RuntimeError("session log is closed")
@@ -807,7 +808,7 @@ class SessionLog:
         event: dict[str, Any] = {
             "type": event_type,
             "seq": len(self._events),
-            "time": int(time.time() * 1000),
+            "time": int(time.time() * 1000) if timestamp_ms is None else timestamp_ms,
             "data": data,
         }
         if ignorable:

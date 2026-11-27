@@ -53,6 +53,10 @@ def _preload_frozen_acp_schema() -> None:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--history-import-worker"]:
+        from box_agent.session_import_worker import main as run_history_import
+        run_history_import()
+        return
     if sys.argv[1:] == [BOOTSTRAP_MCP_CONFIG_ARG]:
         from box_agent.tools.mcp_bootstrap import (
             MANAGED_MCP_CONFIG_VERSION,

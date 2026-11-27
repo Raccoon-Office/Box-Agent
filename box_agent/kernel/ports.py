@@ -139,6 +139,7 @@ class SessionStorePort(Protocol):
         surface_op: str | dict[str, Any] | None = None,
         source_event_seqs: list[int] | None = None,
         ignorable: bool = False,
+        timestamp_ms: int | None = None,
     ) -> dict[str, Any]: ...
 
     def append_unlogged_messages(

@@ -209,6 +209,7 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
         "box_agent",
         "box_agent.acp",
         "box_agent.acp.debug_logger",
+        "box_agent.session_import_worker",
         "box_agent.agent",
         "box_agent.cli",
         "box_agent.config",
