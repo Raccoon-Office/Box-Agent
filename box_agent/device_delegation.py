@@ -692,7 +692,8 @@ class DeviceDelegations:
 
     def _needs_stop_cancel(self, op: str) -> bool:
         record = self.operations[op]
-        return (record["parentTurnId"] in self.stopped_turns
+        # A late RPC result can win cancellation on older asyncio runtimes.
+        return (not self.closed and record["parentTurnId"] in self.stopped_turns
                 and record["status"] not in TERMINAL and "turnId" in record
                 and not record.get("stopCancelAcknowledged") and not record.get("stopCancelRejected"))
 

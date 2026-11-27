@@ -218,7 +218,49 @@ async def test_click_during_cancel_is_delivered_only_after_definite_non_delivery
         assert decisions == (["allow_once"] if outcome in {"not_sent", "not_sent_before_click", "error_result"} else [])
     finally:
         release.set()
-        await broker.aclose()
+        await asyncio.wait_for(broker.aclose(), 1)
+    await asyncio.sleep(0)  # Drain the tracked tasks' completion callbacks.
+    assert not broker.pending
+    assert not broker.stop_cancels
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["offline", "connection_lost"])
+async def test_close_settles_inflight_cancel_and_stop_retry_without_approval(failure):
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def request(method, params):
+        calls.append(params.copy())
+        entered.set()
+        await release.wait()
+        if failure == "connection_lost":
+            raise ConnectionError("cancel acknowledgement lost")
+        raise RequestError(-32004, "DEVICE_OFFLINE", {"deviceId": "d", "delivery": "not_sent"})
+
+    broker = DeviceDelegations("cloud", request, lambda: "parent", Log())
+    broker.save({**target(), "operationId": "op", "parentTurnId": "parent",
+                 "status": "running", "seq": 0})
+    cancel = asyncio.create_task(broker.cancel_target(target()))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        broker.stop("parent")
+        release.set()
+        with pytest.raises(RequestError):
+            await cancel
+    finally:
+        release.set()
+        await asyncio.wait_for(broker.aclose(), 1)
+
+    await asyncio.sleep(0)  # Drain the tracked tasks' completion callbacks.
+    assert not broker.pending
+    assert not broker.stop_cancels
+    assert "parent" in broker.stopped_turns
+    assert not broker.operations["op"].get("stopCancelAcknowledged")
+    before = len(calls)
+    broker.retry_stopped_cancellations()
+    await asyncio.sleep(0)
+    assert not broker.pending and len(calls) == before
 
 
 class Log:
