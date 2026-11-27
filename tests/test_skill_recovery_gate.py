@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from box_agent.llm.token_estimator import estimate_text_tokens
 from box_agent.schema import Message
 from box_agent.tools.base import ToolInvocationContext
 from box_agent.tools.completion_checks import CompletionContext, CompletionChecks
@@ -26,13 +27,26 @@ def checkpoint(history, references):
                              skill_reader=Reader(references).read)
 
 
+def compact_with_older_method_omitted(references, history, summary):
+    compacted = [history[0], Message(role='user', source='runtime', content=summary)]
+    full = references.compact_history(history, compacted)[-1].content
+    locators = references.compact_history(history, compacted, budget_tokens=0)[-1].content
+    analysis = '### Skill: analysis'
+    retained = full[:full.index(analysis)] + locators[locators.index(analysis):]
+    # Allow for rounding each of the two Skill sections separately.
+    budget = estimate_text_tokens(retained) + 4
+    result = references.compact_history(history, compacted, budget_tokens=budget)
+    assert 'SLIDES_BODY' in result[-1].content and 'ANALYSIS_BODY' not in result[-1].content
+    return result
+
+
 def compacted(tmp_path):
     runtime, references, history = skill_context(tmp_path)
     read(references, history, 'analysis')
     runtime.begin_turn()
     read(references, history, 'slides')
-    history[:] = references.compact_history(history, [history[0], Message(
-        role='user', source='runtime', content='Summary contains all old calculation formulas.')])
+    history[:] = compact_with_older_method_omitted(
+        references, history, 'Summary contains all old calculation formulas.')
     runtime.begin_turn()
     references.prepare_request(history, budget_chars=50000)
     context = checkpoint(history, references)
@@ -91,10 +105,8 @@ async def test_deferral_is_explicit_scoped_to_one_turn_and_not_a_read(tmp_path):
 async def test_partial_method_recovers_delivered_pages_without_requiring_unread_pages(tmp_path):
     runtime, references, history = skill_context(tmp_path)
     read(references, history, 'analysis', limit=1)
-    runtime.begin_turn()
-    read(references, history, 'slides')
     history[:] = references.compact_history(history, [history[0], Message(
-        role='user', source='runtime', content='Earlier method was partially read.')])
+        role='user', source='runtime', content='Earlier method was partially read.')], budget_tokens=0)
     runtime.begin_turn()
     references.prepare_request(history, budget_chars=50000)
     gate = SkillRecoveryGate.create(checkpoint(history, references))
@@ -233,8 +245,8 @@ async def test_public_agent_recovers_complete_method_before_writing_receipt(tmp_
         agent.add_user_message(query)
         _ = [event async for event in agent.run_events()]
     context = SkillReferenceContext(runtime)
-    agent.messages[:] = context.compact_history(agent.messages, [agent.messages[0], Message(
-        role='user', source='runtime', content='Summary: calculation formulas survived, receipt requirement omitted.')])
+    agent.messages[:] = compact_with_older_method_omitted(
+        context, agent.messages, 'Summary: calculation formulas survived, receipt requirement omitted.')
     assert 'ANALYSIS_BODY' not in str(agent.messages)
     agent.add_user_message('Return to the earlier method')
     _ = [event async for event in agent.run_events()]

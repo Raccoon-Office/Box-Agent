@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import json
+import filecmp
 import hashlib
+import json
 import math
 import re
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 from uuid import uuid4
@@ -117,6 +119,7 @@ class ToolResultBudgetOutcome:
     persisted_count: int = 0
     original_chars: int = 0
     remaining_chars: int = 0
+    edits: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
 def generate_preview(
@@ -203,6 +206,15 @@ def _content_size(content: str | list[dict[str, Any]]) -> int:
     return len(serialized[0]) if serialized is not None else 0
 
 
+def is_persisted_output(content: str | list[dict[str, Any]]) -> bool:
+    """Recognize a storage receipt, including receipts from older logs."""
+    if not isinstance(content, str):
+        return False
+    prefix = PERSISTED_OUTPUT_TAG + "\nOutput too large ("
+    return (content.startswith((prefix, "Error: " + prefix))
+            and "\n" + PERSISTED_OUTPUT_CLOSING_TAG in content)
+
+
 def _content_is_empty(content: str | list[dict[str, Any]]) -> bool:
     if isinstance(content, str):
         return not content.strip()
@@ -222,8 +234,41 @@ def _safe_path_segment(value: str, fallback: str) -> str:
     return safe[:180] or fallback
 
 
+def _save_result_text(path: Path, text: str) -> Path:
+    """Publish complete files without overwriting a previous use of the call ID."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_name(f"{path.stem}-{uuid4().hex}{path.suffix}")
+    digest = hashlib.sha256()
+    stream = pending.open("xb")
+    keep_pending = False
+    try:
+        with stream:
+            for offset in range(0, len(text), 8192):
+                chunk = text[offset:offset + 8192].encode("utf-8")
+                stream.write(chunk)
+                digest.update(chunk)
+        alternate = path.with_name(f"{path.stem}-{digest.hexdigest()[:12]}{path.suffix}")
+        for candidate in (path, alternate):
+            try:
+                candidate.hardlink_to(pending)
+                return candidate
+            except FileExistsError:
+                if filecmp.cmp(candidate, pending, shallow=False):
+                    return candidate
+            except OSError:
+                # Some filesystems have no hard links. The unique, complete
+                # file is already a usable receipt on those volumes.
+                break
+        keep_pending = True
+        return pending
+    finally:
+        if not keep_pending:
+            with suppress(OSError):
+                pending.unlink()
+
+
 class ToolResultStorage:
-    """Own oversized-result persistence and stable per-conversation decisions.
+    """Own oversized-result persistence and the first-send tool budget.
 
     Model budgets keep their existing policy. prepare_delivery applies a final
     shared output budget before model history, public events and trace commit.
@@ -250,9 +295,6 @@ class ToolResultStorage:
             else aggregate_budget
         )
         self._default_session_id = f"local-{uuid4().hex}"
-        self._seen_ids: set[str] = set()
-        self._replacements: dict[str, str] = {}
-        self._initialized = False
 
     def set_context_token_limit(self, token_limit: int) -> None:
         """Scale default result budgets to the active model's safe input window."""
@@ -271,20 +313,7 @@ class ToolResultStorage:
             )
 
     def initialize_history(self, messages: list[Message]) -> None:
-        """Freeze pre-existing results so resumed history is never retroactively changed."""
-
-        if self._initialized:
-            return
-        for message in messages:
-            if message.role != "tool" or not message.tool_call_id:
-                continue
-            self._seen_ids.add(message.tool_call_id)
-            if (
-                isinstance(message.content, str)
-                and message.content.startswith(PERSISTED_OUTPUT_TAG)
-            ):
-                self._replacements[message.tool_call_id] = message.content
-        self._initialized = True
+        """Compatibility hook for store plugins. Freshness follows the message order."""
 
     def prepare_delivery(
         self,
@@ -306,7 +335,6 @@ class ToolResultStorage:
             / "tool-results"
         )
         label = _safe_path_segment(tool_call_id, "result")
-        stored_model_content = model_content
         # Reuse an existing model-side file instead of persisting stdout twice.
         if (
             content == original_model_content
@@ -350,15 +378,7 @@ class ToolResultStorage:
                 error = content
             elif error is not None:
                 error = bound_output_text(error, directory, label + "-event-error", inline_limit=OUTPUT_REPLY_BYTES)
-        if model_content != stored_model_content:
-            # The later aggregate model budget must not restore the old receipt
-            # and discard the structured-output reference or failure notice.
-            self._replacements[tool_call_id] = model_content
         return ToolResultDelivery(content, error, raw_output, model_content)
-
-    def record_delivery(self, tool_call_id: str, model_content: str) -> None:
-        """Keep the aggregate budget from restoring a stale pre-fallback reply."""
-        self._replacements[tool_call_id] = model_content
 
     def _externalize_raw_output(
         self, raw_output: dict[str, Any], directory: Path, label: str,
@@ -434,9 +454,6 @@ class ToolResultStorage:
 
         if message.role != "tool" or not message.tool_call_id:
             return message
-        cached_replacement = self._replacements.get(message.tool_call_id)
-        if cached_replacement is not None:
-            return message.model_copy(update={"content": cached_replacement})
         model_content = message.content
         if _content_is_empty(model_content):
             display_name = message.name or (tool.name if tool is not None else "Tool")
@@ -447,21 +464,21 @@ class ToolResultStorage:
             )
 
         if persistence_content is not None:
-            self._seen_ids.add(message.tool_call_id)
-            replacement = self._persist_content(
+            persisted = self._persist_content(
                 persistence_content,
                 message.tool_call_id,
                 session_id=session_id,
                 model_content=model_content,
             )
-            if replacement is None:
-                return message
-            self._replacements[message.tool_call_id] = replacement
-            return message.model_copy(update={"content": replacement})
+            if persisted is None:
+                return message.model_copy(update={"tool_result_budget_exempt": True})
+            replacement = build_persisted_output(
+                persisted, preview_label="Tool-bounded output" if _content_text(model_content) is not None else None,
+            )
+            return message.model_copy(update={"content": replacement, "tool_result_budget_exempt": True})
 
         if content_already_processed:
-            self._seen_ids.add(message.tool_call_id)
-            return message
+            return message.model_copy(update={"tool_result_budget_exempt": True})
 
         declared_limit = getattr(tool, "max_result_size_chars", None)
         if isinstance(declared_limit, (int, float)) and math.isinf(declared_limit):
@@ -472,15 +489,15 @@ class ToolResultStorage:
         if _content_size(model_content) <= threshold:
             return message
 
-        replacement = self._persist_content(
+        persisted = self._persist_content(
             model_content,
             message.tool_call_id,
             session_id=session_id,
         )
-        if replacement is None:
+        if persisted is None:
             return message
-        self._replacements[message.tool_call_id] = replacement
-        return message.model_copy(update={"content": replacement})
+        replacement = build_persisted_output(persisted)
+        return message.model_copy(update={"content": replacement, "tool_result_budget_exempt": True})
 
     def enforce_fresh_budget(
         self,
@@ -492,87 +509,77 @@ class ToolResultStorage:
         """Persist largest fresh results until their aggregate fits the budget."""
 
         candidates: list[tuple[int, int, Message]] = []
-        for index, message in enumerate(messages):
-            tool_use_id = message.tool_call_id
-            if message.role != "tool" or not tool_use_id:
+        # User/host injections can follow a tool batch before it is first sent.
+        # The next assistant message marks the end of that batch's eligibility.
+        last_assistant = next(
+            (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "assistant"), -1,
+        )
+        for index in range(last_assistant + 1, len(messages)):
+            message = messages[index]
+            if (message.role != "tool" or not message.tool_call_id
+                    or message.tool_result_budget_exempt or message._tool_result_submitted):
                 continue
-            replacement = self._replacements.get(tool_use_id)
-            if replacement is not None and message.content != replacement:
-                messages[index] = message.model_copy(update={"content": replacement})
-                self._seen_ids.add(tool_use_id)
-                continue
-            if replacement is not None:
-                self._seen_ids.add(tool_use_id)
-                continue
-            if tool_use_id in self._seen_ids:
+            # Older logs also carry self-describing receipts.
+            if is_persisted_output(message.content):
                 continue
             size = _content_size(message.content)
-            self._seen_ids.add(tool_use_id)
             if size > 0:
                 candidates.append((size, index, message))
 
         original_chars = sum(size for size, _, _ in candidates)
         remaining_chars = original_chars
-        persisted_count = 0
+        edits: dict[int, dict[str, Any]] = {}
         for size, index, message in sorted(candidates, key=lambda item: -item[0]):
             if remaining_chars <= self.aggregate_budget:
                 break
             required_reduction = remaining_chars - self.aggregate_budget
             target_replacement_size = max(1, size - required_reduction)
-            preview_limit = PREVIEW_SIZE_CHARS
-
-            def build_replacement(limit: int) -> str | None:
-                value = self._persist_content(
-                    message.content,
-                    message.tool_call_id or "tool-result",
-                    session_id=session_id,
-                    preview_max_chars=limit,
-                )
-                if value is not None and message.name == "read_file":
-                    value += (
-                        "\nRe-read the original path from the matching read_file call with "
-                        "a smaller offset/limit to recover exact content."
-                    )
-                if value is not None and message.name == "read_email":
-                    value += (
-                        "\nThis email page is incomplete in this preview. Do not advance next_offset "
-                        "until the full page is recovered. Re-read the original email at the same "
-                        "offset with a smaller limit and expected_sha256 from the matching call/result, "
-                        "or read the complete persisted output."
-                    )
-                return value
-
-            replacement = build_replacement(preview_limit)
-            if replacement is None:
+            persisted = self._persist_content(
+                message.content, message.tool_call_id or "tool-result", session_id=session_id,
+            )
+            if persisted is None:
                 continue
+            recovery = ""
+            if message.name == "read_file":
+                recovery = (
+                    "\nRe-read the original path from the matching read_file call with "
+                    "a smaller offset/limit to recover exact content."
+                )
+            elif message.name == "read_email":
+                recovery = (
+                    "\nThis email page is incomplete in this preview. Do not advance next_offset "
+                    "until the full page is recovered. Re-read the original email at the same "
+                    "offset with a smaller limit and expected_sha256 from the matching call/result, "
+                    "or read the complete persisted output."
+                )
+            replacement = build_persisted_output(persisted) + recovery
             if len(replacement) > target_replacement_size:
-                serialized = _content_text(message.content)
-                current_preview_size = (
-                    len(generate_preview(serialized[0], preview_limit)[0])
-                    if serialized is not None
-                    else preview_limit
-                )
                 preview_limit = max(
-                    1,
-                    current_preview_size
-                    - (len(replacement) - target_replacement_size),
+                    1, len(persisted.preview) - (len(replacement) - target_replacement_size),
                 )
-                replacement = build_replacement(preview_limit)
-                if replacement is None:
-                    continue
+                serialized = _content_text(message.content)
+                assert serialized is not None  # Persisted above.
+                preview, has_more = generate_preview(serialized[0], preview_limit)
+                replacement = build_persisted_output(
+                    replace(persisted, preview=preview, has_more=has_more),
+                    preview_label=f"Preview (head + tail, up to {_format_size(preview_limit)})",
+                ) + recovery
             replacement_size = len(replacement)
             if replacement_size >= size:
                 continue
-            self._replacements[message.tool_call_id or ""] = replacement
-            messages[index] = message.model_copy(update={"content": replacement})
+            messages[index] = message.model_copy(update={"content": replacement, "tool_result_budget_exempt": True})
             remaining_chars += replacement_size - size
-            persisted_count += 1
+            edits[index] = {
+                "reason": "tool_result_budget", "persistedPath": str(persisted.path),
+                "originalChars": size,
+            }
 
         return ToolResultBudgetOutcome(
             fresh_count=len(candidates),
-            persisted_count=persisted_count,
+            persisted_count=len(edits),
             original_chars=original_chars,
             remaining_chars=remaining_chars,
+            edits=edits,
         )
 
     def _persist_content(
@@ -582,8 +589,7 @@ class ToolResultStorage:
         *,
         session_id: str,
         model_content: str | list[dict[str, Any]] | None = None,
-        preview_max_chars: int = PREVIEW_SIZE_CHARS,
-    ) -> str | None:
+    ) -> PersistedToolResult | None:
         serialized = _content_text(content)
         if serialized is None:
             return None
@@ -595,67 +601,16 @@ class ToolResultStorage:
             f"{identifier}.json" if is_json else f"{identifier}.txt"
         )
 
-        def write_content(target: Path) -> None:
-            with target.open("x", encoding="utf-8", newline="") as stream:
-                # TextIOWrapper.write otherwise encodes one unbounded UTF-8
-                # copy before the shared delivery guard can reduce the reply.
-                for offset in range(0, len(content_text), 8192):
-                    stream.write(content_text[offset:offset + 8192])
-
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                write_content(path)
-            except FileExistsError:
-                try:
-                    existing = path.read_text(encoding="utf-8")
-                except OSError:
-                    return None
-                if existing != content_text:
-                    digest = hashlib.sha256(content_text.encode("utf-8")).hexdigest()[:12]
-                    path = path.with_name(f"{path.stem}-{digest}{path.suffix}")
-                    try:
-                        write_content(path)
-                    except FileExistsError:
-                        try:
-                            if path.read_text(encoding="utf-8") != content_text:
-                                return None
-                        except OSError:
-                            return None
+            path = _save_result_text(path, content_text)
         except OSError:
             return None
-        preview_label = None
-        if model_content is None:
-            preview, has_more = generate_preview(
-                content_text,
-                max_chars=preview_max_chars,
-            )
-            preview_label = (
-                "Preview (head + tail, up to "
-                f"{_format_size(preview_max_chars)})"
-            )
+        projected = _content_text(model_content) if model_content is not None else None
+        if projected is None:
+            preview, has_more = generate_preview(content_text)
         else:
-            serialized_model_content = _content_text(model_content)
-            if serialized_model_content is None:
-                preview, has_more = generate_preview(
-                    content_text,
-                    max_chars=preview_max_chars,
-                )
-                preview_label = (
-                    "Preview (head + tail, up to "
-                    f"{_format_size(preview_max_chars)})"
-                )
-            else:
-                preview = serialized_model_content[0]
-                has_more = False
-                preview_label = "Tool-bounded output"
-        return build_persisted_output(
-            PersistedToolResult(
-                path=path,
-                original_size=len(content_text),
-                is_json=is_json,
-                preview=preview,
-                has_more=has_more,
-            ),
-            preview_label=preview_label,
+            preview, has_more = projected[0], False
+        return PersistedToolResult(
+            path=path, original_size=len(content_text), is_json=is_json,
+            preview=preview, has_more=has_more,
         )

@@ -77,7 +77,8 @@ def test_compaction_retains_the_latest_runtime_date():
     compacted = [system, user]
 
     restored = engine.compact_history(original, compacted)
-    assert restored == [*compacted, latest]
+    assert restored == [*compacted, latest.model_copy(update={"compaction_node": "appended"})]
+    assert engine.compact_history(original, [system, latest, user]) == [system, latest, user]
     assert engine.compact_history(original, restored) == restored
     assert original == [system, old, latest, user]
 

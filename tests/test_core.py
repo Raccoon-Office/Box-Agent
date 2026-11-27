@@ -245,6 +245,46 @@ async def test_transient_image_is_sent_once_without_entering_durable_history():
 
 
 @pytest.mark.asyncio
+async def test_reactive_summary_does_not_receive_transient_followup_images():
+    class OverflowOnImage(CapturingStreamLLM):
+        capabilities = {"image_input": True}
+
+        def __init__(self):
+            super().__init__([
+                LLMResponse(content="", finish_reason="tool", tool_calls=[_transient_tool_call()]),
+                LLMResponse(content="I inspected it.", finish_reason="stop"),
+            ])
+            self.rejected = False
+            self.summary_messages = []
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                self.summary_messages.extend(messages)
+                yield StreamEvent(type="text", delta="<summary>The image tool completed.</summary>")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            if self.message_calls and not self.rejected:
+                assert has_image(messages)
+                self.rejected = True
+                raise RuntimeError("This model's maximum context length is 12000 tokens.")
+            async for event in super().generate_stream(messages, tools=tools, **kwargs):
+                yield event
+
+    def has_image(messages):
+        return any(isinstance(message.content, list)
+                   and any(block.get("type") == "input_image" for block in message.content)
+                   for message in messages)
+
+    llm = OverflowOnImage()
+    await collect(run_agent_loop(
+        llm=llm, messages=_msgs(), tools={"transient_image": TransientImageTool()},
+        max_steps=5, token_limit=10_000,
+    ))
+    assert llm.summary_messages and not has_image(llm.summary_messages)
+    assert has_image(llm.message_calls[-1])
+
+
+@pytest.mark.asyncio
 async def test_transient_image_over_budget_becomes_a_safe_tool_failure():
     llm = CapturingStreamLLM(
         [
@@ -6568,7 +6608,7 @@ class _FakeSummaryLLM:
 @pytest.mark.asyncio
 async def test_create_summary_passes_thinking_disabled_and_no_tools():
     """Summary appends one instruction to the exact history for KV-cache reuse."""
-    from box_agent.core import _create_summary, _SUMMARY_REQUEST
+    from box_agent.core import _create_summary
 
     original = [
         Message(role="system", content="system"),
@@ -6585,12 +6625,13 @@ async def test_create_summary_passes_thinking_disabled_and_no_tools():
     assert len(sent) == len(original) + 1
     assert all(sent[index] is message for index, message in enumerate(original))
     assert sent[-1].role == "user"
-    assert sent[-1].content == _SUMMARY_REQUEST
-    assert "lists every user message" in _SUMMARY_REQUEST
-    assert "<summary>...</summary>" in _SUMMARY_REQUEST
-    assert "below 8,000 characters" in _SUMMARY_REQUEST
-    assert "<analysis>" in _SUMMARY_REQUEST
-    example = _SUMMARY_REQUEST.split("<example>", 1)[1].split("</example>", 1)[0]
+    instruction = sent[-1].content
+    assert "within 8192 tokens" in instruction
+    assert "list all user messages that are not tool results" in instruction
+    assert "<summary>...</summary>" in instruction
+    assert "characters" not in instruction
+    assert "<analysis>" in instruction
+    example = instruction.split("<example>", 1)[1].split("</example>", 1)[0]
     assert "<analysis>" not in example
     assert example.strip().startswith("<summary>")
     assert example.strip().endswith("</summary>")
@@ -6637,7 +6678,7 @@ async def test_create_summary_does_not_truncate_model_output():
     )
 
     assert len(output) > 12_000
-    assert output == body.strip()
+    assert output == body
     assert "<summary>" not in output
 
 
@@ -6648,7 +6689,9 @@ async def test_create_summary_does_not_truncate_model_output():
         "summary without tags",
         "preamble<summary>body</summary>",
         "<summary></summary>",
+        "<summary> \n\t </summary>",
         "<summary>body</summary>trailing text",
+        "<summary>first</summary><summary>second</summary>",
     ],
 )
 async def test_create_summary_rejects_output_outside_one_nonempty_summary_block(
@@ -6688,7 +6731,7 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
         Message(role="tool", content="B" * 50_000, tool_call_id="t1", name="bash"),
         Message(role="user", content="please do X"),
     ]
-    llm = _FakeSummaryLLM(raise_exc=RuntimeError("network"))
+    llm = _FakeSummaryLLM("malformed", raw_response=True)
     outcome = await _maybe_summarize(
         llm, msgs, token_limit=5_000, api_total_tokens=0, skip_check=False
     )
@@ -6696,11 +6739,12 @@ async def test_maybe_summarize_uses_bounded_fallback_on_llm_failure():
     assert new_msgs is not None
     assert skip_next is False
     assert outcome.mode == "fallback"
-    assert outcome.error == "network"
-    assert [m.role for m in new_msgs] == ["system", "user", "user"]
-    assert "Deterministic history fallback" in str(new_msgs[1].content)
-    assert new_msgs[-1] is msgs[-1]
-    assert "fallback stopped: 1 source messages remain" in str(new_msgs[1].content)
+    assert "one <summary>" in outcome.error
+    assert new_msgs[1].compaction_node == "fallback_head"
+    assert new_msgs[1].earlier_user_messages == [msgs[1].content]
+    assert new_msgs[2:-1] == [msgs[-1]]
+    assert new_msgs[-1].runtime_kind == "compaction_notice"
+    assert "earlier conversation was omitted" in new_msgs[-1].content
     assert sum(len(str(m.content)) for m in new_msgs) < sum(len(str(m.content)) for m in msgs)
 
 
@@ -6717,14 +6761,17 @@ async def test_maybe_summarize_inserts_summary_marker():
         Message(role="assistant", content="x" * 5000),
     ]
     llm = _FakeSummaryLLM("brief")
-    new_msgs, _, _ = await _maybe_summarize(llm, msgs, token_limit=10, api_total_tokens=0, skip_check=False)
+    new_msgs, _, _ = await _maybe_summarize(
+        llm, msgs, token_limit=5_000, api_total_tokens=0, skip_check=False, force=True,
+    )
     assert new_msgs is not None
     assert new_msgs[1].role == "user"
     assert new_msgs[1].content.startswith(_SUMMARY_MARKER)
     assert "brief" in new_msgs[1].content
     assert "<summary>" not in str(new_msgs[1].content)
     assert "</summary>" not in str(new_msgs[1].content)
-    assert str(new_msgs[1].content).endswith(_SUMMARY_MESSAGE_SUFFIX)
+    assert _SUMMARY_MESSAGE_SUFFIX in new_msgs[1].content
+    assert new_msgs[1].earlier_user_messages == [msgs[1].content]
     assert "solely because compaction occurred" in str(new_msgs[1].content)
     assert "use the normal user-input or decision tool" in str(
         new_msgs[1].content
@@ -6735,7 +6782,7 @@ async def test_maybe_summarize_inserts_summary_marker():
     assert "pick up the last task as if the break never happened." in str(
         new_msgs[1].content
     )
-    assert new_msgs[2:] == msgs[1:]
+    assert new_msgs[2:] == msgs[2:]
     assert all(
         sent is original
         for sent, original in zip(llm.calls[0]["messages"][:-1], msgs)
@@ -6749,8 +6796,8 @@ async def test_maybe_summarize_collapses_orphan_summary_markers():
     msgs = [
         Message(role="system", content="sys"),
         Message(role="user", content="round 0 prompt"),
-        Message(role="user", content=f"{_SUMMARY_MARKER}\n\nold summary 1"),
-        Message(role="user", content=f"{_SUMMARY_MARKER}\n\nold summary 2"),  # orphan
+        Message(role="user", source="runtime", content=f"{_SUMMARY_MARKER}\n\nold summary 1"),
+        Message(role="user", source="runtime", content=f"{_SUMMARY_MARKER}\n\nold summary 2"),  # orphan
         Message(role="user", content="round 3 prompt"),
         Message(role="assistant", content="z" * 5000),
     ]
@@ -6770,7 +6817,7 @@ async def test_second_compaction_sends_prior_summary_in_original_message_prefix(
     prior_fact = "IMPORTANT_PRIOR_FACT_42"
     msgs = [
         Message(role="system", content="sys"),
-        Message(role="user", content=f"{_SUMMARY_MARKER}\n\n{prior_fact}"),
+        Message(role="user", source="runtime", content=f"{_SUMMARY_MARKER}\n\n{prior_fact}"),
         Message(role="user", content="current request"),
         Message(role="assistant", content="new execution " * 5_000),
     ]
@@ -6786,7 +6833,7 @@ async def test_second_compaction_sends_prior_summary_in_original_message_prefix(
     )
     assert prior_fact in str(summary_input[1].content)
     assert "current request" in str(summary_input[2].content)
-    assert msgs[2] in outcome.messages
+    assert outcome.messages[1].earlier_user_messages == [msgs[2].content]
     assert sum(
         1
         for message in outcome.messages
@@ -6800,12 +6847,12 @@ async def test_second_compaction_treats_runtime_state_as_metadata_not_real_user(
 
     real_user = Message(role="user", content="current request")
     old_runtime_state = Message(
-        role="user",
+        role="user", source="runtime",
         content="[Post-Compaction Runtime State]\n\n## Todo\nstale",
     )
     messages = [
         Message(role="system", content="sys"),
-        Message(role="user", content="[Assistant Execution Summary]\n\nold summary"),
+        Message(role="user", source="runtime", content="[Assistant Execution Summary]\n\nold summary"),
         real_user,
         Message(role="assistant", content="new execution " * 5_000),
         old_runtime_state,
@@ -6821,7 +6868,7 @@ async def test_second_compaction_treats_runtime_state_as_metadata_not_real_user(
     )
 
     assert outcome.messages is not None
-    assert real_user in outcome.messages
+    assert outcome.messages[1].earlier_user_messages == [real_user.content]
     assert old_runtime_state not in outcome.messages
     assert all(
         sent is original
@@ -6865,7 +6912,7 @@ async def test_maybe_summarize_large_history_uses_one_original_prefix_call():
         )
     llm = _FakeSummaryLLM("one-shot summary")
     outcome = await _maybe_summarize(
-        llm, msgs, token_limit=1_000, api_total_tokens=0, skip_check=False
+        llm, msgs, token_limit=20_000, api_total_tokens=0, skip_check=False
     )
 
     assert outcome.messages is not None
@@ -6881,7 +6928,8 @@ async def test_maybe_summarize_large_history_uses_one_original_prefix_call():
 
 @pytest.mark.asyncio
 async def test_create_summary_does_not_serialize_or_chunk_original_messages():
-    from box_agent.core import _create_summary, _SUMMARY_REQUEST
+    from box_agent.core import _create_summary
+    from box_agent.kernel.context_engine import _summary_request
 
     msgs = [
         Message(
@@ -6899,7 +6947,7 @@ async def test_create_summary_does_not_serialize_or_chunk_original_messages():
     sent = llm.calls[0]["messages"]
     assert len(sent) == len(msgs) + 1
     assert all(sent[index] is message for index, message in enumerate(msgs))
-    assert sent[-1].content == _SUMMARY_REQUEST
+    assert sent[-1].content == _summary_request(8_192)
 
 
 @pytest.mark.asyncio
@@ -6954,7 +7002,7 @@ def test_recent_selection_reuses_processed_tool_result_without_second_size_limit
 
 
 @pytest.mark.asyncio
-async def test_maybe_summarize_bounds_newest_group_over_recent_budget():
+async def test_maybe_summarize_drops_oversized_newest_round_when_it_exceeds_target():
     from box_agent.core import _maybe_summarize
 
     latest_user = Message(role="user", content="keep this request")
@@ -6971,36 +7019,32 @@ async def test_maybe_summarize_bounds_newest_group_over_recent_budget():
         oversized_reasoning,
     ]
 
+    llm = _FakeSummaryLLM("complete execution summary")
+    llm.context_window = 64_000
     outcome = await _maybe_summarize(
-        _FakeSummaryLLM("complete execution summary"),
+        llm,
         msgs,
-        token_limit=5_000,
+        token_limit=50_000,
         api_total_tokens=0,
         skip_check=False,
+        force=True,
+        request_headroom_tokens=40_000,
     )
 
     assert outcome.mode == "summary"
     assert outcome.messages is not None
-    assert latest_user in outcome.messages
-    compacted_reasoning = next(
-        message
-        for message in outcome.messages
-        if message.role == "assistant" and message is not outcome.messages[0]
-    )
-    assert compacted_reasoning is not oversized_reasoning
-    assert compacted_reasoning.thinking is None
-    assert "Assistant content compacted" in str(compacted_reasoning.content)
+    assert outcome.messages[1].earlier_user_messages[-1] == latest_user.content
+    assert latest_user.content in outcome.messages[1].content
+    assert not any(m.role == "assistant" for m in outcome.messages)
+    assert outcome.degradation["droppedRounds"] == 1
 
 
 @pytest.mark.asyncio
-async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_exact():
+async def test_maybe_summarize_drops_parallel_read_group_under_target_pressure():
     from box_agent.core import (
         _maybe_summarize,
-        _message_chars,
-        _RECENT_MESSAGE_CHAR_LIMIT,
         _SUMMARY_MESSAGE_PREFIX,
         _SUMMARY_MESSAGE_SUFFIX,
-        _SUMMARY_OUTPUT_CHAR_LIMIT,
     )
 
     class _LargeActivatedTool:
@@ -7038,8 +7082,11 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
         ],
     ]
 
+    summary = "\n  " + "continuation summary " * 700 + "\n"
+    llm = _FakeSummaryLLM(summary)
+    llm.context_window = 128_000
     outcome = await _maybe_summarize(
-        _FakeSummaryLLM("continuation summary " * 700),
+        llm,
         messages,
         token_limit=90_000,
         api_total_tokens=0,
@@ -7051,20 +7098,13 @@ async def test_maybe_summarize_bounds_large_parallel_read_group_and_keeps_user_e
     assert outcome.mode == "summary"
     assert outcome.estimated_after < 90_000
     assert outcome.messages is not None
-    assert latest_user in outcome.messages
-    retained_assistant = next(message for message in outcome.messages if message.tool_calls)
-    retained_tools = [message for message in outcome.messages if message.role == "tool"]
-    assert retained_assistant.tool_calls == calls
-    assert [message.tool_call_id for message in retained_tools] == [call.id for call in calls]
-    assert sum(_message_chars(message) for message in outcome.messages[2:]) <= (
-        _RECENT_MESSAGE_CHAR_LIMIT
-    )
+    assert len(outcome.messages) == 2
+    assert outcome.degradation["droppedRounds"] == 1
     summary_message = outcome.messages[1]
-    assert len(str(summary_message.content)) <= (
-        len(_SUMMARY_MESSAGE_PREFIX)
-        + _SUMMARY_OUTPUT_CHAR_LIMIT
-        + len(_SUMMARY_MESSAGE_SUFFIX)
-    )
+    assert summary_message.earlier_user_messages == [latest_user.content]
+    assert latest_user.content in summary_message.content
+    assert len(summary) > 8_000
+    assert summary_message.content.startswith(_SUMMARY_MESSAGE_PREFIX + summary + _SUMMARY_MESSAGE_SUFFIX)
 
 
 @pytest.mark.asyncio
@@ -7110,37 +7150,13 @@ async def test_provider_prompt_pressure_uses_one_shot_summary_and_retains_recent
 
     assert outcome.mode == "summary"
     assert outcome.messages is not None
-    assert outcome.messages[2:] == msgs[1:]
+    assert outcome.messages[1].earlier_user_messages == [latest_user.content]
+    assert outcome.messages[2:] == msgs[2:]
     assert all(
         sent is original
         for sent, original in zip(llm.calls[0]["messages"][:-1], msgs)
     )
     assert outcome.summary_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_summary_cooldown_uses_local_fallback_without_provider_call():
-    from box_agent.core import _maybe_summarize
-
-    llm = _FakeSummaryLLM("should not be called")
-    outcome = await _maybe_summarize(
-        llm,
-        [
-            Message(role="system", content="sys"),
-            Message(role="user", content="old task"),
-            Message(role="assistant", content="large " * 10_000),
-            Message(role="user", content="task"),
-        ],
-        token_limit=5_000,
-        api_total_tokens=0,
-        skip_check=False,
-        allow_llm_summary=False,
-    )
-
-    assert outcome.mode == "fallback"
-    assert outcome.summary_calls == 0
-    assert outcome.error_type == "RuntimeError"
-    assert llm.calls == []
 
 
 def test_context_pressure_uses_latest_response_usage_plus_new_messages():
@@ -7207,14 +7223,12 @@ def test_context_pressure_counts_new_schemas_even_when_previous_usage_is_small()
         {"activated": _LargeActivatedTool()},
     )
 
-    assert source == "fallback"
-    assert estimated == _fallback_context_estimate(
-        [Message(role="system", content="sys"), response], {"activated": _LargeActivatedTool()},
-    )
+    assert source == "usage"
+    assert estimated == 110 + _fallback_context_estimate([], {"activated": _LargeActivatedTool()})
     assert estimated > 110
 
 
-def test_context_pressure_without_usage_falls_back_to_characters_over_four():
+def test_context_pressure_without_usage_falls_back_to_local_estimator():
     from box_agent.core import (
         _estimate_context_from_latest_response,
         _fallback_context_estimate,
@@ -7306,7 +7320,7 @@ async def test_compaction_restores_runtime_state_without_replaying_files():
         Message(role="system", content="system with pinned skill instructions"),
         Message(role="user", content="old request"),
         Message(role="assistant", content="", tool_calls=[read_call, skill_call]),
-        Message(role="tool", content="old file body " * 100, tool_call_id="read-old", name="read_file"),
+        Message(role="tool", content="old file body " * 1_000, tool_call_id="read-old", name="read_file"),
         Message(role="tool", content="skill loaded", tool_call_id="skill-old", name="get_skill"),
         Message(role="assistant", content="", tool_calls=[write_call]),
         Message(role="tool", content="write complete", tool_call_id="write-new", name="write_file"),
@@ -7322,13 +7336,14 @@ async def test_compaction_restores_runtime_state_without_replaying_files():
     outcome = await _maybe_summarize(
         _FakeSummaryLLM("history summary"),
         messages,
-        token_limit=100,
+        token_limit=1_800,
         api_total_tokens=0,
         skip_check=False,
         tools=tools,
     )
 
     assert outcome.messages is not None
+    assert not outcome.blocked
     rendered = "\n".join(str(message.content) for message in outcome.messages)
     assert any(message.tool_calls == [write_call] for message in outcome.messages)
     assert any(
@@ -7359,7 +7374,7 @@ def test_latest_user_text_ignores_post_compaction_runtime_state():
         Message(role="system", content="system"),
         Message(role="user", content="继续"),
         Message(
-            role="user",
+            role="user", source="runtime",
             content="[Post-Compaction Runtime State]\n\n## Todo\nactive",
         ),
     ]

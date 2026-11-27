@@ -303,7 +303,7 @@ async def test_acp_profile_session_sends_prompt_within_explicit_window(
             },
         })))
         state = adapter._sessions[session.sessionId]
-        assert state.agent.token_limit == 810_000
+        assert state.agent.token_limit == 784_000
         assert state.session_llm.auto_model_candidates[1]["contextWindow"] == 180_000
         result = await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": user_text}], field_meta={},

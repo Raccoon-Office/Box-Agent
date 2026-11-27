@@ -89,6 +89,22 @@ async def test_utf8_full_read_at_the_real_conservative_budget_boundary(monkeypat
     assert await guard.require(record.path) is record
 
 
+@pytest.mark.parametrize("desktop", [True, False])
+async def test_memory_read_admission_uses_the_bound_route_ratio(desktop):
+    record = read_record(text="x" * 1_500)
+    model = SimpleNamespace(model="metered", estimate_text_tokens=lambda text: len(text.encode("utf-8")))
+    guard = DesktopInputGuard(lambda *args: None, lambda _: "") if desktop else CoreVisibilityGuard(lambda *args: None)
+    engine = DefaultContextEngine(llm=model)
+    engine.configure_run()
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    messages = [Message(role="system", content="base"), Message(role="user", content="remember")]
+    engine.prepare_request(messages, prepared_tools=prepare_tools([]), token_limit=3_100)
+    guard.admit(record)
+    engine.token_calibration.record(model, 1400, 1000)
+    with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+        guard.admit(record)
+
+
 async def test_successful_http_read_alone_never_qualifies_mutation(bound):
     guard, _, _, _ = bound
     record = read_record()
@@ -378,10 +394,9 @@ async def test_failed_core_read_revokes_grant_without_blocking_ordinary_projecti
 
 
 @pytest.mark.parametrize("summary_fails", [False, True])
-# The longer history misses the recovery headroom target while leaving room
-# for the summary request's own instructions within the full model budget.
-@pytest.mark.parametrize("user_chars", [32_000, 56_400])
-async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_or_repeat_compaction(summary_fails, user_chars):
+# Exercise model summary, local preflight fallback, and an anchor exceeding the hard limit.
+@pytest.mark.parametrize("user_chars", [32_000, 56_400, 62_000])
+async def test_irreducible_memory_read_failure_only_blocks_when_compaction_cannot_fit(summary_fails, user_chars):
     from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent, ToolCallResult
     from box_agent.runtime import run_agent_loop
     from box_agent.schema import FunctionCall, StreamEvent, ToolCall
@@ -413,11 +428,12 @@ async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_o
             if kwargs.get("call_kind") == "context_summary":
                 self.summary_calls += 1
                 if summary_fails:
-                    raise RuntimeError("synthetic summary unavailable")
-                yield StreamEvent(type="text", delta="<summary>Memory read failed: CORE_CONTEXT_TOO_LARGE.</summary>")
+                    yield StreamEvent(type="text", delta="malformed summary")
+                else:
+                    yield StreamEvent(type="text", delta="<summary>Memory read failed: CORE_CONTEXT_TOO_LARGE.</summary>")
             else:
                 self.normal_calls += 1
-                assert any(message.role == "user" and message.content == "x" * user_chars for message in messages)
+                assert any(message.role == "user" and ("x" * user_chars) in str(message.content) for message in messages)
                 if self.normal_calls > 1:
                     assert any("CORE_CONTEXT_TOO_LARGE" in str(message.content) for message in messages)
                 if self.normal_calls <= 2:
@@ -433,16 +449,28 @@ async def test_irreducible_memory_read_failure_does_not_prevent_ordinary_reply_o
     events = [event async for event in run_agent_loop(
         llm=provider, tools={"memory_read": Reader()}, memory_manager=lookup, token_limit=30000, max_steps=3, logger=None,
         messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * user_chars)])]
-    assert not [event.message for event in events if isinstance(event, ErrorEvent)]
-    assert provider.summary_calls == 1 and provider.normal_calls == 3
-    compactions = [event for event in events if isinstance(event, SummarizationEvent)]
-    assert len(compactions) == 1
-    if user_chars > 32000:
-        assert 30000 - REQUEST_INPUT_HEADROOM_TOKENS < compactions[0].estimated_after <= 30000
+    (compaction,) = [event for event in events if isinstance(event, SummarizationEvent)]
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
     failures = [event for event in events if isinstance(event, ToolCallResult) and not event.success]
-    assert len(failures) == 2 and all(event.error == "CORE_CONTEXT_TOO_LARGE" for event in failures)
-    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
+    assert all(event.error == "CORE_CONTEXT_TOO_LARGE" for event in failures)
+    done = next(event for event in events if isinstance(event, DoneEvent))
     assert not any(event[1] for event in activations)
+    if user_chars == 62_000:
+        assert provider.summary_calls == provider.normal_calls == 0
+        assert compaction.summary_path == "deterministic" and compaction.mode == "blocked"
+        assert compaction.estimated_after > 30_000
+        assert not failures and [error.error_code for error in errors] == ["CONTEXT_INPUT_BUDGET_EXCEEDED"]
+        assert done.stop_reason == StopReason.ERROR
+        return
+
+    assert not errors and provider.normal_calls == 3
+    assert len(failures) == 2 and done.stop_reason == StopReason.END_TURN
+    if user_chars == 56_400:
+        assert provider.summary_calls == 0 and compaction.mode == "fallback"
+    else:
+        assert provider.summary_calls == (5 if summary_fails else 1)
+        assert compaction.mode == ("fallback" if summary_fails else "summary")
+    assert compaction.estimated_after <= 30_000
 
 
 async def test_blocked_model_input_never_grants_visibility(bound):

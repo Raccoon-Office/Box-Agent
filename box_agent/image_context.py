@@ -149,7 +149,7 @@ class ImageContext:
 
     def prepare(self, messages: list[Message], *, llm: Any = None, tools: Any = None,
                 thinking_enabled: bool = False, purpose: str = "main") -> ImageProjection:
-        from .kernel.context_engine import _fallback_context_estimate
+        from .kernel.context_engine import _fallback_context_estimate, _is_summary_marker
 
         request_round = self.model_round + 1
         evicted: list[dict[str, Any]] = []
@@ -161,9 +161,15 @@ class ImageContext:
             if not ref.get("delivered", False):
                 self._notices[ref["imageId"]] = self._notice(ref, reason)
 
+        compacted = any(m.source == "runtime" and (_is_summary_marker(m) or m.runtime_kind == "compaction_notice")
+                        for m in messages)
+        visible_uploads = {ref.get("imageId") for m in messages if m.input_facts
+                           for ref in m.input_facts.get("images", ())}
         candidates = []
         for ref in self.images:
             if not ref.get("active", True) or not ref.get("eligible", True) or ref.get("evicted"):
+                continue
+            if compacted and ref.get("source") == "user_upload" and ref["imageId"] not in visible_uploads:
                 continue
             if request_round - ref.get("createdRound", request_round) >= self.config.keep_rounds:
                 evict(ref, "round_limit")

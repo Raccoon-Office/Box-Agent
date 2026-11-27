@@ -650,7 +650,7 @@ def test_session_log_restores_legacy_workspace_without_rewriting_header(
     assert log.path.read_bytes() == before
 
 
-def test_replay_filters_only_known_legacy_workflow_context(tmp_path):
+def test_replay_and_history_preserve_messages_with_legacy_workflow_text(tmp_path):
     log = SessionLog.create(tmp_path, session_id="legacy-workflow", cwd=tmp_path)
     messages = [
         "Please explain [Post-Compaction Workflow Checkpoint] to me.",
@@ -685,10 +685,8 @@ def test_replay_filters_only_known_legacy_workflow_context(tmp_path):
         cwd=tmp_path,
     )
 
-    assert [message.content for message in restored.replay().messages] == [
-        messages[0],
-        messages[4],
-    ]
+    assert [message.content for message in restored.replay().messages] == messages
+    assert [message.content for _, message, _ in restored.history_messages()] == messages
     restored.close()
 
 
@@ -883,6 +881,65 @@ def test_user_message_source_is_persisted_and_replayed(tmp_path):
     log.close()
 
 
+def test_single_surface_edit_uses_projected_position_and_preserves_original_history(tmp_path):
+    log = SessionLog.create(tmp_path, session_id="single-edit", cwd=tmp_path)
+    legacy = Message(role="user", content="[Post-Compaction Workflow Checkpoint] old")
+    first = Message(role="tool", name="read", tool_call_id="reused", content="first result")
+    second = first.model_copy(update={"content": "second result"})
+    tail = Message(role="user", content="follow up")
+    image = {"imageId": "i1", "source": "image_inspect"}
+    log.queue_message_images(second, [image])
+    _, _, target, _ = log.append_unlogged_messages([legacy, first, second, tail], turn=1, step=1)
+    images = log.replay().images
+    edit = {"reason": "tool_result_budget", "persistedPath": "results/tool.txt", "originalChars": 13}
+    preview = second.model_copy(update={"content": "preview"})
+    updated = [legacy, first, preview, tail]
+    try:
+        event = log.replace_surface_message(2, preview, turn=2, step=3, edit=edit)
+        assert event["type"] == "tool/result"
+        assert event["surfaceOp"] == {"op": "replace", "start": target["seq"], "end": target["seq"]}
+        assert event["sourceEventSeqs"] == [target["seq"]]
+        assert event["data"] == {
+            "message": preview.model_dump(mode="json", exclude_none=True), "turn": 2, "step": 3,
+            "surfaceDerived": True, "images": [image], "edit": edit,
+        }
+        assert log.replay().messages == updated
+        assert log.append_unlogged_messages(updated, turn=2, step=3) == []
+        replacement = log.replace_surface_message(2, second, turn=2, step=4, edit={"reason": "undo"})
+        assert replacement["sourceEventSeqs"] == [event["seq"]]
+        log.flush()
+    finally:
+        log.close()
+
+    reopened = SessionLog.open(tmp_path, session_id="single-edit", cwd=tmp_path)
+    try:
+        assert reopened.replay(through_seq=event["seq"]).messages == updated
+        assert reopened.replay().messages == [legacy, first, second, tail]
+        assert reopened.replay().images == images
+        assert [msg for _, msg, _ in reopened.history_messages()] == [legacy, first, second, tail]
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(("index", "update"), [
+    (-1, {}), (1, {}), (0, {"role": "assistant"}), (0, {"tool_call_id": "different"}),
+    (0, {"name": "other_tool"}),
+])
+def test_invalid_single_surface_edit_leaves_log_intact(tmp_path, index, update):
+    log = SessionLog.create(tmp_path, session_id="invalid-single-edit", cwd=tmp_path)
+    original = Message(role="tool", content="raw", name="read", tool_call_id="call")
+    try:
+        log.append_unlogged_messages([original], turn=1, step=1)
+        with pytest.raises(SessionLogCorrupted, match="surface edit"):
+            log.replace_surface_message(
+                index, original.model_copy(update=update), turn=1, step=2, edit={"reason": "budget"},
+            )
+        assert len(log.events) == 1
+        assert log.replay().messages == [original]
+    finally:
+        log.close()
+
+
 def test_live_surface_rewrite_is_reconciled_without_failing_the_task(
     tmp_path,
     caplog,
@@ -917,7 +974,7 @@ def test_live_surface_rewrite_is_reconciled_without_failing_the_task(
         ),
     ]
 
-    with caplog.at_level("WARNING", logger="box_agent.session_log"):
+    with caplog.at_level("ERROR", logger="box_agent.session_log"):
         replacement = log.append_unlogged_messages(
             rewritten_messages,
             turn=1,

@@ -103,9 +103,11 @@ class AnthropicClient(LLMClientBase):
     def _request_body_params(
         self, system_message: str | None, api_messages: list[dict[str, Any]],
         tools: list[Any] | None, *, thinking_enabled: bool,
+        max_output_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Share exact request parameters between preflight and both transports."""
-        params: dict[str, Any] = {"max_tokens": self.max_output_tokens, "messages": api_messages}
+        max_tokens = self.max_output_tokens if max_output_tokens is None else max_output_tokens
+        params: dict[str, Any] = {"max_tokens": max_tokens, "messages": api_messages}
         if self.model:
             params["model"] = self.model
         if system_message:
@@ -127,8 +129,8 @@ class AnthropicClient(LLMClientBase):
             # Thinking and the final response share max_tokens. Reserve a
             # quarter (at least 1024 tokens) for text or tool arguments rather
             # than allowing high efforts to consume almost the entire cap.
-            response_reserve = max(1024, (self.max_output_tokens + 3) // 4)
-            budget = min(budget, self.max_output_tokens - response_reserve)
+            response_reserve = max(1024, (max_tokens + 3) // 4)
+            budget = min(budget, max_tokens - response_reserve)
             if budget < 1024:
                 raise ValueError(
                     "thinking requires max_output_tokens of at least 2048 "
@@ -162,6 +164,7 @@ class AnthropicClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -186,6 +189,7 @@ class AnthropicClient(LLMClientBase):
         async def _once():
             params = self._request_body_params(
                 system_message, api_messages, tools, thinking_enabled=thinking_enabled,
+                max_output_tokens=max_output_tokens,
             )
 
             auth_headers = await self._auth_headers(
@@ -462,6 +466,7 @@ class AnthropicClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -497,6 +502,7 @@ class AnthropicClient(LLMClientBase):
                 request_params["api_messages"],
                 request_params["tools"],
                 thinking_enabled=thinking_enabled,
+                **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}),
                 session_id=session_id,
                 turn_id=turn_id,
                 title=title,
@@ -509,6 +515,7 @@ class AnthropicClient(LLMClientBase):
                 request_params["api_messages"],
                 request_params["tools"],
                 thinking_enabled=thinking_enabled,
+                **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}),
                 session_id=session_id,
                 turn_id=turn_id,
                 title=title,
@@ -524,6 +531,7 @@ class AnthropicClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -539,6 +547,7 @@ class AnthropicClient(LLMClientBase):
         params = self._request_body_params(
             request_params["system_message"], request_params["api_messages"], request_params["tools"],
             thinking_enabled=thinking_enabled,
+            max_output_tokens=max_output_tokens,
         )
 
         auth_headers = await self._auth_headers(

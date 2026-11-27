@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..correction import CORRECTION_NOTICE_PREFIX
 from ..events import ToolCallResult
 from ..schema import Message, ToolCall
 
 if TYPE_CHECKING:
-    from .ports import SessionStorePort
+    from .ports import SessionStorePort, ToolResultBudgetOutcomePort, ToolResultStorePort
+    from ..tools.base import Tool
     from ..tools.engine.call_contracts import ToolCallRecord
 
 
@@ -51,6 +52,45 @@ class ToolMessageCommitter:
         if self._parallel_calls_pending and self.session_log is not None:
             self.session_log.flush()
             self._parallel_calls_pending = False
+
+    def apply_fresh_budget(
+        self, storage: ToolResultStorePort, *, tools: dict[str, Tool], session_id: str, step: int,
+    ) -> ToolResultBudgetOutcomePort:
+        """Commit budget edits from a working copy before the next request."""
+        proposed = self.messages.copy()
+        outcome = storage.enforce_fresh_budget(proposed, tools=tools, session_id=session_id)
+        edits = [
+            (index, new) for index, (old, new) in enumerate(zip(self.messages, proposed, strict=True))
+            if old is not new
+        ]
+        if edits and self.session_log is not None and self.turn is not None:
+            # A direct SDK caller may supply history that has never been checkpointed.
+            self.session_log.append_unlogged_messages(
+                session_log_messages(self.messages), turn=self.turn, step=step,
+            )
+        metadata = getattr(outcome, "edits", {})
+        for index, message in edits:
+            self.replace_result(index, message, step=step,
+                                edit=metadata.get(index, {"reason": "tool_result_budget"}))
+        return outcome
+
+    def replace_result(self, index: int, message: Message, *, step: int, edit: dict[str, Any]) -> None:
+        """Publish a replacement to live history after the durable write succeeds."""
+        original = self.messages[index]
+        if (original.role != "tool" or message.role != "tool"
+                or original.tool_call_id != message.tool_call_id or original.name != message.name):
+            raise ValueError("tool result budget changed the identity of a message")
+        if self.session_log is not None and self.turn is not None:
+            replace_one = getattr(self.session_log, "replace_surface_message", None)
+            if callable(replace_one):
+                surface_index = index - (1 if self.messages[0].role == "system" else 0)
+                replace_one(surface_index, message, turn=self.turn, step=step, edit=edit)
+            else:
+                updated = self.messages.copy()
+                updated[index] = message
+                self.session_log.replace_surface(session_log_messages(updated), turn=self.turn, step=step)
+            self.session_log.flush()
+        self.messages[index] = message
 
     def commit_result(self, message: Message, event: ToolCallResult, step: int) -> None:
         if self.image_context is not None and event.image_content:

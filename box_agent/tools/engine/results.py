@@ -19,10 +19,10 @@ from ...schema import Message
 from ...session_trace import emit_session_trace
 from ...tool_result_storage import (
     MAX_TOOL_RESULT_BYTES,
-    PERSISTED_OUTPUT_TAG,
     ToolResultDelivery,
     ToolResultStorage,
     _json_fits,
+    is_persisted_output,
 )
 from ..base import Tool, ToolResult
 from ..browser_result_adapter import _playwright_model_content, _trace_safe_tool_raw_output
@@ -212,7 +212,7 @@ def process_tool_result(
             session_id=pipeline_input.session_id,
             persistence_content=result.persistence_content,
             content_already_processed=(
-                model_content.startswith((PERSISTED_OUTPUT_TAG, "Error: " + PERSISTED_OUTPUT_TAG))
+                is_persisted_output(model_content)
                 or (result.success and result.model_context is not None
                     and model_content == result.model_context)
             ),
@@ -276,11 +276,13 @@ def process_tool_result(
             success=result.success, user_visible=pipeline_input.user_visible,
             policy_decision=None, tool_id=None, server_name=None,
         )
-        pipeline_input.result_storage.record_delivery(
-            pipeline_input.tool_call_id, delivery.model_content,
-        )
     visible_content, visible_error, model_content = delivery.content, delivery.error, delivery.model_content
-    tool_message = tool_message.model_copy(update={"content": model_content})
+    if model_content != tool_message.content:
+        # Final delivery may have added a file reference or a failure notice.
+        # Preserve that bounded reply in the projected message, including on resume.
+        tool_message = tool_message.model_copy(update={
+            "content": model_content, "tool_result_budget_exempt": True,
+        })
     result_event = ToolCallResult(
         **event_metadata,
         content=visible_content,

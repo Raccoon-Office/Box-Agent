@@ -1,12 +1,54 @@
 """Inputs and outcomes for replaceable compaction, separate from request Context."""
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
+from ..events import CompactionDegradation, ErrorEvent
 from ..schema import Message
 from ..tools.base import Tool
+
+if TYPE_CHECKING:
+    from ..tools.engine.contracts import ToolDefinitionView
+    from .context_engine import ContextTokenCalibration
+
+
+# Legacy projectors take history alone. The shared projector also accepts
+# max_skill_bodies to rebuild locators and visibility metadata together.
+CompactedHistoryProjector = Callable[..., list[Message] | Awaitable[list[Message]]]
+
+
+def project_ordered_history(
+    messages: list[Message], project: Callable[[list[Message]], list[Message]],
+) -> list[Message]:
+    """Carry log positions across the order-preserving Context projection."""
+    projected = project(messages)
+    if projected is not messages:
+        for live, view in zip(messages, projected, strict=True):
+            if view is not live:
+                view._surface_seq = live._surface_seq
+                view._legacy_compaction_append = live._legacy_compaction_append
+                view._compacted_tail_length = live._compacted_tail_length
+    return projected
+
+
+@dataclass(slots=True)
+class ContextCompactionState:
+    """Track compaction health across turns of one live session."""
+
+    step: int = 0
+    last_compaction_step: int | None = None
+    rapid_refills: int = 0
+
+    @property
+    def refilled_rapidly(self) -> bool:
+        return self.last_compaction_step is not None and 0 < self.step - self.last_compaction_step <= 3
+
+    def record(self) -> None:
+        if self.last_compaction_step is None or self.step > self.last_compaction_step:
+            self.rapid_refills = self.rapid_refills + 1 if self.refilled_rapidly else 0
+            self.last_compaction_step = self.step
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +67,7 @@ class CompactionInput:
 
     token_limit is the safe input threshold. tools restores runtime state;
     estimate_tools is the exact offered schema set used for cost estimation.
+    summary_tools and summary_request_history carry the main request prefix.
     Call before_summary before any model summary or deterministic fallback.
     """
     history: tuple[Message, ...]
@@ -35,7 +78,6 @@ class CompactionInput:
     api_total_tokens: int = 0
     api_prompt_tokens: int | None = None
     skip_check: bool = False
-    allow_llm_summary: bool = True
     session_id: str = ""
     turn_id: str = ""
     title: str = ""
@@ -45,9 +87,25 @@ class CompactionInput:
     summary_input_token_limit: int | None = None
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None
     request_headroom_tokens: int | None = None
-    compacted_history_projector: Callable[[list[Message]], list[Message]] | None = None
+    compacted_history_projector: CompactedHistoryProjector | None = None
     compaction_source_projector: Callable[[list[Message]], list[Message]] | None = None
     session_log: Any = None
+    calibration: ContextTokenCalibration | None = None
+    summary_tools: tuple[ToolDefinitionView, ...] | None = None
+    summary_request_history: tuple[Message, ...] | None = None
+    durable_history: tuple[Message, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionPlan:
+    """Replace the prefix before cut_index (which includes the system slot)."""
+
+    head: Message
+    cut_index: int
+    cut_seq: int | None
+    rewrites: dict[int, Message]
+    appends: list[Message]
+    source_seqs: tuple[int | None, ...]
 
 
 @dataclass(frozen=True)
@@ -69,6 +127,15 @@ class CompactionOutcome:
     trigger_source: str = "none"
     protected_messages: int = 0
     still_over_limit: bool | None = None
+    summary_retries: int = 0
+    head_truncated: bool = False
+    error_code: int | str | None = None
+    summary_path: str | None = None
+    degradation: CompactionDegradation | None = None
+    provider_error: ErrorEvent | None = None
+    plan: CompactionPlan | None = None
+    summary_input: tuple[int, int] | None = None
+    summary_omitted: list[tuple[int, int]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         blocked = self.mode == "blocked"

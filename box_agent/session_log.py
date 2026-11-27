@@ -19,13 +19,16 @@ from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, TypeVar
+from typing import TYPE_CHECKING, Any, BinaryIO, TypeVar
 from uuid import uuid4
 
 from .schema import Message
 from .schema.schema import RequestUsageSnapshot
-from .session_projection import SessionProjection
+from .session_projection import SessionProjection, mark_submitted_tool_results
 from .windows_session_lock import WINDOWS_LOCK_CONTENTION, WindowsSessionLock
+
+if TYPE_CHECKING:
+    from .kernel.context_types import CompactionPlan
 
 
 _log = logging.getLogger(__name__)
@@ -214,7 +217,12 @@ def _context_usage_metadata(message: Message) -> dict[str, Any] | None:
 
 def _restore_context_usage(message: Message, metadata: Any) -> None:
     """Restore optional measured context without changing public usage fields."""
-    if message.role != "assistant" or message.usage is None or not isinstance(metadata, dict):
+    if message.role != "assistant" or message.usage is None:
+        return
+    usage = message.usage
+    # Public token totals do not identify the provider route after replay.
+    usage._request_route_unverified = True
+    if not isinstance(metadata, dict):
         return
     if type(metadata.get("version")) is not int or metadata["version"] != 1:
         return
@@ -238,10 +246,10 @@ def _restore_context_usage(message: Message, metadata: Any) -> None:
             return
     except (TypeError, ValueError, UnicodeError):
         return
-    usage = message.usage
     usage._request_snapshot = RequestUsageSnapshot(
         route=metadata["route"], history=tuple(history), tools=dict(tools), request_only=tuple(request_only),
     )
+    usage._request_route_unverified = False
     # Provider-specific input/cache fields are excluded from public serialization.
     # Restore their aggregate so context_tokens remains identical after replay.
     usage.input_tokens = context_tokens - output_tokens
@@ -269,33 +277,23 @@ def _normalize_cwd(cwd: str | Path) -> str:
     return os.path.normcase(os.path.abspath(os.fspath(cwd)))
 
 
-_LEGACY_WORKFLOW_CHECKPOINT_PREFIX = "[Post-Compaction Workflow Checkpoint]"
-_LEGACY_RUNTIME_CONTEXT_PREFIXES = (
-    "The host runtime supplied the following internal state update",
-    "The user sent the following message while the current task was already running",
-)
-_LEGACY_WORKFLOW_MARKERS = (
-    "CONTROLLED_PRESENTATION_STAGE=",
-    "[BOX_AGENT_EXTERNAL_SKILL_CHECKPOINT]",
-)
 _SURFACE_MESSAGE_TYPES = {"user/message", "assistant/message", "tool/result"}
 
 
-def _is_legacy_workflow_context(message: Message) -> bool:
-    """Identify only framework-authored workflow context from older logs."""
-
-    if message.role != "user" or not isinstance(message.content, str):
-        return False
-    content = message.content.lstrip()
-    if content.startswith(_LEGACY_WORKFLOW_CHECKPOINT_PREFIX):
-        return True
-    return content.startswith(_LEGACY_RUNTIME_CONTEXT_PREFIXES) and any(
-        marker in content for marker in _LEGACY_WORKFLOW_MARKERS
-    )
+def _compaction_format(event: dict[str, Any], current: int | None) -> int | None:
+    kind = event["type"]
+    if kind == "compaction/start":
+        return 2 if event["data"].get("format") == 2 else None
+    if kind == "compaction/summary" and current != 2:
+        # Old writers only started emitting copies after a successful summary.
+        return 1
+    if kind in ("compaction/end", "surface/reset", "turn/start"):
+        return None
+    return current
 
 
 def _apply_surface_message(
-    surface: list[tuple[int, Message]], event: dict[str, Any],
+    surface: list[tuple[int, Message]], event: dict[str, Any], *, compaction_format: int | None,
 ) -> Message:
     data = event["data"]
     message_data = data if event["type"] == "user/message" else data.get("message")
@@ -305,9 +303,13 @@ def _apply_surface_message(
     except Exception as exc:
         raise SessionLogCorrupted(f"session event {seq} has an invalid message") from exc
 
+    message._surface_seq = seq
     node = (seq, message)
     operation = event.get("surfaceOp")
     if operation == "append":
+        if (compaction_format == 1 and message.role == "user" and message.source == "runtime"
+                and (message.name in ("current_date", "tool_descriptions") or message.runtime_kind == "tool_descriptions")):
+            message._legacy_compaction_append = True
         surface.append(node)
         return message
     if not isinstance(operation, dict) or operation.get("op") != "replace":
@@ -322,6 +324,12 @@ def _apply_surface_message(
     if start_index > end_index:
         raise SessionLogCorrupted(f"surface replacement {seq} has a reversed range")
     surface[start_index : end_index + 1] = [node]
+    if message.compaction_node in ("summary_head", "fallback_head"):
+        # Measurements on the retained nodes describe the previous prefix.
+        # Only the projection changes; the original events remain auditable.
+        for _, retained in surface[start_index + 1:]:
+            retained.usage = None
+            retained.request_only_input_tokens = 0
     return message
 
 
@@ -389,6 +397,7 @@ class SessionLog:
         self._durable_event_count = len(events)
         self._surface: list[tuple[int, Message]] = []
         self._surface_cursor: int | None = None if events else 0
+        self._surface_compaction_format: int | None = None
         self._handle = handle
         self._write_lock = asyncio.Lock()
         self._lock_handle = lock_handle
@@ -896,6 +905,7 @@ class SessionLog:
         event = self.append(
             event_type, data, surface_op=surface_op, source_event_seqs=source_event_seqs,
         )
+        message._surface_seq = event["seq"]
         self._pending_message_metadata.pop(id(message), None)
         return event
 
@@ -1022,24 +1032,24 @@ class SessionLog:
         measurements and other recovery state are not needed to compare messages.
         """
 
+        nodes = self._surface_nodes()
         persisted_payloads = [
             message.model_dump(mode="json", exclude_none=True)
-            for _, message in self._surface_nodes()
-            if not _is_legacy_workflow_context(message)
+            for _, message in nodes
         ]
         live_payloads = [
             message.model_dump(mode="json", exclude_none=True) for message in messages
         ]
         if live_payloads[: len(persisted_payloads)] != persisted_payloads:
             if not messages:
-                _log.warning(
+                _log.error(
                     "session_log/surface_diverged session_id=%s persisted=%d live=0 "
                     "action=retain_persisted",
                     self.header.get("id"),
                     len(persisted_payloads),
                 )
                 return []
-            _log.warning(
+            _log.error(
                 "session_log/surface_diverged session_id=%s persisted=%d live=%d "
                 "action=replace_surface",
                 self.header.get("id"),
@@ -1052,6 +1062,11 @@ class SessionLog:
                 step=step if step is not None else 0,
             )
 
+        # Some callers supply newly projected objects for already logged inputs.
+        for (seq, saved), message in zip(nodes, messages):
+            message._surface_seq = seq
+            if saved._legacy_compaction_append:
+                message._legacy_compaction_append = True
         appended: list[dict[str, Any]] = []
         for message, payload in zip(
             messages[len(persisted_payloads) :],
@@ -1105,19 +1120,23 @@ class SessionLog:
         if self._surface_cursor is None:
             surface: list[tuple[int, Message]] = []
             events = self._active_events()
+            compaction_format = None
         else:
             surface = self._surface
             events = self._events[self._surface_cursor:end]
+            compaction_format = self._surface_compaction_format
 
         # A partial refresh after corruption must not be reused.
         self._surface_cursor = None
         for event in events:
+            compaction_format = _compaction_format(event, compaction_format)
             if event["type"] == "surface/reset":
                 surface.clear()
             elif event["type"] in _SURFACE_MESSAGE_TYPES:
-                _apply_surface_message(surface, event)
+                _apply_surface_message(surface, event, compaction_format=compaction_format)
         self._surface = surface
         self._surface_cursor = end
+        self._surface_compaction_format = compaction_format
         return surface
 
     def history_messages(
@@ -1126,25 +1145,37 @@ class SessionLog:
     ) -> list[tuple[int, Message, dict[str, Any]]]:
         """Replay original effective history, excluding model compaction copies."""
         history = []
-        compacting = False
+        compaction_format = None
         if events is None:
             events = self._active_events(checkpoint=checkpoint)
         for event in events:
             if checkpoint is not None:
                 checkpoint()
             kind, data = event["type"], event["data"]
+            compaction_format = _compaction_format(event, compaction_format)
             if kind == "surface/reset":
                 history.clear()
-            elif kind == "compaction/summary":
-                compacting = True
-            elif kind == "compaction/end":
-                compacting = False
-            elif (not compacting and not data.get("surfaceDerived")
-                  and kind in _SURFACE_MESSAGE_TYPES):
+            elif (compaction_format != 1 and kind in _SURFACE_MESSAGE_TYPES
+                  and event.get("surfaceOp") == "append" and not data.get("surfaceDerived")):
                 data = deepcopy(data)
                 payload = data if kind == "user/message" else data["message"]
-                history.append((event["seq"], Message.model_validate(payload), data))
+                if payload.get("compaction_node") is None:
+                    history.append((event["seq"], Message.model_validate(payload), data))
         return history
+
+    def surface_sequences(self, messages: list[Message]) -> tuple[int, ...]:
+        """Resolve a projected history prefix to durable seqs, or omit an ambiguous mapping."""
+        nodes = self._surface_nodes()
+        if len(nodes) > len(messages):
+            return ()
+        for (_, saved), live in zip(nodes, messages):
+            if saved.role != live.role or saved.source != live.source:
+                return ()
+            if saved.input_facts and saved.input_facts == live.input_facts:
+                continue  # Host projection can render the same immutable user input differently.
+            if saved.model_dump() != live.model_dump():
+                return ()
+        return tuple(seq for seq, _ in nodes)
 
     def surface_message_sequence(self, messages: list[Message], target: Message) -> int | None:
         """Resolve a live message by position, never by matching its text alone."""
@@ -1171,9 +1202,12 @@ class SessionLog:
         surface_op: str | dict[str, Any],
         source_event_seqs: list[int] | None = None,
         surface_derived: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = message.model_dump(mode="json", exclude_none=True)
-        metadata = {"surfaceDerived": True} if surface_derived else {}
+        metadata = dict(metadata or {})
+        if surface_derived:
+            metadata["surfaceDerived"] = True
         if message.role == "user":
             payload["source"] = message.source
             return self._append_message_event(
@@ -1201,6 +1235,72 @@ class SessionLog:
             )
         raise ValueError(f"role {message.role!r} cannot enter the Session Surface")
 
+    def replace_surface_message(
+        self, index: int, message: Message, *, turn: int, step: int, edit: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replace one replay-visible node while keeping the original in host history."""
+        nodes = self._surface_nodes()
+        if type(index) is not int or not 0 <= index < len(nodes):
+            raise SessionLogCorrupted(f"surface edit index {index!r} is outside the active surface")
+        return self._append_surface_message(
+            message, turn=turn, step=step, **self._surface_edit_args(nodes[index], message, edit),
+        )
+
+    def _surface_edit_args(
+        self, node: tuple[int, Message], message: Message, edit: dict[str, Any],
+    ) -> dict[str, Any]:
+        seq, previous = node
+        original = self._events[seq]
+        event_types = {"user": "user/message", "assistant": "assistant/message", "tool": "tool/result"}
+        if (original["type"] != event_types.get(message.role) or previous.role != message.role
+                or previous.tool_call_id != message.tool_call_id or previous.name != message.name):
+            raise SessionLogCorrupted(f"surface edit does not match node {seq}")
+        # Images and context measurements belong to the message. Execution
+        # facts such as raw results and accepted model rounds stay on their
+        # original event, where replay processes each occurrence exactly once.
+        data = original["data"]
+        metadata = {key: data[key] for key in ("images", "contextUsage") if key in data}
+        return {
+            "surface_op": {"op": "replace", "start": seq, "end": seq},
+            "source_event_seqs": [seq], "surface_derived": True, "metadata": {**metadata, "edit": edit},
+        }
+
+    def commit_compaction(self, plan: CompactionPlan, *, turn: int, step: int) -> None:
+        """Append validated edits, a single prefix replacement, and generated messages."""
+        nodes = self._surface_nodes()
+        seqs = tuple(seq for seq, _ in nodes)
+        if seqs != plan.source_seqs:
+            raise SessionLogCorrupted("compaction source does not match the current surface")
+        # The plan indexes the original history, including its system message.
+        if type(plan.cut_index) is not int or not 2 <= plan.cut_index <= len(nodes) + 1:
+            raise SessionLogCorrupted("compaction cut must cover a nonempty surface prefix")
+        cut = plan.cut_index - 1
+        if plan.cut_seq != (seqs[cut] if cut < len(nodes) else None):
+            raise SessionLogCorrupted("compaction cut does not name the first retained node")
+        if plan.head.role != "user" or plan.head.compaction_node not in ("summary_head", "fallback_head"):
+            raise SessionLogCorrupted("compaction replacement has no valid head")
+        if any(msg.compaction_node != "appended" or msg.role not in ("user", "assistant", "tool")
+               for msg in plan.appends):
+            raise SessionLogCorrupted("invalid compaction append")
+        # Validate every edit before writing the first one. seq order can
+        # differ from surface order after earlier single-node replacements.
+        retained = dict(nodes[cut:])
+        if not plan.rewrites.keys() <= retained.keys():
+            raise SessionLogCorrupted("compaction rewrite targets a node outside the retained suffix")
+        edits = [
+            (msg, self._surface_edit_args((seq, retained[seq]), msg, {"reason": "compaction"}))
+            for seq, msg in plan.rewrites.items()
+        ]
+        for message, args in edits:
+            self._append_surface_message(message, turn=turn, step=step, **args)
+        self._append_surface_message(
+            plan.head, turn=turn, step=step,
+            surface_op={"op": "replace", "start": seqs[0], "end": seqs[cut - 1]},
+            source_event_seqs=list(seqs[:cut]),
+        )
+        for message in plan.appends:
+            self._append_surface_message(message, turn=turn, step=step, surface_op="append")
+
     def replace_surface(
         self,
         messages: list[Message],
@@ -1214,6 +1314,13 @@ class SessionLog:
             raise ValueError("replacement Surface must not be empty")
         old_nodes = self._surface_nodes()
         appended: list[dict[str, Any]] = []
+        # Match durable fields. Submission markers and restored usage estimates
+        # are private, and may differ between a live message and its log node.
+        old_payloads = [(msg.source, msg.model_dump()) for _, msg in old_nodes]
+
+        def retained(message: Message) -> bool:
+            return (message.source, message.model_dump()) in old_payloads
+
         if old_nodes:
             source_seqs = [seq for seq, _ in old_nodes]
             appended.append(
@@ -1227,20 +1334,23 @@ class SessionLog:
                         "end": source_seqs[-1],
                     },
                     source_event_seqs=source_seqs,
-                    surface_derived=any(messages[0] == previous for _, previous in old_nodes),
+                    surface_derived=retained(messages[0]),
                 )
             )
             remaining = messages[1:]
         else:
             remaining = messages
-        for message in remaining:
+        # Older store adapters can delegate a whole compacted view here. Its
+        # receipts and expired usage still describe copies of original UI rows.
+        compacted_tail = (messages[0]._compacted_tail_length or 0) if old_nodes else 0
+        for index, message in enumerate(remaining):
             appended.append(
                 self._append_surface_message(
                     message,
                     turn=turn,
                     step=step,
                     surface_op="append",
-                    surface_derived=any(message == previous for _, previous in old_nodes),
+                    surface_derived=index < compacted_tail or retained(message),
                 )
             )
         return appended
@@ -1275,13 +1385,18 @@ class SessionLog:
         images: dict[str, dict[str, Any]] = {}
         model_round = 0
         latest_image_request: tuple[int, list[str], list[str]] | None = None
+        compaction_format = None
         for event in self._active_events(through_seq=through_seq):
             event_type = event.get("type")
             data = event["data"]
+            compaction_format = _compaction_format(event, compaction_format)
             if event_type == "surface/reset":
                 surface.clear()
                 images.clear()
                 latest_image_request = None
+                continue
+            if event_type == "request/header":
+                mark_submitted_tool_results(message for _, message in reversed(surface))
                 continue
             if event_type in {"user/message", "tool/result"}:
                 references = data.get("images")
@@ -1390,14 +1505,15 @@ class SessionLog:
                 skills = deepcopy(value) if isinstance(value, list) else []
                 continue
             if event_type in _SURFACE_MESSAGE_TYPES:
-                message = _apply_surface_message(surface, event)
+                message = _apply_surface_message(surface, event, compaction_format=compaction_format)
                 _restore_context_usage(message, data.get("contextUsage"))
-        messages = [message for _, message in surface if not _is_legacy_workflow_context(message)]
+        messages = [message for _, message in surface]
         latest_snapshot_seen = False
         for message in reversed(messages):
             if message.usage is not None and message.usage._request_snapshot is not None:
                 if latest_snapshot_seen:
                     message.usage._request_snapshot = None
+                    message.usage._request_route_unverified = True
                 latest_snapshot_seen = True
         return SessionProjection(
             messages=messages,

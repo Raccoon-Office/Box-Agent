@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 
 import pytest
 
@@ -11,7 +12,97 @@ from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEve
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.context_input import DefaultContextEngine
 from box_agent.kernel.compact_engine import DefaultCompactEngine
-from box_agent.kernel.context_engine import _fallback_context_estimate, _SUMMARY_REQUEST
+from box_agent.kernel.context_engine import (
+    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_MESSAGE_PREFIX, _SUMMARY_MESSAGE_SUFFIX,
+    _create_summary, _fallback_context_estimate, _is_summary_marker, _summary_request,
+)
+from box_agent.llm.llm_wrapper import LLMClient
+from box_agent.session_log import SessionLog
+from box_agent.tools.base import Tool, ToolResult
+
+
+class _PrefixTool(Tool):
+    name = "second_by_name"
+    description = "Load the first report."
+    parameters = {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs):
+        return ToolResult(success=True, content="report")
+
+
+class _AnotherPrefixTool(_PrefixTool):
+    name = "first_by_name"
+    description = "Load the second report."
+
+
+@pytest.mark.asyncio
+async def test_reactive_summary_reuses_main_request_wire_prefix_and_tool_order(tmp_path):
+    import httpx
+    from openai import AsyncOpenAI
+
+    from box_agent.schema import LLMProvider
+
+    requests = []
+
+    def respond(request):
+        payload = json.loads(request.content)
+        if not payload.get("stream"):
+            return httpx.Response(200, json={"choices": [{
+                "index": 0, "message": {"role": "assistant", "content": '{"continue":false}'},
+                "finish_reason": "stop",
+            }]})
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(400, json={"error": {
+                "code": "context_length_exceeded", "message": "This model's maximum context length is 12000 tokens.",
+            }})
+        text = "<summary>Progress retained.</summary>" if len(requests) == 2 else "completed"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=(
+            f"data: {json.dumps({'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': 'stop'}]})}\n\n"
+            "data: [DONE]\n\n"
+        ))
+
+    model = LLMClient(provider=LLMProvider.OPENAI, api_key="test", api_base="https://example.invalid/v1",
+                      model="prefix-test", max_output_tokens=1000)
+    await model._client.client.close()
+    async with AsyncOpenAI(api_key="test", base_url=model.api_base, max_retries=0,
+                           http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))) as client:
+        model._client.client = client
+        agent = Agent(llm_client=model, system_prompt="`<current_date>` is the session date.",
+                      tools=[_PrefixTool(), _AnotherPrefixTool()], max_steps=1, token_limit=10_000,
+                      workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False)
+        agent.messages.extend([Message(role="user", content="First report"),
+                               Message(role="assistant", content="Already checked the first report.")])
+        agent.add_user_message("Summarize the checkpoints.")
+        events = [event async for event in agent.run_events()]
+
+    assert any(isinstance(event, SummarizationEvent) and event.mode == "summary" for event in events)
+    assert len(requests) == 3
+    initial, summary, _ = requests
+    assert [tool["function"]["name"] for tool in initial["tools"][:2]] == ["second_by_name", "first_by_name"]
+    assert summary["tools"] == initial["tools"]
+    assert "tool_choice" not in summary
+    assert any("<current_date>" in message["content"] for message in initial["messages"][1:])
+    assert summary["messages"] == [
+        *initial["messages"], {"role": "user", "content": _summary_request(summary["max_tokens"])},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_summary_preflight_counts_the_shared_tools():
+    from box_agent.kernel.context_engine import _SummaryInputBudgetExceeded
+    from box_agent.tools.engine.contracts import ToolDefinitionView
+
+    llm = CompactionE2ELLM()
+    history = [Message(role="system", content="system"), Message(role="user", content="request")]
+    limit = _fallback_context_estimate([
+        *history, Message(role="user", content=_summary_request(8_192)),
+    ], None, llm=llm)
+    with pytest.raises(_SummaryInputBudgetExceeded):
+        await _create_summary(llm, history, 1, input_token_limit=limit,
+                              tools=(ToolDefinitionView.from_tool(_PrefixTool()),))
+    assert not llm.summary_messages
+    assert await _create_summary(llm, history, 1, input_token_limit=limit)
 
 
 class CompactionE2ELLM:
@@ -106,6 +197,7 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
     facts = json.loads(llm.judge_messages[-1].content.split(marker, 1)[1])
     assert facts["user_request"] == "latest user request"
 
+    assert llm.normal_messages[1].earlier_user_messages == [old_user.content]
     compacted_summary = llm.normal_messages[1]
     assert compacted_summary.role == "user"
     assert "Summary:\n1. Primary Request and Intent:" in str(
@@ -117,7 +209,7 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
         compacted_summary.content
     )
     assert old_user not in llm.normal_messages
-    assert large_execution not in llm.normal_messages
+    assert any(message is large_execution for message in llm.normal_messages)
     assert latest_user in llm.normal_messages
 
     assert agent.messages[-1].role == "assistant"
@@ -127,8 +219,49 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
 
 
 @pytest.mark.asyncio
+async def test_agent_sends_and_replays_full_long_summary_with_original_whitespace(tmp_path):
+    summary = "\n  First detail\n" + "Complete evidence record.\n" * 350 + "Last detail.  \n"
+
+    class LongSummaryProvider(CompactionE2ELLM):
+        context_window = 100_000
+        max_output_tokens = 16_000
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                yield StreamEvent(type="text", delta=f"  <summary>{summary}</summary>\n")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            async for event in super().generate_stream(messages, tools, **kwargs):
+                yield event
+
+    provider = LongSummaryProvider()
+    root = tmp_path / "sessions"
+    with closing(SessionLog.create(root, session_id="long-summary", cwd=tmp_path)) as log:
+        agent = Agent(llm_client=provider, system_prompt="E2E system prompt", tools=[], max_steps=1,
+                      workspace_dir=str(tmp_path), token_limit=18_000, session_log=log,
+                      deferred_mcp_loading_enabled=False)
+        agent.messages.extend([
+            Message(role="user", content="First task"),
+            Message(role="assistant", content="x" * 65_000),
+        ])
+        agent.add_user_message("Continue the latest task.")
+        events = [event async for event in agent.run_events()]
+
+    assert len(summary) > 8_000
+    (event,) = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert event.mode == "summary" and event.summary_calls == 1 and not event.head_truncated
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason == StopReason.END_TURN
+    sent = next(message.content for message in provider.normal_messages if _is_summary_marker(message))
+    assert sent.startswith(_SUMMARY_MESSAGE_PREFIX + summary + _SUMMARY_MESSAGE_SUFFIX)
+    assert sent.index("[Earlier User Messages]") < sent.index("If you need specific details")
+    with closing(SessionLog.open(root, session_id="long-summary", cwd=tmp_path)) as log:
+        replayed = next(message.content for message in log.replay().messages if _is_summary_marker(message))
+    assert replayed == sent
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("history_chars", [100_000, 45_000], ids=["history-overflow", "summary-instruction-overflow"])
-async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(tmp_path, history_chars):
+async def test_agent_trims_an_over_budget_summary_and_resumes(tmp_path, history_chars):
     llm = CompactionE2ELLM()
     token_limit = 16_000
     agent = Agent(
@@ -146,10 +279,10 @@ async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(t
         ),
         latest_user,
     ])
-    history_tokens = _fallback_context_estimate(agent.messages, {})
+    history_tokens = _fallback_context_estimate(agent.messages, {}, llm=llm)
     summary_tokens = _fallback_context_estimate([
-        *agent.messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
-    ], {})
+        *agent.messages, Message(role="user", source="runtime", content=_summary_request(8_192)),
+    ], {}, llm=llm)
     if history_chars == 45_000:
         assert history_tokens < token_limit
     else:
@@ -159,12 +292,13 @@ async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(t
     events = [event async for event in agent.run_events()]
 
     compaction = next(event for event in events if isinstance(event, SummarizationEvent))
-    assert compaction.mode == "fallback"
-    assert compaction.summary_calls == 0
-    assert llm.summary_messages == []
-    assert "Deterministic history fallback" in str(llm.normal_messages)
+    assert compaction.mode == "summary"
+    assert compaction.summary_calls == 1 and compaction.summary_retries == 1
+    assert compaction.head_truncated
+    assert llm.summary_messages[1].content == "[earlier conversation truncated for compaction retry]"
+    assert "NOT covered by this summary" in str(llm.normal_messages)
     assert latest_user in llm.normal_messages
-    assert _fallback_context_estimate(llm.normal_messages, {}) <= token_limit
+    assert _fallback_context_estimate(llm.normal_messages, {}, llm=llm) <= token_limit
     assert not [event.message for event in events if isinstance(event, ErrorEvent)]
     assert agent.messages[-1].content == "E2E resumed answer"
     done = next(event for event in events if isinstance(event, DoneEvent))
@@ -172,9 +306,13 @@ async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("summary_window", [100_000, 60_000])
-@pytest.mark.parametrize("history_chars", [120_000, 164_000, 180_000])
-async def test_summary_uses_its_own_window_and_output_reservation(summary_window, history_chars):
+@pytest.mark.parametrize("summary_window, history_chars, request_shape", [
+    (130_000, 98_000, "full"),
+    (100_000, 98_000, "tight-output"),
+    (80_000, 99_000, "summary-instruction-overflow"),
+    (60_000, 98_000, "summary-history-overflow"),
+], ids=["full", "tight-output", "summary-instruction-overflow", "summary-history-overflow"])
+async def test_summary_uses_its_own_window_and_output_reservation(summary_window, history_chars, request_shape):
     from box_agent.config import derive_context_token_limit
     from box_agent.runtime import run_agent_loop
     from tests.test_main_input_budget import wire_llm
@@ -186,18 +324,23 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
         *(Message(role="assistant", content=f"recent result {index}") for index in range(6)),
         Message(role="user", content="continue"),
     ]
-    async with wire_llm(context_window=100_000) as (llm, requests):
-        llm.max_output_tokens = 50_000
-        summary_llm = llm.for_model("summary-model")
+    configured_output = 50_000
+    async with wire_llm(context_window=80_000, max_output_tokens=configured_output) as (llm, requests):
+        summary_llm = llm.for_model("summary-model", max_output_tokens=configured_output)
         summary_llm.context_window = summary_window
-        main_limit = derive_context_token_limit(100_000, 50_000)
-        summary_limit = derive_context_token_limit(summary_window, 8_192)
+        main_limit = derive_context_token_limit(80_000, configured_output)
+        summary_limit = summary_window - 8_192 - REQUEST_INPUT_HEADROOM_TOKENS
+        history_tokens = _fallback_context_estimate(history, {}, llm=llm)
         summary_tokens = _fallback_context_estimate([
-            *history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
+            *history, Message(role="user", source="runtime", content=_summary_request(configured_output)),
         ], {}, llm=summary_llm)
-        assert _fallback_context_estimate(history, {}, llm=llm) > main_limit
-        if summary_window == 100_000 and history_chars == 164_000:
-            assert _fallback_context_estimate(history, {}, llm=summary_llm) <= summary_limit < summary_tokens
+        assert history_tokens > main_limit
+        if request_shape == "summary-instruction-overflow":
+            assert history_tokens <= summary_limit < summary_tokens
+        elif request_shape == "summary-history-overflow":
+            assert summary_limit < history_tokens
+        else:
+            assert summary_tokens <= summary_limit
 
         events = [event async for event in run_agent_loop(
             llm=llm, summary_llm=summary_llm, messages=history, tools={},
@@ -206,18 +349,28 @@ async def test_summary_uses_its_own_window_and_output_reservation(summary_window
 
         compaction = next(event for event in events if isinstance(event, SummarizationEvent))
         summary_requests = [request for request in requests if request["model"] == "summary-model"]
-        if summary_tokens <= summary_limit:
-            assert compaction.mode == "summary" and compaction.summary_calls == 1
-            assert len(summary_requests) == 1
-            assert summary_requests[0]["messages"][-1]["content"] == _SUMMARY_REQUEST
-            assert summary_requests[0].get("max_tokens", summary_requests[0].get("max_completion_tokens")) == 8_192
+        assert compaction.mode == "summary" and compaction.summary_calls == 1
+        assert compaction.summary_retries == int(summary_tokens > summary_limit)
+        assert compaction.head_truncated == (summary_tokens > summary_limit)
+        assert len(summary_requests) == 1
+        summary_request = summary_requests[0]
+        output = summary_request.get("max_tokens", summary_request.get("max_completion_tokens"))
+        assert summary_request["messages"][-1]["content"] == _summary_request(output)
+        sent_input = _fallback_context_estimate(
+            [Message(role=message["role"], content=message["content"]) for message in summary_request["messages"]],
+            {}, llm=summary_llm,
+        )
+        if request_shape == "tight-output":
+            assert output == summary_window - sent_input - REQUEST_INPUT_HEADROOM_TOKENS
+            assert 8_192 <= output < configured_output
         else:
-            assert compaction.mode == "fallback" and compaction.summary_calls == 0
-            assert summary_requests == []
+            assert output == configured_output
+        assert sent_input <= summary_limit
+        assert sent_input + output + REQUEST_INPUT_HEADROOM_TOKENS <= summary_window
         main_requests = [request for request in requests if request["model"] == llm.model]
         assert len(main_requests) == 1
         assert compaction.estimated_after <= main_limit
-        assert llm.max_output_tokens == 50_000
+        assert llm.max_output_tokens == summary_llm.max_output_tokens == configured_output
         assert not any(isinstance(event, ErrorEvent) for event in events)
 
 
@@ -304,11 +457,13 @@ async def test_compacted_request_recounts_retained_tool_history_before_provider(
 
 
 @pytest.mark.asyncio
-async def test_compaction_shortens_summary_to_leave_room_for_request_overlays(monkeypatch):
+async def test_compaction_keeps_full_summary_when_no_headroom_was_requested(monkeypatch):
     from box_agent.kernel import context_engine
 
+    summary = ("Task progress. " * 400).rstrip()
+
     async def summarize(*args, **kwargs):
-        return "Task progress. " * 400
+        return summary
 
     monkeypatch.setattr(context_engine, "_create_summary", summarize)
     messages = [
@@ -323,7 +478,11 @@ async def test_compaction_shortens_summary_to_leave_room_for_request_overlays(mo
         None, messages, token_limit=limit, api_total_tokens=0, skip_check=False,
     )
     assert outcome.mode == "summary" and outcome.summary_calls == 1
-    assert outcome.estimated_after <= limit - context_engine.REQUEST_INPUT_HEADROOM_TOKENS
+    assert limit - context_engine.REQUEST_INPUT_HEADROOM_TOKENS < outcome.estimated_after <= limit
+    assert outcome.degradation is None
+    message = next(message for message in outcome.messages if context_engine._is_summary_marker(message))
+    assert message.content.startswith(context_engine._SUMMARY_MESSAGE_PREFIX + summary + context_engine._SUMMARY_MESSAGE_SUFFIX)
+    assert message.earlier_user_messages == ["original request"]
 
 
 @pytest.mark.asyncio
@@ -339,13 +498,16 @@ async def test_compaction_rebases_usage_before_rebuilding_request():
         Message(role="user", content="request"),
         old_response,
     ]
+    from tests.test_context_compaction_recovery import _Summary
+
     outcome = await _maybe_summarize(
-        None, messages, token_limit=1_000, api_total_tokens=0,
-        skip_check=False, allow_llm_summary=False,
+        _Summary([("invalid", "stop")] * 5), messages, token_limit=1_000, api_total_tokens=0,
+        skip_check=False,
     )
 
     assert outcome.messages is not None
-    assert all(message.usage is None for message in outcome.messages)
+    assert any(message is old_response for message in outcome.messages)
+    assert old_response.usage.prompt_tokens == 5_000
     assert request_input_tokens(outcome.messages, {}) == _fallback_context_estimate(
         outcome.messages, {}
     )
@@ -366,7 +528,8 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
     from box_agent.runtime import run_agent_loop
 
     class Provider:
-        normal_requests = []
+        def __init__(self):
+            self.normal_requests = []
 
         def estimate_text_tokens(self, text):
             return len(text.encode("utf-8")) // 2
@@ -378,6 +541,14 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
                 self.normal_requests.append(messages)
                 yield StreamEvent(type="text", delta="resumed")
             yield StreamEvent(type="finish", finish_reason="stop")
+
+    class SummaryProvider(Provider):
+        model = "wide-summary-model"
+        context_window = 60_000
+        max_output_tokens = 4_000
+
+        async def generate(self, messages, **kwargs):
+            return LLMResponse(content="<summary>kept</summary>", finish_reason="stop")
 
     preparations = []
     original_prepare = DefaultContextEngine.prepare_request
@@ -397,10 +568,11 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
     monkeypatch.setattr(DefaultContextEngine, "prepare_request", prepare)
     provider = Provider()
     events = [event async for event in run_agent_loop(
-        llm=provider, tools={}, token_limit=30_000, max_steps=1,
+        llm=provider, summary_llm=SummaryProvider(), tools={}, token_limit=30_000, max_steps=1,
         messages=[Message(role="system", content="BASE"), Message(role="user", content="x" * user_chars)],
     )]
     compactions = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert compactions[0].summary_path == "shared"
     assert compactions[0].estimated_after > 30_000 - REQUEST_INPUT_HEADROOM_TOKENS
     assert set(preparations) == {30_000}
     errors = [event for event in events if isinstance(event, ErrorEvent)]
@@ -421,5 +593,54 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
         assert len(compactions) == 1
         assert preparations == [30_000, 30_000]
         assert not errors and len(provider.normal_requests) == 1
-        assert any(message.content == "x" * user_chars for message in provider.normal_requests[0])
+        assert next(m for m in provider.normal_requests[0] if _is_summary_marker(m)).earlier_user_messages == [
+            "x" * user_chars,
+        ]
         assert done.stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.parametrize("summary_cap", [8_192, 50_000])
+async def test_same_window_threshold_keeps_full_summary_prefix_on_wire(summary_cap):
+    from box_agent.config import derive_context_token_limit
+    from box_agent.runtime import run_agent_loop
+    from tests.test_main_input_budget import wire_llm
+
+    history = [Message(role="system", content="sys"), Message(role="user", content="old"),
+               Message(role="assistant", content="x" * 77_000), Message(role="user", content="continue")]
+    old_payload = history[2].content
+    async with wire_llm(context_window=80_000, max_output_tokens=50_000) as (llm, requests):
+        summary = llm.for_model(llm.model, max_output_tokens=summary_cap)
+        events = [event async for event in run_agent_loop(
+            llm=llm, summary_llm=summary, messages=history, tools={}, max_steps=1,
+            token_limit=derive_context_token_limit(80_000, 50_000),
+        )]
+    (compaction,) = [event for event in events if isinstance(event, SummarizationEvent)]
+    assert compaction.mode == "summary" and compaction.summary_calls == 1 and not compaction.head_truncated
+    assert old_payload in [m["content"] for m in requests[0]["messages"]]
+    cap = requests[0].get("max_tokens", requests[0].get("max_completion_tokens"))
+    assert 8_192 <= cap <= summary_cap and (cap < 50_000)
+    assert requests[0]["messages"][-1]["content"] == _summary_request(cap)
+    assert events[-1].stop_reason == StopReason.END_TURN
+
+
+async def test_summary_preflight_uses_summary_route_and_legacy_clients_need_full_output_room():
+    from box_agent.kernel.context_engine import ContextTokenCalibration, _SummaryInputBudgetExceeded
+    from tests.test_context_compaction_recovery import _Summary
+
+    class Legacy(_Summary):
+        context_window = 20_000
+        max_output_tokens = 15_000
+
+        async def generate_stream(self, messages, tools, thinking_enabled, session_id, turn_id, title, call_kind):
+            async for event in super().generate_stream(messages):
+                yield event
+
+    provider = Legacy()
+    history = [Message(role="user", content="漢" * 1850)]
+    calibration = ContextTokenCalibration()
+    calibration.record(_Summary(), 2, 1)
+    assert await _create_summary(provider, history, 1, calibration=calibration)
+    calibration.record(provider, 2, 1)
+    with pytest.raises(_SummaryInputBudgetExceeded):
+        await _create_summary(provider, history, 1, calibration=calibration)
+    assert len(provider.requests) == 1

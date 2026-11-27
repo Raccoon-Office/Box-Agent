@@ -15,7 +15,6 @@ class DefaultCompactEngine:
             turn_id=inputs.turn_id, title=inputs.title,
             api_prompt_tokens=inputs.api_prompt_tokens, tools=inputs.tools,
             summary_llm=inputs.summary_llm,
-            allow_llm_summary=inputs.allow_llm_summary,
             before_summary=inputs.before_summary, session_log=inputs.session_log,
             force=inputs.force, estimate_tools=inputs.estimate_tools,
             summary_input_token_limit=inputs.summary_input_token_limit,
@@ -23,4 +22,8 @@ class DefaultCompactEngine:
             request_headroom_tokens=inputs.request_headroom_tokens,
             compacted_history_projector=inputs.compacted_history_projector,
             compaction_source_projector=inputs.compaction_source_projector,
+            calibration=inputs.calibration,
+            summary_tools=inputs.summary_tools,
+            summary_request_history=inputs.summary_request_history,
+            durable_history=inputs.durable_history,
         )

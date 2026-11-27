@@ -361,5 +361,5 @@ async def test_final_request_budget_matrix_covers_visible_history_and_compacted_
         assert len({row["request_chars"] for row in same_phase}) == 1, same_phase
         assert len({row["estimated_input_tokens"] for row in same_phase}) == 1, same_phase
     assert len({row["fixed_tools_chars"] for row in measurements}) == 1
-    record_property("token_source", "LLMClient.estimate_text_tokens: ceil(UTF-8 bytes / 2), runtime heuristic, not provider usage")
+    record_property("token_source", "LLMClient.estimate_text_tokens: local character-class heuristic")
     record_property("connector_budget_matrix", json.dumps(measurements))

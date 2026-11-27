@@ -11,7 +11,7 @@ from box_agent.context_input import DefaultContextEngine
 from box_agent.config import AgentConfig, LLMConfig, derive_context_token_limit
 from box_agent.events import DoneEvent, StopReason
 from box_agent.kernel.context_engine import (
-    _SUMMARY_MARKER, _validate_transient_followup_result, request_input_tokens,
+    _SUMMARY_MARKER, _SUMMARY_MESSAGE_PREFIX, _validate_transient_followup_result, request_input_tokens,
 )
 from box_agent.llm.llm_wrapper import LLMClient
 from box_agent.runtime import run_agent_loop
@@ -30,6 +30,7 @@ class BudgetModel:
     model = "budget-fixture"
     provider = "fixture"
     estimate_text_tokens = LLMClient.estimate_text_tokens
+    summary = ("Task progress. " * 533).rstrip()
 
     def __init__(self, *, followup=False):
         self.followup = followup
@@ -42,7 +43,7 @@ class BudgetModel:
     async def generate_stream(self, messages, tools=None, **kwargs):
         if kwargs.get("call_kind") == "context_summary":
             self.summary_calls += 1
-            text = "<summary>" + ("Task progress. " * 580)[:8000] + "</summary>"
+            text = f"<summary>{self.summary}</summary>"
         else:
             self.request_sizes.append(request_input_tokens(messages, tools, llm=self))
             if self.followup and len(self.request_sizes) == 1:
@@ -73,7 +74,7 @@ class FollowupTool(Tool):
 
     async def execute(self):
         return ToolResult(success=True, content="Ready.", transient_followup_content=[
-            {"type": "text", "text": "T" * 27000},
+            {"type": "text", "text": "T" * 14500},
         ])
 
 
@@ -90,9 +91,9 @@ async def run_child(model, history, tools=None, *, session_log=None, token_limit
     )
 
 
-def child_history(execution_chars=30000):
+def child_history(execution_chars=18000):
     return [
-        Message(role="system", content="S" * 64000),
+        Message(role="system", content="S" * 35000),
         Message(role="user", content="old task"),
         Message(role="assistant", content="X" * execution_chars),
         Message(role="user", content="Check the supplied content and finish."),
@@ -143,7 +144,9 @@ async def test_child_compacts_history_with_the_full_followup_budget():
 
 @pytest.mark.parametrize("persisted", [False, True])
 @pytest.mark.parametrize("system_chars, overlay_chars, fits", [
-    (64000, 30000, True), (64000, 50000, False), (83000, 14000, True),
+    # Both fitting cases need to drop the retained round after projection adds
+    # the overlay. The middle case exceeds 50k even without that round.
+    (35000, 14500, True), (35000, 25000, False), (45000, 4500, True),
 ])
 async def test_child_tightens_budget_after_reprojecting_compacted_history(
     monkeypatch, tmp_path, system_chars, overlay_chars, fits, persisted,
@@ -164,6 +167,8 @@ async def test_child_tightens_budget_after_reprojecting_compacted_history(
     model = BudgetModel()
     history = child_history(execution_chars=60000)
     history[0].content = "S" * system_chars
+    recent_round = Message(role="assistant", content="Recent result " + "A" * 3600)
+    history.insert(-1, recent_round)
     system, latest_user = history[0], history[-1]
     session_log = None
     if persisted:
@@ -175,9 +180,15 @@ async def test_child_tightens_budget_after_reprojecting_compacted_history(
     assert 2 <= model.summary_calls <= 3
     assert system in history and latest_user in history
     assert projections[0].budget_blocked and projections[1].budget_blocked
+    assert recent_round in projections[1].messages
+    for projection in projections[1:]:
+        summary = next(message.content for message in projection.messages
+                       if str(message.content).startswith(_SUMMARY_MESSAGE_PREFIX))
+        assert summary.removeprefix(_SUMMARY_MESSAGE_PREFIX).split("\n\n", 1)[0] == model.summary
     if fits:
         assert len(model.request_sizes) == 1 and model.request_sizes[0] <= 50000
         assert not projections[-1].blocked_reason
+        assert recent_round not in projections[-1].messages
     else:
         assert model.request_sizes == []
         assert result.raw_output["error_code"] == "CONTEXT_INPUT_BUDGET_EXCEEDED"
@@ -217,7 +228,7 @@ async def test_cancellation_after_reprojection_stops_before_another_summary(monk
     def prepare(self, messages, **kwargs):
         nonlocal cancelled
         if any(_SUMMARY_MARKER in str(message.content) for message in messages):
-            kwargs["extra_messages"] = (Message(role="user", source="runtime", content="R" * 30000),)
+            kwargs["extra_messages"] = (Message(role="user", source="runtime", content="R" * 16000),)
             cancelled = True
         return original_prepare(self, messages, **kwargs)
 
@@ -295,7 +306,7 @@ async def test_parallel_children_derive_separate_budgets_from_their_selected_mod
     )
     assert all(result.success for result in results)
     assert {call["llm"].model: call["token_limit"] for call in child_runs} == {
-        "small": 21600, "large": 810000,
+        "small": 19_200, "large": 784_000,
     }
     assert tool._token_limit is None
     assert (model.context_window, model.max_output_tokens) == (1_000_000, 100_000)
@@ -307,7 +318,7 @@ async def test_child_recomputes_budget_when_its_inherited_binding_changes(child_
     assert (await tool.execute(task="First task", required_tools=[])).success
     model.context_window, model.max_output_tokens = 32000, 8000
     assert (await tool.execute(task="Second task", required_tools=[])).success
-    assert [call["token_limit"] for call in child_runs] == [810000, 21600]
+    assert [call["token_limit"] for call in child_runs] == [784_000, 19_200]
 
 
 @pytest.mark.parametrize("window, output, fits", [(1_000_000, 100_000, True), (32000, 8000, False)])
@@ -325,12 +336,12 @@ async def test_skill_preflight_uses_the_routed_child_budget(tmp_path, child_runs
     result = await tool.execute(task="Apply the delegated review method", skills=["review"], required_tools=[])
     assert result.success is fits, result.error
     if fits:
-        assert child_runs[0]["token_limit"] == 810000
+        assert child_runs[0]["token_limit"] == 784_000
         assert "R" * 110000 in child_runs[0]["messages"][1].content
     else:
         assert not child_runs
         assert result.raw_output["code"] == "SKILL_REFERENCE_BUDGET_EXCEEDED"
-        assert result.raw_output["token_limit"] == 21600
+        assert result.raw_output["token_limit"] == 19_200
 
 
 async def test_batch_files_checks_its_selected_model_budget_without_skills(tmp_path):
@@ -343,7 +354,7 @@ async def test_batch_files_checks_its_selected_model_budget_without_skills(tmp_p
     result = await tool.execute(task="Summarize this file", files=["input.txt"], required_tools=["read_file"])
     assert not result.success
     assert result.raw_output["code"] == "CONTEXT_INPUT_BUDGET_EXCEEDED"
-    assert result.raw_output["token_limit"] == 6300
+    assert result.raw_output["token_limit"] == 5_600
     model.generate.assert_not_called()
 
 

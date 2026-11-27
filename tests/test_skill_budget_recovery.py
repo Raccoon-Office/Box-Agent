@@ -98,7 +98,7 @@ async def test_skill_read_uses_guarded_history_and_reserves_late_followup(runtim
         Message(role="system", content=place_memory_block(
             "BASE", "--- MEMORY START ---\n" + preload + "\n--- MEMORY END ---", reserve=True,
         )),
-        Message(role="user", content="X" * 259000),
+        Message(role="user", content="X" * 93500),
     ]
     request = engine.prepare_request(history, prepared_tools=prepared_tools, token_limit=90000)
 
@@ -187,7 +187,7 @@ def test_consecutive_skill_pages_charge_schemas_images_overlays_and_pending_enve
     transient = Message(role="user", content=[{
         "type":"input_image", "media_type":"image/png", "data":"aGVsbG8=", "width":1, "height":1,
     }])
-    engine.prepare_request(history, prepared_tools=prepare_tools([tool]), token_limit=7000, output_tokens=64000,
+    engine.prepare_request(history, prepared_tools=prepare_tools([tool]), token_limit=9500, output_tokens=64000,
         extra_messages=(extra,), transient_message=transient, transient_tokens=2500)
     calls = [ToolCall(id=f"read-{index}", type="function", function=FunctionCall(
         name="get_skill", arguments={"skill_name":"demo", "offset":index * 20})) for index in range(3)]
@@ -201,7 +201,7 @@ def test_consecutive_skill_pages_charge_schemas_images_overlays_and_pending_enve
     assert page.raw_output["skill_reference"]["has_more"]
     actual = _fallback_context_estimate([*history, extra, transient, Message(role="user", content=followup)], {tool.name:tool})
     declared_reserve = 2500 - _fallback_context_estimate([transient], {})
-    assert actual + declared_reserve + 1024 <= 7000
+    assert actual + declared_reserve + 1024 <= 9500
 
 
 class Provider:
@@ -253,7 +253,7 @@ def crowded_history(runtime, *, prior_read=False, summary_fits=False):
         ])
     history.append(Message(
         role="assistant", content="old execution " * (3000 if summary_fits else 18000),
-        # Provider usage triggers compaction while the tool-free summary fits.
+        # Provider usage triggers compaction while the shared summary fits.
         usage=TokenUsage(prompt_tokens=24000, total_tokens=24000) if summary_fits else None,
     ))
     history.extend(Message(role="assistant", content=f"recent result {index}") for index in range(6))
@@ -263,11 +263,10 @@ def crowded_history(runtime, *, prior_read=False, summary_fits=False):
 
 
 @pytest.mark.asyncio
-async def test_loop_compacts_once_and_reprojects_without_trusting_old_read_facts(runtime, monkeypatch):
+async def test_loop_compacts_once_and_reuses_restored_skill_text(runtime, monkeypatch):
     from box_agent.kernel import context_engine
 
-    # Force the summary-only instruction over budget independently of the
-    # evolving tool schemas, which are not sent to the summary model.
+    # Force the summary instruction over budget regardless of the current tool schemas.
     monkeypatch.setattr(context_engine, "_SUMMARY_REQUEST",
                         context_engine._SUMMARY_REQUEST + "\n" + "summary instruction " * 512)
     history = crowded_history(runtime, prior_read=True)
@@ -292,23 +291,22 @@ async def test_loop_compacts_once_and_reprojects_without_trusting_old_read_facts
         skill_engine=runtime, token_limit=limit, max_steps=1, hooks=[hook])]
     assert len(provider.requests) == 1
     assert projections[0].blocked_reason
-    assert projections[-1].references and not projections[-1].blocked_reason
+    assert not projections[-1].references and not projections[-1].blocked_reason
     assert not failed_commits
-    assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
-    # Adding the summary instruction would exceed the safe input budget;
-    # the bounded fallback must recover without sending that request.
-    assert provider.summary_calls == 0
+    compaction, = [event for event in events if isinstance(event, SummarizationEvent)]
+    # The oversized first candidate is trimmed before the sole summary call.
+    assert compaction.head_truncated and provider.summary_calls == 1
     assert len([event for event in events if isinstance(event, StepStart)]) == 1 and hook.steps == [1]
     assert not any(isinstance(event, ErrorEvent) for event in events)
     assert "EXACT_METHOD_BODY" in str(provider.requests[0])
     assert not any(message.tool_call_id == "old-read" for message in provider.requests[0])
     assert _fallback_context_estimate(provider.requests[0], {tool.name:tool}) + 1024 <= limit
-    assert runtime.turn_deliveries["demo"]["complete"]
+    assert not runtime.turn_deliveries  # The restored body is not another invocation.
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_available", [True, False])
-async def test_loop_selected_body_recovers_with_summary_or_unavailable_summary_fallback(runtime, summary_available):
+async def test_selected_skill_is_delivered_only_after_successful_summary_service(runtime, summary_available):
     runtime.loader.get_skill("demo").skill_path.write_text(
         "---\nname: demo\ndescription: example\n---\nEXACT_METHOD_BODY\n" + "method line\n" * 2500)
     runtime.select(["demo"])
@@ -316,10 +314,16 @@ async def test_loop_selected_body_recovers_with_summary_or_unavailable_summary_f
     provider = Provider(summary_available=summary_available)
     events = [event async for event in run_agent_loop(llm=provider, messages=history, tools={},
         skill_engine=runtime, token_limit=24000, max_steps=1)]
-    assert provider.summary_calls == 1 and len(provider.requests) == 1
+    assert provider.summary_calls == 1
     compactions = [event for event in events if isinstance(event, SummarizationEvent)]
-    assert len(compactions) == 1
-    assert compactions[0].mode == ("summary" if summary_available else "fallback")
+    if not summary_available:
+        error, = [event for event in events if isinstance(event, ErrorEvent)]
+        assert "summary channel unavailable" in error.message
+        assert events[-1].stop_reason == StopReason.ERROR
+        assert not compactions and not provider.requests and not runtime.turn_deliveries
+        return
+    assert len(provider.requests) == len(compactions) == 1
+    assert compactions[0].mode == "summary"
     assert "EXACT_METHOD_BODY" in str(provider.requests[0])
     assert _fallback_context_estimate(provider.requests[0], {}) + 1024 <= 24000
     assert runtime.turn_deliveries["demo"]["complete"]
@@ -488,7 +492,7 @@ async def test_loop_unrecoverable_selection_compacts_at_most_once_and_never_deli
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["compaction/summary", "compaction/flush", "request/context", "request/flush"])
+@pytest.mark.parametrize("failure", ["compaction/end", "compaction/flush", "request/context", "request/flush"])
 async def test_loop_recovery_write_failure_propagates_without_skill_delivery(runtime, tmp_path, failure):
     history = crowded_history(runtime)
     runtime.select(["demo"])

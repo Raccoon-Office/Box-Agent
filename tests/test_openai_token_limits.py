@@ -62,14 +62,14 @@ async def wire_client(respond):
         await original.close()
 
 
-async def generate(client, stream):
+async def generate(client, stream, **kwargs):
     messages = [Message(role="user", content="hi")]
     if stream:
-        events = [event async for event in client.generate_stream(messages, thinking_enabled=True)]
+        events = [event async for event in client.generate_stream(messages, thinking_enabled=True, **kwargs)]
         assert events[-1].type == "finish"
         assert "".join(event.delta for event in events if event.type == "text") == "OK"
     else:
-        assert (await client.generate(messages, thinking_enabled=True)).content == "OK"
+        assert (await client.generate(messages, thinking_enabled=True, **kwargs)).content == "OK"
 
 
 @pytest.mark.asyncio
@@ -124,6 +124,22 @@ async def test_legacy_endpoint_keeps_max_tokens_without_retry(stream):
         assert len(requests) == 1
         assert requests[0]["max_tokens"] == 64000
         assert "max_completion_tokens" not in requests[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_output_override_survives_openai_parameter_fallback_without_leaking(stream):
+    def respond(payload):
+        if "max_tokens" in payload:
+            return httpx.Response(400, json={"error": TOKEN_ERROR})
+
+    async with wire_client(respond) as (client, requests):
+        await generate(client, stream, max_output_tokens=30_000)
+        await generate(client, not stream)
+
+    first, fallback, subsequent = requests
+    assert first["max_tokens"] == fallback["max_completion_tokens"] == 30_000
+    assert subsequent["max_completion_tokens"] == 64_000
 
 
 @pytest.mark.asyncio

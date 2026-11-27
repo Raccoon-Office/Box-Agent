@@ -217,7 +217,8 @@ async def test_recovery_failure_still_reaches_model(monkeypatch, agent):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("token_limit,history_chars,expected_mode", [
-    (2000, 20000, "fallback"),
+    # Fit the complete deterministic fallback while still forcing compaction.
+    (6000, 20000, "fallback"),
     (8000, 6000, "summary"),
     (20000, 20000, None),
 ])
@@ -238,6 +239,15 @@ async def test_real_compaction_retains_current_state_without_summary_cooperation
             yield StreamEvent(type="text", delta=delta)
             yield StreamEvent(type="finish", finish_reason="stop")
 
+    class TinySummaryProvider(Provider):
+        # The fixed summary instruction is over budget even after all eligible
+        # history is removed. The main provider still has room to continue.
+        context_window = 1_024
+        max_output_tokens = 256
+
+        async def generate(self, messages, tools=None, **kwargs):
+            pytest.fail("Summary preflight should reject this provider before sending a request")
+
     agent.add_user_message("first", host_connector_status=snapshot("connected"))
     agent.messages.append(Message(
         role="assistant", content="x" * history_chars,
@@ -247,7 +257,9 @@ async def test_real_compaction_retains_current_state_without_summary_cooperation
     agent.add_user_message("latest", host_connector_status=snapshot("connected"))
     assert agent.messages[-1].content == "latest"
     events = [event async for event in run_agent_loop(
-        llm=Provider(), messages=agent.messages, tools={}, token_limit=token_limit, max_steps=1)]
+        llm=Provider(), summary_llm=TinySummaryProvider() if expected_mode == "fallback" else None,
+        messages=agent.messages, tools={}, token_limit=token_limit, max_steps=1,
+    )]
     assert any(kind == "context_summary" for kind, _ in requests) == (expected_mode == "summary")
     assert [event.mode for event in events if isinstance(event, SummarizationEvent)] == (
         [expected_mode] if expected_mode is not None else []

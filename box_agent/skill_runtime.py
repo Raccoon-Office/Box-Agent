@@ -14,7 +14,7 @@ from .skill_dependencies import SkillDependencyError, resolve_required_skills
 from .skill_state import SkillReferenceSnapshot, SkillRead, SkillSessionState
 from .skill_restore import invalid_restore, recover_available_records, validate_restore_records
 from .tools.base import ToolResult
-from .skill_context import render_reference, read_reference
+from .skill_context import has_compacted_skill_reference, read_reference, render_reference
 
 from box_agent.tools.skill_loader import SkillLoader, SkillValidation, SKILL_VALIDATION_TIMEOUT_SECONDS
 from box_agent.tools.skill_preload import (
@@ -150,7 +150,8 @@ class SkillRuntime:
                 continue
             prompt = skill.prompt
             revision = skill.revision
-            if (name, revision, skill.source, skill.path) in existing:
+            if ((name, revision, skill.source, skill.path) in existing
+                    or has_compacted_skill_reference(messages, skill)):
                 continue
             lines = prompt.splitlines(keepends=True)
             metadata = skill.reference_metadata(offset=0, reason="explicit")
@@ -524,6 +525,12 @@ class SkillRuntime:
         """Record returned material; this says nothing about current visibility."""
         if reason != "restored" and not metadata.get("reused"):
             self._remember(snapshot, snapshot.prompt, reason, metadata)
+        elif reason == "tool" and metadata.get("reused"):
+            record = self.state.reads.get(snapshot.name)
+            if (record is not None and record.revision == snapshot.revision
+                    and record.source == snapshot.source and record.path == snapshot.path):
+                self.state.sequence += 1
+                self.state.reads[snapshot.name] = replace(record, order=self.state.sequence)
         self.turn_deliveries[snapshot.name] = dict(metadata)
         if metadata.get("complete"):
             self._restore_pending = tuple(name for name in self._restore_pending if name != snapshot.name)
@@ -551,6 +558,7 @@ class SkillRuntime:
                 if (current is not None and current.revision == snapshot.revision
                         and current.source == snapshot.source and current.path == snapshot.path):
                     confirmed.add(snapshot.name)
+                    self.record_observation(snapshot, {"offset": 0, "end_offset": len(snapshot.prompt.splitlines())})
             self._restore_pending = tuple(name for name in self._restore_pending if name not in confirmed)
 
         return confirm
@@ -561,7 +569,10 @@ class SkillRuntime:
         ranges = set(old.delivered_ranges) if (old and old.revision == snapshot.revision
                   and old.source == snapshot.source and old.path == snapshot.path) else set()
         pair = (metadata["offset"], metadata["end_offset"])
-        if pair in ranges:
+        if not 0 <= pair[0] < pair[1] or (old and old.delivered_complete and ranges):
+            return
+        covered = {line for start, end in ranges for line in range(start, end)}
+        if set(range(*pair)) <= covered:
             return
         ranges.add(pair)
         self.state.sequence += 1

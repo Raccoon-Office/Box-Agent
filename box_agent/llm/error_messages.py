@@ -42,6 +42,11 @@ class FriendlyError(NamedTuple):
 
 # Categories that are model refusals rather than system failures.
 _SOFT_CATEGORIES: frozenset[str] = frozenset({"content_filter"})
+_REQUEST_BODY_LIMIT_TOKENS = (
+    "request_body_too_large", "request body too large", "request body exceeds",
+    "payload too large", "request entity too large",
+)
+_REQUEST_BODY_LIMIT_MESSAGE = "本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。"
 
 
 # Ordered list of (category, substring-tokens, friendly-message). First match wins,
@@ -49,8 +54,8 @@ _SOFT_CATEGORIES: frozenset[str] = frozenset({"content_filter"})
 _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "request_body_too_large",
-        ("request_body_too_large", "request body exceeds", "payload too large", "request entity too large"),
-        "本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。",
+        _REQUEST_BODY_LIMIT_TOKENS,
+        _REQUEST_BODY_LIMIT_MESSAGE,
     ),
     (
         "content_filter",
@@ -89,7 +94,10 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "context_length",
         ("context_length_exceeded", "context length", "maximum context",
-         "too long", "reduce the length", "input prompt token len"),
+         "context window", "prompt is too long", "prompt too long", "input is too long",
+         "input too long", "messages are too long", "input prompt token len",
+         "exceeded model token limit", "prompt exceeds max length", "input length exceeds",
+         "maximum input length", "input token exceed the limit"),
         "当前对话内容过长，超出所选模型可处理的上限。"
         "请新建会话，或精简历史消息、附件和本次输入后重试。",
     ),
@@ -142,6 +150,7 @@ _BUSINESS_ERROR_CATEGORIES: dict[str, str] = {
     "arrearage": "quota",
     "unsupported_parameter": "unsupported_parameter",
     "context_length_exceeded": "context_length",
+    "1261": "context_length",  # Z.AI prompt length limit
     "model_not_found": "model_not_found",
     "internal_error": "server_error",
     "server_error": "server_error",
@@ -158,6 +167,45 @@ _RAW_FALLBACK_LIMIT = 300
 # point of this module is to never let error-handling code raise, so this is the
 # floor we always fall back to.
 _GENERIC_FALLBACK = "模型调用失败，请稍后重试。"
+
+_TOKEN_NUMBER = r"[0-9][0-9,]{0,14}"
+# ``window`` limits count input together with the requested output; ``input``
+# limits cap the prompt alone and never reserve output room. Losing that
+# distinction makes recovery subtract an output budget the provider never
+# charged, so it must ride on the parsed value.
+_CONTEXT_TOKEN_PATTERNS = tuple(
+    (re.compile(pattern, re.IGNORECASE), kind) for pattern, kind in (
+        (rf"prompt is too long:\s*(?P<actual>{_TOKEN_NUMBER})\s+tokens\s*>\s*"
+         rf"(?P<limit>{_TOKEN_NUMBER})\s+maximum", "window"),
+        (rf"maximum context length is\s+(?P<limit>{_TOKEN_NUMBER})\s+tokens[.\s]+"
+         rf"however,?\s+your messages resulted in\s+(?P<actual>{_TOKEN_NUMBER})\s+tokens", "window"),
+        (rf"maximum context length is\s+(?P<limit>{_TOKEN_NUMBER})\s+tokens[.\s]+"
+         rf"however,?\s+you requested\s+{_TOKEN_NUMBER}\s+tokens\s*\((?P<actual>{_TOKEN_NUMBER})\s+in the messages",
+         "window"),
+        (rf"maximum context length is\s+(?P<limit>{_TOKEN_NUMBER})\s+tokens[.\s]+"
+         rf"however,?\s+you requested\s+(?P<actual>{_TOKEN_NUMBER})\s+tokens in the messages", "window"),
+        (rf"input prompt token len\s+(?P<actual>{_TOKEN_NUMBER})\s*\+\s*max_new_tokens\s+{_TOKEN_NUMBER}"
+         rf"\s*>\s*(?P<limit>{_TOKEN_NUMBER})", "window"),
+        (rf"`inputs`\s+tokens\s*\+\s*`max_new_tokens`\s+must be\s*<=\s*(?P<limit>{_TOKEN_NUMBER})"
+         rf"(?:\.\s*given:\s*(?P<actual>{_TOKEN_NUMBER})\s+`inputs`\s+tokens)?", "window"),
+        (rf"`inputs`\s+must have less than\s+(?P<limit>{_TOKEN_NUMBER})\s+tokens\.\s*"
+         rf"given:\s*(?P<actual>{_TOKEN_NUMBER})", "input"),
+        (rf"range of input length should be\s*\[\s*1\s*,\s*(?P<limit>{_TOKEN_NUMBER})\s*\]", "input"),
+        (rf"exceeded model token limit\s*:\s*(?P<limit>{_TOKEN_NUMBER})", "window"),
+        (rf"maximum input length(?: is| of|:)\s*(?P<limit>{_TOKEN_NUMBER})\s+tokens?\b", "input"),
+    )
+)
+
+
+def _context_length_counts(haystack: str) -> tuple[int | None, int, str] | None:
+    for pattern, kind in _CONTEXT_TOKEN_PATTERNS:
+        if match := pattern.search(haystack):
+            limit = int(match["limit"].replace(",", ""))
+            if limit > 0:
+                raw_actual = match.groupdict().get("actual")
+                actual = int(raw_actual.replace(",", "")) if raw_actual else 0
+                return actual or None, limit, kind
+    return None
 
 
 def classify_llm_error(exc: BaseException) -> FriendlyError:
@@ -191,8 +239,12 @@ def classify_llm_error(exc: BaseException) -> FriendlyError:
 
     try:
         if _safe_http_status_code(root) == 413:
-            return FriendlyError(message="本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。",
-                                 category="request_body_too_large")
+            explicit_body_limit = any(token in haystack for token in _REQUEST_BODY_LIMIT_TOKENS)
+            explicit_context_limit = _context_length_counts(haystack) is not None or any(
+                token in haystack for token in ("context_length_exceeded", "prompt is too long", "prompt too long")
+            )
+            if explicit_body_limit or not explicit_context_limit:
+                return FriendlyError(message=_REQUEST_BODY_LIMIT_MESSAGE, category="request_body_too_large")
         # Recognized business codes are more specific than generic prose.
         # Keep unknown codes, including HTTP numbers, on the text fallback.
         code = extract_llm_error_code(root)
@@ -211,7 +263,9 @@ def classify_llm_error(exc: BaseException) -> FriendlyError:
                 category="model_configuration",
             )
         for category, tokens, message in _RULES:
-            if any(_matches_error_token(haystack, tok) for tok in tokens):
+            if any(_matches_error_token(haystack, tok) for tok in tokens) or (
+                category == "context_length" and _context_length_counts(haystack) is not None
+            ):
                 return FriendlyError(
                     message=message,
                     category=category,
@@ -263,6 +317,10 @@ def extract_llm_error_code(exc: BaseException) -> int | str | None:
         return None
 
 
+def client_error_details(exc: BaseException, client: object) -> dict[str, object]:
+    return structured_llm_error(exc, provider=_safe_attr(client, "provider"), model=_safe_attr(client, "model"))
+
+
 def structured_llm_error(
     exc: BaseException,
     *,
@@ -311,7 +369,7 @@ def structured_llm_error(
     except Exception:
         retryable = False
 
-    return {
+    details = {
         "source": "llm_provider",
         "category": friendly.category,
         "reason": reason,
@@ -324,6 +382,14 @@ def structured_llm_error(
         "retryable": retryable,
         "requestId": request_id,
     }
+    if friendly.category == "context_length":
+        counts = _context_length_counts(_build_haystack(root))
+        if counts is not None:
+            actual, limit, kind = counts
+            if actual is not None:
+                details["actualInputTokens"] = actual
+            details["inputLimitTokens" if kind == "input" else "contextWindowTokens"] = limit
+    return details
 
 
 def _normalize_error_code(value: object) -> int | str | None:

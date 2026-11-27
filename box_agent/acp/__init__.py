@@ -535,12 +535,11 @@ def _normalize_llm_binding(meta: Any) -> dict[str, Any] | None:
         or raw_context_window <= 0
     ):
         raise ValueError("llm_binding.contextWindow is invalid")
-    if (
-        raw_context_window is not None
-        and raw_max_tokens is not None
-        and raw_max_tokens >= raw_context_window
-    ):
-        raise ValueError("llm_binding.maxTokens must be smaller than contextWindow")
+    if raw_context_window is not None and raw_max_tokens is not None:
+        try:
+            derive_context_token_limit(raw_context_window, raw_max_tokens)
+        except ValueError as exc:
+            raise ValueError("llm_binding.maxTokens leaves no safe input budget for contextWindow") from exc
     binding: dict[str, Any] = {"source": source, "model": model}
     routing_mode = str(raw.get("routingMode", raw.get("routing_mode")) or "").strip()
     if source == "profile":

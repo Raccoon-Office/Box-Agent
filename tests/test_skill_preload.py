@@ -4,7 +4,7 @@ import pytest
 
 from box_agent.config import ToolLimitsConfig
 from box_agent.core import _maybe_summarize
-from box_agent.schema import FunctionCall, LLMResponse, Message, ToolCall
+from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.skill_preload import (
     ACTIVE_SKILLS_HEADING,
@@ -94,8 +94,10 @@ def test_research_synthesis_expands_web_search_budget() -> None:
 
 
 class SummaryLLM:
-    async def generate(self, messages, tools=None, **kwargs) -> LLMResponse:
-        return LLMResponse(content="Execution summary", finish_reason="stop")
+    async def generate_stream(self, **kwargs):
+        assert kwargs["call_kind"] == "context_summary"
+        yield StreamEvent(type="text", delta="<summary>Execution summary</summary>")
+        yield StreamEvent(type="finish", finish_reason="stop")
 
 
 @pytest.fixture
@@ -366,14 +368,16 @@ async def test_layer_two_summary_preserves_active_skills_in_system_prompt() -> N
         ),
     ]
 
-    summarized, _, _ = await _maybe_summarize(
+    outcome = await _maybe_summarize(
         SummaryLLM(),
         messages,
-        token_limit=1,
+        token_limit=2_000,
+        force=True,
         api_total_tokens=0,
         skip_check=False,
     )
 
-    assert summarized is not None
+    assert outcome.mode == "summary"
+    summarized = outcome.messages
     assert "MANDATORY_SKILL_RULE" in summarized[0].content
     assert summarized[0].content.endswith("MANDATORY_SKILL_RULE")

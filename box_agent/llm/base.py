@@ -217,6 +217,7 @@ class LLMClientBase(ABC):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -231,6 +232,7 @@ class LLMClientBase(ABC):
                 provider (Anthropic native, or Qwen-style ``enable_thinking``
                 for OpenAI-compatible endpoints). Silent no-op for providers
                 that don't support it.
+            max_output_tokens: Optional output cap for this request only.
             session_id: Optional caller-owned session id.
             turn_id: Optional caller-owned turn id.
             title: Optional trace title. Non-ASCII values are emitted as UTF-8
@@ -248,6 +250,7 @@ class LLMClientBase(ABC):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -262,6 +265,7 @@ class LLMClientBase(ABC):
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
             thinking_enabled: See ``generate()``.
+            max_output_tokens: See ``generate()``.
             session_id: See ``generate()``.
             turn_id: See ``generate()``.
             title: See ``generate()``.

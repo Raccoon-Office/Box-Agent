@@ -9,7 +9,7 @@ budgets remain unchanged. The shared policy is in `box_agent/llm/task_budgets.py
 | --- | --- |
 | Conversation title | 8,000 |
 | Known lightweight purposes, follow-up suggestions, connectivity probes | 8,192 |
-| Context compaction, including CLI/SDK/child-loop summaries | 8,192 |
+| Context compaction | The selected client's output limit, subject to available context. ACP caps its summary client at 8,192. A client without a declared limit defaults to 8,192. |
 | Memory import, extraction, local update, conflict resolution | 8,192 |
 | Core-memory promotion/replacement | 8,192, or 16,384 for larger replacements |
 | Full memory compaction | 16,384 for bounded inputs |
@@ -37,11 +37,13 @@ conservative and is not a model tokenizer. Full memory compaction uses the same
 oversize protection with a 16,384 baseline. Original inputs are not truncated by
 this policy.
 
-Provider finishes of `length` or `max_tokens` are failures for auxiliary results,
-even if partial output happens to be valid JSON or contains a summary envelope.
-Memory planners/maintenance keep their existing failure fallbacks; partial model
-results are never applied. Lightweight RPCs return `output_truncated`, web/image
-tools return errors, and context compaction uses its existing failure path.
+When a provider reports `length` or `max_tokens`, context compaction can use
+one complete, nonempty `<summary>...</summary>` block. It keeps only the body
+and retries if the summary tags are missing, unbalanced, or repeated, the body
+is empty, or the response contains a tool call. Other auxiliary requests still
+treat these finish reasons as failures even when the output parses as JSON.
+Memory planners and maintenance use their failure fallbacks, lightweight RPCs
+return `output_truncated`, and web and image tools return errors.
 
 Validation must cover final request budgets, unchanged parent/child execution
 budgets, model routing/thinking parity, smaller model limits, long replacements,

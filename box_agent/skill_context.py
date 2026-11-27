@@ -10,9 +10,11 @@ from hashlib import sha256
 
 from .kernel.context_engine import (
     SKILL_REFERENCE_BUDGET_CHARS,
+    _RUNTIME_STATE_MARKER,
     _message_chars,
     _summary_message_text,
 )
+from .llm.token_estimator import estimate_text_tokens
 from .schema import Message
 from .skill_dependencies import SkillDependencyError
 from .tools.base import ToolResult
@@ -20,6 +22,15 @@ from .tools.base import ToolResult
 REFERENCE_START = "[Skill reference]\n"
 REFERENCE_END = "\n[/Skill reference]"
 _DEFAULT_STORE = object()
+_INVOKED_SKILLS = "invoked_skills"
+_INVOKED_SKILLS_HEADER = (
+    "[Invoked Skills]\n"
+    "The following skills were invoked EARLIER in this session (before the conversation was compacted). "
+    "IMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions again. "
+    "Use them as reference for continuing the current work."
+)
+_COMPACTED_SKILL_TOKEN_LIMIT = 5_000
+_COMPACTED_SKILLS_TOKEN_LIMIT = 25_000
 
 
 def effective_system_prompt(prompt: str, suffix: str | tuple[str, ...]) -> str:
@@ -77,11 +88,66 @@ def read_reference(content: str) -> tuple[dict[str, Any], str] | None:
         return None
 
 
+def _is_invoked_skills(message: Message) -> bool:
+    return (message.role == "user" and message.source == "runtime" and message.name == _INVOKED_SKILLS
+            and isinstance(message.content, str) and message.content.startswith(_INVOKED_SKILLS_HEADER))
+
+
+def _invoked_skill_entries(message: Message) -> tuple[dict[str, Any], ...]:
+    return (message.skill_compaction_ranges or ()) if _is_invoked_skills(message) else ()
+
+
+def has_compacted_skill_reference(messages: Iterable[Message], snapshot: Any) -> bool:
+    """An attachment already accounts for this exact version, including locator-only entries."""
+    return any(
+        entry.get("name") == snapshot.name and entry.get("revision") == snapshot.revision
+        and entry.get("source") == snapshot.source and entry.get("path") == snapshot.path
+        for message in messages for entry in _invoked_skill_entries(message)
+    )
+
+
+def _skill_in_effective_system(messages: list[Message], snapshot: Any, suffixes: tuple[str, ...]) -> bool:
+    if not messages or messages[0].role != "system" or not isinstance(messages[0].content, str):
+        return False
+    body = snapshot.prompt.strip()
+    return bool(body) and any(
+        suffix and messages[0].content.endswith(suffix) and f"\n\n{body}\n\n" in suffix + "\n\n"
+        for suffix in suffixes
+    )
+
+
+def _compacted_visible_ranges(
+    message: Message, *, name: str, revision: str, lines: list[str], source: str | None, path: str | None,
+) -> set[int]:
+    covered: set[int] = set()
+    for entry in _invoked_skill_entries(message):
+        if (entry.get("name") != name or entry.get("revision") != revision
+                or (source is not None and entry.get("source") != source)
+                or (path is not None and entry.get("path") != path)):
+            continue
+        spans = entry.get("spans")
+        if not isinstance(spans, (list, tuple)):
+            continue
+        for span in spans:
+            if (not isinstance(span, (list, tuple)) or len(span) != 4
+                    or not all(type(value) is int for value in span)):
+                continue
+            start, end, text_start, text_end = span
+            if (0 <= start < end <= len(lines) and 0 <= text_start < text_end <= len(message.content)
+                    and message.content[text_start:text_end] == "".join(lines[start:end])):
+                covered.update(range(start, end))
+    return covered
+
+
 def visible_ranges(messages: Iterable[Message], *, name: str, revision: str,
                    lines: list[str], source: str | None = None, path: str | None = None) -> set[int]:
     """Only verified tool text or durable runtime Skill text counts as visible."""
     covered: set[int] = set()
     for message in messages:
+        if _is_invoked_skills(message):
+            covered.update(_compacted_visible_ranges(message, name=name, revision=revision,
+                                                     lines=lines, source=source, path=path))
+            continue
         tool_text = (message.role == "tool" and message.name in {"get_skill", "skill_view"}
                      and bool(message.tool_call_id))
         runtime_text = message.role == "user" and message.source == "runtime"
@@ -105,6 +171,69 @@ def visible_ranges(messages: Iterable[Message], *, name: str, revision: str,
                 and body == "".join(lines[start:end])):
             covered.update(range(start, end))
     return covered
+
+
+def _contiguous_lines(covered: set[int]) -> Iterable[tuple[int, int]]:
+    """Turn verified line indices into inclusive-start, exclusive-end ranges."""
+    start = end = None
+    for index in sorted(covered):
+        if end != index:
+            if start is not None:
+                yield start, end
+            start = index
+        end = index + 1
+    if start is not None:
+        yield start, end
+
+
+def _compacted_skill_body(record: Any, header: str, count_tokens: Callable[[str], int]) -> tuple[str, list[tuple[int, int, int, int]]]:
+    """Render only delivered source ranges and track exact complete lines in the excerpt."""
+    lines = record.prompt.splitlines(keepends=True)
+    covered = (set(range(len(lines))) if record.delivered_complete else
+               {line for start, end in record.delivered_ranges for line in range(start, min(end, len(lines)))})
+    segments = []
+    spans = []
+    length = len(header)
+    for start, end in _contiguous_lines(covered):
+        if segments:
+            separator = "\n[Earlier undelivered lines omitted.]\n"
+            segments.append(separator)
+            length += len(separator)
+        text = "".join(lines[start:end])
+        segments.append(text)
+        spans.append((start, end, length, length + len(text)))
+        length += len(text)
+    body = "".join(segments)
+    if not body:
+        return "", []
+    if count_tokens(header + body) <= _COMPACTED_SKILL_TOKEN_LIMIT:
+        return header + body, spans
+
+    notice = f"\n[... skill content truncated for compaction; use get_skill on '{record.name}' if you need the full text]"
+    low, high = 0, len(body)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if count_tokens(header + body[:middle] + notice) <= _COMPACTED_SKILL_TOKEN_LIMIT:
+            low = middle
+        else:
+            high = middle - 1
+    if low == 0:
+        return "", []
+    cutoff = len(header) + low
+    visible_spans = []
+    for start, end, text_start, text_end in spans:
+        if text_end <= cutoff:
+            visible_spans.append((start, end, text_start, text_end))
+        elif text_start < cutoff:
+            index = start
+            visible_end = text_start
+            while index < end and visible_end + len(lines[index]) <= cutoff:
+                visible_end += len(lines[index])
+                index += 1
+            if index > start:
+                visible_spans.append((start, index, text_start, visible_end))
+            break
+    return header + body[:low] + notice, visible_spans
 
 
 def append_reference(message: Message, text: str) -> Message:
@@ -177,126 +306,163 @@ class SkillReferenceContext:
         names.extend(row["name"] for row in getattr(self.runtime, "_deferred_restore_records", ())
                      if isinstance(row.get("name"), str))
         for message in messages:
-            tool_text = (message.role == "tool" and message.name in {"get_skill", "skill_view"}
-                         and bool(message.tool_call_id))
-            runtime_text = message.role == "user" and message.source == "runtime"
-            if (tool_text or runtime_text) and isinstance(message.content, str):
-                parsed = read_reference(message.content)
-                if parsed is not None and (not runtime_text or parsed[0].get("kind") == "runtime_skill_instructions"):
-                    name = parsed[0].get("name")
-                    if isinstance(name, str):
-                        names.append(name.strip())
+            names.extend(entry["name"] for entry in _invoked_skill_entries(message)
+                         if isinstance(entry.get("name"), str))
+            parsed = self._compaction_reference(message)
+            if parsed is not None:
+                names.append(parsed[0]["name"].strip())
         return tuple(dict.fromkeys(names))
 
     def observe_history(self, messages: list[Message]) -> None:
-        """Recover read facts from source-verified real tool text before compaction."""
+        """Recover read facts from source-verified text already in history."""
+        pending = {id(message) for message in getattr(self.runtime, "_pending_materialized_messages", ())}
         for message in messages:
-            tool_text = (message.role == "tool" and message.name in {"get_skill", "skill_view"}
-                         and bool(message.tool_call_id))
-            runtime_text = message.role == "user" and message.source == "runtime"
-            if not (tool_text or runtime_text) or not isinstance(message.content, str):
+            if id(message) in pending:
                 continue
-            parsed = read_reference(message.content)
-            if parsed is None:
-                continue
-            metadata, _ = parsed
-            if runtime_text and metadata.get("kind") != "runtime_skill_instructions":
-                continue
-            name = metadata.get("name")
-            if not isinstance(name, str):
-                continue
-            try:
-                snapshot = self.runtime.resolve_reference(name)
-            except SkillDependencyError:
-                continue
-            if visible_ranges([message], name=name, revision=snapshot.revision,
-                              lines=snapshot.prompt.splitlines(keepends=True),
-                              source=snapshot.source, path=snapshot.path):
-                self.runtime.record_observation(snapshot, metadata)
+            if _is_invoked_skills(message):
+                # The attachment itself is ordered most recent first.
+                entries = reversed(_invoked_skill_entries(message))
+            else:
+                parsed = self._compaction_reference(message)
+                entries = (parsed[0],) if parsed is not None else ()
+            for metadata in entries:
+                name = metadata.get("name")
+                if not isinstance(name, str):
+                    continue
+                try:
+                    snapshot = self.runtime.resolve_reference(name)
+                except SkillDependencyError:
+                    continue
+                covered = visible_ranges([message], name=name, revision=snapshot.revision,
+                                         lines=snapshot.prompt.splitlines(keepends=True),
+                                         source=snapshot.source, path=snapshot.path)
+                for start, end in _contiguous_lines(covered):
+                    self.runtime.record_observation(snapshot, {**metadata, "offset": start, "end_offset": end})
 
     def bind_history(self, messages: list[Message]) -> None:
         """Refresh committed text without resetting this request's budget/projection."""
         self._messages = messages
         self.observe_history(messages)
 
-    def compact_history(self, original: list[Message], compacted: list[Message], *,
-                        budget_chars: int = SKILL_REFERENCE_BUDGET_CHARS) -> list[Message]:
-        """Retain current method pages and shed old bodies only at compaction."""
-        if not getattr(self.runtime, "append_only_context", False):
-            return compacted
-        facts = {record.name: record for record in self.runtime.read_facts}
-        reclaimable = self.runtime.reclaimable_after_compaction
-        current_names = set()
-        for name, previous in facts.items():
-            try:
-                current = self.runtime.resolve_reference(name)
-            except SkillDependencyError:
-                continue
-            if (current.revision == previous.revision and current.source == previous.source
-                    and current.path == previous.path):
-                current_names.add(name)
+    @staticmethod
+    def _skill_locator(name: str, path: str, *, stale: bool) -> str:
+        status = "The revision previously read is no longer current. " if stale else ""
+        return f"### Skill: {name}\nPath: {path or '(caller reference)'}\n\n{status}Use get_skill to read it when needed."
 
-        def locator(name):
-            previous = facts[name]
-            loader = getattr(self.runtime, "loader", None)
-            skill = loader.get_skill(name) if loader is not None else None
-            purpose = str(getattr(skill, "description", ""))[:320]
-            return (f"Skill '{name}' revision {previous.revision} is not retained in the current context. "
-                    f"Purpose: {purpose or name}. "
-                    f"Source path: {previous.path or '(caller reference)'}. "
-                    "Use get_skill to read the current instructions before using this method; "
-                    "a summary is not its complete body.")
+    def compact_history(
+        self, original: list[Message], compacted: list[Message], *,
+        budget_tokens: int | Callable[[list[Message]], int] = _COMPACTED_SKILLS_TOKEN_LIMIT,
+        count_text_tokens: Callable[[str], int] = estimate_text_tokens,
+        max_skill_bodies: int | None = None,
+    ) -> list[Message]:
+        """Restore only verified pages, newest invocation first, in one runtime message."""
+        self.observe_history(original)
+        pending = {id(message) for message in getattr(self.runtime, "_pending_materialized_messages", ())}
+        candidates = {}
+        for message in compacted + original:
+            if id(message) in pending:
+                continue
+            parsed = self._compaction_reference(message)
+            entries = (parsed[0],) if parsed is not None else _invoked_skill_entries(message)
+            for entry in entries:
+                if isinstance(entry.get("name"), str):
+                    candidates[entry["name"]] = entry
+
+        suffixes = verified_system_suffixes(self.runtime)
+        restore_diagnostics = self.runtime.restore_diagnostics
+        sections = []
+        for record in sorted(self.runtime.read_facts, key=lambda item: item.order, reverse=True):
+            historical = candidates.pop(record.name, None)
+            identity = {key: getattr(record, key) for key in ("name", "revision", "source", "path")}
+            delivered = record.delivered_ranges or record.delivered_complete
+            restored_stale = record.name in restore_diagnostics and not delivered
+            if not (delivered or historical is not None or restored_stale):
+                continue
+            try:
+                current = self.runtime.resolve_reference(record.name)
+            except SkillDependencyError:
+                current = None
+            if current is not None and _skill_in_effective_system(compacted, current, suffixes):
+                continue
+            verified = current is not None and all(getattr(current, key) == value for key, value in identity.items())
+            # A restored record whose original source changed carries the new
+            # revision but no delivered pages. Keep the old locator until read.
+            prior_version = historical is not None and any(historical.get(key) != value for key, value in identity.items())
+            stale = not verified or restored_stale or (prior_version and not delivered)
+            if stale and not delivered:
+                if historical is not None:
+                    identity = {key: historical.get(key, "") for key in identity}
+                else:
+                    # The restored fact refers to an unread replacement. Its
+                    # historical revision must never stand for this source.
+                    identity["revision"] = ""
+            locator = self._skill_locator(record.name, identity["path"], stale=stale)
+            sections.append((identity, locator, record if not stale else None))
+
+        for name, entry in reversed(candidates.items()):
+            identity = {key: entry.get(key, "") for key in ("name", "revision", "source", "path")}
+            sections.append((identity, self._skill_locator(name, identity["path"], stale=True), None))
 
         rebuilt = []
-        missing: set[str] = set()
         for message in compacted:
-            parsed = self._compaction_reference(message, facts, current_only=False)
-            if parsed is not None and (parsed[0]["name"] in reclaimable
-                    or parsed[0]["name"] not in current_names
-                    or self._compaction_reference(message, facts) is None):
-                name = parsed[0]["name"]
-                if name in facts:
-                    missing.add(name)
-                # Preserve a tool result's call ID and protocol group.
-                if message.role == "tool":
-                    notice = (locator(name) if name in facts else
-                              f"Skill '{name}' revision {parsed[0]['revision']} was removed from active references. "
-                              "Use get_skill if this method is needed again; its previous body is not current guidance.")
-                    rebuilt.append(message.model_copy(update={"content": notice}))
+            assert not _is_invoked_skills(message), "compaction cut must follow the previous Invoked Skills"
+            parsed = self._compaction_reference(message)
+            if parsed is not None:
+                # Replace both tool reads and materialized runtime pages in place.
+                message = message.model_copy(update={"content": self._compaction_receipt(parsed[0])})
+            rebuilt.append(message)
+
+        chunks = [_INVOKED_SKILLS_HEADER]
+        entries = []
+        length = len(chunks[0])
+        # Reserve room for locator-only sections before adding bodies. Locator
+        # instructions still remain available if the input budget is exhausted.
+        used_tokens = count_text_tokens(chunks[0])
+        locator_sections = []
+        for identity, locator, record in sections:
+            # Separate rounded section counts can each undercount by a token.
+            locator_cost = count_text_tokens("\n\n" + locator) + 1
+            if used_tokens + locator_cost > _COMPACTED_SKILLS_TOKEN_LIMIT:
+                continue
+            used_tokens += locator_cost
+            locator_sections.append((identity, locator, record, locator_cost))
+        available = budget_tokens(rebuilt) if callable(budget_tokens) else budget_tokens
+        body_limit = min(available, _COMPACTED_SKILLS_TOKEN_LIMIT)
+        body_count = 0
+        for identity, locator, record, locator_cost in locator_sections:
+            section, spans = "", []
+            if (record is not None and used_tokens - locator_cost < body_limit
+                    and (max_skill_bodies is None or body_count < max_skill_bodies)):
+                header = f"### Skill: {record.name}\nPath: {record.path or '(caller reference)'}\n\n"
+                section, spans = _compacted_skill_body(record, header, count_text_tokens)
+            section_cost = count_text_tokens("\n\n" + section) + 1 if section else 0
+            has_body = bool(section and used_tokens - locator_cost + section_cost <= body_limit)
+            if has_body:
+                used_tokens += section_cost - locator_cost
+                body_count += 1
             else:
-                rebuilt.append(message)
-        remaining = max(0, budget_chars)
-        for message in original:
-            parsed = self._compaction_reference(message, facts)
-            if parsed is None:
-                continue
-            metadata, body = parsed
-            name = metadata["name"]
-            if name in reclaimable or name not in current_names:
-                missing.add(name)
-                continue
-            previous = facts[name]
-            covered = visible_ranges(rebuilt, name=name, revision=previous.revision,
-                                     lines=previous.prompt.splitlines(keepends=True),
-                                     source=previous.source, path=previous.path)
-            if set(range(metadata["offset"], metadata["end_offset"])) <= covered:
-                continue
-            text = render_reference({**metadata, "kind": "runtime_skill_instructions"}, body)
-            cost = reference_cost(text)
-            if cost > remaining:
-                missing.add(name)
-                continue
-            rebuilt.append(Message(role="user", source="runtime", content=text))
-            remaining -= cost
-        if missing:
-            notice = "Skill reference status:\n" + "\n".join(locator(name) for name in sorted(missing))
-            if not any(message.role == "user" and message.source == "runtime" and message.content == notice
-                       for message in rebuilt):
-                rebuilt.append(Message(role="user", source="runtime", content=notice))
+                section, spans = locator, []
+            offset = length + 2
+            chunks.extend(("\n\n", section))
+            length = offset + len(section)
+            entries.append({**identity, "has_body": has_body, "spans": tuple(
+                (start, end, offset + text_start, offset + text_end)
+                for start, end, text_start, text_end in spans
+            )})
+        if entries:
+            invoked = Message(role="user", source="runtime", name=_INVOKED_SKILLS,
+                              compaction_node="appended", content="".join(chunks), skill_compaction_ranges=tuple(entries))
+            insert_at = next((index for index, message in enumerate(rebuilt)
+                              if message.compaction_node == "appended" or (
+                                  message.role == "user" and message.source == "runtime"
+                                  and isinstance(message.content, str)
+                                  and message.content.startswith(_RUNTIME_STATE_MARKER)
+                              )), len(rebuilt))
+            rebuilt.insert(insert_at, invoked)
         return rebuilt
 
     @staticmethod
-    def _compaction_reference(message, facts, *, current_only=True):
+    def _compaction_reference(message: Message) -> tuple[dict[str, Any], str] | None:
         if not isinstance(message.content, str):
             return None
         tool_text = (message.role == "tool" and message.name in {"get_skill", "skill_view"}
@@ -309,33 +475,27 @@ class SkillReferenceContext:
             return None
         if runtime_text and parsed[0].get("kind") != "runtime_skill_instructions":
             return None
-        if not current_only:
-            return parsed
-        previous = facts.get(parsed[0]["name"])
-        if previous is None:
-            return None
-        # Historical envelopes may be discarded even after their read fact was
-        # superseded. Only verified current pages can be restored as instructions.
-        if not visible_ranges([message], name=previous.name, revision=previous.revision,
-                              lines=previous.prompt.splitlines(keepends=True),
-                              source=previous.source, path=previous.path):
-            return None
         return parsed
 
+    @staticmethod
+    def _compaction_receipt(metadata: dict[str, Any]) -> str:
+        return (f"Skill '{metadata['name']}' revision {metadata['revision']} was read. "
+                "Its method body is managed separately from the conversation summary. "
+                "Do not reconstruct instructions from this receipt. Use get_skill if they are needed again.")
+
     def compaction_source(self, messages: list[Message]) -> list[Message]:
-        if not getattr(self.runtime, "append_only_context", False):
-            return messages
-        facts = {record.name: record for record in self.runtime.read_facts}
         projected = []
-        for message in messages:
-            parsed = self._compaction_reference(message, facts, current_only=False)
+        for message in project_legacy_system(messages, verified_system_suffixes(self.runtime)):
+            parsed = self._compaction_reference(message)
             if parsed is not None:
-                metadata = parsed[0]
-                message = message.model_copy(update={"content": (
-                    f"Skill '{metadata['name']}' revision {metadata['revision']} was read. "
-                    "Its method body is managed separately from the conversation summary; "
-                    "do not reconstruct instructions from this receipt."
-                )})
+                message = message.model_copy(update={"content": self._compaction_receipt(parsed[0])})
+            elif _is_invoked_skills(message):
+                names = ", ".join(entry["name"] for entry in _invoked_skill_entries(message)
+                                  if isinstance(entry.get("name"), str))
+                message = message.model_copy(update={
+                    "content": f"Previously invoked Skills: {names}. Their method bodies are managed separately.",
+                    "skill_compaction_ranges": None,
+                })
             projected.append(message)
         return projected
 
@@ -499,7 +659,8 @@ class SkillReferenceContext:
     def prepare_request(self, messages: list[Message], *, budget_chars: int,
                         can_page: Callable[[tuple[str, ...]], bool] | None = None,
                         defer_delivery: bool = False,
-                        count_text_tokens: Callable[[str], int] | None = None) -> ReferenceProjection:
+                        count_text_tokens: Callable[[str], int] | None = None,
+                        project_system: bool = True) -> ReferenceProjection:
         append_only = bool(getattr(self.runtime, "append_only_context", False))
         original_messages = messages
         if append_only:
@@ -514,7 +675,8 @@ class SkillReferenceContext:
         # Only a byte-exact legacy suffix backed by verified restored records
         # belongs to the framework. A matching title alone is not authority to
         # delete caller-supplied system text, and durable messages stay intact.
-        projected = project_legacy_system(messages, verified_system_suffixes(self.runtime))
+        suffixes = verified_system_suffixes(self.runtime)
+        projected = project_legacy_system(messages, suffixes) if project_system else list(messages)
         facts = self.runtime.read_facts
         read_names = {record.name for record in facts}
         diagnostics = [notice for name, notice in self.runtime.restore_diagnostics.items() if name in read_names]
@@ -540,8 +702,11 @@ class SkillReferenceContext:
                     or previous.source != skill.source or previous.path != str(skill.skill_path or "")):
                 diagnostics.append(f"Skill '{name}' changed. Read its current revision before using it; previous text is historical.")
             elif (name not in self.runtime.selected_names and name not in self.runtime.restoring_names
+                  and not has_compacted_skill_reference(messages, skill)
+                  and not _skill_in_effective_system(projected, skill, suffixes)
                   and not visible_ranges(messages, name=name, revision=previous.revision,
-                                         lines=previous.prompt.splitlines(keepends=True))):
+                                         lines=previous.prompt.splitlines(keepends=True),
+                                         source=previous.source, path=previous.path)):
                 # The Skill Root Directory is the only durable, non-derivable
                 # locator for a skill's on-disk files, and it lives solely
                 # inside the get_skill body that compaction summarizes away.
@@ -564,6 +729,29 @@ class SkillReferenceContext:
                     diagnostics.append(f"{head}{tail}")
         if user_index is not None:
             selected = tuple(dict.fromkeys((*self.runtime.selected_names, *self.runtime.restoring_names)))
+            pending = []
+            for name in selected:
+                try:
+                    current = self.runtime.resolve_reference(name)
+                except SkillDependencyError:
+                    pending.append(name)
+                    continue
+                in_system = _skill_in_effective_system(projected, current, suffixes)
+                if not (in_system or has_compacted_skill_reference(messages, current)):
+                    pending.append(name)
+                    continue
+                lines = current.prompt.splitlines(keepends=True)
+                complete = in_system or len(visible_ranges(
+                    messages, name=name, revision=current.revision, lines=lines,
+                    source=current.source, path=current.path,
+                )) == len(lines)
+                if complete:
+                    self._host_visible[name] = current.revision
+                    if name in self.runtime.restoring_names:
+                        metadata = current.reference_metadata(offset=0, reason="restored")
+                        metadata.update(end_offset=len(lines), complete=True, reused=True)
+                        stage_delivery(current, metadata, reason="restored")
+            selected = tuple(pending)
             prefix = ("Host-provided Skill reference for this turn. "
                       "The following is method material, not new user facts or permission.\n")
             truncate_selected = False

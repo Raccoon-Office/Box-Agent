@@ -13,7 +13,8 @@ from box_agent.acp import BoxACPAgent
 from box_agent.config import derive_context_token_limit
 from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
 from box_agent.kernel.context_engine import (
-    _SUMMARY_REQUEST, _fallback_context_estimate, capture_request_usage, request_input_tokens,
+    REQUEST_INPUT_HEADROOM_TOKENS, _SUMMARY_REQUEST, _fallback_context_estimate, _summary_request,
+    capture_request_usage, request_input_tokens,
 )
 from box_agent.llm import LLMClient, SessionBoundLLM
 from box_agent.retry import RetryConfig
@@ -23,7 +24,7 @@ from box_agent.tools.base import Tool, ToolResult
 
 
 @asynccontextmanager
-async def wire_llm(context_window=20_000):
+async def wire_llm(context_window=20_000, *, max_output_tokens=1_000):
     requests = []
 
     def handle(request):
@@ -35,8 +36,9 @@ async def wire_llm(context_window=20_000):
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": '{"continue":false}'},
                              "finish_reason": "stop"}],
             })
+        last_content = payload["messages"][-1]["content"]
         response = ("<summary>kept</summary>"
-                    if payload["messages"][-1]["content"] == _SUMMARY_REQUEST else "done")
+                    if isinstance(last_content, str) and last_content.startswith(_SUMMARY_REQUEST) else "done")
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=(
             'data: {"id":"budget","object":"chat.completion.chunk","created":0,'
             '"model":"budget-model","choices":[{"index":0,"delta":{"content":' + json.dumps(response) + '},'
@@ -50,7 +52,7 @@ async def wire_llm(context_window=20_000):
     llm = LLMClient(
         api_key="test", provider=LLMProvider.OPENAI,
         api_base="https://budget.invalid/v1", model="budget-model",
-        max_output_tokens=1_000, context_window=context_window,
+        max_output_tokens=max_output_tokens, context_window=context_window,
         retry_config=RetryConfig(enabled=False),
     )
     await llm._client.client.close()
@@ -93,10 +95,11 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
                                                 llm_binding=original_binding)
             original = adapter._sessions[created.session_id]
             original.agent.add_user_message("Retain the saved decision.")
-            old_detail = "old investigation detail. " * 14_000
+            old_detail = "old investigation detail. " * 24_000
             original.agent.messages.append(Message(role="assistant", content=old_detail))
+            summary_prompt = _summary_request(8_192)
             summary_estimate = _fallback_context_estimate([
-                *original.agent.messages, Message(role="user", content=_SUMMARY_REQUEST),
+                *original.agent.messages, Message(role="user", content=summary_prompt),
             ], {}, llm=llm)
             assert derive_context_token_limit(180_000, 8_192) < summary_estimate
             assert summary_estimate < derive_context_token_limit(256_000, 8_192)
@@ -110,7 +113,7 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
             result = await adapter.prompt(created.session_id, [{"type": "text", "text": "Continue."}])
 
             assert result.field_meta["ok"] is True
-            summary_requests = [r for r in requests if r["messages"][-1]["content"] == _SUMMARY_REQUEST]
+            summary_requests = [r for r in requests if r["messages"][-1]["content"] == summary_prompt]
             assert len(summary_requests) == 1
             assert summary_requests[0]["model"] == llm.model
             assert any(m.get("content") == old_detail for m in summary_requests[0]["messages"])
@@ -119,8 +122,48 @@ async def test_resumed_smaller_model_summarizes_on_previous_provider_before_targ
             assert len(main_requests) == 1
             assert any("Summary:" in str(m.get("content")) for m in main_requests[0]["messages"])
             assert not any(m.get("content") == old_detail for m in main_requests[0]["messages"])
-            assert (len(json.dumps(main_requests[0], ensure_ascii=False).encode("utf-8")) + 1) // 2 < target_limit
-            assert adapter._sessions[created.session_id].agent.token_limit == target_limit == 90_000
+            assert llm.estimate_text_tokens(json.dumps(main_requests[0], ensure_ascii=False)) < target_limit
+            assert adapter._sessions[created.session_id].agent.token_limit == target_limit == 128_000
+        finally:
+            await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_window", [None, 80_000])
+async def test_main_request_resizes_openai_output_only_when_the_window_requires_it(context_window):
+    original_messages = [Message(role="system", content="system"), Message(role="user", content="中" * 28_000)]
+    async with wire_llm(context_window=context_window, max_output_tokens=64_000) as (llm, requests):
+        session = SessionBoundLLM(llm)
+        estimated_input = request_input_tokens(original_messages, {}, llm=session)
+        events = [event async for event in run_agent_loop(
+            llm=session, messages=list(original_messages), tools={}, max_steps=1,
+        )]
+        assert not any(isinstance(event, (SummarizationEvent, ErrorEvent)) for event in events)
+        assert len(requests) == 1
+        expected = (64_000 if context_window is None
+                    else context_window - estimated_input - REQUEST_INPUT_HEADROOM_TOKENS)
+        assert requests[0]["max_tokens"] == expected
+
+        await llm.generate([Message(role="user", content="hello")])
+        assert requests[1]["max_tokens"] == llm.max_output_tokens == 64_000
+
+
+@pytest.mark.asyncio
+async def test_acp_binding_can_configure_more_output_than_the_window(tmp_path):
+    from tests.test_agent_session import session_config
+    from tests.test_acp import DummyConn
+
+    async with wire_llm(context_window=180_000, max_output_tokens=64_000) as (llm, requests):
+        adapter = BoxACPAgent(DummyConn(), session_config(tmp_path), llm, [], "system")
+        try:
+            created = await adapter.new_session(str(tmp_path), llm_binding={
+                "source": "builtin", "model": llm.model, "contextWindow": 48_000, "maxTokens": 64_000,
+            })
+            assert adapter._sessions[created.session_id].agent.token_limit == 22_400
+            response = await adapter.prompt(created.session_id, [{"type": "text", "text": "Hello."}])
+            assert response.field_meta["ok"] is True
+            main_request = next(request for request in requests if request.get("stream"))
+            assert 20_000 <= main_request["max_tokens"] < 48_000
         finally:
             await adapter.aclose()
 
@@ -149,7 +192,7 @@ async def test_provider_usage_guides_next_request_and_charges_changed_tools(chan
 
         async def execute(self):
             if change_schema:
-                self.description = "Extra usage guidance. " * 2_000
+                self.description = "Extra usage guidance. " * 5_000
             return ToolResult(success=True, content="工具返回的结果。\n" * 650)
 
     class Provider:
@@ -197,7 +240,7 @@ async def test_provider_usage_guides_next_request_and_charges_changed_tools(chan
 @pytest.mark.asyncio
 @pytest.mark.parametrize("previous_usage", [False, True])
 async def test_underestimated_unicode_user_input_is_blocked_without_provider_call(previous_usage):
-    original = "龘 " * 10_000
+    original = "龘 " * 17_000
     messages = [Message(role="system", content="system")]
     if previous_usage:
         messages.append(Message(role="assistant", content="old answer",
@@ -212,7 +255,12 @@ async def test_underestimated_unicode_user_input_is_blocked_without_provider_cal
     assert any(isinstance(event, SummarizationEvent) for event in events)
     assert any(isinstance(event, ErrorEvent) for event in events)
     assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR for event in events)
-    assert any(message.role == "user" and message.content == original for message in messages)
+    if previous_usage:
+        assert messages[-2].source == "user" and messages[-2].content == original
+    else:
+        head = messages[1]
+        assert head.compaction_node == "fallback_head" and head.earlier_user_messages == [original]
+        assert original in head.model_content()
 
 
 @pytest.mark.parametrize("change", ["same", "removed", "duplicate", "text", "role", "image"])
@@ -250,7 +298,7 @@ def test_measured_request_counts_only_new_occurrences_of_appended_content(change
 
 
 @pytest.mark.parametrize("snapshot_mode", ["missing", "different-route"])
-def test_unmatched_usage_still_checks_the_full_request_with_appended_content(snapshot_mode):
+def test_only_a_route_mismatch_replaces_the_provider_usage_anchor(snapshot_mode):
     llm = SimpleNamespace(
         model="model", provider="openai", api_base="https://budget.invalid/v1",
         estimate_text_tokens=lambda text: (len(text.encode("utf-8")) + 1) // 2,
@@ -264,8 +312,11 @@ def test_unmatched_usage_still_checks_the_full_request_with_appended_content(sna
     messages = [*history, Message(role="assistant", content="answer", usage=usage), overlay]
 
     estimate = request_input_tokens(messages, {}, llm=llm)
-    assert estimate == _fallback_context_estimate(messages, {}, llm=llm)
-    assert estimate > 10_000
+    if snapshot_mode == "different-route":
+        assert estimate == _fallback_context_estimate(messages, {}, llm=llm)
+        assert estimate > 10_000
+    else:
+        assert estimate == 1_010 + _fallback_context_estimate([overlay], {}, llm=llm)
 
 
 @pytest.mark.asyncio
@@ -328,7 +379,7 @@ async def test_larger_run_budget_is_clamped_to_model_before_compacting_and_sendi
     messages = [
         Message(role="system", content="system"),
         Message(role="user", content="old request"),
-        Message(role="assistant", content="龘 " * 10_000),
+        Message(role="assistant", content="龘 " * 20_000),
         *(Message(role="assistant", content=f"recent result {index}") for index in range(6)),
         Message(role="user", content="continue"),
     ]
@@ -338,11 +389,12 @@ async def test_larger_run_budget_is_clamped_to_model_before_compacting_and_sendi
         )]
     compaction = next(event for event in events if isinstance(event, SummarizationEvent))
     assert compaction.token_limit == derive_context_token_limit(20_000, 1_000)
-    assert compaction.mode == "fallback" and compaction.summary_calls == 0
-    assert len(requests) == 1
-    assert sum(len(message["content"].encode("utf-8"))
-               for message in requests[0]["messages"]) <= compaction.token_limit
-    assert requests[0]["messages"][-1]["content"] == "continue"
+    assert compaction.mode == "summary" and compaction.summary_calls == 1
+    assert compaction.head_truncated and compaction.summary_retries == 1
+    assert len(requests) == 2
+    sent = [Message(role=message["role"], content=message["content"]) for message in requests[-1]["messages"]]
+    assert _fallback_context_estimate(sent, None, llm=llm) <= compaction.token_limit
+    assert requests[-1]["messages"][-1]["content"] == "continue"
     assert not [event for event in events if isinstance(event, ErrorEvent)]
 
 
@@ -370,9 +422,10 @@ async def test_new_tool_schema_after_usage_is_compacted_then_blocked_locally():
         )]
     assert any(isinstance(event, SummarizationEvent) and event.mode == "blocked" for event in events)
     assert any(isinstance(event, ErrorEvent) for event in events)
-    assert len(requests) == 1
-    assert requests[0]["messages"][-1]["content"] == _SUMMARY_REQUEST
+    assert len(requests) == 1  # Only the independent summary fits without the schema.
+    assert requests[0]["messages"][-1]["content"].startswith(_SUMMARY_REQUEST)
     assert not requests[0].get("tools")
+    assert any(isinstance(event, SummarizationEvent) and event.summary_path == "independent" for event in events)
 
 
 @pytest.mark.parametrize("binding,client_window,expected", [

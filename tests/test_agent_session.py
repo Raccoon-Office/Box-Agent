@@ -284,7 +284,7 @@ async def test_model_switch_keeps_explicit_session_budget_after_default_changes(
 
     assert result.stopReason == "end_turn"
     assert session.agent.llm.model == "another-model"
-    assert session.agent.token_limit == 72_000
+    assert session.agent.token_limit == 64_000
 
 
 @pytest.mark.asyncio
@@ -410,7 +410,7 @@ async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(t
         assert old_output not in main_calls[0][3]
         assert session.llm_binding["model"] == "small"
         assert session.agent.llm.model == "small"
-        assert session.agent.token_limit == 42_300
+        assert session.agent.token_limit == 37_600
 
 
 @pytest.mark.asyncio

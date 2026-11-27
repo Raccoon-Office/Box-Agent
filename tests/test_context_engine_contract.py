@@ -134,17 +134,23 @@ async def test_compaction_recovers_sources_and_user_constraints_in_messages_only
             instruction = kwargs["messages"][-1].content
             assert "explicit user prohibitions" in instruction
             assert "source paths" in instruction
-            yield StreamEvent(type="text", delta="<summary>Excluded records are listed in analysis.json.</summary>")
+            yield StreamEvent(type="text", delta="invalid" if fallback else "<summary>Excluded records are listed in analysis.json.</summary>")
             yield StreamEvent(type="finish", finish_reason="stop")
 
     system = Message(role="system", content="Stable system prefix")
     history = [system, Message(role="user", content="Continue the report without installing dependencies.")]
     outcome = await _maybe_summarize(
         SummaryProvider(), history, token_limit=10000, api_total_tokens=0,
-        skip_check=False, force=True, allow_llm_summary=not fallback,
+        skip_check=False, force=True,
     )
     assert outcome.mode == ("fallback" if fallback else "summary")
     assert outcome.messages[0] is system
+    if fallback:
+        assert outcome.summary_calls == 5
+        assert outcome.plan.head.compaction_node == "fallback_head"
+        assert outcome.plan.head.content.endswith(history[-1].content)
+        assert outcome.plan.head.earlier_user_messages == [history[-1].content]
+        return
     recovery = outcome.messages[1]
     assert recovery.source == "runtime" and recovery.role == "user"
     assert "reopen the relevant source" in recovery.content
@@ -152,11 +158,12 @@ async def test_compaction_recovers_sources_and_user_constraints_in_messages_only
     assert "Before reusing facts in the next artifact mutation, use a tool" in recovery.content
     assert "not a per-record status mapping" in recovery.content
     assert "Explicit user prohibitions still apply" in recovery.content
-    assert outcome.messages[-1] is history[-1]
+    assert recovery.earlier_user_messages == [history[-1].content]
+    assert history[-1].content in recovery.content
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra_chars", [20_000, 60_000])
+@pytest.mark.parametrize("extra_chars", [20_000, 125_000, 160_000])
 async def test_summary_checks_complete_projected_input_against_its_own_capacity(extra_chars):
     from types import SimpleNamespace
 
@@ -172,8 +179,8 @@ async def test_summary_checks_complete_projected_input_against_its_own_capacity(
 
     def project(messages, **kwargs):
         assert kwargs["purpose"] == "summary"
-        assert kwargs["llm"].max_output_tokens == 8_192
-        return SimpleNamespace(messages=[*messages, extra], manifest={}, input_tokens=extra_chars // 2,
+        assert kwargs["llm"].max_output_tokens == 50_000
+        return SimpleNamespace(messages=[*messages, extra], manifest={}, input_tokens=llm.estimate_text_tokens(extra.content),
                                blocked_reason=None)
 
     context = DefaultContextEngine(image_context=SimpleNamespace(
@@ -183,7 +190,7 @@ async def test_summary_checks_complete_projected_input_against_its_own_capacity(
     history = [
         Message(role="system", content="system"),
         Message(role="user", content="old request"),
-        Message(role="assistant", content="x" * 120_000),
+        Message(role="assistant", content="x" * 84_000),
         *(Message(role="assistant", content=f"recent result {index}") for index in range(6)),
         Message(role="user", content="continue"),
     ]
@@ -191,7 +198,8 @@ async def test_summary_checks_complete_projected_input_against_its_own_capacity(
         llm, history, token_limit=45_000, api_total_tokens=0, skip_check=False,
         summary_input_token_limit=45_000, summary_projector=context.prepare_summary,
     )
-    if extra_chars == 20_000:
+    if extra_chars < 160_000:
+        assert result.head_truncated == (extra_chars == 125_000)
         assert result.mode == "summary" and result.summary_calls == 1
         assert len(llm.calls) == 1
     else:

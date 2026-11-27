@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..client_info import ClientInfo, scoped_client_info
+from ..config import derive_context_token_limit
 from ..retry import RetryConfig
 from ..schema import LLMProvider, LLMResponse, Message, StreamEvent
 from ..session_trace import emit_session_trace
@@ -20,6 +21,7 @@ from .base import LLMClientBase, closing_llm_stream
 from .openai_client import OpenAIClient
 from .reasoning import ReasoningEffort, parse_reasoning_effort, parse_raccoon_thinking_level
 from .think_tag_splitter import split_inline_think, unwrap_think_tags
+from .token_estimator import estimate_text_tokens
 from .token_meter import record_usage
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ def _trace_int(value: Any) -> int:
 
 
 def _trace_request_message(message: Message) -> dict[str, Any]:
-    payload = message.model_dump(exclude_none=True, exclude={"host_connector_status"})
+    payload = message.model_dump(exclude_none=True, exclude=Message.PROJECTION_METADATA)
     if message.role == "user":
         payload["source"] = message.source
     if not message.trace_redact_content or not isinstance(message.content, list):
@@ -196,10 +198,10 @@ class LLMClient:
         self.model = model
         self.retry_config = retry_config or RetryConfig()
         self.max_output_tokens = max_output_tokens
-        if context_window is not None and (
-            type(context_window) is not int or context_window <= max_output_tokens
-        ):
-            raise ValueError("context_window must be an integer greater than max_output_tokens")
+        if context_window is not None:
+            if type(context_window) is not int:
+                raise ValueError("context_window must be an integer")
+            derive_context_token_limit(context_window, max_output_tokens)
         self.context_window = context_window
         self.auth_token = auth_token
         self.auth_file = auth_file
@@ -261,12 +263,8 @@ class LLMClient:
             await closer()
 
     def estimate_text_tokens(self, text: str) -> int:
-        """Estimate text without assuming the endpoint uses a particular tokenizer.
-
-        Use two UTF-8 bytes per token as a local heuristic. This leaves more
-        margin than the legacy byte/3 rule without charging every byte as a token.
-        """
-        return (len(text.encode("utf-8")) + 1) // 2
+        """Estimate text locally when provider token counts are unavailable."""
+        return estimate_text_tokens(text)
 
     def for_reasoning_effort(self, effort: ReasoningEffort) -> "LLMClient":
         """Isolate session policy while sharing the owned SDK transport."""
@@ -345,6 +343,7 @@ class LLMClient:
         tools: list | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "Box-Agent",
@@ -356,6 +355,7 @@ class LLMClient:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
             thinking_enabled: Enable provider-native extended thinking.
+            max_output_tokens: Optional output cap for this request only.
             session_id: Optional caller-owned session id.
             turn_id: Optional caller-owned turn id.
             title: Optional trace title.
@@ -384,6 +384,7 @@ class LLMClient:
                 messages,
                 tools,
                 thinking_enabled=thinking_enabled,
+                **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}),
                 session_id=session_id,
                 turn_id=turn_id,
                 title=title,
@@ -443,6 +444,7 @@ class LLMClient:
         tools: list | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "Box-Agent",
@@ -457,6 +459,7 @@ class LLMClient:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
             thinking_enabled: Enable provider-native extended thinking.
+            max_output_tokens: Optional output cap for this request only.
             session_id: Optional caller-owned session id.
             turn_id: Optional caller-owned turn id.
             title: Optional trace title.
@@ -490,6 +493,7 @@ class LLMClient:
                 messages,
                 tools,
                 thinking_enabled=thinking_enabled,
+                **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}),
                 session_id=session_id,
                 turn_id=turn_id,
                 title=title,
@@ -670,6 +674,7 @@ class SessionBoundLLM:
         tools: list | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -685,6 +690,8 @@ class SessionBoundLLM:
         effective_call_kind = call_kind.strip() or self._call_kind
         if effective_call_kind:
             kwargs["call_kind"] = effective_call_kind
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max_output_tokens
         with scoped_client_info(self._client_info):
             return await client.generate(messages, tools, **kwargs)
 
@@ -694,6 +701,7 @@ class SessionBoundLLM:
         tools: list | None = None,
         *,
         thinking_enabled: bool = False,
+        max_output_tokens: int | None = None,
         session_id: str = "",
         turn_id: str = "",
         title: str = "",
@@ -709,6 +717,8 @@ class SessionBoundLLM:
         effective_call_kind = call_kind.strip() or self._call_kind
         if effective_call_kind:
             kwargs["call_kind"] = effective_call_kind
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max_output_tokens
         async with closing_llm_stream(client.generate_stream(messages, tools, **kwargs)) as stream:
             while True:
                 try:

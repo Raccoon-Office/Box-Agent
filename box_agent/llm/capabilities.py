@@ -8,8 +8,8 @@ from typing import Any
 from ..config import LLMConfig, derive_context_token_limit
 
 
-def bound_context_token_limit(llm: Any, token_limit: int | None) -> int:
-    """Derive the active model's safe input budget, optionally applying a cap."""
+def model_context_window(llm: Any) -> int | None:
+    """Resolve the active model's declared context window, if known."""
     window = getattr(llm, "context_window", None)
     windows = [window] if type(window) is int and window > 0 else []
     model = getattr(llm, "model", None)
@@ -18,11 +18,15 @@ def bound_context_token_limit(llm: Any, token_limit: int | None) -> int:
             window = candidate.get("contextWindow")
             if type(window) is int and window > 0:
                 windows.append(window)
-    if not windows:
+    return min(windows, default=None)
+
+
+def bound_context_token_limit(llm: Any, token_limit: int | None) -> int:
+    """Derive the active model's safe input budget, optionally applying a cap."""
+    window = model_context_window(llm)
+    if window is None:
         return LLMConfig().context_token_limit if token_limit is None else token_limit
-    model_limit = derive_context_token_limit(
-        min(windows), getattr(llm, "max_output_tokens", 0),
-    )
+    model_limit = derive_context_token_limit(window, getattr(llm, "max_output_tokens", 0))
     return model_limit if token_limit is None else min(token_limit, model_limit)
 
 
@@ -140,4 +144,4 @@ def image_input_support(llm: Any) -> bool | None:
     return None
 
 
-__all__ = ["bound_context_token_limit", "image_input_support", "model_candidate_has_tag"]
+__all__ = ["bound_context_token_limit", "image_input_support", "model_candidate_has_tag", "model_context_window"]

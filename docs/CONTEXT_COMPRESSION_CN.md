@@ -3,14 +3,13 @@
 Box-Agent 在两个边界控制持久上下文增长：
 
 1. 工具结果在占满后续模型请求之前按需落盘；
-2. 只有下一次请求接近模型有效输入上限时，才压缩会话历史。
+2. 下一次请求达到有效输入上限，或 provider 拒绝请求长度时，压缩会话历史。
 
 两者彼此独立。工具结果落盘在存储层是无损的：完整结果保存在磁盘，模型保留有界的 head + tail 工作预览和恢复路径；会话摘要是有损的，因此更晚触发，并显式保留一个有界的工作集。
 
-原生图片检查走第三条“仅本次请求”路径。规范化图片块只附加到主模型的一次请求，不进入持久消息历史；预算按解码后的图片尺寸估算，而不是按 Base64 字符长度计算。原始图片载荷不会写入 session trace 或 provider debug log。
+会话图片以副本和引用保存，模型请求按保留轮数、图片大小及请求体上限选择像素。用户图片越过压缩切点后，归档条目列出按需重读的文件路径。原始图片载荷不写入普通日志。
 
-摘要请求发送前，会估算投影完成的完整请求，包括追加的摘要指令和图片，并按摘要客户端自己的窗口检查：先减去实际输出预留（上限 8,192 tokens），再取 90% 作为输入预算。客户端未声明窗口或输出预留时，回退到会话输入预算。
-普通压缩和强制压缩都执行此检查；超预算时不调用摘要模型，直接使用本地有界兜底，再按主模型预算检查压缩后的主请求是否可以发送。
+每次摘要都按摘要路由的校准比例估算完整输入，包括摘要指令、图片和工具 schema。已知窗口预留 1,024 tokens 的封装空间，还要能容纳至少 `min(8192, 配置输出上限)` tokens 的输出。本次请求和提示统一使用 `max_tokens = min(配置输出上限, 窗口 − 输入 − 1024)`，收紧时重新渲染并计量。不支持请求级输出参数的客户端须能容纳完整配置输出。客户端未声明输出额度时默认 8,192。窗口未知时使用传入的会话输入预算。
 
 ## 请求生命周期
 
@@ -18,7 +17,8 @@ Box-Agent 在两个边界控制持久上下文增长：
 工具执行完成
   -> 检查单个结果
   -> 追加 tool messages
-  -> 下一次 LLM 请求前检查 fresh 结果总预算
+  -> 在下一次主模型请求前对尚未发送的工具结果检查总预算
+  -> 将改写事件刷入 Session Log，再更新内存历史
   -> 从文本历史上限中预留本次图片预算
   -> 估算下一次请求大小
   -> 达到阈值才压缩历史
@@ -29,13 +29,13 @@ Box-Agent 在两个边界控制持久上下文增长：
 
 ## 仅本次请求的原生图片输入
 
-只有当前主模型已知或预期支持图片输入时，才允许调用 `inspect_images(..., strategy="native")`。默认 `proxy` 策略保持原有工具模型路径并返回文本。
+未指定 `inspect_images` 的策略时，已知支持图片的模型使用 native，其余使用 proxy 返回文字。显式选择 native 时同样会校验模型能力。工具在保存前校验 PNG/JPEG，并按限制校正方向、缩放。请求按图片保留窗口、编码字节预算和完整请求体大小选择可发送的图片。
 
-原生策略沿用 proxy 路径的 PNG/JPEG 数量、尺寸、方向校正和降采样限制，然后通过 ToolResult 内部字段返回 provider-neutral 的 `input_image` 块。Core 只接受显式 opt-in 工具提供的这类内容，同时验证主模型能力，并对整批临时内容实施不超过安全输入上限 30% 的预算。图片成本按宽高保守估算，每张最少 512 tokens、最多 4,096 tokens；Base64 传输长度不会再被当作会话文本。
+图片像素只在准备 provider 请求时加载。Session Log 的原始输入保留图片引用，普通工具结果、会话 trace 和 provider debug log 均隐藏原始像素。摘要模型与预算允许时，摘要生成请求可以读取仍然活跃的图片。切点前的用户图片归档后，后续请求只接收归档中的路径，需要时可用 `inspect_images` 重读。成功提交主模型响应才推进图片保留计数。
 
-覆盖层只追加到下一次 provider 调用的内存消息列表，不参与 ToolResult 序列化、会话持久化、普通 AgentLogger 历史、cache fingerprint 或摘要输入。Session trace 只保留文字以及图片的媒体类型、宽高、源字节数和摘要；provider debug log 会始终脱敏 Anthropic Base64 source 与 OpenAI-compatible data URL，即使显式开启 full-payload logging 也不会记录原图。空的 provider-stale 重试会暂时保留覆盖层；一旦收到实际内容或正常结束就立即释放。能力或预算校验失败时，工具结果会变成有界错误，提示改用 `strategy="proxy"` 或减少图片数量。
-
-Provider 返回的 usage 仍会包含本次图片输入。因此对应 assistant message 只持久化一个纯数字的 request-only 估算值；下一次上下文计算会先扣除它，再累加后续持久消息。这样已释放图片不会导致提前压缩，重启恢复后也能继续正确估算，同时不保存任何图片字节。
+Provider 返回的 usage 包含图片输入。assistant 消息记录数字形式的 request-only 估算值，
+供没有请求快照的 usage 扣减。请求快照也能识别已由真实 usage 计量的临时消息。上下文
+估算按图片尺寸计量，传输预算按编码后的字节数计量。
 
 ## 大表计算的前置上下文策略
 
@@ -128,7 +128,7 @@ Session Log 恢复后也执行相同检查。
 
 ## 超长工具结果落盘
 
-`box_agent/tool_result_storage.py` 中的 `ToolResultStorage` 统一负责持久化、预览生成和会话内去重。共享执行循环同时用于串行和并行工具；CLI 与 ACP 不复制这套策略。
+`box_agent/tool_result_storage.py` 中的 `ToolResultStorage` 负责写入完整工具结果并生成预览。CLI 与 ACP 共用执行循环，将串行或并行工具最终选定的文本提交到会话历史。
 
 ### 单结果即时检查
 
@@ -136,7 +136,7 @@ Session Log 恢复后也执行相同检查。
 
 以下结果不会再做二次压缩：
 
-- 已实际采用工具 `model_context` 的结果会按 `tool_use_id` 冻结；
+- 已实际采用工具 `model_context` 的结果在消息上记录预算豁免；
 - `read_file`、`query_jsonl`、`search_files` 通过 Infinity 明确退出，它们分别依赖行/字符分页、cursor/结构化摘要、结果数/字符分页；
 - `bash`、`bash_output` 也通过 Infinity 退出，因为工具内部已经执行一次 50,000 字符的 40% head + 60% tail 截断。
 
@@ -146,13 +146,12 @@ Session Log 恢复后也执行相同检查。
 
 - 字符串保存为 `.txt`；
 - 只含 text block 的数组格式化序列化后保存为 `.json`；
-- 文件路径为 `~/.box-agent/sessions/<session>/tool-results/<tool_use_id>.<ext>`；
-- 使用独占创建模式 `x`（等价于 `wx`），已有文件不会被覆盖；
+- 文件保存在会话的 `tool-results/` 目录，默认位于 `~/.box-agent/sessions/<session>/` 下；
 - 模型侧结果替换为稳定的 `<persisted-output>` head + tail 预览。
 
 以下情况保留原结果：未超过阈值、包含图片或任何非 text block、持久化失败。空输出规范化为 `(<工具名> completed with no output)`，Bash 对应 `(Bash completed with no output)`。
 
-每个 `tool_use_id` 只做一次决策。成功落盘后的替换文本会被缓存，后续循环直接复用，不会重复写文件。恢复会话时已经存在的结果会被冻结，不会被追溯外置。
+即使 provider 复用了工具调用 ID，每次调用也根据本次输出独立处理。存储层先写完带唯一名称的文件，再为它建立惯用的 `<tool_use_id>.<ext>` 文件名。同名文件内容不同时使用带内容哈希后缀的名称。如果文件系统无法建立硬链接，预览会直接指向已写完的唯一文件。
 
 工具仍可自行保留有界输出；此时通过 `ToolResult.persistence_content` 把完整可落盘文本交给统一边界，真正的写入仍只由 `ToolResultStorage` 完成。Bash 的成功和失败命令都使用这条路径：完整输出保存到磁盘，模型继续看到工具已经生成的 head/tail，并额外得到完整输出路径，不会再被替换成通用的 2,000 字符 head 预览。工具提供的语义化 `model_context` 属于另一层职责，一旦采用也不会被即时检查或 fresh 总预算重复处理。
 
@@ -178,15 +177,15 @@ Preview (head + tail, up to 2.0KB):
 
 ### fresh 结果总预算
 
-每次 LLM 请求前，对本会话首次出现的工具结果执行动态总预算检查：`max(50,000, context_token_limit * 0.50)` 字符。
+在准备下一次主模型请求前，内核检查当前投影中最后一条 assistant 消息之后可参与预算的工具结果。中途注入的 user 消息不会截断这一批结果。如果工具执行后会话被取消、达到步数上限或由工具结束本轮，下轮或恢复会话后的首个请求仍会检查这些尚未发送的结果。新的 assistant 消息一旦提交，之前的批次就退出检查范围。
 
-1. 只处理 fresh `tool_use_id`；
-2. 排除已经采用 `model_context` 的结果，但仍统计单结果声明为 Infinity 的自处理工具；Infinity 只关闭即时单结果落盘，不代表并行批次可绕过聚合预算；
-3. 按可落盘结果大小从大到小排序；
-4. 总预算路径保留可按结果份数自动收紧的 head + tail 预览和恢复路径，并按包装后的模型侧实际长度记账；
-5. 依次持久化并替换最大结果，直到实际剩余 fresh 内容不超过预算。
+如果主请求已经记账、assistant 回复尚未提交就中断，恢复时会根据 `request/header` 的事件序号识别该请求已经包含的工具消息。即便磁盘恢复可写，或下次请求使用了更小的预算，这些消息的正文也保持原样。纯内存会话在已提交请求的工具消息上保留同样的标记。
 
-不支持的 block 和落盘失败结果保持不变。检查时 ID 会被标记为已见，因此后续请求不会反复处理。这条路径专门覆盖并行工具调用：单个结果都没有超限，但合计内容过大。
+消息上的持久字段 `tool_result_budget_exempt` 保护已采用的语义投影、已提供完整载荷的工具自限长结果，以及投递阶段生成的最终通知。此字段只用于会话历史，provider 请求中不携带它。恢复时也能识别已有的 `<persisted-output>` 回执，包括 `Error: <persisted-output>` 形式。旧日志可能缺少豁免字段，其中仍处于未发送批次的无标记语义结果会按普通文本参与预算。
+
+总预算默认为 `max(50,000, context_token_limit * 0.50)` 字符。并行返回的每一页都符合单条限制，合计仍可能超额。存储层从最大的可落盘文本开始，保存完整内容，按含回查路径的预览实际长度计费，达到预算或没有可选结果时停止。多媒体结果和写入失败的结果保留当前正文。
+
+对于有日志的会话，模型使用的持久历史以 Session Log 为准。每次预算改写都在请求前追加一条派生的 `tool/result`。它的 `surfaceOp` 为 `{"op":"replace","start":seq,"end":seq}`，`sourceEventSeqs` 为 `[seq]`，其中 `seq` 取自该消息位置的当前有效节点。事件记录新的 `data.message`、值为 `true` 的 `data.surfaceDerived`，以及值为 `tool_result_budget` 的 `data.edit.reason`。默认存储还在 `data.edit` 中记录 `persistedPath` 和 `originalChars`。刷盘后内核才更新内存消息。重放得到预览，宿主聊天记录只显示一次最初提交的工具消息。旧日志中已经存在的重复记录维持原状。缺少单条替换接口的第三方会话存储可提交整个投影。纯内存会话直接更新消息列表。
 
 ## 上下文限制压缩
 
@@ -195,6 +194,7 @@ Preview (head + tail, up to 2.0KB):
 Kernel 通过 `CompactionInput` 调用 `CompactEnginePort`。默认引擎沿用现有压缩算法，
 不替换请求 Context 接口，也不增加第二套 Skill 加载策略。输入分别保留用于恢复运行状态的
 工具目录、用于估算的本次实际提供 schema、强制恢复标志及摘要请求输入上限。
+摘要输入还携带按请求顺序排列的工具 schema，以及可用的主请求前缀。
 
 Context 先投影有效历史。压缩引擎必须在摘要调用或确定性兜底前调用 Kernel 提供的
 `before_summary`；Kernel 提交并 flush 返回的 surface 后才更新内存历史。请求交付及响应
@@ -206,10 +206,20 @@ blocked 模式一致。
 ### 触发阈值
 
 ```text
-autoCompactThreshold = 0.9 * (context_window - max_output_tokens)
+output_reserve = min(max_output_tokens, 20_000)
+autoCompactThreshold = int(0.8 * (context_window - output_reserve))
 ```
 
-`LLMConfig.context_token_limit` 会先预留配置的最大输出预算，再从剩余输入预算中保留 10% 作为 token 估算误差和摘要请求的余量。
+以 180,000 tokens 的窗口为例，输出上限配置为 8,000 时，触发阈值为 137,600 tokens。
+配置为 20,000、64,000 或 80,000 时，阈值均为 128,000 tokens。
+256,000 tokens 的窗口配合 64,000 tokens 的输出上限，阈值为 188,800 tokens。
+1,000,000 tokens 的窗口配合 100,000 tokens 的输出上限，阈值为 784,000 tokens。
+
+主模型窗口已知时，发送前从窗口扣除本次投影输入和 1,024 tokens 的组装余量，计算可用
+输出空间，并以 `output_reserve` 为下限。本次输出上限取适用的输出额度与可用空间的较小值。
+Anthropic 和 OpenAI 兼容客户端仅在当前请求应用覆盖值。Anthropic 会按有效输出上限重算
+thinking 预算，确保低于本次输出上限。窗口未知时使用配置的输出额度。辅助请求沿用各自的
+输出上限。
 
 子 Agent 在实际模型路由完成后使用同一公式。`sub_agent_token_limit` 默认 `null`
 （自动），显式正数仅作为额外上限；Skill 预检、子循环及预取后的 batch_files
@@ -248,60 +258,129 @@ ACP 模型绑定可以通过当前所选模型的 `contextWindow` 和 `maxTokens
 
 ### 估算下一次请求
 
-Provider 会把真实 API 响应的 usage 附在对应 assistant message 上。压缩器找到最近一条带真实 usage 的响应，按以下方式得到当时完整上下文：
+同一路由最近可用的 provider usage 是上下文估算的基线。Anthropic 上下文计数包含输入、
+缓存写入、缓存读取及输出。OpenAI 兼容接口的 prompt 总数已含缓存输入。只返回
+`total_tokens` 时可作为上下文基线，但输入计数校准需要独立报告的输入用量。
 
-```text
-input_tokens
-+ cache_creation_input_tokens
-+ cache_read_input_tokens
-+ output_tokens
-```
+估算器在基线上增加新增或变更的消息和工具 schema 成本。请求快照保存历史与临时附加消息
+的指纹，每个已计量的相同出现次数最多复用一次，新增副本和变更内容计入增量。快照基线上
+已删除内容的成本会保留至下一次真实 usage。内存中没有快照的 usage 会先扣减
+`request_only_input_tokens`，再补算新增内容和当前工具 schema。无 usage、路由无法匹配，
+或压缩已清除旧 usage 时，从头估算完整请求。
 
-如果这份 usage 有同一路由的请求快照，就以真实用量为基线，补算新增或改写的消息，以及新增或变化的工具 schema。删除项暂不从旧用量中扣除，等下一份服务端 usage 更新基线。新写入的 assistant 记录会将快照指纹和聚合计数保存为 Session Log 的私有 `contextUsage` 元数据，不保存临时请求正文，也不改变公开 usage 字段。重放时校验版本、字段类型以及绑定响应的校验和，只保留当前有效历史中最新的快照；历史回退恢复对应检查点，压缩则清除旧 usage 基线。旧日志没有可恢复的快照，元数据缺失或校验失败时安全回退。没有可用快照时会重新估算完整请求，旧会话和底层调用中未配对的 usage 仍可作为保护下限。
+Session Log 的私有 `contextUsage` 元数据保存快照指纹和聚合计数，也记录绑定响应的
+校验和。重放验证通过后才复用 usage。有效历史保留最新快照，回退时恢复对应检查点。完整
+请求已经符合预算时，可跳过单独的历史阈值检查，以免为已计入的附加内容重复预留空间。
 
-请求快照也记录历史之后追加的临时消息指纹。真实 usage 已包含的相同消息按出现次数复用，每个已计量的出现次数最多匹配一次；新增副本或变化内容仍计入增量。删除内容的旧成本继续保留到下一次响应更新基准。完整请求已确认符合输入预算时，默认压缩器跳过单独的历史阈值检查，避免在已含附加内容的 usage 基准上再次预留同一份空间；真正超限时仍进行有界压缩和完整复检。
+默认本地估算器按字符类别、类别切换和重复段计费。常用汉字约为每字 1.07 tokens，假名
+0.77，韩文音节 1.31。英文字母、数字、标点、空格及换行各用不同权重。自定义客户端可以
+提供同步 `estimate_text_tokens(text)`。图片仍按尺寸估算，Skill 文本和普通文本共用同一
+文本计数器。
 
-标准模型客户端不知道接口的真实分词器时，统一按每 2 个 UTF-8 字节估算 1 个 token，向上取整，并保留原字符／字节估算作为下限。这个离线近似值可能高估或低估实际用量。自定义客户端可通过 `estimate_text_tokens(text)` 提供计数。未提供同步计数的自定义客户端仍使用字节上界，未传客户端的底层兼容路径仍使用原启发式。图片载荷单独估算，Skill 附加内容和最终请求使用同一个计数器。压缩会尝试缩短已有摘要以留出组装余量，最终请求仍按完整输入预算复检。
+收到带输入 usage 的主模型响应后，将真实输入 token 数除以本次请求的本地估算值，并将
+比例限制在 `[0.5, 2.0]`。完整输入、usage 后增量、重建历史和输出余量都用 `ceil(本地估算 × 当前路由比例)` 与窗口或预算比较。provider 已计量的 usage 直接使用。摘要预检使用摘要路由的比例。最近消息 15k、普通用户原文单条 2k/合计 10k、Skill 单个 5k/合计 25k、兜底 12k 都用本地 token 计数。可从 provider 的上下文
+超限错误解析实际输入 token 数时，也用于校准。比例初始为 `1.0`，在当前会话内存中保存。
 
-运行预算受当前客户端和匹配目录项的已知窗口约束，并预留实际输出额度。ACP 优先使用绑定显式传入的 `contextWindow`，并为本会话目录中所选模型补齐或覆盖窗口。字段缺省时，才从适用于当前模型的 profile／客户端、匹配目录项和启动配置中取最小的已知窗口。显式切换模型但没有任何已知窗口时，本地拒绝。自动路由也会将选中候选的已知窗口传给解析后的客户端，子循环因此能按目标模型的窗口检查组装后的完整请求。宿主遗漏输出额度时保留 profile 的真实额度。这些检查仍依赖准确的能力声明，服务端静默缩小自身上限无法仅凭本地配置发现。
+运行预算受当前客户端和匹配目录项的已知窗口约束。ACP 优先使用绑定显式传入的
+`contextWindow`，并在会话目录中设置所选模型的窗口。字段缺省时，从适用的 profile、
+客户端、目录项和启动配置中取最小的已知窗口。显式切换至另一模型要求窗口已知。宿主遗漏
+输出额度时沿用 profile 的额度。
 
-压缩会创建新的历史 epoch。压缩结果中保留的 assistant 消息会清除旧的 provider usage，下一次 `prepare request` 从压缩后的消息面重新估算；loop 同时清除旧的 API token 锚点，直到新的 provider 响应提供新的 usage。
+本地估算会与 provider 的实际分词结果有偏差。Provider 省略 reasoning tokens 时，usage
+计数也可能与实际上下文成本不同。
 
-ACP 切到较小输入预算的模型时，先按目标模型投影完整请求，必要时使用原会话的摘要路由压缩，再按目标预算复检；通过后才提交新绑定。失败返回 `MODEL_SWITCH_CONTEXT_PREPARATION_FAILED`，保留原模型、历史及本次输入和附件。同一运行进程内，通过 `session/resume`、`session/load` 或重复 `session/new` 重建已有会话（例如同时切换执行档位）也遵循此流程：恢复只暂存目标绑定，下一次 prompt 才执行切换，显式传入的新选择优先。恢复本身不会调用模型。进程重启后没有仍存活的原模型客户端时，继续使用传入模型的普通有界压缩流程。
+ACP 切到较小输入预算的模型时，先按目标模型投影完整请求，必要时使用原会话的摘要路由压缩，再按目标预算复检，通过后才提交新绑定。目标预算复检失败返回 `MODEL_SWITCH_CONTEXT_PREPARATION_FAILED`，保留原模型、历史及本次输入和附件。同一运行进程内，通过 `session/resume`、`session/load` 或重复 `session/new` 重建已有会话（例如同时切换执行档位）也遵循此流程：恢复只暂存目标绑定，下一次 prompt 才执行切换，显式传入的新选择优先。恢复本身不会调用模型。进程重启后没有仍存活的原模型客户端时，继续使用传入模型的普通有界压缩流程。
 
 普通请求在所需图片未能纳入输入时，返回 `ErrorEvent.error_code = INPUT_IMAGE_NOT_ADOPTED`，ACP 对应 `errorCode`。原始 `INPUT_IMAGE_NOT_ADOPTED:required_image_unavailable_or_over_budget` 文本及 `error_details.reason` 保留用于诊断。宿主应按错误码在展示时翻译，并兼容旧版本仅返回该文本的记录；模型切换失败仍使用上述模型切换错误码。
 
 ### 压缩后的消息组织
 
-压缩会在原始 message 列表末尾临时追加一条 `user` 摘要指令，并调用一次摘要模型。历史不会被序列化进新 prompt，也不会分块或滚动摘要，因此摘要请求保留完整的 provider message 前缀，可以复用 KV cache。ACP 通过会话模型路由器解析该调用，并把输出上限限制为 8,192 tokens。自动模式只能在宿主下发的 `autoRouting.models` 模型池中，按摘要任务标签、能力和上下文适配度排序选择；上下文适配使用当前 Agent 的安全输入上限，避免把大段历史交给小窗口工具模型。显式选择模式始终锁定原模型，不再切换独立 lite 模型。`routingMode=manual` 时，ACP 忽略宿主误传的 `autoRouting`，包括过期或格式错误的候选池；该规则统一作用于会话、子任务和辅助调用。未声明路由模式的旧版 builtin 绑定仍兼容候选池路由。其他 host 可传入独立摘要客户端，未提供时回退主模型。这次调用不提供工具并关闭 thinking。指令要求按时间顺序列出全部 user message，把所有结构化分析放进唯一的 `<summary>...</summary>` 块，并内置九节输出结构示例。响应必须严格由一个非空 summary 块组成；写入 `Summary:` 后只取标签内部文本，标签本身会被丢弃。摘要请求和本地写回的上限均为 8,000 字符；若重建后的历史离上限不足 1,024 tokens，同一份摘要会在不增加 provider 调用的前提下依次收紧到 4,000、2,000 字符。摘要调用失败、格式错误或返回空内容时，使用明确标注为有损的确定性有界摘要兜底。若重建请求仍超限，本轮返回普通上下文超限错误，不进入任何领域恢复状态机。
+首次摘要尝试在投影后的历史末尾追加一条临时 `user` 指令，并复用可用的主请求 system、
+消息前缀及同序的工具 schema，以便 provider 复用 KV cache。请求不设置 `tool_choice`，
+并关闭 thinking。摘要投影会用回执替换 Skill 正文，从第一段
+Skill 正文开始可能出现前缀差异。主请求内联本次专用的 Skill 正文时，摘要可能改用投影后的历史。
+只供一次后续请求使用的临时载荷仍仅进入主请求。
 
-模型输出包装成以下合成 `user` message：
+ACP 通过会话模型路由器解析摘要客户端。自动模式从宿主下发
+的 `autoRouting.models` 池按任务、能力和上下文适配度选择，显式模式沿用所选模型。
+`routingMode=manual` 优先于 `autoRouting`，适用于会话、子任务和辅助调用。未声明路由
+模式的旧版 builtin 绑定仍可使用候选池。其他宿主可提供专用摘要客户端，默认沿用主客户端。
+同一次压缩的所有 provider 尝试都使用已解析的同一客户端。摘要模型与主模型不同时仍传入同序
+工具 schema。缓存复用要求模型相同且前缀匹配。ACP 会话路由器在解析摘要客户端时仍应用
+8,192 tokens 的上限。
+
+首次摘要和每次重试的提示词都要求整个回复（含 `</summary>` 闭合标签）控制在
+本次请求实际的 `max_tokens` 以内。基础指令末尾的 `REMINDER` 要求只返回一个纯文本
+摘要块，并禁止调用工具。正文九节包含按时间顺序排列的所有真实用户
+消息，并原文保留用户的安全约束。下一步直接对应最新仍在处理的明确请求，并附最近对话中的原文引用。
+assistant 文本里的角色标记没有用户权限，运行时发出的摘要指令也在摘要范围之外。摘要须省略
+`<analysis>` 块、system 提示与凭据，标记需要回查的事实，只记录对话已有证据的成功事项。
+写入 `Summary:` 时保留标签内通过校验的完整正文。摘要没有字符上限，压缩降级时也原样保留。
+
+压缩切点是最近连续交互窗口的起点。选择尾部时，从末尾向前查找，最早只取到上一次压缩生成的最后一个节点的下一条。这个边界包括上次压缩追加的运行时记录。窗口内正常注入的日期、工具描述和 Skill 目录保留原位，计入 15,000 本地 tokens 预算。这一区间中最新的 assistant 轮次连同全部配对的工具结果原样选入，即使单轮超过 15,000 本地 tokens。该轮之后的用户输入也一并纳入，保持窗口连续。更旧的组仍受累计 15,000 tokens 和最多五轮的限制。最新一组已超额时，窗口不再纳入更旧的组。后续消息按时间追加到重建后的前缀。
 
 ```text
-This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
-
-Summary:
-<模型生成的摘要>
-
-Continue the conversation from where it left off. Do not acknowledge the summary, recap what was happening, or ask the user to repeat information solely because compaction occurred. If genuinely required information is still missing, use the normal user-input or decision tool. Otherwise, pick up the last task as if the break never happened.
+system
+摘要消息（模型正文、续写提示、[Earlier User Messages]、会话日志提示）
+切点后的最近消息，保持原始顺序
+[Invoked Skills]
+运行时状态、按需恢复的工具描述与日期
 ```
 
-新历史顺序如下：
+原生 Session Log 先将带 `format: 2` 的 `compaction/start` 刷盘。保留区内需要换成回执的 Skill 读取结果先各自做一次单节点 replace。随后一条 `user/message` 从当前首节点覆盖至切点前一节点，`sourceEventSeqs` 按当前消息顺序列出被覆盖的节点。尾部其余消息沿用原 seq、图片引用和工具结果。重放到头部时，旧前缀对应的 usage 自动失效。压缩生成的附件追加在尾部，均带 `compaction_node="appended"`。
 
-```text
-system message
-摘要 user message
-按规则保留的近期 messages
-运行状态 user message
-```
+成功的 `compaction/end` 记录首个保留节点 `cutSeq`（空尾部为 null）、最近一次实际摘要请求看到的 seq 范围 `summaryInput`、摘要输入截短所移除的区间 `summaryOmitted`、估算值、重试与降级信息。内核将消息变更和结束记录一起刷盘，再用重放结果更新内存。摘要服务失败或因连续快速回填停止时，结束记录携带错误及阶段。即使进程在两行之间退出，每个已写完整行的前缀仍可重放。宿主历史读取原始 append，过滤压缩生成的节点和派生改写。旧日志继续按原摘要括号过滤复制品。
 
-recent 选择统一覆盖 user、assistant 和 tool message；assistant 工具调用与连续 tool results 按组保留。目标上限为 5 条消息、合计 20,000 字符，并始终原样保留最新真实 user message。如果最新完整协议组本身超过字符上限，压缩会保留精确的 assistant 工具调用、参数、result ID、顺序和数量，同时将已经进入 continuation summary 的 assistant reasoning 与 tool-result 正文替换为有界 receipt。只有剩余的精确用户文本、工具调用参数、system 指令、工具 schema、有界摘要和运行状态仍无法放入安全窗口时，才标记为 blocked。
+摘要消息的 `earlier_user_messages` 保存切点前的完整用户原文，供重放及下一次压缩取回。可见条目按时间先后排列。普通条目最多 2,000 本地 tokens，超长时保留头尾，合计最多 10,000 tokens。最新真实用户若在切点前，完整文本和路径随摘要显示，单独保护且不占这两项配额。若在切点后，则只出现在最近消息内。最近消息可以从 assistant 开始。
 
-上下文压缩不再发现、重新读取或重放近期文件。
+每条用户原文后附该消息的文件路径。图片优先列工作区路径，其次列会话 images 目录内副本的绝对路径，无法找回时写明未保存。需要查看图片时可用 `inspect_images` 重读。原用户消息上的文件信息与图片引用保存在 Session Log 中。摘要末尾的日志提示给出实际绝对路径与可用的读取方式。
 
-Goal、Todo 和 Plan 通过显式、无副作用的 `compaction_state` 契约读取；压缩不会执行普通工具调用，合并后的运行状态消息上限为 12,000 字符。SkillRuntime 管理选择及带版本的读取事实；Context 将显式选择或恢复的 Skill 正文放入普通请求资料，或接收真实读取工具的回复，并按最终可见文本核实覆盖。完整 Skill 正文不固定在 system message 中，也不会回放历史 `get_skill` 调用。分页、来源校验和请求提交边界见 [Skill Engine](design/skill-engine.md)。控制策略查询“最新用户文本”时会排除内部摘要与运行状态消息。
+Goal、Plan 和 Todo 通过无副作用的 `compaction_state` 契约提供状态，按该顺序共享
+12,000 字符预算。每个区块为后续区块预留空间，未用额度顺延。
 
-若重建后的请求仍超过安全阈值，结果会标记为 blocked，不会静默发送一个已知超限的请求。
+压缩会按最近交付时间倒序恢复曾实际交付给模型的 Skill。当前 Skill 的 revision、source 和
+path 须通过校验。`[Invoked Skills]` 提示模型以这些 Skill 为参考，避免重复一次性初始化。
+每个 Skill 区块最多 5,000 tokens，整条消息最多 25,000 tokens。正文截断时提示通过
+`get_skill` 读取其余内容。版本过期或正文放不下时保留名称和路径。append-only 模式和普通
+模式按可见区间记账，已通过 system 后缀生效的 Skill 跳过重复恢复。摘要源以回执代替 Skill
+正文，普通请求的 100,000 字符引用预算继续生效。[Skill Engine](design/skill-engine.md)
+
+### 重建请求超预算时的降级顺序
+
+初次选择窗口后，Box-Agent 按以下顺序腾出空间。每次移除一项后都重新组装请求，
+包括 Skill 恢复、工具说明和日期，再重新估算输入 tokens，满足目标后立即停止。
+
+1. 从最早的完整 assistant 轮次开始删除。切点向后移动，离开最近窗口的真实用户消息进入摘要内的原文条目。
+2. 从最早调用的 Skill 开始逐个移除正文，保留名称、路径和重读提示。
+3. 从最早的普通用户原文条目开始移除。最新真实用户与完整摘要正文始终保留。
+4. 依次移除 Todo、Plan、Goal。
+
+默认目标是输入硬上限减去显式预留空间。可选项全部移除后，仍在硬上限内的请求可以继续。超过硬上限则返回 `blocked`。
+
+### 摘要重试与模型服务错误
+
+一次压缩先发一次共享前缀请求，共享重试总共最多三次。下一次请求取决于上次的失败原因。
+
+| 失败 | 处理 |
+| --- | --- |
+| 本地输入预检超限，或 provider 返回 `context_length` | 从最早的可删组开始，每次移除约五分之一的可删 tokens。保留 system、全部真实用户、旧摘要及压缩元数据。无组可删时直接进入独立请求。 |
+| 达到输出上限且摘要块未完整闭合 | 提示上一次的实际输出上限，并要求本次在实际 token 额度内写完摘要和闭合标签。 |
+| 调用了工具、标签不唯一、摘要为空或格式错误 | 追加严格格式提示。长度终止时如已有唯一完整非空块，直接接受块内正文。 |
+| 网络、超时、429、5xx、鉴权、权限及其他 provider 错误 | 由模型客户端执行统一重试。用尽后沿主模型的结构化错误路径结束本轮，继续保留原消息投影。 |
+
+共享内容重试结束后，使用同一模型和最近一次删减后的历史发一次独立请求，改用专用 system 和严格格式指令，工具为空。独立请求仍遇内容失败时才进入本地兜底。本地预检引起的重试占用计数，未出站的预检不计模型调用。每次压缩重新获得完整重试额度，兜底后的下一步也可再次调用摘要模型。
+
+### 本地兜底与日志回查
+
+在当前消息中，最近的真实用户或摘要段作为锚点。锚点后的完整 assistant 交互组从最新往前选取不超过 12,000 本地 tokens 的连续后缀，按原时间顺序发送。最新锚点后没有交互时，如有前一个锚点则一并纳入，12,000 tokens 配额用于两个锚点之间的交互。最新一组单独超额时，整个交互后缀为空。配额只计算交互组。两种情况都只从上次压缩生成的最后一个节点之后保留交互。若前一锚点后曾追加 Skill 或日期，其前面的交互留在日志中供回查。切点取首个保留组；相邻锚点可以原样留在尾部。与保留组隔有省略内容的锚点写入兜底头部，保留用户原文和附件路径，或展开先前的结构化摘要与归档。相邻锚点恰为整个 surface 首节点时，由头部承载它，以满足 replace 的非空区间约束。
+
+重建后若仍超目标，先从最早开始删保留的交互组，空间仍不足时再降级前一锚点。前一锚点是摘要时，从最早的可见用户原文起逐条删除，包括该段最新的一条，仍超目标才删除整段。前一锚点是真实用户消息时，整条删除。最后，若最新锚点是摘要，可从最早开始删其中较早的可见用户原文，保留摘要正文和该段最新原文。兜底始终保留最新锚点。Skill 正文和 Todo/Plan/Goal 仅在摘要模式中恢复。
+
+有省略时，在末尾放一条 `role="user", source="runtime", runtime_kind="compaction_notice"` 消息。能定位日志和受影响的 seq 时，给出区间和 `session.jsonl` 绝对路径；缺少定位信息时只说明发生了省略。只有当前任务需要早期信息时才查询这些区间，优先用 `query_jsonl`，否则用 `read_file` 分页读取。兜底头部和通知的 `omitted_ranges` 保存前次省略与本次新增区间的并集，后续兜底直接读取该字段。全部内容均保留时省去末尾通知。摘要和兜底均只写一条头部。旧日志内的工作流 checkpoint 和中途注入文本也会在原位置回放。
+
+主请求在产生输出前被拒绝，允许对该请求最多做两次反应式压缩。任一成功响应都会复位次数，包括没有 usage 的工具调用响应。报错中的实际输入可用于校准。报错给出的上限分两类，解析时保留类型：总窗口型（输入与 max_tokens 合计，如 OpenAI `maximum context length`）按 provider tokens 收紧输入预算，扣除输出预留，并在本次运行余下的请求里参与 max_tokens 收紧；输入上限型（只限制输入，如 `Range of input length should be [1, N]`、`maximum input length is N`）只收紧输入预算，不扣输出预留，也不影响 max_tokens。用尽后返回 `CONTEXT_INPUT_BUDGET_EXCEEDED` 和 `reactiveCompactionAttempts`。已有部分输出时保留并结束本轮。
+
+快速回填在同一步内只计一次。连续三次在后续一至三个 step 内再次填满，会以 `CONTEXT_COMPACTION_THRASHING` 结束本轮。摘要重试计数只在单次压缩内有效。Python 事件记录 `summary_retries`、`head_truncated` 和 `summary_path`，Session Log 对应 `summaryRetries`、`headTruncated` 和 `summaryPath`（`shared`、`independent`、`deterministic`）。`degradation` 记录被移除的轮次、Skill 正文、用户原文条目数及运行时区块。
 
 ## 相邻保护
 
@@ -309,6 +388,14 @@ write/edit 工具调用参数会保留原文，直到整段历史压缩摘要其
 
 ## 验证
 
-- `tests/test_tool_result_storage.py`：类型处理、独占写入、预览、Read 单结果豁免、失败保留、去重和总预算排序；
-- `tests/test_core.py`：请求前执行、usage 加增量估算、原始前缀单次摘要、回退估算、近期消息边界与运行状态恢复；
-- `tests/test_auth.py`：阈值推导。
+- [逐行崩溃恢复](../tests/test_compaction_crash_replay.py)、[Session Log 计划提交](../tests/test_session_log_compaction_plan.py)和[共享内核提交](../tests/test_compaction_commit.py)覆盖原 seq、每个中断点及结束记录。
+- `tests/test_tool_result_storage.py` 覆盖类型处理、独占写入、预览、Read 单结果豁免、失败保留、重复调用 ID 和总预算排序。
+- `tests/test_tool_result_surface.py` 覆盖压缩和重开日志后的请求前缀稳定性，以及 ACP 回放中的原始工具结果。
+- `tests/test_auth.py` 和 `tests/test_main_input_budget.py` 覆盖触发阈值、模型绑定及请求输出限制。
+- `tests/test_context_token_estimation.py` 和 `tests/test_session_log.py` 覆盖 usage 格式、校准和重放。
+- `tests/test_context_compaction_retention.py` 和 `tests/test_core.py` 覆盖历史保留和运行状态恢复。
+- `tests/test_compaction_budget_convergence.py` 覆盖降级顺序、空间预留、归档重放与反应式恢复。
+- `tests/test_compaction_resource_retention.py` 覆盖 Skill 恢复和引用可见范围。
+- `tests/test_context_compaction_e2e.py`、`tests/test_context_compaction_recovery.py` 和
+  `tests/test_error_messages.py` 覆盖摘要预检、重试、快速回填和 provider 错误。
+- `tests/test_compaction_session_log.py` 覆盖日志回查提示和受限模式下对 Box-Agent 状态目录的读取。
