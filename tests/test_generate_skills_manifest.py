@@ -47,6 +47,10 @@ def test_builtin_memory_guide_shows_desktop_read_append_read():
     skill = loader.get_skill("memory-guide")
     assert skill is not None
     assert skill.source == "builtin"
+    assert skill.description.startswith("指导助手")
+    assert skill.content.startswith("# 记忆指南")
+    for query in ("请记住我的偏好", "remember my preference"):
+        assert "memory-guide" in {item.name for item in loader.filter_by_query(query)}
     assert 'memory_write(content=' not in skill.content
     example = skill.content.split('```python\n', 1)[1].split('```', 1)[0].splitlines()
     assert len(example) == 3
