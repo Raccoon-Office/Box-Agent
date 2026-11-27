@@ -508,9 +508,12 @@ def test_two_failed_design_attempts_cannot_be_replaced_by_a_third(design_case):
 def test_brief_is_bounded_and_details_are_loaded_only_when_needed(design_case):
     root, _, data, _ = design_case
     metadata = json.loads((root / "design_input.json").read_text())
-    brief = json.loads(Path(metadata["request_file"]).read_text())
+    brief_text = Path(metadata["request_file"]).read_text(encoding="utf-8")
+    brief = json.loads(brief_text)
     assert "catalog" not in metadata
-    assert len(Path(metadata["request_file"]).read_text()) < 8000
+    # Keep the size budget independent of pytest's machine-specific temp path.
+    workspace_prefix = json.dumps(str(root.resolve()) + os.sep, ensure_ascii=False)[:-1]
+    assert len(brief_text.replace(workspace_prefix, '"<workspace>/')) < 8000
     assert "themes" not in brief and "outline" not in brief
     for item in brief["required_read_files"]:
         packet = Path(item["path"])
