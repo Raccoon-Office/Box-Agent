@@ -1455,11 +1455,18 @@ def test_file_delivery_prompt_uses_dynamic_loopback_preview_and_reclaims_it():
     assert "Playwright MCP 不要打开 `file://`" in prompt
     assert "http.server 0 --bind 127.0.0.1" in prompt
     assert "bash_output" in prompt
-    assert "bash_kill" in prompt
-    assert "任务结束时 runtime 会兜底回收" in prompt
-    assert 'lifetime="turn"' in prompt
-    assert 'lifetime="runtime"' in prompt
-    assert "启动服务我看一下" in prompt
+    assert "`lifetime` 按 bash 参数说明选择" in prompt
+    # Lifetime semantics live once, in the bash parameter schema.
+    assert "bash_kill" not in prompt and "启动服务我看一下" not in prompt
+
+    from box_agent.tools.bash_tool import BashTool
+
+    lifetime = BashTool().parameters["properties"]["lifetime"]["description"]
+    for phrase in ("'turn' (default)", "bash_kill it as soon as the check is done",
+                   "reclaimed when the turn ends", "explicitly wants to use the service",
+                   "close only the automation browser", "URL and bash_id",
+                   "Box-Agent restart or client exit"):
+        assert phrase in lifetime
 
 
 def test_file_delivery_prompt_has_one_cwd_rooted_policy():
@@ -6341,7 +6348,7 @@ async def test_acp_injects_standard_box_agent_image_generation_policy(tmp_path):
     prompt = agent._sessions[session.sessionId].agent.system_prompt
 
     assert "## Native Image Generation" in prompt
-    assert "CLI 与 ACP 共用" in prompt
+    # "shared by CLI and ACP" now lives only in the generate_image description.
     assert "不由宿主 `env_context` 控制" in prompt
     assert "当前生图服务：已配置" in prompt
 

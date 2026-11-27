@@ -182,6 +182,27 @@ _EMAIL_SCHEMAS = json.loads(
 _VIDEO_SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/video_schema.json").read_text(encoding="utf-8")
 )
+_BASH_LIFETIME_DESCRIPTION_CHANGES = (
+    (
+        "  - lifetime (optional): `turn` (default) is reclaimed when the current turn ends; `runtime` survives "
+        "the turn and is reclaimed when explicitly killed or when Box-Agent exits\n",
+        "  - lifetime (optional): background-process lifetime; see the parameter schema\n",
+    ),
+    (
+        "  - Use lifetime=runtime only when the user explicitly needs a service or command to remain available "
+        "after the final response\n",
+        "",
+    ),
+)
+_BASH_LIFETIME_PARAMETER = (
+    "Optional background-process lifetime. 'turn' (default) is for the agent's own checks, such as "
+    "previewing a page it built: bash_kill it as soon as the check is done; anything left is reclaimed "
+    "when the turn ends. Use 'runtime' only when the user explicitly wants to use the service or command "
+    "after the final response (e.g. 'start it so I can look'): after validating, close only the automation "
+    "browser and keep the shell running; the final response gives the URL and bash_id and says it runs "
+    "until bash_kill, a Box-Agent restart or client exit. Fully consumed, completed shell history is "
+    "limited to the most recent 128 records per runtime."
+)
 _MANAGED_RUNTIME_DESCRIPTION_CHANGES = {
     "bash": (
         (
@@ -241,6 +262,7 @@ _C5_DISCOVERABLE = {
     "plan_read", "plan_write", "todo_read", "todo_write", "goal_read", "goal_write",
     "memory_read", "memory_search", "memory_write", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction", "obsidian_create_note",
     "obsidian_update_note", "obsidian_daily_note", "search_skillhub", "install_skillhub_skill",
+    "validate_table",
 }
 
 
@@ -640,6 +662,16 @@ def _assert_schema_contract(tools, profile):
             description = entry["schema"]["description"]
             assert description.count(before) == 1, (tool.name, before)
             entry["schema"]["description"] = description.replace(before, after)
+        if tool.name == "bash":
+            # Context-opt batch 1: lifetime semantics live once, in the
+            # parameter schema, instead of three places in the description.
+            for before, after in _BASH_LIFETIME_DESCRIPTION_CHANGES:
+                description = entry["schema"]["description"]
+                assert description.count(before) == 1, (tool.name, before)
+                entry["schema"]["description"] = description.replace(before, after)
+            lifetime = entry["schema"]["input_schema"]["properties"]["lifetime"]
+            assert lifetime["description"].startswith("Optional background-process lifetime. 'turn' (default) is automatically")
+            lifetime["description"] = _BASH_LIFETIME_PARAMETER
         if tool.name == "execute_code":
             properties = entry["schema"]["input_schema"]["properties"]
             assert "python_path" not in properties

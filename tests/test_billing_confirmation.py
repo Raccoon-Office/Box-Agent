@@ -243,6 +243,7 @@ async def test_new_image_attempt_checks_runtime_approval_again_after_denial(tmp_
     try:
         first = await tool.execute(**arguments)
         assert not first.success
+        assert "Do not switch to Seko or another image service" in first.error
         network.assert_not_awaited()
         second = await tool.execute(**arguments)
         assert second.success

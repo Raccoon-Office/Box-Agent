@@ -3,18 +3,18 @@
  "unit": "utf8_bytes_compact_json",
  "scenarios": {
   "acp_general_chat": {
-   "system_bytes": 35149,
-   "system_sha256": "e5a1a5fe5a2ff057",
-   "tools_bytes": 51823,
-   "tool_count": 22,
+   "system_bytes": 32343,
+   "system_sha256": "6358cdc0e84c048e",
+   "tools_bytes": 45537,
+   "tool_count": 21,
    "messages_bytes": 218,
-   "request_bytes": 87494,
+   "request_bytes": 78397,
    "tools": {
     "bash": {
-     "bytes": 6514,
-     "description_bytes": 4876,
-     "parameters_bytes": 1509,
-     "sha256": "305cd61377f280ef"
+     "bytes": 6533,
+     "description_bytes": 4653,
+     "parameters_bytes": 1752,
+     "sha256": "001da52997e378cf"
     },
     "bash_kill": {
      "bytes": 953,
@@ -130,12 +130,6 @@
      "parameters_bytes": 1739,
      "sha256": "58c763d840b958d9"
     },
-    "validate_table": {
-     "bytes": 6304,
-     "description_bytes": 3230,
-     "parameters_bytes": 2987,
-     "sha256": "931dae7924f50af7"
-    },
     "write_file": {
      "bytes": 1452,
      "description_bytes": 489,
@@ -145,18 +139,18 @@
    }
   },
   "acp_code_agent_chat": {
-   "system_bytes": 37508,
-   "system_sha256": "6438be2f5f2f63e7",
-   "tools_bytes": 53748,
-   "tool_count": 24,
+   "system_bytes": 34702,
+   "system_sha256": "664f3d3c86f890e6",
+   "tools_bytes": 47462,
+   "tool_count": 23,
    "messages_bytes": 218,
-   "request_bytes": 91805,
+   "request_bytes": 82708,
    "tools": {
     "bash": {
-     "bytes": 6514,
-     "description_bytes": 4876,
-     "parameters_bytes": 1509,
-     "sha256": "305cd61377f280ef"
+     "bytes": 6533,
+     "description_bytes": 4653,
+     "parameters_bytes": 1752,
+     "sha256": "001da52997e378cf"
     },
     "bash_kill": {
      "bytes": 953,
@@ -284,12 +278,6 @@
      "parameters_bytes": 1739,
      "sha256": "58c763d840b958d9"
     },
-    "validate_table": {
-     "bytes": 6304,
-     "description_bytes": 3230,
-     "parameters_bytes": 2987,
-     "sha256": "931dae7924f50af7"
-    },
     "write_file": {
      "bytes": 1452,
      "description_bytes": 489,
@@ -299,18 +287,18 @@
    }
   },
   "acp_data_analysis_chat": {
-   "system_bytes": 41659,
-   "system_sha256": "9bef8785eefde6ea",
-   "tools_bytes": 51823,
-   "tool_count": 22,
+   "system_bytes": 38853,
+   "system_sha256": "f8fd167f09f6847a",
+   "tools_bytes": 45537,
+   "tool_count": 21,
    "messages_bytes": 218,
-   "request_bytes": 94548,
+   "request_bytes": 85451,
    "tools": {
     "bash": {
-     "bytes": 6514,
-     "description_bytes": 4876,
-     "parameters_bytes": 1509,
-     "sha256": "305cd61377f280ef"
+     "bytes": 6533,
+     "description_bytes": 4653,
+     "parameters_bytes": 1752,
+     "sha256": "001da52997e378cf"
     },
     "bash_kill": {
      "bytes": 953,
@@ -425,12 +413,6 @@
      "description_bytes": 118,
      "parameters_bytes": 1739,
      "sha256": "58c763d840b958d9"
-    },
-    "validate_table": {
-     "bytes": 6304,
-     "description_bytes": 3230,
-     "parameters_bytes": 2987,
-     "sha256": "931dae7924f50af7"
     },
     "write_file": {
      "bytes": 1452,
@@ -441,18 +423,18 @@
    }
   },
   "acp_general_csv": {
-   "system_bytes": 35149,
-   "system_sha256": "e5a1a5fe5a2ff057",
-   "tools_bytes": 51823,
-   "tool_count": 22,
-   "messages_bytes": 259,
-   "request_bytes": 87535,
+   "system_bytes": 32343,
+   "system_sha256": "6358cdc0e84c048e",
+   "tools_bytes": 45537,
+   "tool_count": 21,
+   "messages_bytes": 7348,
+   "request_bytes": 85527,
    "tools": {
     "bash": {
-     "bytes": 6514,
-     "description_bytes": 4876,
-     "parameters_bytes": 1509,
-     "sha256": "305cd61377f280ef"
+     "bytes": 6533,
+     "description_bytes": 4653,
+     "parameters_bytes": 1752,
+     "sha256": "001da52997e378cf"
     },
     "bash_kill": {
      "bytes": 953,
@@ -567,12 +549,6 @@
      "description_bytes": 118,
      "parameters_bytes": 1739,
      "sha256": "58c763d840b958d9"
-    },
-    "validate_table": {
-     "bytes": 6304,
-     "description_bytes": 3230,
-     "parameters_bytes": 2987,
-     "sha256": "931dae7924f50af7"
     },
     "write_file": {
      "bytes": 1452,

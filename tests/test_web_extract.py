@@ -156,6 +156,12 @@ async def test_verification_pages_return_browser_handoff_instead_of_article(
     assert "take over" in result.error
     assert "confirmation" in result.error
     assert "same browser" in result.error
+    # The system prompt no longer repeats these recovery steps; they travel
+    # only with this error, so it must stay self-sufficient.
+    for phrase in ("not article content", "discover browser tools if deferred",
+                   "Do not solve or bypass", "repeatedly retry HTTP extraction",
+                   "claim the article was read", "report the blocker and URL"):
+        assert phrase in result.error
     assert result.raw_output["status"] == "verification_required"
     assert result.raw_output["url"] == url
     assert result.raw_output["final_url"] == url

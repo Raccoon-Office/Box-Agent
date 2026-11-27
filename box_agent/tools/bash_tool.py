@@ -1519,7 +1519,7 @@ Parameters:
   - command (required): PowerShell command to execute
   - timeout (optional): Timeout in seconds (default: {self.default_timeout_seconds}, max: {self.max_timeout_seconds}) for foreground commands
   - run_in_background (optional): Set true for commands that must continue after the tool call
-  - lifetime (optional): `turn` (default) is reclaimed when the current turn ends; `runtime` survives the turn and is reclaimed when explicitly killed or when Box-Agent exits
+  - lifetime (optional): background-process lifetime; see the parameter schema
 
 Tips:
   - Quote file paths with spaces: cd "My Documents"
@@ -1527,7 +1527,6 @@ Tips:
   - Use absolute paths instead of cd when possible
   - {python_tip}
   - For background commands, monitor with bash_output and terminate with bash_kill
-  - Use lifetime=runtime only when the user explicitly needs a service or command to remain available after the final response
 
 Examples:
   - git status
@@ -1552,7 +1551,7 @@ Parameters:
   - command (required): Bash command to execute
   - timeout (optional): Timeout in seconds (default: {self.default_timeout_seconds}, max: {self.max_timeout_seconds}) for foreground commands
   - run_in_background (optional): Set true for commands that must continue after the tool call
-  - lifetime (optional): `turn` (default) is reclaimed when the current turn ends; `runtime` survives the turn and is reclaimed when explicitly killed or when Box-Agent exits
+  - lifetime (optional): background-process lifetime; see the parameter schema
 
 Tips:
   - Quote file paths with spaces: cd "My Documents"
@@ -1568,7 +1567,6 @@ Tips:
   - For one-off data scripts, validate input types and never append to a collection while iterating it; collect additions separately or iterate over a copy
   - A timeout, resource stop, or optional QA failure is advisory for artifact workflows: preserve usable output, record the warning, and continue to delivery when safe
   - For background commands, monitor with bash_output and terminate with bash_kill
-  - Use lifetime=runtime only when the user explicitly needs a service or command to remain available after the final response
 
 Examples:
   - git status
@@ -1623,13 +1621,17 @@ Examples:
                     "type": "string",
                     "enum": [BASH_LIFETIME_TURN, BASH_LIFETIME_RUNTIME],
                     "description": (
-                        "Optional background-process lifetime. 'turn' (default) "
-                        "is automatically reclaimed when the current turn ends. "
-                        "Use 'runtime' only when the user explicitly asks for a "
-                        "service or command to remain available after the final "
-                        "response; it remains manageable with bash_output/bash_kill "
-                        "until Box-Agent exits. Fully consumed, completed shell history "
-                        "is limited to the most recent 128 records per runtime."
+                        "Optional background-process lifetime. 'turn' (default) is for "
+                        "the agent's own checks, such as previewing a page it built: "
+                        "bash_kill it as soon as the check is done; anything left is "
+                        "reclaimed when the turn ends. Use 'runtime' only when the user "
+                        "explicitly wants to use the service or command after the final "
+                        "response (e.g. 'start it so I can look'): after validating, close "
+                        "only the automation browser and keep the shell running; the final "
+                        "response gives the URL and bash_id and says it runs until "
+                        "bash_kill, a Box-Agent restart or client exit. Fully consumed, "
+                        "completed shell history is limited to the most recent 128 "
+                        "records per runtime."
                     ),
                     "default": BASH_LIFETIME_TURN,
                 },
