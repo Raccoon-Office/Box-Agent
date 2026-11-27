@@ -91,7 +91,15 @@ class DeterministicLLM:
                 yield StreamEvent(type="finish", finish_reason="stop")
                 return
             if re.search(r'"hold"\s*:\s*true', str(tail[0].get("content", ""))):
-                await asyncio.sleep(300)
+                release = os.environ.get("DEVICE_TEST_PARENT_RELEASE")
+                if release:
+                    deadline = asyncio.get_running_loop().time() + 90
+                    while not Path(release).exists():
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise asyncio.TimeoutError("test parent was not released")
+                        await asyncio.sleep(0.05)
+                else:
+                    await asyncio.sleep(300)
             yield StreamEvent(type="text", delta=(
                 "Completed the available work and wrote fallback.txt."
                 if fallback_requested and latest_result.startswith("Successfully wrote ") and "fallback.txt" in latest_result

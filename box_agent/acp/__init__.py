@@ -1436,6 +1436,7 @@ class BoxACPAgent:
         self._closing = False
         self._close_lock = asyncio.Lock()
         self._device_delegation_receiver = False
+        self._device_approval_relay = False
         self._client_info: ClientInfo | None = None
         self._memory = memory_manager
         self._hooks = hooks
@@ -1875,6 +1876,7 @@ class BoxACPAgent:
     ) -> InitializeResponse:
         log.info("initialize", message="ACP initialize request received")
         receiver = meta.get("deviceDelegationReceiver")
+        self._device_approval_relay = meta.get("deviceApprovalRelay") is True
         self._device_delegation_receiver = (
             isinstance(receiver, dict) and type(receiver.get("version")) is int
             and receiver["version"] == 1
@@ -2854,6 +2856,7 @@ class BoxACPAgent:
             if state.device_delegations is not None:
                 state.device_delegations.bind_pending_org(current_request_org() or "")
                 state.device_delegations.retry_stopped_cancellations()
+                self._enable_device_approvals(state)
             self._schedule_device_wake(session_id, state)
         return response
 
@@ -2911,6 +2914,7 @@ class BoxACPAgent:
             state.device_delegations.bind_pending_org(current_request_org() or "", replace=True)
             state.device_auto_wake_enabled = True
             state.device_delegations.retry_stopped_cancellations()
+            self._enable_device_approvals(state)
             self._schedule_device_wake(session_id, state)
         if replay_from is not None:
             return ResumeSessionResponse(field_meta={
@@ -3317,6 +3321,8 @@ class BoxACPAgent:
             if state.trace_writer is not None:
                 trace_token = set_session_trace_writer(state.trace_writer, turn_id=turn_id)
             config = state.config or self._config
+            if not state.device_auto_wake_enabled:
+                self._enable_device_approvals(state)
             state.device_auto_wake_enabled = True
             with scoped_exact_approvals(delegated_turn), private_payload_scope(config.agent.memory_backend_type == "desktop"):
                 return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
@@ -3341,6 +3347,29 @@ class BoxACPAgent:
             if state.device_delegations is not None:
                 state.device_delegations.bind_pending_org(current_request_org() or "")
             self._schedule_device_wake(session_id, state)
+
+    def _enable_device_approvals(self, state: SessionState) -> None:
+        broker = state.device_delegations
+        if self._device_approval_relay and broker is not None:
+            broker.ask_permission = self._ask_device_permission
+            broker.restore_approvals()
+
+    async def _ask_device_permission(self, session_id: str, device: str, approval: dict) -> str:
+        from acp.schema import AllowedOutcome, PermissionOption, ToolCallUpdate
+
+        reply = await self._conn.request_permission(
+            session_id=session_id,
+            tool_call=ToolCallUpdate(tool_call_id=f"device-approval-{approval['approvalRequestId']}",
+                                     title=f"{device} · {approval['title']}"),
+            options=[PermissionOption(option_id="allow_once", kind="allow_once", name="仅本次允许"),
+                     PermissionOption(option_id="deny", kind="reject_once", name="拒绝")],
+            deviceApproval={key: approval[key] for key in ("approvalRequestId", "expiresAt")},
+        )
+        if isinstance(reply.outcome, AllowedOutcome):
+            if reply.outcome.option_id not in {"allow_once", "deny"}:
+                raise ValueError("unrecognized delegated permission option")
+            return reply.outcome.option_id
+        return "deny"
 
     def _schedule_device_wake(self, session_id: str, state: SessionState) -> None:
         broker = state.device_delegations

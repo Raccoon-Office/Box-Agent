@@ -13,7 +13,7 @@
 | 桌面历史、用户补答 | 本机已登录账号可见委派会话。入口保留只读历史，底部 DecisionCard 支持回答或取消。补答之后的流式消息和普通本地续跑共用历史写入 | `registerConversationHandlers.ts`、`decisionResolution.ts`、`decisionContinuation.ts` 均在 `runtime/electron/main/client/conversation/` 下 |
 | 云端查询本地历史 | `session.list`、`session.read` 限于当前父云会话委派给本机的子会话。账号切换后重新校验 | `runtime/electron/main/device/deviceSessionHistory.ts`、`runtime/electron/main/localChatStorage/repository.ts` |
 | 子轮产物取件 | 从本地 ACP 产物登记信息生成取件 ID。需要云端文件时复用桌面云文件服务上传，在文件服务确认后上报云端引用 | `runtime/electron/main/device/deviceArtifacts.ts`、`runtime/electron/main/client/cloud-files/service.ts` |
-| 远端用户审批 | 桌面保留正在等待的本地 ACP 权限请求，收到有权用户的决定后回填原请求。独立 mock 已模拟审批端；正式云会话界面的审批展示、用户身份和返回路径需与 2c 联调 | `runtime/electron/main/device/devicePermission.ts`、`deviceSubagentHost.ts`；[后端方法与路由](DEVICE_DELEGATION_BACKEND_HANDOFF_CN.md) |
+| 远端用户审批 | 桌面保留正在等待的本地 ACP 权限请求，收到有权用户的决定后回填原请求。B 复用云会话审批卡，云 Harness 将决定发回 A。正式 2c 部署需验证身份与路由 | `runtime/electron/main/device/devicePermission.ts`、`deviceSubagentHost.ts`；[后端方法与路由](DEVICE_DELEGATION_BACKEND_HANDOFF_CN.md) |
 
 ## 2. 从注册到上报
 
@@ -98,7 +98,11 @@
 {"jsonrpc":"2.0","id":42,"method":"_device/permission_decision","params":{"deviceId":"PC-A","cloudSessionId":"cloud-1","sessionId":"remote-device-01","turnId":"t1","approvalRequestId":"approval-7","decision":"allow_once"}}
 ```
 
-2c 鉴别审批人后将决定转发给桌面。桌面再次校验目标、时效和允许选项，向原权限请求返回结果并应答 `{"applied":true}`。拒绝、过期、已取消或目标错配时文件操作不能被放行。答复用户问题本身不会获得文件权限。可按 `waiting_input → running → waiting_approval → running → succeeded` 验证同一逻辑子轮。
+B 在 ACP `initialize` 的 `params._meta.deviceApprovalRelay` 传 `true` 开启审批中继。收到 `waiting_approval` 后云 Harness 在父会话发起标准 `session/request_permission`，携带 `params._meta.deviceApproval.{approvalRequestId,expiresAt}`、含设备和文件操作的标题，以及一次允许和拒绝选项。B 用原 RPC ID 向云 Harness 回答，审批卡持续到用户选择或到期，可跨父轮自然结束。云 Harness 关联原子轮后发出上例请求，2c 校验身份与归属后路由至 A。桌面再次校验目标、时效和允许选项，向原权限请求返回结果并应答 `{"applied":true}`。拒绝、过期、已取消或目标错配时文件操作不能被放行。答复用户问题本身不会获得文件权限。可按 `waiting_input → running → waiting_approval → running → succeeded` 验证同一逻辑子轮。
+
+同一会话重新 `session/resume` 时，B 移除上一次绑定的审批卡。恢复成功后，同一 `approvalRequestId` 可以对应新的 JSON-RPC ID，B 仅向当前请求应答。已记录选择且仍待交付时，Harness 沿用原选择。使用稳定 ID 的 `session/new` 重开时也恢复待办；只读 `session/load` 期间仅记录审批事件，直到会话进入执行状态。
+
+独立 mock 的 `--approval-running`、`--approval` 和 `--approval-resume` 分别覆盖父轮运行中、父轮自然结束、旧卡未点即恢复的路径。
 
 ### 补答后的本地历史
 

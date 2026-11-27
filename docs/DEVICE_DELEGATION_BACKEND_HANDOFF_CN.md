@@ -56,7 +56,8 @@ sequenceDiagram
 | 桌面 → 2c | `_device/register` | 校验登录账号和设备凭据，登记该条 WS 的主机名与能力，返回 `{"registered":true}` |
 | 云 Box → 2c → 执行方 | `_device/request` | 下表八项基础操作和可选取件操作共用入口。读请求也带 `operationId` |
 | 桌面 → 2c → 云 Box | `_device/event` | 两跳都有请求 ID 和回执。2c 记录事件及待投递状态；云 Box 写 Session Log 后确认 |
-| 已登录的用户界面 → 2c → 桌面 | `_device/permission_decision` | 仅放行有权审批该云会话的人；桌面校验并返回 `{"applied":true}` |
+| 云 Harness → 2c → 父会话客户端 B → 2c → 云 Harness | `session/request_permission` 及同 ID 应答 | 沿父会话的 ACP 通道传递卡片，只接受有控制权的客户端应答 |
+| 云 Harness → 2c → 执行桌面 A | `_device/permission_decision` | 校验云身份、父会话、设备和待审批项归属，按设备路由。A 核对有效期并回填原请求，返回 `{"applied":true}` |
 | 云 Box → 云会话接入方 | `_device/turn` | 无 ID 通知。自动续跑开始时带 `version,sessionId,turnId,phase:"started"`。结束时使用同一 turnId、`phase:"finished"`，并在 params 内带 `result` 或 `error`。result 沿用普通 ACP PromptResponse 的 `stopReason` 和 `_meta`（如有），error 沿用 JSON-RPC 错误对象。普通用户轮次走原有 prompt 链路 |
 | 云会话接入方 → 云 Box | `_device/cancel_turn` | 按用户点击时的云 `{sessionId,turnId}` 停止当前父轮，返回 `{"accepted":true}` 或 `false`；子轮取消由 Harness 发出 |
 
@@ -207,7 +208,7 @@ sequenceDiagram
 | 等用户、等审批、人工 Stop | `waiting_input` 可带 `inputRequest.question`，答复入口在原桌面。`waiting_approval` 带 `approvalRequestId,title,expiresAt,decisions`（包在 `approval` 内）。2c 展示或转交状态；审批接收方见客户端交接。`succeeded/failed/cancelled/interrupted` 为终态。运行中注入结果、自然结束后唤醒、用户 Stop 后抑制唤醒均由云 Harness 负责 |
 | 查询回包早于事件 | 已认证桌面的 get_turn 或 wait 可能先交付产物引用或待审批项。校验父会话、设备及子轮归属后，该回包也可作为具体 ID 的依据。随后可立即发起取件或人工审批，桌面校验原始文件修订或当前待审批项。事件仍按 seq 顺序入账 |
 
-**权限边界**　按当前账号和父云会话检查工具调用、每一个 wait target、子会话历史以及审批。设备上报能力不授予执行权。允许 `session.read` 的范围为当前父会话获授权的委派会话；任意本地聊天 ID 不构成访问凭据。用户审批通道校验身份及完整目标，再转发原决策；云模型没有审批工具。
+**权限边界**　按当前账号和父云会话检查工具调用、每一个 wait target、子会话历史以及审批。设备上报能力不授予执行权。允许 `session.read` 的范围为当前父会话获授权的委派会话；任意本地聊天 ID 不构成访问凭据。B 的 ACP 应答回到发卡的云 Harness。Harness 使用云身份下发设备决定，2c 校验云身份及完整目标后向原设备转发；云模型没有审批工具。
 
 **父轮何时继续**　`recorded:true` 确认事件已由该跳接收。2c 可据此推进投递进度；父模型是否已读由 Box 单独记录。父轮运行中，Harness 在后续模型请求中提供未消费的子轮状态，完整的 `get/wait` 结果已在上下文时复用该结果。Box 在模型响应落盘后记录消费回执，没有待确认项时跳过历史摘要计算。2c 原样转交桌面产生的快照、事件和序号。
 

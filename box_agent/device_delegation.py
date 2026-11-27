@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 from hashlib import sha256
 from collections.abc import Awaitable, Callable, Sequence
@@ -304,10 +305,13 @@ class DeviceDelegations:
         self, session_id: str,
         request: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
         turn_id: Callable[[], str], session_log: SessionLog | None = None, *, artifact_upload: bool = False,
+        ask_permission: Callable[[str, str, dict], Awaitable[str]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.artifact_upload = artifact_upload
         self.request = request
+        self.ask_permission = ask_permission
+        self._approval_tasks: dict[str, tuple[str, asyncio.Task]] = {}
         self.turn_id = turn_id
         self.log = session_log
         self.operations: dict[str, dict[str, Any]] = {}
@@ -317,6 +321,7 @@ class DeviceDelegations:
         self.wait_requests: dict[str, set[asyncio.Task]] = {}
         self.closed = False
         self.stop_cancels: set[str] = set()
+        self._cancel_locks: dict[str, asyncio.Lock] = {}
         self.cancel_slots = asyncio.Semaphore(CANCEL_RETRY_CONCURRENCY)
         self.offered: dict[str, list[dict[str, Any]]] = {}
         self.consumed: dict[str, int] = {}
@@ -358,6 +363,8 @@ class DeviceDelegations:
     def reconcile_history(self) -> None:
         if self.log is not None:
             self._apply_history(self.log.events)
+            for op in tuple(self._approval_tasks):
+                self._sync_approval(op)
 
     def bind_pending_org(self, org: str, *, replace: bool = False) -> None:
         """Use a fresh host identity for work restored without a live parent turn."""
@@ -550,6 +557,89 @@ class DeviceDelegations:
         self._record("device/state", record)
         self._index_record(record)
 
+    def restore_approvals(self) -> None:
+        if self.ask_permission:
+            for op in self.operations:
+                self._sync_approval(op)
+
+    def _sync_approval(self, op: str) -> None:
+        if not self.ask_permission or self.closed:
+            return
+        record = self.operations[op]
+        approval = record.get("approval") if record["status"] == "waiting_approval" else None
+        approval_id = approval["approvalRequestId"] if approval and self._eligible(record) else None
+        active = self._approval_tasks.get(op)
+        if active:
+            if active[0] == approval_id:
+                return
+            active[1].cancel()
+            self._approval_tasks.pop(op)
+        if not approval_id or record.get("cancelRequested") or record.get("approvalApplied") == approval_id:
+            return
+        expires = datetime.fromisoformat(approval["expiresAt"].replace("Z", "+00:00"))
+        remaining = (expires - datetime.now(expires.tzinfo)).total_seconds()
+        if remaining <= 0:
+            return
+        deadline = asyncio.get_running_loop().time() + remaining
+        task = asyncio.create_task(self._relay_approval(op, approval, deadline), name=f"device-approval:{op}")
+        self._approval_tasks[op] = (approval_id, task)
+        self._track(task)
+
+    async def _relay_approval(self, op: str, approval: dict, deadline: float) -> None:
+        clock = asyncio.get_running_loop().time
+        def current() -> bool:
+            record = self.operations[op]
+            return (not self.closed and self._eligible(record)
+                    and record["status"] == "waiting_approval" and record.get("approval") == approval
+                    and deadline > clock())
+
+        approval_id = approval["approvalRequestId"]
+        try:
+            if not current():
+                return
+            record = self.operations[op]
+            choice = record.get("approvalChoice", {})
+            if choice.get("id") != approval_id:
+                decision = await asyncio.wait_for(
+                    self.ask_permission(self.session_id, record["deviceId"], approval), deadline - clock(),
+                )
+                if decision not in {"allow_once", "deny"}:
+                    return
+                choice = {"id": approval_id, "decision": decision}
+                async with session_write_lock(self.log):
+                    if not current():
+                        return
+                    self.save({**self.operations[op], "approvalChoice": choice})
+            delay = CANCEL_RETRY_INITIAL_SECONDS
+            # Keep a click made during a cancel attempt, but fence delivery until its outcome is known.
+            while current() and not self.operations[op].get("cancelRequested"):
+                params = {**{k: record[k] for k in IDENTITY_FIELDS}, "cloudSessionId": self.session_id,
+                          "approvalRequestId": approval_id, "decision": choice["decision"]}
+                try:
+                    reply = await asyncio.wait_for(self.request("device/permission_decision", params),
+                                                   min(RPC_TIMEOUT_SECONDS, deadline - clock()))
+                except (ConnectionError, asyncio.TimeoutError):
+                    pass
+                except RequestError as exc:
+                    if exc.code not in {-32004, -32008}:
+                        raise
+                else:
+                    if reply.get("applied") is not True:
+                        raise ValueError("invalid device approval acknowledgement")
+                    async with session_write_lock(self.log):
+                        if current():
+                            self.save({**self.operations[op], "approvalApplied": approval_id})
+                    return
+                await asyncio.sleep(min(delay, max(0, deadline - clock())))
+                delay = min(delay * 2, CANCEL_RETRY_MAX_SECONDS)
+        except asyncio.TimeoutError:
+            pass  # The device independently expires the original permission request.
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Delegated approval relay failed (%s)", type(exc).__name__)
+        finally:
+            if self._approval_tasks.get(op) == (approval_id, asyncio.current_task()):
+                self._approval_tasks.pop(op)
+
     def _index_record(self, record: dict[str, Any]) -> None:
         op = record["operationId"]
         old = self.operations.get(op)
@@ -738,25 +828,44 @@ class DeviceDelegations:
             self.save({**record, "status": status})
 
     async def cancel(self, operation_id: str, *, explicit: bool = False) -> dict[str, Any]:
+        if operation_id not in self.operations:
+            raise ValueError("unknown device operation")
+        async with self._cancel_locks.setdefault(operation_id, asyncio.Lock()):
+            return await self._cancel_once(operation_id, explicit)
+
+    async def _cancel_once(self, operation_id: str, explicit: bool) -> dict[str, Any]:
         async with session_write_lock(self.log):
             if self.closed:
                 raise RuntimeError("device delegations are closed")
-            record = self.operations.get(operation_id)
-            if record is None:
-                raise ValueError("unknown device operation")
+            record = self.operations[operation_id]
             if record["status"] in TERMINAL and not explicit:
                 return {"status": record["status"]}
             if "sessionId" not in record:
                 return {"status": "pending_start_receipt"}
             cancel_id = record.get("cancelOperationId") or uuid4().hex
+            already_requested = record.get("cancelRequested", False)
             record = {**record, "cancelOperationId": cancel_id, "cancelRequested": True}
             self.save(record)
-        result = await self._request({
+        request = {
             "version": 1, "sessionId": self.session_id,
             "deviceId": record["deviceId"], "operation": "session.cancel",
             "operationId": cancel_id,
             "args": {"sessionId": record["sessionId"], "turnId": record["turnId"]},
-        })
+        }
+        error = None
+        try:
+            result = await self._request(request)
+            error = result.get("error") if isinstance(result, dict) else None
+        except RequestError as exc:
+            error = exc
+            raise
+        finally:
+            # A missed retry cannot undo an earlier cancel whose delivery was unknown.
+            if explicit and not already_requested and (problem := _delivery_problem(error, record["deviceId"])):
+                if problem["delivery"] == "not_sent":
+                    async with session_write_lock(self.log):
+                        self.save({**self.operations[operation_id], "cancelRequested": False})
+                        self._sync_approval(operation_id)
         # Acceptance is deliberately not a terminal event.
         if not isinstance(result, dict) or any(
             key in result and result[key] != record[key] for key in IDENTITY_FIELDS
@@ -1017,6 +1126,7 @@ class DeviceDelegations:
         self.interrupt_waits(turn)
         for op, record in self.operations.items():
             if record["parentTurnId"] == turn:
+                self._sync_approval(op)
                 self.retry_stopped_cancellation(op)
 
     async def aclose(self) -> None:
@@ -1106,6 +1216,7 @@ class DeviceDelegations:
                 buffered.clear()
                 break
         self.save({**record, "buffered": buffered})
+        self._sync_approval(record["operationId"])
         self.retry_stopped_cancellation(record["operationId"])
         if buffered:
             return {"recorded": True, "throughSeq": through, "nextSeq": through + 1}
@@ -1129,7 +1240,7 @@ class DeviceTool(Tool):
     @property
     def description(self) -> str:
         approval_guidance = (
-            "For waiting_approval, the approval card has already been delivered to the user. "
+            "For waiting_approval, the host handles the user's decision. "
             "Continue other available work. If there is none, tell the user approval is pending and end the parent turn. "
             "The Harness delivers the terminal result when it is available. Do not sleep or poll for it. "
             "For waiting_input, relay the question when available and let the user respond on the device. "

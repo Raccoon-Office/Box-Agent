@@ -22,6 +22,205 @@ def approval():
             "expiresAt": "2031-01-01T00:00:00Z", "decisions": ["allow_once", "deny"]}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["allow_once", "deny"])
+async def test_delegated_approval_uses_one_card_and_delivers_only_its_users_choice(decision):
+    cards, calls = [], []
+    shown = asyncio.Event()
+    clicked = asyncio.get_running_loop().create_future()
+    async def ask(*args):
+        cards.append(args)
+        shown.set()
+        return await clicked
+    async def deliver(method, params):
+        calls.append((method, params))
+        return {"applied": True}
+    log = Log()
+    broker = DeviceDelegations("cloud", deliver, lambda: "parent", log, ask_permission=ask)
+    broker.save({**target(), "operationId": "op", "parentTurnId": "parent", "status": "running", "seq": 0})
+    event = {"version": 1, "sessionId": "cloud", "event": {
+        **target(), "operationId": "op", "seq": 1, "status": "waiting_approval", "approval": approval()}}
+    assert broker.event(event) == {"recorded": True}
+    broker.event(event)
+    await asyncio.wait_for(shown.wait(), 1)
+    broker.end("parent")
+    assert cards == [("cloud", "d", approval())] and not calls
+    clicked.set_result(decision)
+    await asyncio.gather(*broker.pending)
+    assert calls == [("device/permission_decision", {**target(), "cloudSessionId": "cloud",
+                     "approvalRequestId": "approval-1", "decision": decision})]
+    reopened = DeviceDelegations("cloud", deliver, lambda: "", log, ask_permission=ask)
+    reopened.restore_approvals()
+    assert not reopened.pending
+
+
+@pytest.mark.asyncio
+async def test_delegation_ending_while_card_is_open_cannot_authorize_a_stale_file_request():
+    async def ask(*args):
+        await asyncio.Future()
+    async def deliver(*args):
+        pytest.fail("stale decision reached the device")
+    broker = DeviceDelegations("cloud", deliver, lambda: "parent", ask_permission=ask)
+    broker.save({**target(), "operationId": "op", "parentTurnId": "parent", "status": "running", "seq": 0})
+    envelope = {"version": 1, "sessionId": "cloud"}
+    child = {**target(), "operationId": "op"}
+    broker.event({**envelope, "event": {**child, "seq": 1, "status": "waiting_approval", "approval": approval()}})
+    await asyncio.sleep(0)
+    broker.event({**envelope, "event": {**child, "seq": 2, "status": "cancelled"}})
+    await broker.aclose()
+    assert not broker.pending
+
+
+@pytest.mark.asyncio
+async def test_resume_retries_recorded_decision_without_asking_user_again():
+    async def ask(*args):
+        pytest.fail("the user's choice was already recorded")
+    calls = []
+    async def deliver(method, params):
+        calls.append(params.copy())
+        if len(calls) == 1:
+            raise ConnectionError("ack lost")
+        return {"applied": True}
+    log = Log()
+    first = DeviceDelegations("cloud", None, lambda: "parent", log)
+    first.save({**target(), "operationId": "op", "parentTurnId": "parent", "status": "waiting_approval",
+                "seq": 1, "approval": approval(), "approvalChoice": {"id": "approval-1", "decision": "deny"}})
+    broker = DeviceDelegations("cloud", deliver, lambda: "", log, ask_permission=ask)
+    broker.restore_approvals()
+    await asyncio.gather(*broker.pending)
+    assert len(calls) == 2 and calls[0] == calls[1] and calls[1]["decision"] == "deny"
+    assert broker.operations["op"]["approvalApplied"] == "approval-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("entry", "recorded"), [
+    ("new", False), ("new", True), ("resume", False), ("prompt", False),
+])
+async def test_loaded_approval_is_record_only_until_execution_binding(tmp_path, entry, recorded):
+    from acp import text_block
+    from acp.schema import AllowedOutcome, RequestPermissionResponse
+    from box_agent.acp import BoxACPAgent
+    from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+    from examples.device_parent_demo import DeterministicLLM
+
+    cards, decisions = [], []
+
+    class Connection:
+        async def session_update(self, *args, **kwargs):
+            pass
+
+        async def request_permission(self, **kwargs):
+            cards.append(kwargs["session_id"])
+            return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id="allow_once"))
+
+        async def ext_method(self, method, params):
+            assert method == "device/permission_decision"
+            decisions.append(params["decision"])
+            return {"applied": True}
+
+    config = Config(tools=ToolsConfig(), llm=LLMConfig(api_key="test"),
+                    agent=AgentConfig(workspace_dir=str(tmp_path)))
+    adapter = BoxACPAgent(Connection(), config, DeterministicLLM(), [], "test")
+    opts = {"device": {"version": 1}}
+    child = {**target(), "operationId": "op"}
+    try:
+        await adapter.initialize(1, deviceApprovalRelay=True)
+        created = await adapter.new_session(str(tmp_path), session_id="stable", **opts)
+        sid = created.session_id
+        adapter._sessions[sid].device_delegations.save({
+            **child, "status": "running", "seq": 0, "parentTurnId": "first",
+        })
+        await adapter.load_session(str(tmp_path), sid, **opts)
+        broker = adapter._sessions[sid].device_delegations
+        await adapter.ext_method("device/event", {"version": 1, "sessionId": sid, "event": {
+            **child, "seq": 1, "status": "waiting_approval", "approval": approval(),
+        }})
+        assert broker.operations["op"]["status"] == "waiting_approval"
+        assert not broker.pending and not cards and not decisions
+        if recorded:
+            broker.save({**broker.operations["op"], "approvalChoice": {"id": "approval-1", "decision": "deny"}})
+        if entry == "new":
+            await adapter.new_session(str(tmp_path), session_id="stable", **opts)
+        elif entry == "resume":
+            await adapter.resume_session(str(tmp_path), sid, **opts)
+        else:
+            await adapter.prompt(sid, [text_block('{"operation":"unavailable"}')])
+        broker = adapter._sessions[sid].device_delegations
+        await asyncio.wait_for(asyncio.gather(*broker.pending), 5)
+        assert cards == ([] if recorded else [sid])
+        assert decisions == (["deny"] if recorded else ["allow_once"])
+        assert broker.operations["op"]["approvalApplied"] == "approval-1"
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [
+    "not_sent", "not_sent_before_click", "error_result", "unknown", "not_sent_after_unknown", "accepted", "stopped",
+])
+async def test_click_during_cancel_is_delivered_only_after_definite_non_delivery(outcome):
+    shown, cancelling, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    click = asyncio.get_running_loop().create_future()
+    decisions, cancel_ids = [], []
+
+    async def ask(*args):
+        shown.set()
+        return await click
+
+    async def request(method, params):
+        if method == "device/permission_decision":
+            decisions.append(params["decision"])
+            return {"applied": True}
+        cancelling.set()
+        await release.wait()
+        cancel_ids.append(params["operationId"])
+        data = {"deviceId": "d", "delivery": "not_sent"}
+        if outcome == "unknown" or (outcome == "not_sent_after_unknown" and len(cancel_ids) == 1):
+            raise ConnectionError("lost ack")
+        if outcome == "accepted":
+            return {"accepted": True}
+        if outcome == "error_result":
+            return {"error": {"code": -32004, "message": "DEVICE_OFFLINE", "data": data}}
+        raise RequestError(-32004, "DEVICE_OFFLINE", data)
+
+    broker = DeviceDelegations("cloud", request, lambda: "parent", Log(), ask_permission=ask)
+    try:
+        child = {**target(), "operationId": "op"}
+        broker.save({**child, "parentTurnId": "parent", "seq": 0, "status": "running"})
+        broker.event({"version": 1, "sessionId": "cloud", "event": {
+            **child, "seq": 1, "status": "waiting_approval", "approval": approval(),
+        }})
+        await asyncio.wait_for(shown.wait(), 1)
+        cancel = asyncio.create_task(broker.cancel_target(target()))
+        await asyncio.wait_for(cancelling.wait(), 1)
+        if outcome != "not_sent_before_click":
+            click.set_result("allow_once")
+            await asyncio.wait_for(asyncio.gather(*broker.pending), 1)
+            assert broker.operations["op"]["approvalChoice"]["decision"] == "allow_once"
+        assert not decisions
+        if outcome == "stopped":
+            broker.stop("parent")
+        release.set()
+        if outcome not in {"accepted", "error_result"}:
+            with pytest.raises(RequestError):
+                await cancel
+        else:
+            await cancel
+        if outcome == "not_sent_before_click":
+            click.set_result("allow_once")
+        if outcome == "not_sent_after_unknown":
+            with pytest.raises(RequestError) as refused:
+                await broker.cancel_target(target())
+            assert refused.value.data["delivery"] == "not_sent"
+            assert len(cancel_ids) == 2 and cancel_ids[0] == cancel_ids[1]
+        if outcome != "stopped":
+            await asyncio.wait_for(asyncio.gather(*broker.pending), 1)
+        assert decisions == (["allow_once"] if outcome in {"not_sent", "not_sent_before_click", "error_result"} else [])
+    finally:
+        release.set()
+        await broker.aclose()
+
+
 class Log:
     def __init__(self):
         self.events = []
@@ -2293,7 +2492,7 @@ def test_device_tool_guides_parent_to_yield_when_approval_is_pending(operation):
 
     tool = DeviceTool(DeviceDelegations("p", request, lambda: "parent"), operation)
     description = tool.description
-    assert "the approval card has already been delivered to the user" in description
+    assert "the host handles the user's decision" in description
     assert "Continue other available work" in description
     assert "If there is none, tell the user approval is pending and end the parent turn" in description
     assert "The Harness delivers the terminal result" in description
