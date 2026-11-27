@@ -378,7 +378,7 @@ path 须通过校验。`[Invoked Skills]` 提示模型以这些 Skill 为参考�
 
 有省略时，在末尾放一条 `role="user", source="runtime", runtime_kind="compaction_notice"` 消息。能定位日志和受影响的 seq 时，给出区间和 `session.jsonl` 绝对路径；缺少定位信息时只说明发生了省略。只有当前任务需要早期信息时才查询这些区间，优先用 `query_jsonl`，否则用 `read_file` 分页读取。兜底头部和通知的 `omitted_ranges` 保存前次省略与本次新增区间的并集，后续兜底直接读取该字段。全部内容均保留时省去末尾通知。摘要和兜底均只写一条头部。旧日志内的工作流 checkpoint 和中途注入文本也会在原位置回放。
 
-主请求在产生输出前被拒绝，允许对该请求最多做两次反应式压缩。任一成功响应都会复位次数，包括没有 usage 的工具调用响应。报错中的实际输入可用于校准，已知窗口直接按 provider tokens 收紧预算。用尽后返回 `CONTEXT_INPUT_BUDGET_EXCEEDED` 和 `reactiveCompactionAttempts`。已有部分输出时保留并结束本轮。
+主请求在产生输出前被拒绝，允许对该请求最多做两次反应式压缩。任一成功响应都会复位次数，包括没有 usage 的工具调用响应。报错中的实际输入可用于校准。报错给出的上限分两类，解析时保留类型：总窗口型（输入与 max_tokens 合计，如 OpenAI `maximum context length`）按 provider tokens 收紧输入预算，扣除输出预留，并在本次运行余下的请求里参与 max_tokens 收紧；输入上限型（只限制输入，如 `Range of input length should be [1, N]`、`maximum input length is N`）只收紧输入预算，不扣输出预留，也不影响 max_tokens。用尽后返回 `CONTEXT_INPUT_BUDGET_EXCEEDED` 和 `reactiveCompactionAttempts`。已有部分输出时保留并结束本轮。
 
 快速回填在同一步内只计一次。连续三次在后续一至三个 step 内再次填满，会以 `CONTEXT_COMPACTION_THRASHING` 结束本轮。摘要重试计数只在单次压缩内有效。Python 事件记录 `summary_retries`、`head_truncated` 和 `summary_path`，Session Log 对应 `summaryRetries`、`headTruncated` 和 `summaryPath`（`shared`、`independent`、`deterministic`）。`degradation` 记录被移除的轮次、Skill 正文、用户原文条目数及运行时区块。
 

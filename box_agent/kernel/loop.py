@@ -867,7 +867,10 @@ async def _run_agent_loop_impl(
     api_total_tokens = 0
     api_prompt_tokens = 0
     reactive_compaction_attempts = 0
+    # Provider-reported limits stay distinct: a total window also bounds later
+    # requests' max_tokens, while an input-only limit never reserves output.
     reactive_window: int | None = None
+    reactive_input_cap: int | None = None
     run_start = perf_counter()
 
     # Defensive: heal any dangling assistant.tool_calls from a prior interrupted
@@ -2216,12 +2219,15 @@ async def _run_agent_loop_impl(
                         return
                     actual_input = error_details.get("actualInputTokens")
                     reported_window = error_details.get("contextWindowTokens")
+                    reported_input_limit = error_details.get("inputLimitTokens")
                     if type(actual_input) is int:
                         calibration.record(llm, actual_input, request_local_input_tokens)
                     if not generated_output and reactive_compaction_attempts < MAX_REACTIVE_COMPACTION_ATTEMPTS:
                         reactive_compaction_attempts += 1
                         if type(reported_window) is int:
                             reactive_window = min(reported_window, reactive_window or reported_window)
+                        if type(reported_input_limit) is int:
+                            reactive_input_cap = min(reported_input_limit, reactive_input_cap or reported_input_limit)
                         # The failed request may just have changed the route ratio. Recount
                         # its projected input on the same scale as the durable history.
                         projected_tokens = request_input_tokens(
@@ -2244,7 +2250,14 @@ async def _run_agent_loop_impl(
                                 OUTPUT_RESERVE_CAP_TOKENS,
                             )
                             observed_room = reactive_window - output_reserve - REQUEST_INPUT_HEADROOM_TOKENS
-                            reactive_input_limit = max(1, min(token_limit, observed_room))
+                            reactive_input_limit = min(reactive_input_limit, observed_room)
+                        if reactive_input_cap is not None:
+                            # Input-only limits exclude output, so only the request headroom applies.
+                            reactive_input_limit = min(
+                                reactive_input_limit, reactive_input_cap - REQUEST_INPUT_HEADROOM_TOKENS,
+                            )
+                        reactive_input_limit = max(1, reactive_input_limit)
+                        if reactive_window is not None or reactive_input_cap is not None:
                             tightened_limit = min(tightened_limit, reactive_input_limit - request_reserve)
                         tightened_limit = max(1, min(tightened_limit, history_token_limit))
                         result, summarization_event = await compact_context(

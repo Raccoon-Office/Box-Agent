@@ -520,36 +520,38 @@ def test_hosted_auth_errors_keep_canonical_message():
      "Please reduce the length of the messages.", 400, (2_074, 2_048)),
     ("`inputs` tokens + `max_new_tokens` must be <= 32768. Given: 36000 `inputs` tokens and 4000 `max_new_tokens`",
      422, (36_000, 32_768)),
-    ("`inputs` must have less than 32768 tokens. Given: 36000", 422, (36_000, 32_768)),
+    ("`inputs` must have less than 32768 tokens. Given: 36000", 422, (36_000, 32_768, "inputLimitTokens")),
     ("the input prompt token len 243000 + max_new_tokens 63999 > 262144No fallback model", 400, (243_000, 262_144)),
 ])
 def test_context_error_reports_actual_input_and_window_without_counting_requested_output(message, status, expected):
     error = _FakeAPIError("bad request", status_code=status, body={"error": {"message": message}})
     details = structured_llm_error(RetryExhaustedError(error, attempts=1))
+    actual, limit, key = (*expected, "contextWindowTokens")[:3]
+    other = "inputLimitTokens" if key == "contextWindowTokens" else "contextWindowTokens"
     assert details["category"] == "context_length"
-    assert (details["actualInputTokens"], details["contextWindowTokens"]) == expected
+    assert (details["actualInputTokens"], details[key]) == (actual, limit)
+    assert other not in details
 
 
-@pytest.mark.parametrize(("message", "window"), [
-    ("Range of input length should be [1, 129024]", 129_024),
-    ("`inputs` tokens + `max_new_tokens` must be <= 32768", 32_768),
-    ("exceeded model token limit: 262144", 262_144),
-    ("Invalid request: Your request exceeded model token limit: 262144 (requested: 269030)", 262_144),
-    ("Your request exceeded model token limit", None),
-    ("Prompt exceeds max length", None),
-    ("input length exceeds", None),
-    ("maximum input length", None),
-    ("maximum input length is 16,384 tokens", 16_384),
+@pytest.mark.parametrize(("message", "key", "limit"), [
+    ("Range of input length should be [1, 129024]", "inputLimitTokens", 129_024),
+    ("`inputs` tokens + `max_new_tokens` must be <= 32768", "contextWindowTokens", 32_768),
+    ("exceeded model token limit: 262144", "contextWindowTokens", 262_144),
+    ("Invalid request: Your request exceeded model token limit: 262144 (requested: 269030)",
+     "contextWindowTokens", 262_144),
+    ("Your request exceeded model token limit", None, None),
+    ("Prompt exceeds max length", None, None),
+    ("input length exceeds", None, None),
+    ("maximum input length", None, None),
+    ("maximum input length is 16,384 tokens", "inputLimitTokens", 16_384),
 ])
-def test_context_error_reports_only_known_token_counts(message, window):
+def test_context_error_reports_only_known_token_counts(message, key, limit):
     details = structured_llm_error(_FakeAPIError(message, status_code=400))
     assert details["category"] == "context_length"
     assert details["retryable"] is False
     assert "actualInputTokens" not in details
-    if window is None:
-        assert "contextWindowTokens" not in details
-    else:
-        assert details["contextWindowTokens"] == window
+    for name in ("contextWindowTokens", "inputLimitTokens"):
+        assert details.get(name) == (limit if name == key else None)
 
 
 def test_glm_prompt_limit_business_code_classifies_without_prose():
@@ -567,6 +569,7 @@ def test_deepseek_input_token_limit_prose_distinguishes_it_from_quota_errors():
     assert details["category"] == "context_length"
     assert "actualInputTokens" not in details
     assert "contextWindowTokens" not in details
+    assert "inputLimitTokens" not in details
 
 
 @pytest.mark.parametrize(("message", "status", "category"), [
@@ -584,3 +587,4 @@ def test_non_context_request_size_errors_do_not_imply_overflow(message, status, 
     assert details["category"] == category
     assert "actualInputTokens" not in details
     assert "contextWindowTokens" not in details
+    assert "inputLimitTokens" not in details

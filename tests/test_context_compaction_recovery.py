@@ -483,7 +483,14 @@ async def test_fourth_compaction_uses_summary_after_failures_and_stops_only_for_
 
 
 @pytest.mark.parametrize("ratio", [1.0, 1.4])
-async def test_each_successful_request_gets_a_new_reactive_budget_in_provider_units(ratio):
+@pytest.mark.parametrize(("overflow", "reserves_output"), [
+    # An input-only ceiling never charges the output budget.
+    ("maximum input length is 12000 tokens", False),
+    ("Range of input length should be [1, 12000]", False),
+    # A total window charges input together with the output reserve.
+    ("This model's maximum context length is 12000 tokens. However, your messages resulted in 13000 tokens.", True),
+])
+async def test_each_successful_request_gets_a_new_reactive_budget_in_provider_units(ratio, overflow, reserves_output):
     from box_agent.context_input import DefaultContextEngine
     from box_agent.runtime import run_agent_loop
 
@@ -506,7 +513,7 @@ async def test_each_successful_request_gets_a_new_reactive_budget_in_provider_un
                 return
             self.main_calls += 1
             if self.main_calls % 2:
-                raise _ContextOverflow("maximum input length is 12000 tokens")
+                raise _ContextOverflow(overflow)
             if self.main_calls < 6:
                 call = ToolCall(id=f"echo-{self.main_calls}", type="function",
                                 function=FunctionCall(name="echo", arguments={"value": self.main_calls}))
@@ -530,7 +537,9 @@ async def test_each_successful_request_gets_a_new_reactive_budget_in_provider_un
     )]
     assert events[-1].stop_reason == StopReason.END_TURN, events[-1].final_content
     assert llm.main_calls == 6 and len(llm.requests) == 3
-    assert limits.count(12_000 - 1_000 - context_engine.REQUEST_INPUT_HEADROOM_TOKENS) == 3
+    reserve = 1_000 if reserves_output else 0
+    expected = 12_000 - reserve - context_engine.REQUEST_INPUT_HEADROOM_TOKENS
+    assert limits.count(expected) == 3, limits
 
 
 async def test_third_summary_request_still_contains_the_fact_from_the_first_summary():
@@ -929,3 +938,71 @@ async def test_step_after_fallback_can_run_a_new_summary_in_the_same_turn():
                                               max_steps=2, token_limit=10_000)]
     assert [e.mode for e in events if isinstance(e, SummarizationEvent)] == ["fallback", "summary"]
     assert events[-1].stop_reason == StopReason.END_TURN and len(provider.requests) == 6
+
+
+class _LimitProvider:
+    """Rejects the first main request with ``overflow``, then answers."""
+
+    model = "limit-model"
+    provider = "openai"
+
+    def __init__(self, overflow, *, max_output_tokens):
+        self.overflow = overflow
+        self.max_output_tokens = max_output_tokens
+        self.summary_provider = _Summary()
+        self.main_options = []
+
+    async def generate_stream(self, messages, *, call_kind="", **kwargs):
+        if call_kind == "context_summary":
+            async for chunk in self.summary_provider.generate_stream(messages):
+                yield chunk
+            return
+        self.main_options.append(kwargs)
+        if len(self.main_options) == 1:
+            raise _ContextOverflow(self.overflow)
+        yield StreamEvent(type="text", delta="Completed answer.")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+
+_INPUT_LIMIT_12K = "maximum input length is 12000 tokens"
+# The same input room reported as a total window: 12,000 + 8,000 output + 1,024 headroom.
+_WINDOW_21K = "This model's maximum context length is 21024 tokens. However, your messages resulted in 22000 tokens."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overflow", [_INPUT_LIMIT_12K, _WINDOW_21K])
+async def test_input_only_limit_recovers_like_the_equivalent_total_window(tmp_path, overflow):
+    # Fixed prompt above 2,976 tokens: subtracting the 8,000 output reserve from
+    # an input-only 12,000 limit would leave no room for any history at all.
+    provider = _LimitProvider(overflow, max_output_tokens=8_000)
+    agent = Agent(llm_client=provider, system_prompt="规则" * 2_000, tools=[],
+                  workspace_dir=str(tmp_path), token_limit=20_000, max_steps=1,
+                  deferred_mcp_loading_enabled=False)
+    agent.messages.extend(_history(rounds=9, size=600)[1:])
+    events = [event async for event in agent.run_events()]
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.stop_reason == StopReason.END_TURN, done.final_content
+    assert len(provider.main_options) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("overflow", "clamped"), [
+    ("Range of input length should be [1, 25000]", False),
+    ("`inputs` tokens + `max_new_tokens` must be <= 25000", True),
+])
+async def test_only_a_reported_total_window_clamps_later_output(tmp_path, overflow, clamped):
+    provider = _LimitProvider(overflow, max_output_tokens=30_000)
+    agent = Agent(llm_client=provider, system_prompt="System prompt.", tools=[],
+                  workspace_dir=str(tmp_path), token_limit=20_000, max_steps=1,
+                  deferred_mcp_loading_enabled=False)
+    agent.messages.extend(_history(rounds=3, size=100)[1:])
+    events = [event async for event in agent.run_events()]
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.stop_reason == StopReason.END_TURN, done.final_content
+    retried = provider.main_options[1].get("max_output_tokens")
+    if clamped:
+        # Input plus output must stay inside the reported window.
+        assert retried is not None and 20_000 <= retried < 30_000
+    else:
+        # An input-only limit says nothing about output room.
+        assert retried in (None, 30_000)
