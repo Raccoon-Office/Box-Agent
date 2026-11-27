@@ -6,6 +6,35 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-11-27 — Context compaction display notice
+
+- **Change:** The `codex/context-compaction-notice` contribution adds optional ACP
+  `context_compaction` v1 metadata after a committed `SummarizationEvent`. See the
+  [wire contract](../integration/acp-sdk-0.12.md#context-compaction-display-notice-2026-11-27).
+  It supplements existing compression and Session Log contracts; it does not
+  change compaction thresholds, summary policy, or historical model messages.
+- **Ownership and compatibility:** ACP uses its bounded best-effort progress
+  sender. The payload contains no summary, private context, or provider error.
+  Hosts ignore unknown versions, deduplicate by event-derived `toolCallId`, and
+  retain received notices in display snapshots, outside answer/model text.
+  Undelivered notices are not reconstructed on history replay. No migration or
+  new configuration is required. Older runtimes simply omit the notice; older
+  desktop hosts drop the unknown `toolCallId` update without rendering it.
+- **Memory scheduling:** No kernel change. Current `main` already creates the
+  pre-compaction memory extraction task on the owning session loop after the
+  persisted commit returns; the added e2e test locks that behavior in.
+- **Proof:** `tests/test_acp.py` covers notification shape, session ownership,
+  success/fallback/failure, and stalled-consumer isolation;
+  `tests/test_context_compaction_e2e.py` is a regression test for persisted
+  compaction and owner-loop memory scheduling. A rebuilt/installed darwin-arm64
+  development runtime passed real ACP probes and paired Lab display/switch-back
+  acceptance using a local mock provider. Real-model summary quality and other platforms are not covered;
+  source tests and packaged runtime status must still be reported per PR Head.
+- **Rollback and dependency:** Revert the optional ACP translation and paired
+  `raccoon-lab` display support together if needed; saved messages stay readable.
+  The paired host must ship a runtime containing the notification to display it;
+  no release is implied.
+
 ## Five-level session reasoning and unified hosted thinking (PR #257)
 
 - **Scope and source:** [PR #257](https://github.com/Raccoon-Office/Box-Agent/pull/257)
@@ -377,6 +406,7 @@ decision, read those entries together.
 | Tool invocation | `box_agent/tools/base.py`, `schema_validation.py`, `Tool.invoke` | Tool schemas and arguments fail closed before `execute()` is called. | Current at this baseline. | [PR #33](#2026-08-17--validate-tool-arguments-before-execution-pr-33) |
 | Image inspection | `inspect_images`, `vision_review`, canonical image blocks, structured image attachments, transient follow-up | Image inspection is instruction-driven and read-only; `proxy` returns utility-model text, while `native` uses a bounded one-request main-model overlay that never enters durable history. | PR #62 replaced `vision_review`; PR #76 is being rebased as an additive native strategy. | [PR #62](#2026-08-21--instruction-driven-image-inspection-pr-62), [PR #76](#2026-08-23--request-only-native-image-inspection-pr-76) |
 | Shell safety inspection | `shell_inspection.py`, `safety.py`, `bash_tool.py`, dangerous commands, DWS | Policy checks inspect shell structure and executable invocations while treating embedded-language bodies as data; bounded parsing fails closed for policy-relevant ambiguity. | Pending PR #63; must be reviewed as a security-boundary change. | [PR #63](#2026-08-21--structure-aware-shell-policy-inspection-pr-63) |
+| Compaction display notice | `SummarizationEvent`, ACP `context_compaction` | Committed compaction emits bounded optional metadata; hosts own display snapshots. | Adds to existing compression contracts; no replay backfill or data migration. | [2026-11-27 notice](#2026-11-27--context-compaction-display-notice) |
 | Context compression | `box_agent/core.py`, tool-call arguments, history summarization | Normal unsummarized history retains exact tool-call arguments; whole-history summarization remains a separate boundary. | Current at this baseline. | [PR #35](#2026-08-17--preserve-tool-call-arguments-in-normal-history-pr-35) |
 | Turn continuation judge | `turn_continuation.py`, `AgentLoopKernel`, `turn_continuation_judge`, `request_user_decision` | The auxiliary judge evaluates an isolated copy of the already-appended transcript, with only read-only runtime facts; it cannot mutate main history. Provider/client timeout remains authoritative, while caller cancellation or new user input interrupts the auxiliary request. | Hardens the existing model-guided continuation behavior without a public protocol or Session Log migration. | [PR #161](#2026-09-21--continuation-judge-transcript-isolation-and-timeout-authority-pr-161) |
 | Agent kernel and plugin composition | `box_agent/kernel/`, `box_agent/plugins/`, `composition.py`, `KernelServices`, `AgentLoopKernel`, `PluginHost` | ACP/CLI public entry points keep their signatures while the shared loop consumes an immutable Port bundle resolved by an explicit startup-static plugin host. | Pending implementation; reorganizes ownership without adding discovery, hot reload, or a protocol migration. | [2026-09-03 kernel/plugin boundary](#2026-09-03--stable-kernel-and-static-plugin-composition) |
