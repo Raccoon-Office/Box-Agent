@@ -176,7 +176,7 @@ async def test_fresh_budget_commits_before_request_and_acp_replays_each_original
 @pytest.mark.parametrize(("stop", "reason"), [
     ("limit", StopReason.MAX_STEPS), ("cancel", StopReason.CANCELLED), ("tool", StopReason.WAITING_FOR_USER),
 ])
-async def test_reopened_turn_budgets_unsent_results_and_preserves_sent_prefix(tmp_path, stop, reason):
+async def test_reopened_turn_budgets_results_and_preserves_sent_prefix(tmp_path, stop, reason):
     first_batch = [report("old", "X", 6_000)]
     second_batch = [report("pending", "Y", 6_000)]
     tool = ReportTool()
@@ -195,9 +195,13 @@ async def test_reopened_turn_budgets_unsent_results_and_preserves_sent_prefix(tm
                 if stop == "cancel" and event.tool_call_id == "pending":
                     cancelled = True
         assert_done(events, reason)
-        assert len(before.requests) == 2
+        assert len(before.requests) == (3 if stop == "limit" else 2)
+        assert tool_bodies(before.requests[1], "pending") == []
         assert tool_bodies(before.requests[-1], "old")[0].startswith("<persisted-output>")
-        assert history[-1].content == "Y" * 6_000
+        if stop == "limit":
+            assert tool_bodies(before.requests[-1], "pending")[0].startswith("<persisted-output>")
+        else:
+            assert history[-1].content == "Y" * 6_000
         log.flush()
 
     with closing(SessionLog.open(tmp_path, session_id="reports", cwd=tmp_path)) as reopened:
