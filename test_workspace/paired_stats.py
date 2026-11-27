@@ -268,12 +268,26 @@ def gate(prereg: dict, b0: list[dict], p: list[dict], c: list[dict], calibration
             blockers.append(f"critical case {case} failed {failed} time(s)")
         elif not versus_p.get(case, {}).get("after", {}).get("verified"):
             blockers.append(f"critical case {case} has no verified attempt")
+    # Coverage: every case the comparison expects must have verified evidence
+    # in the candidate. A missing or unverifiable case can hide a regression,
+    # so it never counts as passing.
+    expected = {*classes, *prereg.get("critical_cases", []), *prereg.get("beneficiary_cases", []),
+                *(case for run in [*b0, *p] for case in run)}
+    for case in sorted(expected - set(prereg.get("critical_cases", []))):
+        if not versus_p.get(case, {}).get("after", {}).get("verified"):
+            investigate.append(f"case {case} has no verified candidate attempt (missing or unverified)")
     for label, rows in (("B0", versus_b0), ("P", versus_p)):
         stable = [case for case, kind in classes.items() if kind == "stable_pass"]
         for case in stable:
             if rows.get(case, {}).get("after", {}).get("failed"):
                 investigate.append(f"stable case {case} failed vs {label}: re-run paired under the same conditions")
-        flaky = [case for case, kind in classes.items() if kind == "flaky"]
+        uncalibrated = [case for case in rows if case not in classes]
+        for case in uncalibrated:
+            # Without A/A evidence a new failure cannot be dismissed as noise.
+            if rows[case]["after"]["failed"] and not rows[case]["before"]["failed"]:
+                investigate.append(f"uncalibrated case {case} failed vs {label} without baseline failures: "
+                                   "calibrate it or re-run paired")
+        flaky = [case for case, kind in classes.items() if kind == "flaky"] + uncalibrated
         if flaky:
             # Small samples cannot prove non-inferiority; act on evidence of a drop.
             interval = newcombe(_pooled(rows, flaky, "before"), _pooled(rows, flaky, "after"))

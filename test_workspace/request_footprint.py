@@ -210,13 +210,42 @@ def footprint(payload: dict) -> dict:
     }
 
 
+@contextlib.contextmanager
+def pinned_runtimes():
+    """Render Skill Runtime Context as on a machine without managed runtimes.
+
+    Discovery reads the sandbox venv and the managed Node manifest, so the
+    system prompt (and this snapshot) would otherwise differ between machines.
+    The section's real text is kept; only the discovered state is fixed.
+    """
+    from unittest import mock
+
+    from box_agent.tools import runtime
+
+    def python(sandbox_mode, *_args, **_kwargs):
+        if sandbox_mode:
+            return runtime.SkillRuntime("python", "missing", "box_agent", notes=(
+                "Sandbox venv Python executable does not exist yet; use execute_code for Python code execution.",))
+        return runtime.SkillRuntime("python", "missing", "missing",
+                                    notes=("No Python runtime is configured for shell skills.",))
+
+    def node(*_args, **_kwargs):
+        return runtime.SkillRuntime("node", "missing", "missing",
+                                    notes=("No Box-Agent managed Node runtime manifest was found.",))
+
+    with mock.patch.object(runtime, "_build_python_runtime", python), \
+            mock.patch.object(runtime, "_build_node_runtime", node):
+        yield
+
+
 async def measure(scenarios=SCENARIOS) -> dict:
     results = {}
-    for scenario in scenarios:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory) / "workspace"
-            workspace.mkdir()
-            results[scenario.name] = footprint(await capture(scenario, workspace))
+    with pinned_runtimes():
+        for scenario in scenarios:
+            with tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory) / "workspace"
+                workspace.mkdir()
+                results[scenario.name] = footprint(await capture(scenario, workspace))
     return {"schema_version": SCHEMA_VERSION, "unit": "utf8_bytes_compact_json", "scenarios": results}
 
 

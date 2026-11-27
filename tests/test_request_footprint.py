@@ -95,3 +95,24 @@ def test_compare_reports_byte_deltas_and_changed_tools_only():
     assert result["chat"]["tools_bytes"]["delta"] == -5
     assert result["chat"]["tools"] == {"bash": -10, "call_tool": 5}
     assert result["gone"] == {"status": "missing_in_after"}
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="bash tool describes PowerShell on Windows")
+def test_footprint_does_not_depend_on_installed_managed_runtimes(monkeypatch):
+    # A machine with managed Python/Node ready renders a different Skill
+    # Runtime Context; the sampler must pin it so the snapshot is portable.
+    import asyncio
+
+    from box_agent.tools import runtime
+
+    def ready(kind):
+        return lambda *_args, **_kwargs: runtime.SkillRuntime(
+            kind, "available", "box_agent", executable_path=f"/opt/managed/{kind}",
+            env_vars={"BOX_AGENT_NODE": "/opt/managed/node"} if kind == "node" else {})
+
+    monkeypatch.setattr(runtime, "_build_python_runtime", ready("python"))
+    monkeypatch.setattr(runtime, "_build_node_runtime", ready("node"))
+    scenario = fp.SCENARIOS[0]
+    report = asyncio.run(fp.measure((scenario,)))
+    expected = json.loads(SNAPSHOT.read_text(encoding="utf-8"))["scenarios"][scenario.name]
+    assert report["scenarios"][scenario.name] == expected

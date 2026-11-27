@@ -115,6 +115,10 @@
      "pattern": "12\\.3\\.4|第\\s*20\\s*(条|行|笔)|id\\s*[=为:：]?\\s*20|最后一(行|条)|末行"
     },
     {
+     "kind": "absent_glob",
+     "pattern": "**/total.json"
+    },
+    {
      "kind": "no_unknown_tool"
     }
    ],

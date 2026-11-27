@@ -157,3 +157,29 @@ def test_gate_holds_when_flaky_cases_drop_beyond_the_margin():
     result = ps.gate(prereg, b0, p, c, CALIBRATION)
     assert result["decision"] == "defer"
     assert any("dropped" in note for note in result["notes"])
+
+
+def test_gate_does_not_accept_when_a_non_critical_case_is_missing_or_unverified():
+    prereg = {"primary_metric": "first_prompt_tokens", "beneficiary_cases": ["chat"],
+              "min_effect": 50, "max_pairs": 3, "critical_cases": ["safety"]}
+    for candidate_noisy in (None, "unverified"):
+        b0, p, c = sides()
+        for index in range(3):
+            if candidate_noisy is None:
+                del c[index]["noisy"]
+            else:
+                c[index]["noisy"] = [attempt("unverified")]
+        result = ps.gate(prereg, b0, p, c, CALIBRATION)
+        assert result["decision"] == "investigate"
+        assert any("noisy has no verified candidate attempt" in item for item in result["investigate"])
+
+
+def test_gate_does_not_accept_an_uncalibrated_case_that_starts_failing():
+    b0, p, c = sides()
+    for side, quality in ((b0, "passed"), (p, "passed"), (c, "failed")):
+        side[0]["fresh"] = [attempt(quality)]  # 1/1 -> 0/1, never calibrated
+    prereg = {"primary_metric": "first_prompt_tokens", "beneficiary_cases": ["chat"],
+              "min_effect": 50, "max_pairs": 3}
+    result = ps.gate(prereg, b0, p, c, CALIBRATION)
+    assert result["decision"] == "investigate"
+    assert any("uncalibrated case fresh failed" in item for item in result["investigate"])
