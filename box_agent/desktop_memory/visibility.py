@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from ..context_input import DefaultContextEngine, ModelInputGuard, PreparedContext
 from ..kernel.context_engine import _budget_content_json, _budget_image_tokens, request_input_tokens
+from ..memory import MemoryHistory, external_memory_block, is_memory_history_message, project_memory_system
 from ..schema import Message
 from .transport import MemoryProxyError
 
@@ -152,9 +153,10 @@ class DesktopInputGuard(CoreVisibilityGuard):
     """Bound memory input and request recovery only after a failed core read."""
 
     def __init__(self, notify: VisibilityCallback, content_builder: Callable[[int], str], *,
-                 can_read: Callable[[], bool] = lambda: True) -> None:
+                 history: MemoryHistory | None = None, can_read: Callable[[], bool] = lambda: True) -> None:
         super().__init__(notify)
         self._content_builder = content_builder
+        self._memory_history = history
         self._can_read = can_read
         self._read_recovery_pending = False
         self._read_recovery_attempted = False
@@ -189,6 +191,17 @@ class DesktopInputGuard(CoreVisibilityGuard):
         return max(super()._input_tokens(messages, definitions), byte_bound)
 
     def prepare_context(self, projection: PreparedContext) -> PreparedContext:
+        if self._memory_history is not None:
+            # 投影在工作线程，宿主可能已在事件循环撤销这次授权。
+            def visible(message: Message) -> bool:
+                return not is_memory_history_message(message) or self._memory_history.accepts(message)
+
+            projection = replace(projection, messages=list(filter(visible, projection.messages)),
+                                 context_messages=list(filter(visible, projection.context_messages)),
+                                 history_updates=tuple(filter(visible, projection.history_updates)))
+            if self._memory_history.system_day is not None and not self._memory_history.system_block:
+                projection = replace(projection, messages=self._empty_system_memory(projection.messages),
+                                     context_messages=self._empty_system_memory(projection.context_messages))
         if self._read_recovery_pending:
             # Consume before the shared loop compacts/reprojects. A byte-bound
             # failure must not become a permanent ban on model-valid input.
@@ -202,46 +215,58 @@ class DesktopInputGuard(CoreVisibilityGuard):
                 )
         return super().prepare_context(projection)
 
-    def project_messages(self, messages, *, tools, token_limit, tail=(), reserve_tokens=0):
-        from ..memory import _MEMORY_START, _MEMORY_END, place_memory_block
+    def _empty_system_memory(self, messages: list[Message]) -> list[Message]:
+        context = self._context
+        base = context.without_system_memory(messages) if context is not None else messages
+        return project_memory_system(base, "", prompt_type=self._memory_history.prompt_type)
 
-        index = next((i for i, message in enumerate(messages) if message.role == "system"
-                      and isinstance(message.content, str) and _MEMORY_START in message.content
-                      and _MEMORY_END in message.content), None)
-        if index is None:
+    def project_messages(self, messages, *, tools, token_limit, tail=(), reserve_tokens=0, memory_update=None):
+        history = self._memory_history
+        if history is None:
             return messages
-
-        def projected(size):
-            content = self._content_builder(size)
-            block = (_MEMORY_START + "\n以下是历史记忆数据；当前用户要求优先，实时事实需要重新验证。\n"
-                     + content + "\n" + _MEMORY_END) if content else ""
-            result = list(messages)
-            result[index] = messages[index].model_copy(update={
-                "content": place_memory_block(messages[index].content, block, reserve=True),
-            })
-            return result
 
         def fits(candidate):
             return self._input_tokens([*candidate, *tail], tools.definitions) + reserve_tokens + 1024 <= token_limit
 
-        # A revoked scope must clear its old preload even when the request fits.
-        if not self._content_builder(15400):
-            return projected(0)
+        if history.system_day is not None:
+            if history.system_block and not fits(messages):
+                _log.info("memory operation=preload reason=system_snapshot_over_budget")
+                return self._empty_system_memory(messages)
+            return messages
+
+        latest = next((message for message in reversed(messages) if history.accepts(message)), None)
+        if latest is None:
+            return messages
         if fits(messages):
             return messages
-        best = projected(0)
+        # 预算不足时，只能临时省略已发快照。新快照裁剪后才进入持久历史。
+        base = [message for message in messages if not is_memory_history_message(message) or message is memory_update]
+        index = next((i for i, message in enumerate(base) if message is memory_update), None)
+        best = [message for message in base if message is not memory_update]
         if not fits(best):
             _log.warning("memory operation=preload reason=history_over_budget budget=utf8_upper_bound estimated=%d limit=%d reserve=%d",
                          self._input_tokens([*best, *tail], tools.definitions), token_limit, reserve_tokens + 1024)
-            return best  # Other history still requires normal shared compaction.
-        low, high = 0, 15400
-        while low <= high:
-            middle = (low + high) // 2
-            candidate = projected(middle)
-            if fits(candidate):
-                best, low = candidate, middle + 1
-            else:
-                high = middle - 1
+            return best
+        if index is None:
+            latest_only = [message for message in messages if not is_memory_history_message(message) or message is latest]
+            if fits(latest_only):
+                best = latest_only
+        else:
+            if fits(base):
+                best = base
+            elif memory_update.content != history.empty:
+                low, high = 1, 15400
+                while low <= high:
+                    middle = (low + high) // 2
+                    block = external_memory_block(self._content_builder(middle), middle)
+                    candidate = ([*base[:index], history.message(block, name=memory_update.name), *base[index + 1:]]
+                                 if block else None)
+                    if candidate is None or fits(candidate):
+                        low = middle + 1
+                        if candidate is not None:
+                            best = candidate
+                    else:
+                        high = middle - 1
         _log.info("memory operation=preload reason=budget_reduced budget=utf8_upper_bound estimated=%d limit=%d reserve=%d",
                   self._input_tokens([*best, *tail], tools.definitions), token_limit, reserve_tokens + 1024)
         return best

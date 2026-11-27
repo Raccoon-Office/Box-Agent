@@ -63,6 +63,8 @@ def test_resource_copy_preserves_skill_assets_without_local_dependencies_or_cred
     assert not any(path.endswith((".pyc", ".pyo", ".DS_Store")) for path in copied)
     assert set(p.name for p in (runtime / "config").iterdir()) == build_runtime._RUNTIME_CONFIG_FILES
     assert copied["config/config-example.yaml"] == b"bundled config-example.yaml"
+    assert copied["config/memory_block_default.md"] == b"bundled memory_block_default.md"
+    assert copied["config/memory_block_memsense.md"] == b"bundled memory_block_memsense.md"
     assert (project / "box_agent/skills/example/node_modules/dependency/private.txt").is_file()
 
 

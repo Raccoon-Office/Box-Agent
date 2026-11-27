@@ -14,7 +14,7 @@ from box_agent.hooks import BaseHook
 from box_agent.kernel.context_engine import (
     _fallback_context_estimate, request_input_tokens, skill_reference_budget_chars,
 )
-from box_agent.memory import place_memory_block
+from box_agent.memory import MemoryHistory
 from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall, TokenUsage
 from box_agent.session_log import SessionLog
@@ -88,17 +88,17 @@ def test_host_and_paged_tool_share_the_safe_input_budget(runtime):
 @pytest.mark.parametrize("late_followup", [False, True])
 async def test_skill_read_uses_guarded_history_and_reserves_late_followup(runtime, late_followup):
     preload = "P" * 15400
-    guard = DesktopInputGuard(lambda *_: None, lambda size: preload[:size])
+    memory = MemoryHistory("desktop", ("authorized",))
+    guard = DesktopInputGuard(lambda *_: None, lambda size: preload[:size], history=memory)
     engine = DefaultContextEngine()
     engine.configure_run(skill_engine=runtime)
-    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard, memory_history=memory))
     tool = GetSkillTool(runtime.loader)
     prepared_tools = prepare_tools([tool])
     history = [
-        Message(role="system", content=place_memory_block(
-            "BASE", "--- MEMORY START ---\n" + preload + "\n--- MEMORY END ---", reserve=True,
-        )),
+        Message(role="system", content="BASE"),
         Message(role="user", content="X" * 93500),
+        memory.message(preload),
     ]
     request = engine.prepare_request(history, prepared_tools=prepared_tools, token_limit=90000)
 
@@ -131,7 +131,7 @@ async def test_skill_read_uses_guarded_history_and_reserves_late_followup(runtim
         assert next_request.blocked_reason is None
         assert request_input_tokens(next_request.messages, prepared_tools.definitions) <= 90000
     # Optional input projection must not rewrite durable history.
-    assert preload in history[0].content
+    assert preload in history[2].content
 
 
 def test_near_limit_selected_skill_pages_without_blocking_final_request(runtime):

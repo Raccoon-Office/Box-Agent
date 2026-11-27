@@ -3,12 +3,12 @@
  "unit": "utf8_bytes_compact_json",
  "scenarios": {
   "acp_general_chat": {
-   "system_bytes": 32343,
-   "system_sha256": "6358cdc0e84c048e",
+   "system_bytes": 32489,
+   "system_sha256": "417410e3867a5a2d",
    "tools_bytes": 45537,
    "tool_count": 21,
    "messages_bytes": 218,
-   "request_bytes": 78397,
+   "request_bytes": 78546,
    "tools": {
     "bash": {
      "bytes": 6533,
@@ -139,12 +139,12 @@
    }
   },
   "acp_code_agent_chat": {
-   "system_bytes": 34702,
-   "system_sha256": "664f3d3c86f890e6",
+   "system_bytes": 34848,
+   "system_sha256": "0ee238853ee668b7",
    "tools_bytes": 47462,
    "tool_count": 23,
    "messages_bytes": 218,
-   "request_bytes": 82708,
+   "request_bytes": 82857,
    "tools": {
     "bash": {
      "bytes": 6533,
@@ -287,12 +287,12 @@
    }
   },
   "acp_data_analysis_chat": {
-   "system_bytes": 38853,
-   "system_sha256": "f8fd167f09f6847a",
+   "system_bytes": 38999,
+   "system_sha256": "dc3cb5b4e061b12e",
    "tools_bytes": 45537,
    "tool_count": 21,
    "messages_bytes": 218,
-   "request_bytes": 85451,
+   "request_bytes": 85600,
    "tools": {
     "bash": {
      "bytes": 6533,
@@ -423,12 +423,12 @@
    }
   },
   "acp_general_csv": {
-   "system_bytes": 32343,
-   "system_sha256": "6358cdc0e84c048e",
+   "system_bytes": 32489,
+   "system_sha256": "417410e3867a5a2d",
    "tools_bytes": 45537,
    "tool_count": 21,
    "messages_bytes": 7348,
-   "request_bytes": 85527,
+   "request_bytes": 85676,
    "tools": {
     "bash": {
      "bytes": 6533,

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from datetime import date, timedelta
 from pathlib import Path
 import secrets
 from types import SimpleNamespace
@@ -18,13 +19,17 @@ from box_agent.config import AgentConfig, DesktopMemoryConfig
 from box_agent.context_input import DefaultContextEngine
 from box_agent.desktop_memory.backend import DesktopMemoryBackend, model_json
 from box_agent.desktop_memory.transport import MemoryProxyError
-from box_agent.memory import _MemoryTurn, create_memory_backend, memory_user_turn, uses_local_memory
-from box_agent.schema import Message, StreamEvent, FunctionCall, ToolCall
+from box_agent.memory import (
+    _MemoryTurn, create_memory_backend, external_memory_block, is_memory_history_message, memory_user_turn, uses_local_memory,
+)
+from box_agent.schema import Message, StreamEvent, FunctionCall, ToolCall, TokenUsage
 from box_agent.session_context import HostBindings, SessionOptions
+from box_agent.session_log import SessionLog, run_session_write
 from box_agent.tools.engine.preparation import prepare_tools
 from box_agent.tools.memory_tool import create_memory_tools
 from tests.test_agent_session import session_config
 from tests.test_desktop_memory_evidence import CREDENTIAL_SAMPLES
+from tests.test_memory_backends import set_memory_date
 from tests.test_session_plugins import RecordingLLM
 from tests.acp_helpers import acp_params
 
@@ -374,6 +379,61 @@ async def test_read_capacity_failure_and_model_compaction_revoke_host_grant(host
         await manager.aclose()
 
 
+@pytest.mark.parametrize("keep_full_read", [True, False], ids=["full-read", "summary-only"])
+async def test_desktop_read_authorization_survives_request_preparation_with_session_log(host, tmp_path, keep_full_read):
+    manager = backend(host)
+    log = SessionLog.create(tmp_path / "sessions", session_id="session-1", cwd=tmp_path)
+    engine = DefaultContextEngine()
+    engine.configure_run(session_store=log)
+    engine.bind_memory(manager)
+    arguments = dict(prepared_tools=prepare_tools(create_memory_tools(manager)), token_limit=20000)
+    history = [Message(role="user", content="Update my long-term memory")]
+    path = "memory.md"
+    original = host.files[path]
+
+    try:
+        await manager.load_context(query=history[0].content, session_id="session-1", turn_id="turn-1")
+        await engine.aprepare_request(history, **arguments)
+        read = await manager.read_core_memory(path)
+        reply = Message(role="tool", name="memory_read", tool_call_id="read-1", content=model_json(read))
+        request = await engine.aprepare_request([*history, reply], **arguments)
+        await run_session_write(log, request.on_committed)
+        request.on_response()
+        await manager.model_input_guard.require(path)
+        assert read["read_id"] in host.active
+
+        # 模拟后续请求保留完整结果，或压缩后只保留摘要。
+        if keep_full_read:
+            next_request = await engine.aprepare_request([*history, reply], **arguments)
+        else:
+            summary = Message(role="assistant", content="The prior step read the memory file.")
+            next_request = await engine.apreview_request([*history, summary], **arguments)
+        assert next_request.blocked_reason is None
+        await run_session_write(log, next_request.on_committed)
+        next_request.on_response()
+
+        if keep_full_read:
+            await manager.edit_core_memory(path, old_text="", new_text="<mem>新记忆</mem>")
+            assert "新记忆" in host.files[path]
+        else:
+            with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+                await manager.edit_core_memory(path, old_text="", new_text="<mem>新记忆</mem>")
+            assert host.files[path] == original
+    finally:
+        log.close()
+        await manager.aclose()
+
+    operations = [operation for operation, _ in host.calls]
+    commit = operations.index("visibility/commit")
+    revoke = operations.index("visibility/revoke", commit + 1)
+    assert operations.count("core/read") == 1
+    if keep_full_read:
+        assert operations.index("visibility/commit", revoke + 1) < operations.index("core/mutate")
+    else:
+        assert "visibility/commit" not in operations[revoke + 1:] and "core/mutate" not in operations
+    assert not host.active
+
+
 async def test_repeated_core_reads_keep_only_current_path_records(host):
     manager = backend(host)
     try:
@@ -469,9 +529,16 @@ async def test_real_session_keeps_single_frozen_block_and_same_batch_mutation_is
             session.agent.add_user_message("read then write")
             _ = [event async for event in session.run_events(options=session.build_run_options(logger=None))]
         assert len(llm.requests) == 2
-        text = llm.requests[-1]["messages"][0].content
-        assert text.count("--- MEMORY START ---") == 1
-        assert "profile-unique-data" in text and "experience-unique-data" in text
+        first, last = [request["messages"][0] for request in llm.requests]
+        assert first == last and last.role == "system"
+        assert not any(is_memory_history_message(message) for message in llm.requests[-1]["messages"])
+        text = last.content
+        assert text.count("## Memory Rules") == 1 and "--- MEMORY START ---" not in text
+        assert "先加载 `memory-guide`" in text.partition("## Memory Content")[0]
+        assert "profile-unique-data" in text and "automatic-unique-data" in text and "dates-unique-data" in text
+        assert "user_items-unique-data" in text and "{USER_ITEMS}" not in text
+        assert text.index("### User Profile") < text.index("### User-maintained Memory") < text.index("### 最近几天的记忆摘要")
+        assert "experience-unique-data" not in text
         failed = next(message for message in llm.requests[-1]["messages"] if message.role == "tool" and message.name == "memory_edit")
         assert "CORE_READ_REQUIRED" in str(failed.content)
         assert not any(operation == "core/mutate" for operation, _ in host.calls)
@@ -505,15 +572,14 @@ async def test_automatic_off_online_cloud_session_can_wake_pending_reconciliatio
 
 async def test_small_model_budget_reduces_preload_without_changing_user_rules_or_full_core(host):
     from box_agent.kernel.context_engine import request_input_tokens
-    from box_agent.memory import place_memory_block
 
     manager = backend(host)
     try:
         for key in host.sections:
             host.sections[key]["content"] = (key + " ") * 1500
         content = await manager.load_context(query="query", session_id="session-1", turn_id="turn-1")
-        original = "KEEP-USER-RULES\n" + place_memory_block(
-            "", "--- MEMORY START ---\n" + content + "\n--- MEMORY END ---", reserve=True)
+        manager.memory_history.stage(external_memory_block(content, 15400))
+        original = "KEEP-USER-RULES"
         history = [Message(role="system", content=original), Message(role="user", content="current task")]
         engine = DefaultContextEngine()
         engine.bind_memory(manager)
@@ -525,14 +591,263 @@ async def test_small_model_budget_reduces_preload_without_changing_user_rules_or
         assert "KEEP-USER-RULES" in request.messages[0].content
         assert request_input_tokens(request.messages, tools.definitions) + 1024 <= 5000
         assert manager.model_input_guard._input_tokens(request.messages, tools.definitions) + 1024 <= 5000
-        assert len(request.messages[0].content) < len(original)
-        assert history[0].content == original
-        assert "experience experience" not in request.messages[0].content
+        snapshot, = request.history_updates
+        assert snapshot in request.messages and len(snapshot.content) < len(content)
+        assert request.messages[0].content == history[0].content == original
+        assert "experience experience" not in snapshot.content
+        # 预算恢复后，已发送的裁剪版本按原始召回内容去重。
+        repeated = engine.prepare_request([*history, snapshot], prepared_tools=tools, token_limit=40000)
+        assert not repeated.history_updates
+        assert [m for m in repeated.messages if is_memory_history_message(m)] == [snapshot]
         host.files["memory.md"] = "<mem>" + "core data " * 6000 + "</mem>"
         with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
             await manager.read_core_memory("memory.md")
         assert not any(operation == "core/mutate" for operation, _ in host.calls)
     finally:
+        await manager.aclose()
+
+
+async def test_desktop_system_memory_is_omitted_under_budget_pressure_and_reused_when_room_returns(host):
+    manager = backend(host)
+    try:
+        host.sections["profile"]["content"] = "用户偏好" * 850
+        content = await manager.load_context(
+            query="question", session_id="session-1", turn_id="turn-1", for_system_prompt=True,
+        )
+        snapshot = manager.memory_history
+        snapshot.begin_system_day(None)
+        snapshot.finish_system_refresh(content)
+        engine = DefaultContextEngine()
+        engine.bind_memory(manager)
+        messages = [Message(role="system", content="用户规则"), Message(role="user", content="当前问题")]
+        tools = prepare_tools([])
+        small = engine.prepare_request(messages, prepared_tools=tools, token_limit=4_000)
+        roomy = engine.prepare_request(messages, prepared_tools=tools, token_limit=40_000)
+        assert not small.blocked_reason and "用户规则" in small.messages[0].content
+        assert "## Memory Rules" in small.messages[0].content and "用户偏好" not in small.messages[0].content
+        assert roomy.messages[0].role == "system" and snapshot.system_block in roomy.messages[0].content
+        assert "用户偏好" in snapshot.system_block
+    finally:
+        await manager.aclose()
+
+
+async def test_desktop_cloud_preloads_only_nonempty_system_sections(host):
+    manager = backend(host)
+    try:
+        host.sections["profile"]["content"] = "  \n  "
+        host.sections["experience"]["status"] = "error"
+        content = await manager.load_context(
+            query="question", session_id="session-1", turn_id="turn-1", for_system_prompt=True,
+        )
+        assert manager.memory_history.prompt_type == "memsense"
+        assert "### Long-term Memory" in content and "automatic-unique-data" in content
+        assert "### 最近几天的记忆摘要" in content and "dates-unique-data" in content
+        assert "### User Profile" not in content
+        assert "### User-maintained Memory" in content and "user_items-unique-data" in content
+        assert "experience-unique-data" not in content
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.parametrize("user_items", [
+    pytest.param(None, id="absent"),
+    pytest.param({"content": ""}, id="empty"),
+    pytest.param({"content": "  \n  ", "revision": "v1"}, id="whitespace"),
+    pytest.param({"content": "不可用的正文", "status": "missing"}, id="missing"),
+    pytest.param({"content": "", "status": "error"}, id="error"),
+    pytest.param({"content": "过期的正文", "status": "stale"}, id="stale"),
+])
+async def test_desktop_cloud_omits_the_entire_unavailable_user_items_section(host, user_items):
+    manager = backend(host)
+    try:
+        if user_items is None:
+            host.sections.pop("user_items")
+        else:
+            host.sections["user_items"] = user_items
+        content = await manager.load_context(
+            query="question", session_id="session-1", turn_id="turn-1", for_system_prompt=True,
+        )
+        assert manager.memory_history.prompt_type == "memsense"
+        assert manager.memory_history.needs_system_refresh()
+        assert "### Long-term Memory" in content and "automatic-unique-data" in content
+        assert "### User Profile" in content and "profile-unique-data" in content
+        assert "### 最近几天的记忆摘要" in content and "dates-unique-data" in content
+        for absent in ("### User-maintained Memory", "{USER_ITEMS}", "用户主动维护", "不可用的正文", "过期的正文"):
+            assert absent not in content
+    finally:
+        await manager.aclose()
+
+
+async def test_desktop_revocation_removes_memory_from_an_already_prepared_system_message(host):
+    manager = backend(host)
+    try:
+        content = await manager.load_context(
+            query="question", session_id="session-1", turn_id="turn-1", for_system_prompt=True,
+        )
+        snapshot = manager.memory_history
+        snapshot.begin_system_day(None)
+        snapshot.finish_system_refresh(content)
+        engine = DefaultContextEngine()
+        engine.bind_memory(manager)
+        messages = [
+            Message(role="system", content="位于记忆前的规则\n{MEMORY_BLOCK}\n位于记忆后的规则"),
+            Message(role="user", content="当前问题"),
+        ]
+        prepared = engine.prepare_request(messages, prepared_tools=prepare_tools([]), token_limit=40_000)
+        assert "profile-unique-data" in prepared.messages[0].content
+        assert "user_items-unique-data" in prepared.messages[0].content
+        assert "--- MEMORY START ---" not in prepared.messages[0].content
+
+        manager.end_turn()
+        revoked = manager.model_input_guard.prepare_context(prepared)
+        for system in (revoked.messages[0], revoked.context_messages[0]):
+            assert system.content.count("## Memory Rules") == 1
+            assert "## Memory Content\n位于记忆后的规则" in system.content
+            assert system.content.startswith("位于记忆前的规则")
+            assert "profile-unique-data" not in system.content
+            assert "### User Profile" not in system.content
+            assert "user_items-unique-data" not in system.content
+            assert "### User-maintained Memory" not in system.content
+    finally:
+        await manager.aclose()
+
+
+async def test_desktop_pins_system_memory_by_day_and_revalidates_access_every_turn(tmp_path, host, monkeypatch):
+    from box_agent.agent_service import AgentService
+    from box_agent.api import RunRequest
+
+    today = date(2026, 11, 26)
+    set_memory_date(monkeypatch, today)
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    manager = backend(host)
+    model = RecordingLLM()
+    log = SessionLog.create(tmp_path / "logs", session_id="session-1", cwd=tmp_path)
+    # 模拟升级前同一天已经保存的三分区快照。
+    old_scope = ("account-1", "personal", host.bootstrap["identity_epoch"], "subject-1", "cloud",
+                 host.generation, 0, True, "memsense-prompt-v1")
+    old_digest = hashlib.sha256(json.dumps(old_scope, sort_keys=True).encode()).hexdigest()
+    log.append("memory/system-snapshot", {
+        "day": today.isoformat(), "scope": "memsense_memory:desktop:" + old_digest, "block": "旧版三分区快照",
+    }, ignorable=True)
+    log.flush()
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=model, memory_manager=manager, tools=[], system_prompt="BASE\n{MEMORY_BLOCK}", session_log=log,
+    ), options=SessionOptions(workspace_dir=tmp_path, profile="acp"))
+
+    async def turn(number):
+        run_id = f"run-{number}"
+        handle = await AgentService().start(RunRequest(run_id, "session-1", f"问题 {number}"), session=session)
+        assert (await handle.result()).status.value == "completed"
+        messages = model.requests[-1]["messages"]
+        assert messages[0].role == "system"
+        assert messages[0].content.count("## Memory Rules") == 1
+        assert "## Memory Content" in messages[0].content
+        assert not any(is_memory_history_message(message) for message in messages)
+        return messages[0].content
+
+    async def timeout(operation, payload):
+        if operation == "context":
+            raise httpx.ReadTimeout("fixture: context timed out")
+
+    try:
+        first = await turn(1)
+        assert "profile-unique-data" in first
+        assert "user_items-unique-data" in first and "旧版三分区快照" not in first
+        assert await turn(2) == first
+        host.sections["profile"]["content"] = "更新后的桌面画像"
+        host.sections["user_items"]["content"] = "更新后的用户维护条目"
+        assert await turn(3) == first
+        assert sum(operation == "context" for operation, _ in host.calls) == 3
+        set_memory_date(monkeypatch, today + timedelta(days=1))
+        updated = await turn(4)
+        assert "更新后的桌面画像" in updated and "profile-unique-data" not in updated
+        assert "更新后的用户维护条目" in updated and "user_items-unique-data" not in updated
+        host.before = timeout
+        assert "--- MEMORY START ---" not in await turn(5)
+        host.before = None
+        host.sections["profile"]["status"] = "error"
+        assert "--- MEMORY START ---" not in await turn(6)
+        host.sections = {}
+        assert await turn(7) == updated
+        host.generation += 1
+        host.sections = {"profile": {"content": "不同授权的画像"}}
+        new_scope = await turn(8)
+        assert "不同授权的画像" in new_scope and "更新后的桌面画像" not in new_scope
+        host.source = "unavailable"
+        empty = await turn(9)
+        assert "## Memory Content" in empty and "### User Profile" not in empty
+        assert "当前用户的明确要求优先" not in empty
+        assert "不同授权的画像" not in empty
+        host.source = "cloud"
+        host.automatic = False
+        assert await turn(10) == empty
+        old_snapshot, *snapshots = [event["data"] for event in log.events_of_type("memory/system-snapshot")]
+        assert old_snapshot["scope"] != snapshots[0]["scope"]
+        assert len(snapshots) == 3
+        assert [row["day"] for row in snapshots] == ["2026-11-26", "2026-11-27", "2026-11-27"]
+        assert snapshots[0]["scope"] == snapshots[1]["scope"] != snapshots[2]["scope"]
+        assert all(row["block"] in prompt for row, prompt in zip(snapshots, [first, updated, new_scope]))
+        assert not any(is_memory_history_message(message) for message in log.replay().messages)
+    finally:
+        await session.aclose()
+        await manager.aclose()
+        log.close()
+
+
+async def test_desktop_compaction_reuses_system_memory_without_sending_it_to_summarizer(tmp_path, host):
+    from box_agent.agent_service import AgentService
+    from box_agent.api import RunRequest
+
+    class SummaryLLM(RecordingLLM):
+        summary = None
+
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
+        async def generate_stream(self, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                self.summary = kwargs["messages"]
+                yield StreamEvent(type="text", delta="<summary>继续做原任务。</summary>")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            async for event in super().generate_stream(**kwargs):
+                yield event
+
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    manager = backend(host)
+    model = SummaryLLM()
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=model, memory_manager=manager, tools=[], system_prompt="BASE",
+    ), options=SessionOptions(workspace_dir=tmp_path, profile="acp"))
+    session.agent.token_limit = 104_400
+
+    async def turn(number):
+        handle = await AgentService().start(RunRequest(f"run-{number}", "session-1", f"问题 {number}"), session=session)
+        assert (await handle.result()).status.value == "completed"
+        return model.requests[-1]["messages"][0]
+
+    try:
+        first = await turn(1)
+        host.sections["profile"]["content"] = "最新的桌面画像"
+        assert await turn(2) == first
+        assert first.role == "system" and "profile-unique-data" in first.content
+        # 压缩保留最新一轮，大段输出放在更早的一轮里，才会被摘要替换。
+        session.agent.messages.extend([
+            Message(role="user", content="先完成一次运行"),
+            Message(role="assistant", content="x" * 200_000),
+            Message(role="user", content="再确认一下结果"),
+            Message(role="assistant", content="已确认",
+                    usage=TokenUsage(prompt_tokens=104_400, completion_tokens=100, total_tokens=104_500)),
+        ])
+        assert await turn(3) == first
+        assert model.summary is not None and not any(is_memory_history_message(message) for message in model.summary)
+        assert all("profile-unique-data" not in str(message.content) for message in model.summary)
+        assert "--- MEMORY START ---" not in session.agent.messages[0].content
+        assert await turn(4) == first
+    finally:
+        await session.aclose()
         await manager.aclose()
 
 
@@ -1410,7 +1725,11 @@ async def test_desktop_acp_trace_correlates_recall_tools_model_rounds_and_qa(tmp
                     recorded["source"] = message.source
                 expected.append(recorded)
             assert request["data"]["messages"] == expected
-            assert "user_items-unique-data" in request["data"]["messages"][0]["content"]
+            system = request["data"]["messages"][0]
+            assert system["role"] == "system" and "profile-unique-data" in system["content"]
+            assert "user_items-unique-data" in system["content"] and "experience-unique-data" not in system["content"]
+            assert not any(m["role"] == "user" and "user_items-unique-data" in m["content"]
+                           for m in request["data"]["messages"] if isinstance(m.get("content"), str))
         assert requests[0]["llm_call_id"] != requests[1]["llm_call_id"]
         tool_request = next(row for row in records if row["event"] == "tool.request" and row["tool_call_id"] == "trace-call")
         tool_response = next(row for row in records if row["event"] == "tool.response" and row["tool_call_id"] == "trace-call")
@@ -1471,10 +1790,10 @@ async def test_revocation_removes_preload_from_next_model_request(tmp_path, host
             _ = [event async for event in session.run_events(options=session.build_run_options(logger=None))]
             assert session.memory_manager.current_scope is None
         assert len(model.requests) == 2
-        assert 'user_items-unique-data' in str(model.requests[0]['messages'])
+        assert 'profile-unique-data' in str(model.requests[0]['messages'])
         failure = next(m for m in model.requests[1]['messages'] if m.role == 'tool' and m.name == 'memory_search')
         assert code in str(failure.content)
-        assert 'user_items-unique-data' not in str(model.requests[1]['messages'])
+        assert 'profile-unique-data' not in str(model.requests[1]['messages'])
     finally:
         await session.aclose()
         await process.aclose()

@@ -15,7 +15,8 @@ POSIX 校验文件归属、权限与链接；Windows 使用句柄及私有 ACL �
 对应自动化测试包含可移植的 Win32 接口替身；条件用例跳过不等于 Windows 实机通过。
 
 `CoreVisibilityGuard` 通过 `ModelInputGuard` 接入最终模型输入投影。完整读取仅形成 pending；
-实际请求提交且模型成功响应后才激活资格，后续投影移除正文或消费写入会撤销。
+实际请求提交且模型成功响应后才激活资格。准备新请求时先撤销旧资格，新请求仍包含完整结果时可重新激活。
+Session Log 工作线程负责组装请求，授权通知由发起会话 I/O 的事件循环调度。实际写入会消费资格。
 `DesktopInputGuard` 先缩减可选预载，再检查完整读；模型 tokenizer 未精确适配时采用
 已有 usage 估算与完整 UTF-8 JSON 字节上界的较大值，并保留 1,024 token 余量，可能保守拒绝大全文。
 普通请求仍使用共享的模型 token 预算，不因启用在线记忆而套用 UTF-8 字节上界。
@@ -90,7 +91,7 @@ MCP 等第三方工具即使注册为同名 memory 工具，也不能借用本�
 
 ### MemSense 核心文件工具
 
-修改前必须在同一会话显式 `memory_read` 目标文件；自动 system prompt
+修改前必须在同一会话显式 `memory_read` 目标文件；自动记忆
 预载不解锁修改，读取另一文件也不能解锁目标文件。工具描述说明这一要求，
 执行时同样强制校验。read 的完整 JSON 结构进入模型的工具消息，例如：
 
@@ -133,22 +134,45 @@ exists=false 时只允许 write 创建，不允许 edit。
 任意搜索资源的 memory_read 调用需改为两个必填短路径。后端内部资源读取
 和日期自动预载保留，local/generic 的工具参数和行为不变。
 
-### System prompt 的记忆位置
+### 自动记忆的注入位置
 
-模板可以使用 `{MEMORY_CONTEXT}` 指定记忆位置；默认模板已预留该位置。
-旧模板没有占位符时自动追加，禁用记忆和 utility 会话移除占位符。
-local 保留原有内容和加载时机，generic 保留服务返回格式。
-外部后端每个真实用户轮次原位替换一个 `--- MEMORY START ---` 块；
-同轮工具调用和自动续跑不重复读取。读取失败清除旧数据、保留空块位置，
-不影响后续恢复或其他系统提示。
+六种内置后端把自动预载的记忆放入实际发给模型的 `system` 消息。
+内置 system prompt 用 `{MEMORY_BLOCK}` 指定位置，默认模板
+`box_agent/config/memory_block_default.md` 提供 `Memory Rules` 和 `Memory Content`。
+默认模板的 `{MEMORY_CONTENT}` 接收后端正文，例如 `local` 的核心记忆和搜索路由摘要。
+直连 `memsense` 和 `desktop` 的 `cloud` 来源共用 `box_agent/config/memory_block_memsense.md`。
+用户明确要求删除某条记忆时，该模板引导模型先加载 `memory-guide` 并用当前会话的工具处理，
+验证删除成功后才确认结果。
+`desktop` 的 `legacy_read_only` 和 `unavailable` 来源使用默认模板。
+自定义提示可使用同一占位符指定位置，旧模板继续支持原有的正文注入方式。
+新会话首轮或按 Box-Agent 运行环境的本地日期跨天后首轮加载。同一会话当天复用同一份正文，
+当天重新打开会话时从 Session Log 恢复。已有 Desktop cloud 会话首次使用包含用户维护记忆的模板时，
+会重新生成当天的快照。
+当正文为空时，当前模板保留记忆规则，`Memory Content` 留空。记忆关闭或 Desktop 授权不可用时，
+使用默认模板并留空正文。首次加载失败只记录日志，
+当天运行中的会话留空该范围的记忆，同日重新打开可再次尝试。
+历史压缩会排除自动记忆，新模型请求会继续使用当天的快照。旧版追加的自动记忆用户消息
+会从模型请求和摘要中滤掉。自动记忆快照也不会作为用户发言提交到记忆后端。
 
-MemSense 块包含 `User Profile`、`Long-term Memory`、`Recent Date Memory`
-三个非空分区及使用规则，全部位于 system prompt 中。日期按旧到新排列，
+`local` 预载 `MEMORY.md` 和 `memory_summary.md`，按记忆目录隔离。按问题自动匹配的项目经验
+仍是本轮请求上下文。`desktop` 每轮调用宿主的 `context` 接口确认当前授权和来源。
+授权不可用时本轮留空记忆正文，切换到新授权范围时加载该范围当天的快照。模型预算不足时
+也可能临时省略正文。
+
+`generic`、`mem0` 和 `memu` 配置 `recall` 后才加载，外部请求使用各自的 HTTP 映射。
+快照按后端、身份和召回连接配置隔离。默认模板的 `Memory Rules` 约束回复和产物中的记忆表述。
+
+云端模板依次渲染 `Long-term Memory`、`User Profile`、`User-maintained Memory` 和 `最近几天的记忆摘要`。
+各分区有正文才显示标题、Markdown 正文围栏和使用规则。
+直连 MemSense 从 `memory://memory.md`、`memory://user.md` 和日期文件读取，省略用户维护记忆分区。
+Desktop cloud 对应宿主的 `automatic`、`profile`、`user_items` 和 `dates`。生成快照时，
+`user_items` 为空、读取失败或只返回过期片段，会省略整节。召回经验可按需检索。
+直连 MemSense 的日期按旧到新排列，
 自动注入只保留日期标题和摘要正文；模型工具不开放日期文件的显式读取或修改。
-`date_memory_load_days` 仅用于 MemSense，默认 3，范围 0～31；读取
-`memory://date-memory/YYYY-MM-DD.md`。日期依据本轮时间戳和 MemSense 服务端
-的 UTC 日分区计算，包含当天和此前若干天，每个新 query 重新计算和读取。
-服务端不存在或为空的文件不生成分区；失败文件单独记录日志，其他文件继续使用。
+`date_memory_load_days` 仅用于 MemSense，默认 3，范围 0～31。新会话首轮或按
+Box-Agent 本地日期跨天后的首轮，随记忆快照加载 `memory://date-memory/YYYY-MM-DD.md`。
+文件范围按加载时的 UTC 日期计算，包含 UTC 当天和此前若干天。同一会话当天复用已有快照。
+服务端确认不存在或为空的文件不生成分区。
 日期预载只读取已有摘要，不会等待后台保存或代替服务端生成摘要。
 `context_max_chars` 限制后端上下文总长度；MemSense 截断保留完整 mem 条目
 边界；核心文件截断时提示通过 memory_read 获取完整内容，日期只标记摘要截断。
@@ -231,7 +255,7 @@ Box-Agent provides persistent cross-session memory with core memory plus topic-s
 
 | Type | Purpose | Recall behavior | Storage |
 |------|---------|-----------------|---------|
-| **Core memory** | User identity, explicit preferences, local defaults, durable behavioral rules | Automatically injected into the system prompt at session start | `~/.box-agent/memory/MEMORY.md` |
+| **Core memory** | User identity, explicit preferences, local defaults, durable behavioral rules | Loaded into the system prompt on the first turn of the session or of a new day | `~/.box-agent/memory/MEMORY.md` |
 | **Memory summary** | Lightweight routing guide for deciding whether a request should search memory | Injected with core memory; does not contain full context entries | `~/.box-agent/memory/memory_summary.md` |
 | **Context / experience memory** | Project context, task templates, historical notes, decisions, deadlines, prior pitfalls | Topic-routed search on demand via `memory_search`; weak auto-match may surface v2 hits | `~/.box-agent/memory/v2/experiences/<topic>.md` |
 
@@ -389,11 +413,11 @@ Memory updated (context, fallback_appended). Current context memory: ...
 
 ### 4.2 Automatic recall
 
-On ACP `newSession`, Box-Agent:
+On the first model turn of a session or of a new day, Box-Agent:
 
-1. Reads `MEMORY.md`.
-2. Builds a memory block if core memory exists.
-3. Appends the block to the session system prompt.
+1. Reads `MEMORY.md` and `memory_summary.md` for local memory.
+2. Saves the formatted system memory block in the Session Log for reuse that day.
+3. Appends the block to the system message of each model request.
 
 Format:
 

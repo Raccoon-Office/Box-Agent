@@ -41,18 +41,30 @@ def test_builtin_manifest_contains_exactly_the_core_skill_allowlist():
     assert set(loader.list_skills()) == set(EXPECTED_BUILTIN_SKILLS)
 
 
-def test_builtin_memory_guide_shows_desktop_read_append_read():
+def test_builtin_memory_guide_shows_core_memory_append_and_forget_workflows():
     loader = SkillLoader(SKILLS_DIR)
     loader.discover_skills()
     skill = loader.get_skill("memory-guide")
     assert skill is not None
     assert skill.source == "builtin"
+    assert skill.description.startswith("指导助手")
+    assert skill.content.startswith("# 记忆指南")
+    for query in ("请记住我的偏好", "remember my preference"):
+        assert "memory-guide" in {item.name for item in loader.filter_by_query(query)}
     assert 'memory_write(content=' not in skill.content
     example = skill.content.split('```python\n', 1)[1].split('```', 1)[0].splitlines()
     assert len(example) == 3
     assert example[0] == example[2] == 'memory_read(path="memory.md")'
     assert example[1].startswith('memory_edit(path="memory.md", old_text="", new_text="<mem>')
     assert example[1].endswith('</mem>")')
+
+    _, heading, forget = skill.content.partition("## 用户要求忘记某条记忆")
+    assert heading
+    example = forget.split('```python\n', 1)[1].split('```', 1)[0].splitlines()
+    assert len(example) == 3
+    assert example[0] == example[2] == 'memory_read(path="user.md")'
+    assert example[1].startswith('memory_edit(path="user.md", old_text="<mem>')
+    assert example[1].endswith('</mem>", new_text="")')
 
 
 @pytest.mark.parametrize(

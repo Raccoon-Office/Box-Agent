@@ -51,7 +51,7 @@ from box_agent.config import (
     ToolLimitsConfig,
     ToolsConfig,
 )
-from box_agent.memory import MemoryManager
+from box_agent.memory import MemoryManager, is_memory_history_message
 from box_agent.llm import SessionBoundLLM
 from box_agent.kernel.ports import KernelServices
 from box_agent.runtime import invoke_tool_with_permissions
@@ -1231,23 +1231,19 @@ async def test_acp_event_send_timeout_remains_terminal(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cache_state", ["startup", "refreshed", "empty"])
-async def test_session_creation_uses_cached_memory_while_busy_then_refreshes(tmp_path, cache_state):
+async def test_acp_opens_session_during_maintenance_and_loads_local_memory_on_prompt(tmp_path):
     import threading
 
     memory = MemoryManager(memory_dir=str(tmp_path / "memory"))
     memory.write_core("- user prefers Chinese")
     memory.write_context("- project uses uv", topic="project")
-    if cache_state == "startup":
-        memory = MemoryManager(memory_dir=str(tmp_path / "memory"))
-    elif cache_state == "refreshed":
-        memory.recall()
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory_extraction=False),
         tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system", memory_manager=memory)
+    llm = MemoryPromptLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system", memory_manager=memory)
     entered, release = threading.Event(), threading.Event()
 
     def hold_maintenance_lock():
@@ -1262,25 +1258,26 @@ async def test_session_creation_uses_cached_memory_while_busy_then_refreshes(tmp
             **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})),
         ), timeout=2)
         assert not release.is_set()
-        prompt = agent._sessions[session.sessionId].agent.system_prompt
-        assert "user prefers English" not in prompt
-        if cache_state == "empty":
-            assert "--- MEMORY START ---" not in prompt
-        else:
-            assert "user prefers Chinese" in prompt
-            assert "`project`" in prompt
+        state = agent._sessions[session.sessionId]
+        assert "--- MEMORY START ---" not in state.agent.system_prompt
     finally:
         release.set()
         await asyncio.wait_for(maintenance, 2)
 
+    response = await agent.prompt(**acp_params(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "请确认项目配置"}],
+    )))
+    assert response.stopReason == "end_turn"
+    snapshot = llm.requests[-1][0]
+    assert snapshot.role == "system"
+    assert "user prefers Chinese" in snapshot.content and "`project`" in snapshot.content
     memory.write_core("- user prefers English")
-    session = await asyncio.wait_for(agent.new_session(
-        **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})),
-    ), timeout=2)
-    prompt = agent._sessions[session.sessionId].agent.system_prompt
-    assert "user prefers English" in prompt
-    assert "user prefers Chinese" not in prompt
-    assert "`project`" in prompt
+    response = await agent.prompt(**acp_params(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "继续处理项目配置"}],
+    )))
+    assert response.stopReason == "end_turn"
+    assert llm.requests[-1][0] == snapshot
+    assert not any(is_memory_history_message(message) for message in state.agent.messages)
 
 
 @pytest.mark.asyncio
@@ -2005,6 +2002,19 @@ class DoneLLM:
 
     async def generate(self, messages, tools=None):
         return LLMResponse(content="done", finish_reason="stop")
+
+
+class MemoryPromptLLM(DoneLLM):
+    """记录 ACP 实际交给模型的消息。"""
+
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+
+    async def generate_stream(self, messages, tools=None, **kwargs):
+        self.requests.append(messages)
+        async for event in super().generate_stream(messages, tools, **kwargs):
+            yield event
 
 
 @pytest.mark.asyncio
@@ -8079,7 +8089,7 @@ async def test_acp_inject_same_id_is_idempotent(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_new_session_injects_core_memory_without_returning_it(tmp_path):
+async def test_acp_new_session_returns_only_metadata_and_first_prompt_loads_core_memory(tmp_path):
     memory_mgr = MemoryManager(memory_dir=str(tmp_path / "memory"))
     memory_mgr.write_core("- User prefers concise Chinese responses\n- User works on officev3")
     config = Config(
@@ -8087,7 +8097,8 @@ async def test_acp_new_session_injects_core_memory_without_returning_it(tmp_path
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path), memory_dir=str(tmp_path / "memory")),
         tools=ToolsConfig(),
     )
-    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system", memory_manager=memory_mgr)
+    llm = MemoryPromptLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [EchoTool()], "system", memory_manager=memory_mgr)
 
     session = await agent.new_session(
         **acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
@@ -8101,8 +8112,14 @@ async def test_acp_new_session_injects_core_memory_without_returning_it(tmp_path
             "managed_mcp_config_versions": [1],
         }
     }
-    assert "--- MEMORY START ---" in agent._sessions[session.sessionId].agent.system_prompt
-    assert "User prefers concise Chinese responses" in agent._sessions[session.sessionId].agent.system_prompt
+    state = agent._sessions[session.sessionId]
+    assert "--- MEMORY START ---" not in state.agent.system_prompt
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "你好"}])))
+    assert response.stopReason == "end_turn"
+    snapshot = llm.requests[-1][0]
+    assert snapshot.role == "system"
+    assert "User prefers concise Chinese responses" in snapshot.content
+    assert not any(is_memory_history_message(message) for message in state.agent.messages)
 
 
 @pytest.mark.asyncio
