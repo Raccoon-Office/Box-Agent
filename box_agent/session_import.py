@@ -3,19 +3,24 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import tempfile
 from typing import Any, BinaryIO
 from uuid import UUID
 
 from .schema import Message
-from .session_log import SESSION_LOG_VERSION, SessionLog, default_session_root
-from .user_paths import box_agent_home
+from .session_log import (
+    SESSION_LOG_VERSION, SessionLog, SessionLogInUseError, _acquire_writer_lock,
+    _release_writer_lock, default_session_root,
+)
+from .user_paths import box_agent_home, state_path
 
 
 _MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -41,6 +46,36 @@ def _uuid(value: object) -> str:
     if not isinstance(value, str) or len(value) != 36 or str(UUID(value)) != value:
         raise ValueError("Invalid history import identifier")
     return value
+
+
+def _remove_staging(staging: Path) -> None:
+    try:
+        shutil.rmtree(staging)
+    except FileNotFoundError:
+        pass
+
+
+@contextmanager
+def _locked_staging(marker: Path) -> Iterator[Path]:
+    # A new owner can recover even when the previous ACP and its worker both died.
+    lock = _acquire_writer_lock(marker.with_suffix(".lock"))
+    try:
+        staging = default_session_root() / f".import-{marker.stem}"
+        _remove_staging(staging)
+        yield staging
+    finally:
+        _release_writer_lock(lock)
+
+
+def reap_interrupted_import(token: str) -> None:
+    marker = state_path("history-import-jobs") / f"{_uuid(token)}.json"
+    if not marker.is_file():
+        return
+    try:
+        with _locked_staging(marker):
+            marker.unlink(missing_ok=True)
+    except SessionLogInUseError:
+        pass  # The new owner performs recovery under the same token lock.
 
 
 def _read_snapshot(token: str) -> bytes:
@@ -190,16 +225,16 @@ def _sync_history_directories(destination: Path) -> None:
 
 def import_staged_history(
     token: str, *, report: Callable[[str, int], None] | None = None,
-    cancelled: Callable[[], bool] | None = None,
+    cancelled: Callable[[], bool] | None = None, worker_staging: Path | None = None,
 ) -> dict:
     observer = _observer.set((report or (lambda *_: None), cancelled or (lambda: False)))
     try:
-        return _import_staged_history(token)
+        return _import_staged_history(token, worker_staging)
     finally:
         _observer.reset(observer)
 
 
-def _import_staged_history(token: str) -> dict:
+def _import_staged_history(token: str, worker_staging: Path | None) -> dict:
     token = _uuid(token)
     raw = _read_snapshot(token)
     origin = "desktop-history-v1:" + hashlib.sha256(raw).hexdigest()
@@ -219,7 +254,12 @@ def _import_staged_history(token: str) -> dict:
     if not destination.exists():
         # Publish the closed, durable directory in one rename. Native session directories
         # contain a writer lock and log, so a concurrent winner cannot be replaced.
-        with tempfile.TemporaryDirectory(dir=root, prefix=".import-") as temp:
+        if worker_staging is None:
+            temporary = tempfile.TemporaryDirectory(dir=root, prefix=".import-")
+        else:
+            worker_staging.mkdir(mode=0o700)
+            temporary = nullcontext(worker_staging)
+        with temporary as temp:
             log = SessionLog.create(temp, session_id=session_id, cwd=workspace, origin=origin)
             try:
                 _write_history(log, snapshot["messages"])

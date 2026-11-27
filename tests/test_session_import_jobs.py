@@ -1,5 +1,6 @@
 """Isolated import processes preserve other sessions and retain writer ownership."""
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 
+from box_agent.session_import import reap_interrupted_import
 from box_agent.session_import_jobs import (
     HistoryImportJobError, HistoryImportJobs, _worker_launch, worker_command,
 )
@@ -74,20 +76,29 @@ def test_frozen_worker_keeps_its_runtime_entry_and_environment(monkeypatch):
     assert env is None
 
 
-@pytest.mark.parametrize("stage", ["read", "parse", "write", "file_sync", "verify", "directory_sync"])
-@pytest.mark.asyncio
-async def test_real_import_can_be_retired_at_each_io_stage_and_retried(tmp_path, monkeypatch, stage):
-    if stage == "directory_sync" and os.name == "nt":
-        pytest.skip("Windows does not sync directories")
+@pytest.fixture
+def history_snapshot(tmp_path, monkeypatch):
     profile = tmp_path / "profile"
     monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
-    token, attempt = str(uuid4()), str(uuid4())
-    source = profile / "history-import" / token
-    source.mkdir(parents=True)
-    (source / "snapshot.json").write_text(json.dumps({"version": 1, "id": token,
+    token = str(uuid4())
+    snapshot = profile / "history-import" / token / "snapshot.json"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text(json.dumps({"version": 1, "id": token,
         "workspace": str(tmp_path), "messages": [
-            {"role": "user", "text": "retained history", "timestamp": 1, "turnId": str(uuid4())},
-        ]}))
+            {"role": "user", "text": "retained history " * 8192, "timestamp": 1, "turnId": str(uuid4())},
+        ]}), encoding="utf-8")
+    return snapshot
+
+
+@pytest.mark.parametrize("stage", ["read", "parse", "write", "file_sync", "publish", "verify", "directory_sync"])
+@pytest.mark.asyncio
+async def test_two_forced_cancellations_and_retry_leave_only_the_published_history(tmp_path, history_snapshot, stage):
+    if stage == "directory_sync" and os.name == "nt":
+        pytest.skip("Windows does not sync directories")
+    snapshot_bytes = history_snapshot.read_bytes()
+    token = history_snapshot.parent.name
+    profile = tmp_path / "profile"
+    sessions = profile / "sessions"
     stall = tmp_path / "stall"
     stall.touch()
     worker = f"""
@@ -113,18 +124,30 @@ main()
 
     jobs = HistoryImportJobs(notify, command=lambda: [sys.executable, "-c", worker],
                              grace_seconds=.05, kill_seconds=1)
-    pending = asyncio.create_task(jobs.run(token, attempt))
+    pending = []
     try:
-        await asyncio.wait_for(entered.wait(), 5)
-        assert await jobs.cancel(token, attempt) == {"state": "stopped"}
-        with pytest.raises(HistoryImportJobError, match="CANCELLED"):
-            await pending
+        for _ in range(2):
+            entered.clear()
+            attempt = str(uuid4())
+            task = asyncio.create_task(jobs.run(token, attempt))
+            pending.append(task)
+            await asyncio.wait_for(entered.wait(), 30)
+            assert await jobs.cancel(token, attempt) == {"state": "stopped"}
+            with pytest.raises(HistoryImportJobError, match="CANCELLED"):
+                await task
+            assert not list(sessions.glob(".import-*"))
         stall.unlink()
         assert (await jobs.run(token, str(uuid4())))["sessionId"].startswith("acp-v1-")
-        assert (source / "snapshot.json").exists()
+        assert history_snapshot.read_bytes() == snapshot_bytes
+        published = sessions / hashlib.sha256(token.encode()).hexdigest()
+        assert list(sessions.iterdir()) == [published]
+        assert list(profile.rglob("session.jsonl")) == [published / "session.jsonl"]
+        records = [json.loads(line) for line in (published / "session.jsonl").read_bytes().splitlines()]
+        message = json.loads(snapshot_bytes)["messages"][0]["text"]
+        assert [r["data"]["content"] for r in records if r["type"] == "user/message"] == [message]
     finally:
         await jobs.aclose()
-        await asyncio.gather(pending, return_exceptions=True)
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -237,18 +260,21 @@ async def test_stalled_import_can_be_cancelled_without_stopping_another_acp_sess
 
 @pytest.mark.skipif(sys.platform not in {"darwin", "win32"}, reason="Desktop parent-death guard")
 @pytest.mark.asyncio
-async def test_import_worker_exits_when_its_acp_parent_is_killed(tmp_path, monkeypatch):
-    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "profile"))
+async def test_import_worker_exits_when_its_acp_parent_is_killed(tmp_path, history_snapshot):
+    token = history_snapshot.parent.name
+    sessions = tmp_path / "profile" / "sessions"
     script = """
 import asyncio, sys
 from box_agent.session_import_jobs import HistoryImportJobs
 worker = '''
 import os, threading
 import box_agent.session_import as importer
-def blocked(token):
-    importer._checkpoint("worker_pid", os.getpid())
-    threading.Event().wait()
-importer._read_snapshot = blocked
+report = importer._checkpoint
+def checkpoint(stage, completed=0):
+    if stage == "file_sync":
+        report("worker_pid", os.getpid())
+        threading.Event().wait()
+importer._checkpoint = checkpoint
 from box_agent.session_import_worker import main
 main()
 '''
@@ -262,20 +288,20 @@ async def run():
 asyncio.run(run())
 """
     # Retain the actual owner handle, not a Windows venv redirector's handle.
-    command, env = _worker_launch([sys.executable, "-c", script, str(uuid4()), str(uuid4())])
+    command, env = _worker_launch([sys.executable, "-c", script, token, str(uuid4())])
     parent = await asyncio.create_subprocess_exec(*command, env=env, stdout=asyncio.subprocess.PIPE)
     pid = None
     child_handle = None
     kernel = None
     try:
-        # Both interpreters cold-start before the worker holds the write lock and enters the read.
+        # Both interpreters cold-start before the worker owns the lock and has written the history.
         try:
             ready = await asyncio.wait_for(parent.stdout.readline(), timeout=30)
         except asyncio.TimeoutError:
-            pytest.fail("Import worker did not reach the snapshot read within 30 seconds")
+            pytest.fail("Import worker did not reach file sync within 30 seconds")
         if not ready:
             code = await asyncio.wait_for(parent.wait(), timeout=5)
-            pytest.fail(f"Import parent exited with code {code} before the worker reached the snapshot read")
+            pytest.fail(f"Import parent exited with code {code} before the worker reached file sync")
         pid = int(ready)
         if os.name == "nt":
             import ctypes as c
@@ -288,6 +314,11 @@ asyncio.run(run())
             kernel.CloseHandle.argtypes = [c.c_void_p]
             child_handle = kernel.OpenProcess(0x100001, False, pid)
             assert child_handle, "Could not retain the exact child process handle"
+        staged, = sessions.rglob("session.jsonl")
+        contents = staged.read_bytes()
+        assert json.loads(history_snapshot.read_bytes())["messages"][0]["text"].encode() in contents
+        await asyncio.to_thread(reap_interrupted_import, token)
+        assert staged.read_bytes() == contents
         parent.kill()
         await parent.wait()
         for _ in range(100):
@@ -302,6 +333,15 @@ asyncio.run(run())
             await asyncio.sleep(.02)
         else:
             pytest.fail("history import outlived its parent")
+        assert staged.exists()  # The killed parent could not reap the files.
+        jobs = HistoryImportJobs()
+        try:
+            assert (await jobs.run(token, str(uuid4())))["sessionId"].startswith("acp-v1-")
+        finally:
+            await jobs.aclose()
+        published = sessions / hashlib.sha256(token.encode()).hexdigest()
+        assert list(sessions.iterdir()) == [published]
+        assert list(sessions.rglob("session.jsonl")) == [published / "session.jsonl"]
     finally:
         if parent.returncode is None:
             parent.kill()

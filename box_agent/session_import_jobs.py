@@ -6,11 +6,12 @@ import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import json
+import logging
 import os
 import sys
 from uuid import uuid4
 
-from .session_import import _uuid
+from .session_import import _uuid, reap_interrupted_import
 
 
 class HistoryImportJobError(Exception):
@@ -114,9 +115,9 @@ class HistoryImportJobs:
             raise HistoryImportJobError("AGENT_CLOSING")
         current = self._jobs.get(token)
         if (current is not None and current.result.done() and current.process is not None
-                and current.process.returncode is not None):
-            # Only in-flight calls are coalesced. A new import must re-run the
-            # existing-history verification and durability barrier.
+                and current.process.returncode == 0):
+            # A clean exit has released the staging files. After an abnormal
+            # exit the supervisor keeps ownership through cleanup.
             self._jobs.pop(token)
             current = None
         if current is not None:
@@ -219,6 +220,12 @@ class HistoryImportJobs:
                 reporter.cancel()
                 await asyncio.gather(reporter, return_exceptions=True)
             if job.process is None or job.process.returncode is not None:
+                if job.process is not None and job.process.returncode != 0:
+                    job.stopping = True
+                    try:
+                        await asyncio.to_thread(reap_interrupted_import, job.token)
+                    except (OSError, ValueError):
+                        logging.getLogger(__name__).warning("Could not clean interrupted import", exc_info=True)
                 job.exited.set()
                 if job.windows_job is not None:
                     job.windows_job.close()

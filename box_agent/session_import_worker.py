@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import select
 import sys
 import threading
@@ -48,8 +47,10 @@ def main() -> None:
     if not raw.endswith(b"\n"):
         return
     request = json.loads(raw)
-    from .session_import import HistoryImportCancelled, _uuid, import_staged_history
-    from .session_log import SessionLogInUseError, _acquire_writer_lock, _release_writer_lock
+    from .session_import import (
+        HistoryImportCancelled, _locked_staging, _remove_staging, _uuid, import_staged_history,
+    )
+    from .session_log import SessionLogInUseError
     from .user_paths import state_path
 
     token, attempt = _uuid(request["token"]), _uuid(request["attemptId"])
@@ -84,20 +85,21 @@ def main() -> None:
             send({"progress": {"stage": stage, "completed": completed}})
             last_sent = now
 
-    lock = None
-    marker: Path | None = None
     try:
-        directory = state_path("history-import-jobs")
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # The OS lock, not a stale PID, fences writers across ACP restarts.
-        lock = _acquire_writer_lock(directory / f"{token}.lock")
-        marker = directory / f"{token}.json"
-        with marker.open("w", encoding="utf-8") as stream:
-            json.dump({"token": token, "attemptId": attempt, "pid": os.getpid(),
-                       "parentPid": request["parentPid"]}, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        result = import_staged_history(token, report=progress, cancelled=stopped.is_set)
+        marker = state_path("history-import-jobs") / f"{token}.json"
+        marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with _locked_staging(marker) as staging:
+            try:
+                with marker.open("w", encoding="utf-8") as stream:
+                    json.dump({"token": token, "attemptId": attempt, "pid": os.getpid(),
+                               "parentPid": request["parentPid"]}, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                result = import_staged_history(token, report=progress, cancelled=stopped.is_set,
+                                               worker_staging=staging)
+            finally:
+                _remove_staging(staging)
+                marker.unlink(missing_ok=True)
         send({"result": result})
     except HistoryImportCancelled:
         send({"error": "HISTORY_IMPORT_CANCELLED"})
@@ -105,13 +107,6 @@ def main() -> None:
         send({"error": "HISTORY_IMPORT_BUSY"})
     except Exception:
         send({"error": "HISTORY_IMPORT_FAILED"})
-    finally:
-        if lock is not None:
-            try:
-                if marker is not None:
-                    marker.unlink(missing_ok=True)
-            finally:
-                _release_writer_lock(lock)
     # Avoid joining a stdin reader at interpreter shutdown. All owned files and
     # locks have already been closed; a blocked cleanup is handled by the parent.
     output.flush()
