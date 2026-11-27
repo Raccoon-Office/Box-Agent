@@ -10056,3 +10056,67 @@ async def test_desktop_acp_keeps_tool_bodies_in_diagnostics_and_original_protoco
         assert 'payload_redacted' not in detail
     finally:
         logger.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_acp_committed_compaction_emits_scoped_display_notice(acp_agent, monkeypatch, fallback):
+    from box_agent.agent import Agent
+    from box_agent.events import ContentEvent, SummarizationEvent
+
+    async def compacted(self, *, options=None, **kwargs):
+        yield SummarizationEvent(
+            estimated_tokens=1000, api_tokens=1000, token_limit=900,
+            estimated_after=200, mode="fallback" if fallback else "summary",
+            error="private provider error" if fallback else None,
+        )
+        yield ContentEvent(content="done")
+        yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="done")
+
+    monkeypatch.setattr(Agent, "run_events", compacted)
+    agent, conn = acp_agent
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    response = await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])))
+    notices = [u for u in conn.updates if isinstance(getattr(u.update, "rawOutput", None), dict)
+               and u.update.rawOutput.get("type") == "context_compaction"]
+    assert response.stopReason == "end_turn"
+    assert len(notices) == 1
+    assert notices[0].sessionId == session.sessionId
+    assert notices[0].update.status == "completed"
+    assert notices[0].update.toolCallId.startswith("context-compaction-")
+    assert notices[0].update.rawOutput == {"type": "context_compaction", "version": 1, "status": "completed"}
+    assert "private provider error" not in str(notices)
+    assert any(getattr(u.update, "sessionUpdate", None) == "agent_message_chunk" for u in conn.updates)
+
+
+@pytest.mark.asyncio
+async def test_acp_compaction_notice_timeout_does_not_block_other_session_or_answer(acp_agent, monkeypatch):
+    from box_agent.agent import Agent
+    from box_agent.events import ContentEvent, SummarizationEvent
+
+    async def compacted(self, *, options=None, **kwargs):
+        yield SummarizationEvent(estimated_tokens=1000, api_tokens=1000, token_limit=900)
+        yield ContentEvent(content="done")
+        yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="done")
+
+    monkeypatch.setattr(Agent, "run_events", compacted)
+    agent, conn = acp_agent
+    first = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    second = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
+    blocked = asyncio.Event()
+    original = conn.session_update
+
+    async def send(*, session_id, update, **kwargs):
+        if session_id == first.sessionId and getattr(update, "raw_output", {}).get("type") == "context_compaction":
+            blocked.set()
+            await asyncio.Event().wait()
+        await original(session_id=session_id, update=update, **kwargs)
+
+    monkeypatch.setattr(conn, "session_update", send)
+    monkeypatch.setattr(agent, "_SESSION_PROGRESS_TIMEOUT_SECONDS", 0.1)
+    async def prompt(session):
+        return await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])))
+    task = asyncio.create_task(prompt(first))
+    await asyncio.wait_for(blocked.wait(), 2)
+    assert (await asyncio.wait_for(prompt(second), 2)).stopReason == "end_turn"
+    assert (await asyncio.wait_for(task, 2)).stopReason == "end_turn"
