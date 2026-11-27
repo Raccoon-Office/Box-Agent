@@ -220,7 +220,7 @@ async def test_acp_decline_continues_original_task_with_ready_capabilities(tmp_p
         def __init__(self):
             super().__init__()
             self.requests = []
-            searches = ["law", "law", "other-law"]
+            searches = ["law", "law"]
             if fallback == "ready_tool":
                 searches.append("public-law")
             self.searches = iter(searches)
@@ -293,6 +293,62 @@ async def test_acp_decline_continues_original_task_with_ready_capabilities(tmp_p
     finally:
         await host.aclose()
         catalog.clear()
+
+
+@pytest.mark.asyncio
+async def test_acp_declining_one_connector_still_waits_for_the_next_connector(tmp_path):
+    class SequentialConnectorLLM(DoneLLM):
+        def __init__(self):
+            super().__init__()
+            self.searches = iter(["jinshuju", "jinshuju", "klingai-cn", "jinshuju"])
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            connector_id = next(self.searches, None)
+            if connector_id is None:
+                async for event in super().generate_stream(messages, tools, **kwargs):
+                    yield event
+                return
+            self.calls += 1
+            yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                id=f"connector-{self.calls}", type="function",
+                function=FunctionCall(name="tool_search", arguments={"connector": connector_id}),
+            )])
+
+    llm, conn = SequentialConnectorLLM(), DummyConn()
+    host = BoxACPAgent(conn, config(tmp_path), llm, [], "system")
+    initial = snapshot([entry("jinshuju", name="金数据", kind="mcp", skills=[]),
+                        entry("klingai-cn", name="可灵 AI", kind="mcp", skills=[])])
+
+    def receipts():
+        outputs = [notification.model_dump(by_alias=True, exclude_none=True)["update"].get("rawOutput")
+                   for notification in conn.updates]
+        return [output["connector_id"] for output in outputs if isinstance(output, dict)
+                and output.get("type") == "connector_action_required"]
+
+    try:
+        session = await create(host, tmp_path, catalog=initial)
+        first = await prompt(host, session.sessionId, "依次查询金数据和可灵连接器。", metadata={
+            "connector_discovery": initial,
+        })
+        assert first.field_meta["runStatus"] == "waiting_for_user"
+        assert receipts() == ["jinshuju"]
+        resumed = await prompt(host, session.sessionId, "暂不连接金数据，继续原任务。", metadata={
+            "connector_discovery": initial,
+            "connector_continuation": {"request_id": "skip-jinshuju", "skip_connector_id": "jinshuju"},
+        })
+        assert resumed.field_meta["runStatus"] == "waiting_for_user"
+        assert receipts() == ["jinshuju", "klingai-cn"]
+        assert llm.calls == 3
+        discovery = host._sessions[session.sessionId].agent.connector_discovery
+        assert not discovery.permitted("jinshuju") and not discovery.permitted("klingai-cn")
+
+        ordinary = await prompt(host, session.sessionId, "这次连接金数据。", metadata={
+            "connector_discovery": initial,
+        })
+        assert ordinary.field_meta["runStatus"] == "waiting_for_user"
+        assert receipts() == ["jinshuju", "klingai-cn", "jinshuju"]
+    finally:
+        await host.aclose()
 
 
 @pytest.mark.asyncio

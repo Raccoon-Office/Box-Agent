@@ -142,7 +142,7 @@ class ConnectorDiscovery:
     def update(self, value: Any, *, skipped_connector_id: str | None = None,
                ready_only: bool = False) -> None:
         self.skipped_connector_id = skipped_connector_id
-        self.ready_only = ready_only or skipped_connector_id is not None
+        self.ready_only = ready_only
         if value is None or not self.host_supported:
             self.available = False
             return
@@ -200,8 +200,8 @@ class ConnectorDiscovery:
         terms = set().union(*(_terms(query) for query in queries[:12])) if queries else set()
         ranked = []
         for entry in self.entries.values():
-            if self.ready_only and (
-                entry["id"] == self.skipped_connector_id or self.action(entry, live_mcp_ids) is not None
+            if entry["id"] == self.skipped_connector_id or (
+                self.ready_only and self.action(entry, live_mcp_ids) is not None
             ):
                 continue
             fields = ((entry["id"], 8), (entry["name"], 8), (" ".join(entry["keywords"]), 5),
@@ -224,14 +224,18 @@ class ConnectorDiscovery:
         if not self.host_supported:
             return None
         resolved = self.resolve(connector) if connector else None
-        if self.ready_only and connector and (
-            resolved is None or resolved["id"] == self.skipped_connector_id
-            or self.action(resolved, live_mcp_ids) is not None
+        skipped = resolved is not None and resolved["id"] == self.skipped_connector_id
+        if skipped or (
+            self.ready_only and connector
+            and (resolved is None or self.action(resolved, live_mcp_ids) is not None)
         ):
             if not payload.get("activated"):
                 payload["notice"] = (
                     "Continue the original task with currently available tools or answer directly. "
                     "Do not request connector setup in this continuation. Explain any remaining limitation."
+                    if self.ready_only else
+                    "This connector was skipped for this continuation. Continue the original task; "
+                    "other connectors can still be requested when needed."
                 )
             return None
         entries = ([resolved] if resolved else []) if connector else self.search(queries, live_mcp_ids)
