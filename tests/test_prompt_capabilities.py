@@ -71,11 +71,17 @@ def test_table_gate_guidance_requires_registered_validator():
     enabled = resolve_capability_placeholders('{FILE_OPERATIONS}', {'read_file', 'bash', 'validate_table'})
     assert '`validate_table`' not in without
     assert '`validate_table`' in enabled
-    assert '程序检查 EOF' in enabled
-    assert 'validation_complete' in enabled and 'data_valid' in enabled
-    assert '用途在本轮锁定' in enabled
-    assert '计算任务仍要求数据合格' in enabled
-    assert '此门禁不替代输出计算及读回校验' in enabled
+    # The system prompt states when validation is required; parameter and
+    # file-role details live once, in the tool schema the model already gets.
+    assert '不能先算后补' in enabled
+    assert '计算任务要求数据合格' in enabled
+    for detail in ('validation_complete', 'data_valid', 'transaction_v1', 'operation_ready', 'output_fields'):
+        assert detail not in enabled
+    from box_agent.tools.file.validate_table_tool import ValidateTableTool
+    description = ValidateTableTool(".").description
+    for detail in ('EOF', 'validation_complete', 'data_valid', 'Purpose is locked',
+                   'computation still requires valid input', 'not the correctness of output calculations'):
+        assert detail in description
 
 
 @pytest.mark.parametrize("tools,executor", [

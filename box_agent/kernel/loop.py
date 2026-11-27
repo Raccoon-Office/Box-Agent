@@ -1014,6 +1014,15 @@ async def _run_agent_loop_impl(
                           skill_reader=context_engine.tool_reader if context_engine is not None else None),
         enabled=completion_checks_enabled,
     )
+
+    def expose_gate_tools() -> None:
+        # A gate that guards an explicit input makes its own validator callable;
+        # exposure and enforcement share the gate's input detection.
+        require = getattr(tool_exposure_manager, "require_local_tools", None)
+        if callable(require):
+            require(completion_checks.required_tool_names())
+
+    expose_gate_tools()
     if _on_completion_checks is not None:
         _on_completion_checks(completion_checks)
     stream_recovery = StreamInterruptionRecovery()
@@ -1435,6 +1444,7 @@ async def _run_agent_loop_impl(
                                                  resume_scope=messages,
                                                  skill_reader=context_engine.tool_reader if context_engine is not None else None),
                     )
+                    expose_gate_tools()
                 yield injected_event
 
         has_plan_tool = "plan_write" in tools

@@ -1,0 +1,149 @@
+{
+ "version": "context-opt-routing/v1",
+ "cases": [
+  {
+   "id": "w-public-text",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "tool",
+     "name": "web_extract",
+     "success": true
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "example|示例|域名|domain|文档"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "w-similar-no-web",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "no_tool",
+     "names": [
+      "web_search",
+      "web_extract"
+     ]
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "HTTPS"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "w-explicit-browser-unavailable",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "no_tool",
+     "names": [
+      "web_search",
+      "web_extract"
+     ]
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "无法|不能|没有|不可用|未连接|未安装|做不到|不支持"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ],
+   "expected_state": "completed_or_waiting"
+  },
+  {
+   "id": "w-follow-up-same-page",
+   "split": "holdout",
+   "checks": [
+    {
+     "kind": "tool",
+     "name": "web_extract",
+     "success": true
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "(避免|不应|不要|不建议|不能|不可以|不适合|不宜|别).{0,15}(测试|监控)|(测试|监控).{0,15}(避免|不应|不要|不建议|不能|不可以|不适合|不宜)|avoid.{0,30}(testing|monitoring)"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "i-default-service",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "tool",
+     "name": "generate_image"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ],
+   "expected_state": "completed_or_waiting"
+  },
+  {
+   "id": "i-similar-no-image",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "exists_glob",
+     "pattern": "**/sunset.md"
+    },
+    {
+     "kind": "no_tool",
+     "names": [
+      "generate_image"
+     ]
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "i-explicit-seko-unavailable",
+   "split": "dev",
+   "checks": [
+    {
+     "kind": "no_tool",
+     "names": [
+      "generate_image"
+     ]
+    },
+    {
+     "kind": "reply_matches",
+     "pattern": "Seko"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ],
+   "expected_state": "completed_or_waiting"
+  },
+  {
+   "id": "i-second-turn",
+   "split": "holdout",
+   "checks": [
+    {
+     "kind": "tool",
+     "name": "generate_image"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ],
+   "expected_state": "completed_or_waiting"
+  }
+ ]
+}

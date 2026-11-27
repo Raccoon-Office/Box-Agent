@@ -213,14 +213,13 @@ def build_file_delivery_prompt(tools: Collection[str] | None = None) -> str:
     image = tools is None or "generate_image" in tools
     background_shell = tools is None or {"bash", "bash_output", "bash_kill"} <= set(tools)
     preview_directory = '"$PWD"'
+    # Turn/runtime semantics and cleanup live in the bash ``lifetime``
+    # parameter; the system prompt only routes previews away from file://.
     preview_guidance = (
-        "\n- **本地 HTML 预览**：Playwright MCP 不要打开 `file://`。用 bash 后台启动仅监听 "
-        "loopback 的动态端口预览：`${BOX_AGENT_PYTHON:-python3} -u -m http.server 0 "
+        "\n- **本地 HTML 预览**：Playwright MCP 不要打开 `file://`。用 bash 后台运行 "
+        "`${BOX_AGENT_PYTHON:-python3} -u -m http.server 0 "
         f"--bind 127.0.0.1 --directory {preview_directory}`，从 `bash_output` 读取实际端口后访问 "
-        "`http://127.0.0.1:<port>/...`。模型仅为自己验证时使用 `lifetime=\"turn\"`，验证后立即 "
-        "`bash_kill`，任务结束时 runtime 会兜底回收；用户明确要求在最终回复后亲自访问服务（如“启动服务我看一下”）时，"
-        "使用 `lifetime=\"runtime\"`，验证后只关闭自动化浏览器，不停止服务，最终回复提供链接、`bash_id`，"
-        "并说明服务会持续到显式 `bash_kill`、Box-Agent 重启或客户端退出。"
+        "`http://127.0.0.1:<port>/...`；`lifetime` 按 bash 参数说明选择。"
     )
     prompt = (
         "- **目录**：bash、文件工具、" + ("`generate_image`、" if image else "") + "视觉检查和 Python 沙箱的相对路径"
@@ -292,21 +291,16 @@ def build_image_generation_prompt(
         )
     configured = image_generation_service_configured(config, env)
     status = (
-        "已配置，可以调用 `generate_image`。"
+        "已配置，可以调用 `generate_image`"
         if configured
-        else "未配置；调用失败时必须如实报告阻塞，不得假装已生成图片。"
+        else "未配置；调用会失败，须如实报告阻塞，不得假装已生成图片"
     )
+    # When to prefer the tool, edit modes, fallback limits and failure
+    # handling live in the generate_image description and results.
     return (
         "## Native Image Generation\n\n"
-        "- `generate_image` 是 Box-Agent 的标准工具，CLI 与 ACP 共用；"
-        "是否可用只由 Box-Agent 自身的 `image_generation.endpoint` 或对应环境变量决定，"
-        "不由宿主 `env_context` 控制。\n"
-        f"- 当前生图服务：{status}\n"
-        "- 用户明确要求生图、生成新图片、插画、海报或位图信息图，且没有要求可编辑 HTML 时，"
-        "按统一生图选路规则应使用内置服务时，优先调用 `generate_image`。\n"
-        "- 文生图、图生图、改图及 HTML/PPT 配图均适用。\n"
-        "- 用户明确禁止 HTML/CSS/SVG、PIL 或截图回退时，`generate_image` 失败后必须如实报告阻塞，"
-        "不得擅自改用这些路径。"
+        f"- 当前生图服务：{status}。可用性只由 Box-Agent 自身的生图配置决定，不由宿主 `env_context` 控制；"
+        "适用场景、回退限制和失败处理以 `generate_image` 工具说明及返回为准。"
     )
 
 

@@ -140,13 +140,14 @@ async def test_discovered_executor_cannot_bypass_gate_through_call_tool(tmp_path
         async def generate_stream(self, messages, tools=None, **kwargs):
             self.step += 1
             if self.step == 1:
-                name, arguments = "tool_search", {"tool_names": [executor.name]}
-            elif self.step == 3:
-                name, arguments = "validate_table", {"path": str(path), "fields": FIELDS}
-            elif self.step in (2, 4):
+                name, arguments = "tool_search", {"tool_names": [executor.name, validator.name]}
+            elif self.step in (2, 3, 4):
                 result = next(m for m in messages if m.tool_call_id == "1" and m.role == "tool")
-                ref = json.loads(result.content)["activated"][0]["tool_ref"]
-                name, arguments = "call_tool", {"tool_ref": ref, "arguments_json": "{}"}
+                refs = {item["name"]: item["tool_ref"] for item in json.loads(result.content)["activated"]}
+                # The validator is discoverable too; both routes share one gate.
+                target, payload = ((validator.name, {"path": str(path), "fields": FIELDS})
+                                   if self.step == 3 else (executor.name, {}))
+                name, arguments = "call_tool", {"tool_ref": refs[target], "arguments_json": json.dumps(payload)}
             else:
                 yield StreamEvent(type="text", delta="done")
                 yield StreamEvent(type="finish", finish_reason="stop")

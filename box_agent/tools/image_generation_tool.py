@@ -97,6 +97,12 @@ _EDIT_ENDPOINT_SUFFIXES = ("/images/gen", "/images/generations")
 _OPENAI_IMAGE_ENDPOINT_HINTS = ("/images/gen", "/images/generations", "/images/edits")
 _HOST_ALIGNED_IMAGE_ENDPOINT_SUFFIXES = ("/images/gen",)
 _IMAGE_EDIT_MODES = {"image_to_image", "edit", "image_edit"}
+# Failure routing travels with the failure instead of the system prompt: the
+# model sees it exactly when the default service did not produce an image.
+_NO_SERVICE_SWITCH = (
+    " Do not switch to Seko or another image service unless the user explicitly selected it "
+    "for this image task; a rejected or failed request must not be routed around."
+)
 
 
 def _is_large_image_service(endpoint: str | None, model: str | None) -> bool:
@@ -604,7 +610,9 @@ class GenerateImageTool(Tool):
                 success=False,
                 error=(
                     "Image generation service is not configured. Set image_generation.endpoint in "
-                    "config.yaml, or provide BOX_AGENT_IMAGE_GENERATION_ENDPOINT / BOX_AGENT_IMAGE_GEN_ENDPOINT."
+                    "config.yaml, or provide BOX_AGENT_IMAGE_GENERATION_ENDPOINT / BOX_AGENT_IMAGE_GEN_ENDPOINT. "
+                    "Report the image generation as blocked; do not claim an image exists."
+                    + _NO_SERVICE_SWITCH
                 ),
             )
 
@@ -672,6 +680,7 @@ class GenerateImageTool(Tool):
                             "If the user later explicitly asks to continue generating or editing the image, "
                             "call generate_image directly again; the runtime will check and collect any required "
                             "billing consent. A chat answer or generic decision is not a runtime approval."
+                            + _NO_SERVICE_SWITCH
                         ),
                     )
             check_tool_cancellation()
@@ -790,7 +799,7 @@ class GenerateImageTool(Tool):
             return file_change_result(result, self.workspace_dir.resolve(), target, before,
                                       hashlib.sha256(image_bytes).hexdigest(), verify_current=True)
         except Exception as exc:
-            return ToolResult(success=False, error=f"Image generation failed: {exc}")
+            return ToolResult(success=False, error=f"Image generation failed: {exc}" + _NO_SERVICE_SWITCH)
 
 
     def _resolve_output_path(self, output_path: str) -> Path:

@@ -78,6 +78,11 @@ class TableCompletionGate:
         self.contracts: dict[Path, dict] = {}
         self.purpose: str | None = None
 
+    @property
+    def required_tools(self) -> tuple[str, ...]:
+        """The validator must be callable whenever this gate guards an input."""
+        return (self.tool.name,) if self.sources else ()
+
     def snapshot(self) -> dict:
         return deepcopy({
             "version": 1,
@@ -264,7 +269,9 @@ class TableCompletionGate:
                 issue = CompletionIssue(
                     "TABLE_VALIDATION_REQUIRED_BEFORE_EXECUTION",
                     f"{path}: use read_file to inspect the header/sample and validate_table "
-                    "to scan every original record with the complete field contract first. "
+                    "to scan every original record with the complete field contract first "
+                    "(call it through call_tool with the tool_ref from its runtime tool description, "
+                    "or find it with tool_search). "
                     "Then retry execution; validating after calculations cannot satisfy this order.",
                 )
             elif not receipt.valid and self.purpose != "diagnosis" and mode != "edit_target":

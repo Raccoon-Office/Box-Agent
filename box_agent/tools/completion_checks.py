@@ -170,6 +170,13 @@ class CompletionChecks:
                     "COMPLETION_CHECK_FAILED", f"{registered_name}: {exc}", False,
                 ))
 
+    def required_tool_names(self) -> tuple[str, ...]:
+        """Tools an active gate needs callable; exposure reuses gate detection."""
+        names: list[str] = []
+        for gate in self.gates.values():
+            names.extend(name for name in getattr(gate, "required_tools", ()) if name not in names)
+        return tuple(names)
+
     async def check(self) -> list[CompletionIssue]:
         issues = list(self.failures)
         for name, gate in self.gates.items():

@@ -734,8 +734,10 @@ class MCPToolExposureManager:
         deferred_local_names_provider: Callable[[], frozenset[str]] | None = None,
         deferred_mcp: bool = True,
         allowed_connector_ids_provider: Callable[[], frozenset[str]] | None = None,
+        require_local_tools: Callable[[Iterable[str]], None] | None = None,
     ) -> None:
         self._catalog = catalog
+        self._require_local_tools = require_local_tools
         self._activated = activated
         self._activated_local = (
             activated_local_tools if activated_local_tools is not None else OrderedDict()
@@ -791,6 +793,12 @@ class MCPToolExposureManager:
                 entry = self._catalog.get_by_model_name(name)
                 scoped._direct_generations[name] = entry.generation if entry is not None and entry.tool is upstream else -1
         return scoped
+
+    def require_local_tools(self, names: Iterable[str]) -> None:
+        """Make discoverable local tools direct for the rest of the session."""
+        names = tuple(names)
+        if names and self._require_local_tools is not None:
+            self._require_local_tools(names)
 
     def bind_search_tool(self, search_tool: ToolSearchTool) -> None:
         self._search_tool = search_tool

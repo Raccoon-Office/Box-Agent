@@ -113,16 +113,18 @@ def test_routing_contract_prioritizes_explicit_targets_and_preserves_recovery_bo
         "Fetch 不能替代交互或展示",
         "权限拒绝和访问限制不能靠切换绕过",
         "“让我看/检查”本身不要求系统浏览器",
-        "不执行无条件 Fetch→内置→系统降级",
-        "WEB_VERIFICATION_REQUIRED",
-        "可用浏览器",
-        "原 URL",
+        "不做无条件 Fetch→内置→系统降级",
+        "某通道不可用不代表其他通道不可用",
+        "验证页不算取得正文，按工具返回的指引继续",
         "等待用户确认",
-        "同一浏览器",
-        "不要反复 HTTP 重试",
         "不替用户完成或绕过验证",
+        "不复用跨通道的标签页",
+        "读取正文不等于已打开给用户看",
     ):
         assert boundary in policy
+    # web_extract's WEB_VERIFICATION_REQUIRED error carries the fetch-specific
+    # recovery steps (see test_web_extract); the policy does not repeat them.
+    assert "WEB_VERIFICATION_REQUIRED" not in policy
 
 
 @pytest.mark.parametrize("profile", ["acp", "cli", "python"])
@@ -160,7 +162,7 @@ async def test_routing_contract_reaches_model_requests_on_initial_and_follow_up_
             assert prompt.count("## Web Access Routing") == 1
             assert "5. 已知公开 URL" in prompt
             assert "当前任务实际提供的工具清单" in prompt
-            assert "WEB_VERIFICATION_REQUIRED" in prompt
+            assert "验证页不算取得正文" in prompt
             assert "等待用户确认" in prompt
     finally:
         await session.aclose()

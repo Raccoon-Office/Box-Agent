@@ -224,6 +224,90 @@ uv run --project test_workspace/trace_viewer trace-viewer \
 
 详细规范见 [AGENTS.md](AGENTS.md)，组件说明见 [acp_eval/README.md](acp_eval/README.md) 和 [trace_viewer/README.md](trace_viewer/README.md)。
 
+## 上下文优化基线（第 0 批）
+
+上下文优化按批合入，每批同时对照原始基线 B0 和上一已通过版本 P。收益分两类，分开计量：
+
+| 类别 | 指标 | 工具 | 是否调用模型 |
+|---|---|---|---|
+| 确定性 | 首轮 system、tools、messages 的 UTF-8 字节（逐工具拆分） | `test_workspace/request_footprint.py` | 否 |
+| 行为 | 逐用例通过率、首轮/主调用输入 token、未命中缓存 token、轮数、耗时 | `quality_baseline run/check` + `test_workspace/paired_stats.py` | 是 |
+
+### 确定性体积
+
+`request_footprint` 在进程内驱动 ACP 适配器 `BoxACPAgent`，模型请求由 `httpx.MockTransport` 截获，不联网、不调用模型；做法与 `tests/test_main_input_budget.py` 相同。它测的是 provider 实际会收到的首个主请求（OpenAI 协议），固定条件：MCP、Skill、memory 关闭，不配置生图服务，ripgrep 视为可用，工作区路径和当天日期已归一化。Windows 上 bash 描述的是 PowerShell，因此快照只覆盖 POSIX。
+
+```bash
+uv run python -m test_workspace.request_footprint                         # 查看当前源码
+uv run python -m test_workspace.request_footprint --output /abs/P.json    # 保存
+uv run python -m test_workspace.request_footprint --compare /abs/P.json /abs/C.json
+```
+
+`tests/test_request_footprint.py` 把结果锁进 `tests/fixtures/request_footprint.json`。任何 system prompt、工具 schema 或首轮消息的改动都会以逐场景、逐工具的字节差值报错；有意改动后与提示词快照一起重新生成：
+
+```bash
+BOX_AGENT_UPDATE_PROMPT_SNAPSHOTS=1 uv run pytest tests/test_request_footprint.py tests/test_session_prompt_snapshots.py
+```
+
+字节是离线门禁。各 provider 的 tokenizer 不同，真实 `prompt_tokens` 以真实运行的 usage 为准。
+
+### 专项用例包
+
+| 包 | 用例 | 依赖 |
+|---|---|---|
+| `inputs/context_opt` | HTML 预览 4 条、CSV 校验 5 条 | 默认工具 |
+| `inputs/context_opt_routing` | 网页 4 条、生图 4 条 | 评测 profile 需提供 `web_extract`、生图服务；缺失时由 A/A 暴露为未验证或稳定失败，不能当作行为退化 |
+
+每类都含「应触发 / 相似但不该触发 / 第二轮才触发」三种输入；`split` 为 `dev` 的用于调试，`holdout` 的只在候选冻结后验收。`tests/test_context_opt_packs.py` 离线检查用例能被评测驱动解析、只用评测器已实现的判定、期望值由夹具数据推出。用例包的任何文件改动都会改变 `pack_sha256`，此前的运行全部不可比；需要改判定时，双方用新规则重跑。
+
+HTML 预览的「最终回复后链接仍能打开」「进程已回收」无法从 ACP 证据事后确认（评测结束时 ACP 进程退出），这两项在候选 runtime 上做第三层验收。
+
+### 冻结与 A/A
+
+1. 冻结条件：同一提交、同一显式模型（`--model`，不用自动路由）、同一 `~/.box-agent/config/config.yaml`（其哈希进入比较上下文）、同一用例包。
+2. 每个包跑两组 A/A，各至少 3 次，交错执行；每次运行目录按顺序记下：
+
+```bash
+PACK=test_workspace/inputs/context_opt
+uv run python -m test_workspace.quality_baseline run --model <MODEL> --pack "$PACK" \
+  $(python3 -c "import json,sys;print(' '.join('--case-id '+json.loads(l)['id'] for l in open(sys.argv[1])))" "$PACK/dataset.jsonl")
+```
+
+3. 标定：每个用例分为 `stable_pass` / `stable_fail` / `flaky`，并按 A/A 配对差值的标准差给出检测某个最小改善值所需的配对数：
+
+```bash
+uv run python -m test_workspace.paired_stats calibrate --pack "$PACK" \
+  --group-a /abs/a1 /abs/a2 /abs/a3 --group-b /abs/b1 /abs/b2 /abs/b3 \
+  --min-effect main_calls=1 --min-effect first_prompt_tokens=500 --output /abs/calibration.json
+```
+
+### 每批放行
+
+看候选结果前，先写下预登记文件：
+
+```json
+{
+  "batch": "2A",
+  "primary_metric": "footprint:acp_general_chat.system_bytes",
+  "min_effect": 1000,
+  "beneficiary_cases": [],
+  "critical_cases": ["t-tail-error-compute", "t-inplace-append", "h-serve-for-user"],
+  "noninferiority_margin": 0.15,
+  "min_pairs": 3,
+  "max_pairs": 10
+}
+```
+
+`primary_metric` 可以是 `footprint:<场景>.<字段>`（按精确差值判定），也可以是 `paired_stats.METRICS` 中的行为指标（配对差值 bootstrap 区间上界 < 0 且改善 ≥ `min_effect`），或 `pass_rate`。
+
+```bash
+uv run python -m test_workspace.paired_stats gate --pack "$PACK" --prereg /abs/prereg.json \
+  --calibration /abs/calibration.json --b0 /abs/b0-runs... --p /abs/p-runs... --candidate /abs/c-runs... \
+  --footprint /abs/P.json /abs/C.json
+```
+
+判定顺序：关键用例任何失败为 `block`；A/A 中稳定通过的用例在候选中失败为 `investigate`（同条件配对复测）；波动用例汇总后下降超过容差，或区间显著为负，为 `defer`；主指标已证明为 `accept`，未到 `max_pairs` 为 `continue_sampling`，否则为 `not_proven`。B0、P、C 三方须通过 `quality_baseline` 的同条件校验（运行器、判定器、用例包、profile、超时预算一致），否则拒绝比较。成对指标按运行目录的顺序配对，第 i 个基线目录对第 i 个候选目录；usage 缺失记为未知，并报告被丢弃的配对数。
+
 ## Tool / Skill / MCP 缓存评测
 
 CI 离线检查与手动真实 ACP 缓存评测见 [context_cache](inputs/context_cache/README.md)。手动入口：

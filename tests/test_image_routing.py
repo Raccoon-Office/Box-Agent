@@ -46,8 +46,8 @@ def test_image_routing_reaches_parent_and_child_without_inheriting_tool_inventor
         assert "无关新任务恢复默认" in prompt
         assert "已明确指定 Seko 的图片任务" in prompt
         assert "不视为指定 Seko" in prompt
-        assert "不自动切换到 Seko" in prompt
-        assert "拒绝后不得换服务绕过" in prompt
+        assert "用户指定的服务不可用时说明原因，不擅自替换" in prompt
+        assert "默认服务失败或被拒时按工具返回处理，不自动改用其他服务" in prompt
     assert "`generate_image`" not in policy
     assert "mcp__" not in policy
 
@@ -64,7 +64,7 @@ def test_native_image_guidance_respects_explicit_service_choice(config):
     assert "follow-up edits" in description
     assert "runtime handles billing confirmation" in description
     prompt = build_image_generation_prompt(config, {}, tools={"generate_image"})
-    assert "按统一生图选路规则应使用内置服务时" in prompt
+    assert "以 `generate_image` 工具说明及返回为准" in prompt
     missing = build_image_generation_prompt(config, {}, tools={"tool_search"})
     assert "用户明确指定其他生图服务时" in missing
     assert "使用当前可用的对应工具" in missing

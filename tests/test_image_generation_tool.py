@@ -1144,13 +1144,17 @@ def test_image_generation_service_is_box_agent_configured_for_cli_and_acp() -> N
 
     assert image_generation_service_configured(Config(), {}) is True
     prompt = build_image_generation_prompt(Config(), {})
-    assert "Box-Agent 的标准工具" in prompt
-    assert "CLI 与 ACP 共用" in prompt
+    assert "当前生图服务：已配置" in prompt
     assert "不由宿主 `env_context` 控制" in prompt
-    assert "优先调用 `generate_image`" in prompt
-    assert "文生图、图生图、改图" in prompt
-    assert "HTML/PPT" in prompt
+    assert "以 `generate_image` 工具说明及返回为准" in prompt
+    # When-to-use, edit modes and fallback limits live once, in the tool description.
+    assert "优先调用 `generate_image`" not in prompt
     description = GenerateImageTool().description
+    assert "shared by CLI and ACP" in description
+    assert "prefer this tool over HTML/CSS, SVG, PIL" in description
+    assert "image-to-image with reference_images" in description
+    assert "HTML/PPTX" in description
+    assert "If the user forbids fallback and this tool fails, report the request as blocked" in description
     assert "call this tool directly" in description
     assert "runtime handles billing" in description
     assert "explicit request to continue" in description
@@ -2157,3 +2161,24 @@ async def test_private_image_service_accepts_successful_response(
     )
     assert result.success, result.error
     assert (tmp_path / "result.png").read_bytes() == PNG_BYTES
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_and_failed_image_results_forbid_switching_services(tmp_path, monkeypatch) -> None:
+    # The system prompt no longer repeats "do not switch to Seko on failure";
+    # every default-service failure result has to carry it.
+    from unittest.mock import AsyncMock
+
+    for name in ("BOX_AGENT_IMAGE_GENERATION_ENDPOINT", "BOX_AGENT_IMAGE_GEN_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    unconfigured = await GenerateImageTool(workspace_dir=str(tmp_path), endpoint="").execute(
+        prompt="draw", output_path="out.png")
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint="https://images.example/v1/images/generations",
+                             api_key="custom")
+    monkeypatch.setattr(tool, "_request_image", AsyncMock(side_effect=RuntimeError("upstream 500")))
+    failed = await tool.execute(prompt="draw", output_path="out.png")
+    for result in (unconfigured, failed):
+        assert not result.success
+        assert "Do not switch to Seko or another image service unless the user explicitly selected it" in result.error
+    assert "blocked" in unconfigured.error
+    assert failed.error.startswith("Image generation failed: upstream 500")

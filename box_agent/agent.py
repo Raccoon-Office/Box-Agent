@@ -546,6 +546,7 @@ class Agent:
                 self.activated_mcp_tools,
                 activated_local_tools=self.activated_local_tools,
                 deferred_local_names_provider=self.local_tool_exposure.deferred_names,
+                require_local_tools=self.local_tool_exposure.require_tools,
                 deferred_mcp=deferred_mcp_loading_enabled,
                 allowed_connector_ids_provider=allowed_connector_ids_provider,
             )

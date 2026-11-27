@@ -16,6 +16,9 @@ DISCOVERABLE_LOCAL_NAMES = frozenset({
     "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction",
     "obsidian_create_note", "obsidian_update_note", "obsidian_daily_note",
     "search_skillhub", "install_skillhub_skill",
+    # Delivered once a table completion gate detects an explicit CSV/TSV input;
+    # the same detection enforces validation, so exposure and gate cannot diverge.
+    "validate_table",
 })
 
 # These audited method hints change schema visibility only. They never register

@@ -108,11 +108,13 @@ async def test_anthropic_preflight_equals_wire_and_preserves_pixels(stream, thin
         await client.client.close()
     size, body = captured[0]
     assert size == metrics["body_bytes"]
-    assert body["system"] == messages[0].content
+    # The full system prompt is kept, as one cache-marked block.
+    assert body["system"] == [{"type": "text", "text": messages[0].content, "cache_control": {"type": "ephemeral"}}]
     assert len(body["messages"]) == 1  # Adjacent users merge without losing the image overlay.
     image = body["messages"][0]["content"][-1]
     assert image["source"]["data"] == messages[-1].content[-1]["data"]
     assert image["source"]["media_type"] == "image/png"
+    assert image["cache_control"] == {"type": "ephemeral"}  # rolling tail breakpoint
     assert [message.model_dump() for message in messages] == before
     assert metrics["non_image_bytes"] < metrics["body_bytes"]
 

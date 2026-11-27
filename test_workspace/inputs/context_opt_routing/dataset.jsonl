@@ -1,0 +1,8 @@
+{"id": "w-public-text", "query": "读一下 https://example.com 这个页面，用一句话告诉我它写了什么。", "input_files": []}
+{"id": "w-similar-no-web", "query": "不用查资料，凭你已有的知识用三句话解释 HTTP 和 HTTPS 的区别。", "input_files": []}
+{"id": "w-explicit-browser-unavailable", "query": "用我 Chrome 里已经登录的页面，看一下我的 GitHub 通知现在有几条。", "input_files": []}
+{"id": "w-follow-up-same-page", "query": "读一下 https://example.com 这个页面，用一句话告诉我它写了什么。", "input_files": [], "follow_up_turns": [{"query": "那它说可以拿这个域名来做测试或者监控吗？"}]}
+{"id": "i-default-service", "query": "生成一张图片：蓝色背景上一个白色圆形，存为 circle.png。", "input_files": []}
+{"id": "i-similar-no-image", "query": "写一段 100 字左右描写海边日落的文字，存成 sunset.md。", "input_files": []}
+{"id": "i-explicit-seko-unavailable", "query": "用 Seko 生成一张咖啡杯的插图，存为 coffee.png。", "input_files": []}
+{"id": "i-second-turn", "query": "我在准备一份介绍咖啡文化的演示，先帮我列 3 个章节标题。", "input_files": [], "follow_up_turns": [{"query": "第一章配一张咖啡豆的插图，存为 beans.png。"}]}

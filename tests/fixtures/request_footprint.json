@@ -1,0 +1,562 @@
+{
+ "schema_version": 1,
+ "unit": "utf8_bytes_compact_json",
+ "scenarios": {
+  "acp_general_chat": {
+   "system_bytes": 32343,
+   "system_sha256": "6358cdc0e84c048e",
+   "tools_bytes": 45537,
+   "tool_count": 21,
+   "messages_bytes": 218,
+   "request_bytes": 78397,
+   "tools": {
+    "bash": {
+     "bytes": 6533,
+     "description_bytes": 4653,
+     "parameters_bytes": 1752,
+     "sha256": "001da52997e378cf"
+    },
+    "bash_kill": {
+     "bytes": 953,
+     "description_bytes": 639,
+     "parameters_bytes": 220,
+     "sha256": "4eaaa7d65d815439"
+    },
+    "bash_output": {
+     "bytes": 1758,
+     "description_bytes": 1181,
+     "parameters_bytes": 462,
+     "sha256": "5353515cedee828e"
+    },
+    "call_tool": {
+     "bytes": 438,
+     "description_bytes": 69,
+     "parameters_bytes": 287,
+     "sha256": "3a5f9ba1a19add52"
+    },
+    "create_scheduled_task": {
+     "bytes": 2234,
+     "description_bytes": 1334,
+     "parameters_bytes": 793,
+     "sha256": "186574afe7690704"
+    },
+    "edit_file": {
+     "bytes": 703,
+     "description_bytes": 231,
+     "parameters_bytes": 390,
+     "sha256": "852f2b180756a01d"
+    },
+    "execute_code": {
+     "bytes": 4650,
+     "description_bytes": 3256,
+     "parameters_bytes": 1244,
+     "sha256": "97c530032b003a41"
+    },
+    "extract_email_attachment": {
+     "bytes": 1068,
+     "description_bytes": 462,
+     "parameters_bytes": 509,
+     "sha256": "e23a182c7ab23909"
+    },
+    "inspect_images": {
+     "bytes": 1159,
+     "description_bytes": 329,
+     "parameters_bytes": 743,
+     "sha256": "4a079d3cc58cdf9e"
+    },
+    "publish_artifact": {
+     "bytes": 1208,
+     "description_bytes": 747,
+     "parameters_bytes": 372,
+     "sha256": "83c6cc071a0aaaf4"
+    },
+    "query_jsonl": {
+     "bytes": 2426,
+     "description_bytes": 1080,
+     "parameters_bytes": 1248,
+     "sha256": "8a50e59586eb8e8f"
+    },
+    "read_email": {
+     "bytes": 1076,
+     "description_bytes": 552,
+     "parameters_bytes": 441,
+     "sha256": "2eda7aafd9462603"
+    },
+    "read_file": {
+     "bytes": 2322,
+     "description_bytes": 1476,
+     "parameters_bytes": 764,
+     "sha256": "42747f942de5fcad"
+    },
+    "read_video": {
+     "bytes": 1458,
+     "description_bytes": 605,
+     "parameters_bytes": 770,
+     "sha256": "ad39b42f8909e4a9"
+    },
+    "report_execution_result": {
+     "bytes": 2808,
+     "description_bytes": 479,
+     "parameters_bytes": 2233,
+     "sha256": "4e8d433184c50c4f"
+    },
+    "request_user_decision": {
+     "bytes": 3298,
+     "description_bytes": 1409,
+     "parameters_bytes": 1795,
+     "sha256": "95d24fae171624ee"
+    },
+    "request_user_input": {
+     "bytes": 1202,
+     "description_bytes": 656,
+     "parameters_bytes": 455,
+     "sha256": "9880cb136a5fc88b"
+    },
+    "search_files": {
+     "bytes": 1218,
+     "description_bytes": 325,
+     "parameters_bytes": 808,
+     "sha256": "e5e181e3aefa0800"
+    },
+    "sub_agent": {
+     "bytes": 5610,
+     "description_bytes": 2329,
+     "parameters_bytes": 3193,
+     "sha256": "4d174ded25f3f9d3"
+    },
+    "tool_search": {
+     "bytes": 1941,
+     "description_bytes": 118,
+     "parameters_bytes": 1739,
+     "sha256": "58c763d840b958d9"
+    },
+    "write_file": {
+     "bytes": 1452,
+     "description_bytes": 489,
+     "parameters_bytes": 880,
+     "sha256": "64cf569ba17bda99"
+    }
+   }
+  },
+  "acp_code_agent_chat": {
+   "system_bytes": 34702,
+   "system_sha256": "664f3d3c86f890e6",
+   "tools_bytes": 47462,
+   "tool_count": 23,
+   "messages_bytes": 218,
+   "request_bytes": 82708,
+   "tools": {
+    "bash": {
+     "bytes": 6533,
+     "description_bytes": 4653,
+     "parameters_bytes": 1752,
+     "sha256": "001da52997e378cf"
+    },
+    "bash_kill": {
+     "bytes": 953,
+     "description_bytes": 639,
+     "parameters_bytes": 220,
+     "sha256": "4eaaa7d65d815439"
+    },
+    "bash_output": {
+     "bytes": 1758,
+     "description_bytes": 1181,
+     "parameters_bytes": 462,
+     "sha256": "5353515cedee828e"
+    },
+    "call_tool": {
+     "bytes": 438,
+     "description_bytes": 69,
+     "parameters_bytes": 287,
+     "sha256": "3a5f9ba1a19add52"
+    },
+    "create_scheduled_task": {
+     "bytes": 2234,
+     "description_bytes": 1334,
+     "parameters_bytes": 793,
+     "sha256": "186574afe7690704"
+    },
+    "edit_file": {
+     "bytes": 703,
+     "description_bytes": 231,
+     "parameters_bytes": 390,
+     "sha256": "852f2b180756a01d"
+    },
+    "execute_code": {
+     "bytes": 4650,
+     "description_bytes": 3256,
+     "parameters_bytes": 1244,
+     "sha256": "97c530032b003a41"
+    },
+    "extract_email_attachment": {
+     "bytes": 1068,
+     "description_bytes": 462,
+     "parameters_bytes": 509,
+     "sha256": "e23a182c7ab23909"
+    },
+    "glob": {
+     "bytes": 983,
+     "description_bytes": 505,
+     "parameters_bytes": 401,
+     "sha256": "c94c663b300870ce"
+    },
+    "grep": {
+     "bytes": 940,
+     "description_bytes": 370,
+     "parameters_bytes": 493,
+     "sha256": "51c8fe2fbca9b57a"
+    },
+    "inspect_images": {
+     "bytes": 1159,
+     "description_bytes": 329,
+     "parameters_bytes": 743,
+     "sha256": "4a079d3cc58cdf9e"
+    },
+    "publish_artifact": {
+     "bytes": 1208,
+     "description_bytes": 747,
+     "parameters_bytes": 372,
+     "sha256": "83c6cc071a0aaaf4"
+    },
+    "query_jsonl": {
+     "bytes": 2426,
+     "description_bytes": 1080,
+     "parameters_bytes": 1248,
+     "sha256": "8a50e59586eb8e8f"
+    },
+    "read_email": {
+     "bytes": 1076,
+     "description_bytes": 552,
+     "parameters_bytes": 441,
+     "sha256": "2eda7aafd9462603"
+    },
+    "read_file": {
+     "bytes": 2322,
+     "description_bytes": 1476,
+     "parameters_bytes": 764,
+     "sha256": "42747f942de5fcad"
+    },
+    "read_video": {
+     "bytes": 1458,
+     "description_bytes": 605,
+     "parameters_bytes": 770,
+     "sha256": "ad39b42f8909e4a9"
+    },
+    "report_execution_result": {
+     "bytes": 2808,
+     "description_bytes": 479,
+     "parameters_bytes": 2233,
+     "sha256": "4e8d433184c50c4f"
+    },
+    "request_user_decision": {
+     "bytes": 3298,
+     "description_bytes": 1409,
+     "parameters_bytes": 1795,
+     "sha256": "95d24fae171624ee"
+    },
+    "request_user_input": {
+     "bytes": 1202,
+     "description_bytes": 656,
+     "parameters_bytes": 455,
+     "sha256": "9880cb136a5fc88b"
+    },
+    "search_files": {
+     "bytes": 1218,
+     "description_bytes": 325,
+     "parameters_bytes": 808,
+     "sha256": "e5e181e3aefa0800"
+    },
+    "sub_agent": {
+     "bytes": 5610,
+     "description_bytes": 2329,
+     "parameters_bytes": 3193,
+     "sha256": "4d174ded25f3f9d3"
+    },
+    "tool_search": {
+     "bytes": 1941,
+     "description_bytes": 118,
+     "parameters_bytes": 1739,
+     "sha256": "58c763d840b958d9"
+    },
+    "write_file": {
+     "bytes": 1452,
+     "description_bytes": 489,
+     "parameters_bytes": 880,
+     "sha256": "64cf569ba17bda99"
+    }
+   }
+  },
+  "acp_data_analysis_chat": {
+   "system_bytes": 38853,
+   "system_sha256": "f8fd167f09f6847a",
+   "tools_bytes": 45537,
+   "tool_count": 21,
+   "messages_bytes": 218,
+   "request_bytes": 85451,
+   "tools": {
+    "bash": {
+     "bytes": 6533,
+     "description_bytes": 4653,
+     "parameters_bytes": 1752,
+     "sha256": "001da52997e378cf"
+    },
+    "bash_kill": {
+     "bytes": 953,
+     "description_bytes": 639,
+     "parameters_bytes": 220,
+     "sha256": "4eaaa7d65d815439"
+    },
+    "bash_output": {
+     "bytes": 1758,
+     "description_bytes": 1181,
+     "parameters_bytes": 462,
+     "sha256": "5353515cedee828e"
+    },
+    "call_tool": {
+     "bytes": 438,
+     "description_bytes": 69,
+     "parameters_bytes": 287,
+     "sha256": "3a5f9ba1a19add52"
+    },
+    "create_scheduled_task": {
+     "bytes": 2234,
+     "description_bytes": 1334,
+     "parameters_bytes": 793,
+     "sha256": "186574afe7690704"
+    },
+    "edit_file": {
+     "bytes": 703,
+     "description_bytes": 231,
+     "parameters_bytes": 390,
+     "sha256": "852f2b180756a01d"
+    },
+    "execute_code": {
+     "bytes": 4650,
+     "description_bytes": 3256,
+     "parameters_bytes": 1244,
+     "sha256": "97c530032b003a41"
+    },
+    "extract_email_attachment": {
+     "bytes": 1068,
+     "description_bytes": 462,
+     "parameters_bytes": 509,
+     "sha256": "e23a182c7ab23909"
+    },
+    "inspect_images": {
+     "bytes": 1159,
+     "description_bytes": 329,
+     "parameters_bytes": 743,
+     "sha256": "4a079d3cc58cdf9e"
+    },
+    "publish_artifact": {
+     "bytes": 1208,
+     "description_bytes": 747,
+     "parameters_bytes": 372,
+     "sha256": "83c6cc071a0aaaf4"
+    },
+    "query_jsonl": {
+     "bytes": 2426,
+     "description_bytes": 1080,
+     "parameters_bytes": 1248,
+     "sha256": "8a50e59586eb8e8f"
+    },
+    "read_email": {
+     "bytes": 1076,
+     "description_bytes": 552,
+     "parameters_bytes": 441,
+     "sha256": "2eda7aafd9462603"
+    },
+    "read_file": {
+     "bytes": 2322,
+     "description_bytes": 1476,
+     "parameters_bytes": 764,
+     "sha256": "42747f942de5fcad"
+    },
+    "read_video": {
+     "bytes": 1458,
+     "description_bytes": 605,
+     "parameters_bytes": 770,
+     "sha256": "ad39b42f8909e4a9"
+    },
+    "report_execution_result": {
+     "bytes": 2808,
+     "description_bytes": 479,
+     "parameters_bytes": 2233,
+     "sha256": "4e8d433184c50c4f"
+    },
+    "request_user_decision": {
+     "bytes": 3298,
+     "description_bytes": 1409,
+     "parameters_bytes": 1795,
+     "sha256": "95d24fae171624ee"
+    },
+    "request_user_input": {
+     "bytes": 1202,
+     "description_bytes": 656,
+     "parameters_bytes": 455,
+     "sha256": "9880cb136a5fc88b"
+    },
+    "search_files": {
+     "bytes": 1218,
+     "description_bytes": 325,
+     "parameters_bytes": 808,
+     "sha256": "e5e181e3aefa0800"
+    },
+    "sub_agent": {
+     "bytes": 5610,
+     "description_bytes": 2329,
+     "parameters_bytes": 3193,
+     "sha256": "4d174ded25f3f9d3"
+    },
+    "tool_search": {
+     "bytes": 1941,
+     "description_bytes": 118,
+     "parameters_bytes": 1739,
+     "sha256": "58c763d840b958d9"
+    },
+    "write_file": {
+     "bytes": 1452,
+     "description_bytes": 489,
+     "parameters_bytes": 880,
+     "sha256": "64cf569ba17bda99"
+    }
+   }
+  },
+  "acp_general_csv": {
+   "system_bytes": 32343,
+   "system_sha256": "6358cdc0e84c048e",
+   "tools_bytes": 45537,
+   "tool_count": 21,
+   "messages_bytes": 7348,
+   "request_bytes": 85527,
+   "tools": {
+    "bash": {
+     "bytes": 6533,
+     "description_bytes": 4653,
+     "parameters_bytes": 1752,
+     "sha256": "001da52997e378cf"
+    },
+    "bash_kill": {
+     "bytes": 953,
+     "description_bytes": 639,
+     "parameters_bytes": 220,
+     "sha256": "4eaaa7d65d815439"
+    },
+    "bash_output": {
+     "bytes": 1758,
+     "description_bytes": 1181,
+     "parameters_bytes": 462,
+     "sha256": "5353515cedee828e"
+    },
+    "call_tool": {
+     "bytes": 438,
+     "description_bytes": 69,
+     "parameters_bytes": 287,
+     "sha256": "3a5f9ba1a19add52"
+    },
+    "create_scheduled_task": {
+     "bytes": 2234,
+     "description_bytes": 1334,
+     "parameters_bytes": 793,
+     "sha256": "186574afe7690704"
+    },
+    "edit_file": {
+     "bytes": 703,
+     "description_bytes": 231,
+     "parameters_bytes": 390,
+     "sha256": "852f2b180756a01d"
+    },
+    "execute_code": {
+     "bytes": 4650,
+     "description_bytes": 3256,
+     "parameters_bytes": 1244,
+     "sha256": "97c530032b003a41"
+    },
+    "extract_email_attachment": {
+     "bytes": 1068,
+     "description_bytes": 462,
+     "parameters_bytes": 509,
+     "sha256": "e23a182c7ab23909"
+    },
+    "inspect_images": {
+     "bytes": 1159,
+     "description_bytes": 329,
+     "parameters_bytes": 743,
+     "sha256": "4a079d3cc58cdf9e"
+    },
+    "publish_artifact": {
+     "bytes": 1208,
+     "description_bytes": 747,
+     "parameters_bytes": 372,
+     "sha256": "83c6cc071a0aaaf4"
+    },
+    "query_jsonl": {
+     "bytes": 2426,
+     "description_bytes": 1080,
+     "parameters_bytes": 1248,
+     "sha256": "8a50e59586eb8e8f"
+    },
+    "read_email": {
+     "bytes": 1076,
+     "description_bytes": 552,
+     "parameters_bytes": 441,
+     "sha256": "2eda7aafd9462603"
+    },
+    "read_file": {
+     "bytes": 2322,
+     "description_bytes": 1476,
+     "parameters_bytes": 764,
+     "sha256": "42747f942de5fcad"
+    },
+    "read_video": {
+     "bytes": 1458,
+     "description_bytes": 605,
+     "parameters_bytes": 770,
+     "sha256": "ad39b42f8909e4a9"
+    },
+    "report_execution_result": {
+     "bytes": 2808,
+     "description_bytes": 479,
+     "parameters_bytes": 2233,
+     "sha256": "4e8d433184c50c4f"
+    },
+    "request_user_decision": {
+     "bytes": 3298,
+     "description_bytes": 1409,
+     "parameters_bytes": 1795,
+     "sha256": "95d24fae171624ee"
+    },
+    "request_user_input": {
+     "bytes": 1202,
+     "description_bytes": 656,
+     "parameters_bytes": 455,
+     "sha256": "9880cb136a5fc88b"
+    },
+    "search_files": {
+     "bytes": 1218,
+     "description_bytes": 325,
+     "parameters_bytes": 808,
+     "sha256": "e5e181e3aefa0800"
+    },
+    "sub_agent": {
+     "bytes": 5610,
+     "description_bytes": 2329,
+     "parameters_bytes": 3193,
+     "sha256": "4d174ded25f3f9d3"
+    },
+    "tool_search": {
+     "bytes": 1941,
+     "description_bytes": 118,
+     "parameters_bytes": 1739,
+     "sha256": "58c763d840b958d9"
+    },
+    "write_file": {
+     "bytes": 1452,
+     "description_bytes": 489,
+     "parameters_bytes": 880,
+     "sha256": "64cf569ba17bda99"
+    }
+   }
+  }
+ }
+}
