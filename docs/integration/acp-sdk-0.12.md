@@ -173,3 +173,41 @@ pnpm desktop:typecheck:runtime
 
 这些检查验证源码组合，不证明已安装客户端、正式 runtime、远程传输或目标云电脑可用。
 Windows 模拟与 Windows 原生进程检查分别报告；正式平台验证需使用实际目标环境。
+
+
+## Context compaction display notice (2026-11-27)
+
+After `SummarizationEvent` confirms that the compacted surface was committed,
+ACP sends a display-only `tool_call_update` with a stable per-event `toolCallId`
+(`context-compaction-<run event ID>`), `status: "completed"`, and this `rawOutput`:
+
+```json
+{"type":"context_compaction","version":1,"status":"completed"}
+```
+
+The notification is routed to the owning session and uses the existing bounded,
+best-effort progress sender. A slow or failed display consumer does not fail the
+prompt. A committed deterministic fallback also counts as compaction; provider
+errors, summary text, and private context are not included. This does not add a
+start notification or infer completion from token estimates. Hosts should ignore
+unknown versions, deduplicate by `toolCallId`, localize the notice, and persist it
+outside answer/model-context text. ACP history replay still reconstructs messages;
+hosts retain received notices in their own display snapshots. Notices not delivered
+before disconnect are not reconstructed by this change.
+
+Validation: 393 focused ACP, Session Log, and compaction tests passed. A packaged
+darwin-arm64 1.0.0 runtime was rebuilt and installed into the Lab checkout, then
+probed over real ACP stdio with an isolated local provider reporting controlled
+high usage. The engine requested and committed a summary, emitted one notice,
+continued three prompts, and served a second session on the same process. This
+probe also exposed and fixed memory extraction scheduling from the compaction disk
+worker: background tasks are now created on the owning event loop.
+The running Lab development client subsequently passed live acceptance in an
+isolated session: round two displayed one notice, that round and round three
+completed, and switching to another session and back retained exactly one notice
+and readable original messages. The local mock provider used a 128K context
+window and reported high usage; this verifies the real ACP/display path, not
+real-model summary quality. An initial 64K configuration was rejected because
+the base context exceeded its budget. This is not a release build or a claim
+that a later rebased runtime was installed; host restart was not separately
+observed.

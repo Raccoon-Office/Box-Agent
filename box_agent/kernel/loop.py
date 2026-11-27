@@ -85,7 +85,7 @@ from .tool_messages import (
 )
 from ..logger import AgentLogger
 from ..payload_privacy import redact_diagnostic_text
-from ..session_log import SessionLogReplayError, run_session_write
+from ..session_log import SessionLogReplayError, run_on_session_loop, run_session_write
 from ..llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from ..loop_guards import (
     EMPTY_ARGS_LIMIT,
@@ -1220,7 +1220,8 @@ async def _run_agent_loop_impl(
             # Snapshot messages before compression, then extract in background
             if memory_extractor:
                 _snapshot = list(messages)
-                asyncio.create_task(
+                run_on_session_loop(
+                    asyncio.create_task,
                     memory_extractor.maybe_extract(
                         _snapshot,
                         "pre_summarize",

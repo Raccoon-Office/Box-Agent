@@ -169,6 +169,7 @@ from box_agent.events import (
     StepStart,
     StopReason,
     SubAgentEvent,
+    SummarizationEvent,
     ThinkingEvent,
     ToolCallResult as ToolCallResultEvent,
     ToolCallStart as ToolCallStartEvent,
@@ -5673,6 +5674,19 @@ class BoxACPAgent:
                             update.field_meta = {"messageDisplay": display_meta}
                             await self._send(session_id, update)
 
+                        case SummarizationEvent():
+                            # Emitted only after the compacted surface is committed.
+                            # A bounded, display-only notification must not delay the run.
+                            await _send_progress(update_tool_call(
+                                f"context-compaction-{envelope.event_id}",
+                                status="completed",
+                                raw_output={
+                                    "type": "context_compaction",
+                                    "version": 1,
+                                    "status": "completed",
+                                },
+                            ))
+
                         case ProgressEvent(step=s, content=text):
                             payload = {
                                 "type": "agent_progress",
@@ -6156,7 +6170,7 @@ class BoxACPAgent:
                                     log.exception("memory/proposal_unhandled", exc, session_id=session_id)
 
                         case _:
-                            pass  # StepStart, SummarizationEvent, PermissionRequestEvent, etc.
+                            pass  # StepStart, PermissionRequestEvent, etc.
 
                 except Exception as exc:
                     if isinstance(exc, TimeoutError):

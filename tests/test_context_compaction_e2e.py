@@ -423,3 +423,47 @@ async def test_forced_compaction_headroom_does_not_replace_the_final_request_bud
         assert not errors and len(provider.normal_requests) == 1
         assert any(message.content == "x" * user_chars for message in provider.normal_requests[0])
         assert done.stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.asyncio
+async def test_persisted_compaction_schedules_memory_on_owner_loop_and_resumes(tmp_path):
+    import asyncio
+    import threading
+    from box_agent.session_log import SessionLog
+
+    owner_loop = asyncio.get_running_loop()
+    owner_thread = threading.get_ident()
+    extracted = asyncio.Event()
+    snapshots = []
+
+    class Extractor:
+        async def maybe_extract(self, messages, trigger, **kwargs):
+            assert asyncio.get_running_loop() is owner_loop
+            assert threading.get_ident() == owner_thread
+            snapshots.append((list(messages), trigger))
+            extracted.set()
+
+    log = SessionLog.create(tmp_path, session_id="compaction-memory", cwd=tmp_path)
+    try:
+        agent = Agent(
+            llm_client=CompactionE2ELLM(), system_prompt="Test system", tools=[],
+            max_steps=2, workspace_dir=str(tmp_path), token_limit=104_400,
+            deferred_mcp_loading_enabled=False, session_log=log,
+        )
+        agent.set_memory_extractor(Extractor())
+        agent.messages.extend([
+            Message(role="user", content="old user request"),
+            Message(role="assistant", content="x" * 200_000,
+                    usage=TokenUsage(prompt_tokens=104_400, completion_tokens=100, total_tokens=104_500)),
+            Message(role="user", content="latest user request"),
+        ])
+        events = [event async for event in agent.run_events()]
+        await asyncio.wait_for(extracted.wait(), 2)
+        assert any(isinstance(event, SummarizationEvent) for event in events)
+        assert not any(isinstance(event, ErrorEvent) for event in events)
+        assert any(isinstance(event, DoneEvent) for event in events)
+        assert snapshots[0][1] == "pre_summarize"
+        assert any(message.content == "x" * 200_000 for message in snapshots[0][0])
+        assert any(event["type"] == "compaction/end" for event in log.events)
+    finally:
+        log.close()
