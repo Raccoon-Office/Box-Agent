@@ -484,13 +484,10 @@ async def initialize_base_tools(
     # 3. MCP tools (loaded with priority search, in background to avoid blocking startup)
     mcp_task: Optional[asyncio.Task] = None
     if config.tools.enable_mcp:
-        from box_agent.plugins.cua.ready_tool import create_cua_service, EnsureCuaReadyTool
+        from box_agent.plugins.cua.ready_tool import create_cua_service
         from box_agent.tools.mcp_loader import register_cua_service
 
-        cua_service = create_cua_service(config)
-        if cua_service is not None:
-            cua_service = register_cua_service(cua_service)
-            tools.append(EnsureCuaReadyTool(cua_service))
+        register_cua_service(create_cua_service(config))
         mcp_config = config.tools.mcp
         set_mcp_timeout_config(
             connect_timeout=mcp_config.connect_timeout,

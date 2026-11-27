@@ -338,6 +338,12 @@ async def prepare_tools(resources: SessionResources) -> None:
         ) if options.profile == "acp" else {}),
     )
     resources.tools.extend(host.extra_tools)
+    from .plugins.repl import prepare_repl
+
+    from .tools.mcp_loader import get_cua_service
+
+    prepare_repl(resources, allow_full_access=allow_full_access,
+                 cua_service=get_cua_service() if config.tools.enable_mcp else None)
     resources.state.update(
         permission_engine=permission_engine, grant_store=grant_store,
         skill_runtime_context=runtime_context, skill_loader=resources.skill_loader,

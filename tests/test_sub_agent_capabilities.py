@@ -50,6 +50,26 @@ class NamedMcpTool(NamedTool):
         self.server_name = server_name
 
 
+@pytest.mark.parametrize("name,server", [
+    ("managed_browser_snapshot", "playwright"),
+    ("user_browser_click", "browser-gateway"),
+    ("browser_repl_js", ""), ("browser_repl_reset", ""),
+    ("cua_repl_js", ""), ("cua_repl_reset", ""),
+    ("ensure_cua_ready", ""), ("get_app", "computer-use"),
+    ("read_file", "computer-use"), ("read_file", "browser-gateway"),
+])
+def test_gui_tools_cannot_be_delegated_even_with_relaxed_constraints(name, server):
+    tool = NamedMcpTool(name, server)
+    spec = _parse(required_tools=[name])
+    assert isinstance(spec, DelegationSpec)
+    spec = replace(spec, constraints=replace(
+        spec.constraints, read_only=False, network=True, external_side_effect=True,
+    ))
+    result = CapabilityResolver().resolve(spec, parent_tools={name: tool})
+    assert isinstance(result, CapabilityFailure)
+    assert result.details["denied_reason"] == "gui_delegation_disabled"
+
+
 def _parse(**overrides) -> DelegationSpec | CapabilityFailure:
     values = {"task": "Inspect the repository"}
     values.update(overrides)
@@ -158,7 +178,7 @@ def test_eager_mcp_memory_name_collision_cannot_borrow_local_permissions(
     result = CapabilityResolver().resolve(spec, parent_tools=tools)
 
     assert isinstance(result, CapabilityFailure)
-    assert result.details["denied_reason"] == "unknown_capability_metadata"
+    assert result.details["denied_reason"] == ("gui_delegation_disabled" if server_name == "playwright" else "unknown_capability_metadata")
     session.call_tool.assert_not_called()
 
 
@@ -617,7 +637,7 @@ _PLAYWRIGHT_BLOCKED_MANAGED_TOOLS = (
 )
 
 
-def test_playwright_named_run_code_is_delegable_like_navigate() -> None:
+def test_playwright_navigation_and_code_are_both_parent_only() -> None:
     navigate = NamedMcpTool("managed_browser_navigate", "playwright")
     run_code = NamedMcpTool("managed_browser_run_code", "playwright")
     navigate_spec = _parse(required_tools=["managed_browser_navigate"])
@@ -636,13 +656,13 @@ def test_playwright_named_run_code_is_delegable_like_navigate() -> None:
         parent_tools={"managed_browser_run_code": run_code},
     )
 
-    assert isinstance(navigate_result, ResolvedCapabilityBundle)
-    assert isinstance(run_code_result, ResolvedCapabilityBundle)
-    assert run_code_result.resolved_tool_names == ("managed_browser_run_code",)
+    for result in (navigate_result, run_code_result):
+        assert isinstance(result, CapabilityFailure)
+        assert result.details["denied_reason"] == "gui_delegation_disabled"
 
 
 @pytest.mark.parametrize("tool_name", _PLAYWRIGHT_DELEGABLE_MANAGED_TOOLS)
-def test_explicit_playwright_page_interact_tools_are_delegable(tool_name: str) -> None:
+def test_explicit_playwright_page_interact_tools_are_parent_only(tool_name: str) -> None:
     spec = _parse(required_tools=[tool_name])
     assert isinstance(spec, DelegationSpec)
     assert spec.constraints.network is True
@@ -653,8 +673,8 @@ def test_explicit_playwright_page_interact_tools_are_delegable(tool_name: str) -
         parent_tools={tool_name: NamedMcpTool(tool_name, "playwright")},
     )
 
-    assert isinstance(result, ResolvedCapabilityBundle)
-    assert result.resolved_tool_names == (tool_name,)
+    assert isinstance(result, CapabilityFailure)
+    assert result.details["denied_reason"] == "gui_delegation_disabled"
 
 
 @pytest.mark.parametrize("tool_name", _PLAYWRIGHT_BLOCKED_MANAGED_TOOLS)
@@ -668,10 +688,7 @@ def test_playwright_file_upload_remains_denied(tool_name: str) -> None:
     )
 
     assert isinstance(result, CapabilityFailure)
-    assert result.details["denied_reason"] in {
-        "network_disabled",
-        "external_side_effect_disabled",
-    }
+    assert result.details["denied_reason"] == "gui_delegation_disabled"
 
 
 def test_playwright_interact_tools_are_not_default_child_tools() -> None:

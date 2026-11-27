@@ -450,11 +450,9 @@ class SubAgentTool(EventEmittingTool):
             "edit_file, and append_file, restricted to those outputs; pass an explicit "
             "minimal list for other work or an empty list for a tool-free task. Explicit tools "
             "still pass a fail-closed runtime policy: unknown MCP tools and file uploads "
-            "are not delegated. Managed Playwright tools including page interaction, "
-            "screenshots, evaluate, `managed_browser_run_code`, dialogs, and navigation "
-            "(`managed_browser_click`, `managed_browser_type`, `managed_browser_evaluate`, "
-            "`managed_browser_handle_dialog`, `managed_browser_take_screenshot`) may be named "
-            "explicitly when the parent session already has them. Image tools require explicit "
+            "are not delegated. All Browser and CUA tools are parent-only, including "
+            "managed/user browsers, legacy MCP tools and both REPL interfaces. "
+            "Do not delegate GUI work or bypass this restriction through shell/code tools. Image tools require explicit "
             "selection. "
             "`bash` and `execute_code` may be named explicitly when the parent has them. "
             "Bash uses the parent's existing permissions and approval rules; Python "
@@ -517,9 +515,8 @@ class SubAgentTool(EventEmittingTool):
                         "A non-empty "
                         "write_scope also supplies available write_file, edit_file, and "
                         "append_file within that scope. Explicit lists, including [], "
-                        "are never expanded. Managed Playwright tools including "
-                        "managed_browser_run_code may be named when already active on "
-                        "the parent; file uploads cannot."
+                        "are never expanded. Browser and CUA tools are parent-only "
+                        "and cannot be delegated, including legacy MCP and REPL tools."
                     ),
                     "items": {"type": "string"},
                     "uniqueItems": True,

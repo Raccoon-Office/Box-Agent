@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from box_agent.llm.capabilities import image_input_support
-from box_agent.tools.mcp_result_hooks import bind_mcp_result_adapter, mcp_result_processing_cache
+from box_agent.tools.base import ToolResult
+from box_agent.tools.mcp_result_hooks import (
+    adapt_mcp_image_context, adapt_mcp_inline_images, bind_mcp_result_adapter,
+    mcp_result_processing_cache, mcp_result_processing_scope, persist_mcp_image_references,
+)
 
 from .config import CuaConfig
 from .image_encoding import encode_canonical_cua_image
@@ -43,6 +47,24 @@ def _canonical_image(data: str, mime_type: str) -> dict[str, Any] | None:
     block = cache[key]
     # Canonical blocks contain scalars only; callers must not mutate the memo.
     return dict(block) if block is not None else None
+
+
+def adapt_repl_screenshots(result: ToolResult, server_name: str, images: list[dict]) -> None:
+    """Apply this run's CUA archive, model-vision and single-request settings."""
+    capture = dict(server_name=server_name, remote_name="cua_repl_js", inline_images=[
+        {"data": image["data"], "mime_type": image["mimeType"]} for image in images
+    ])
+    with mcp_result_processing_scope():
+        refs = persist_mcp_image_references(**capture)
+        if refs:
+            result.raw_output["mcp_image_references"] = refs
+            paths = [ref.get("path") or ref["contentRef"] for ref in refs]
+            result.content = "\n".join([result.content, *paths]).strip()
+        if result.success:
+            result.image_content, result.image_source = adapt_mcp_image_context(
+                **capture, arguments={}, structured_content=None,
+            )
+            result.transient_followup_content = adapt_mcp_inline_images(**capture)
 
 
 def cua_vision_enabled(config: CuaConfig) -> bool:
@@ -222,27 +244,11 @@ class CuaBindings:
         original = agent.run_events
         self._original_instance_method = vars(agent).get("run_events", _MISSING)
         self._agent = agent
-        self._activate_server_tools()
 
         def bound_run_events(*args: Any, **kwargs: Any):
             return self.bind_run(original(*args, **kwargs))
 
         agent.run_events = bound_run_events
-
-    def _activate_server_tools(self) -> None:
-        """Expose the configured MCP server through the existing session map."""
-        if not self.mcp_active or self._agent is None:
-            return
-        exposure = getattr(self._agent, "mcp_tool_exposure", None)
-        activate = getattr(exposure, "activate_server", None)
-        if callable(activate):
-            try:
-                activate(self.config.server_name)
-            except Exception:
-                # A late/failed MCP catalog publication must not make the
-                # ordinary Agent run fail; the normal tool-search path can
-                # still discover the server when it becomes ready.
-                return
 
     def close(self) -> None:
         """Restore the instance exactly as it was before activation."""
@@ -268,7 +274,6 @@ class _ScopedCuaEvents:
 
     async def __anext__(self) -> Any:
         with bind_mcp_result_adapter(self._bindings):
-            self._bindings._activate_server_tools()
             return await self._events.__anext__()
 
     async def aclose(self) -> None:

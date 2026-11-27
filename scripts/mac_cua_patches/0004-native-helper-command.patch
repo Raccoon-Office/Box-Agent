@@ -1,0 +1,22 @@
+--- a/cua_adapter/cua_adapter.py
++++ b/cua_adapter/cua_adapter.py
+@@ -58,7 +58,9 @@
+ class Adapter:
+     """Internal native API. Model IDs are positions in the latest app snapshot."""
+ 
+-    def __init__(self, driver, evidence=None):
++    def __init__(self, driver, evidence=None, *, native_command=None):
++        self.native_command = native_command or [
++            sys.executable, str(Path(__file__).with_name('cua_native.py'))]
+         self.driver = DriverSession(
+             driver, evidence_contract, evidence, timeout_seconds=DRIVER_TIMEOUT_SECONDS)
+         self.handles = {}
+@@ -343,7 +345,7 @@
+         self.record({'phase': 'dispatch', **entry})
+         try:
+             process = subprocess.run(
+-                [sys.executable, str(Path(__file__).with_name('cua_native.py')), '--pid', str(args['pid'])],
++                [*self.native_command, '--pid', str(args['pid'])],
+                 capture_output=True, text=True, timeout=timeout, check=True)
+             context = json.loads(process.stdout)
+             if not isinstance(context, dict) or context.get('pid') != args['pid'] or context.get('source') != 'guest_native_ax':

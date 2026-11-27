@@ -1,0 +1,127 @@
+{
+  "bridge_contract": 1,
+  "driver_commit": "80bcb2048fb81e9be88cd5fd79050bc59d92b553",
+  "files": {
+    "cua_adapter/cua_actions.py": {
+      "sha256": "b884f43bd29ec2d6dbf969c3487bd414007d215a3a5ffb48288032781139fead",
+      "source_sha256": "e356d53bc3392240a39c9135d9ca613d87d2f7b01ec57f37c612a344ef5f7c9f"
+    },
+    "cua_adapter/cua_adapter.py": {
+      "sha256": "6599d2a92133bc96d6fa08e959a079aabb3e49beca53b44a636dafeb9316d689",
+      "source_sha256": "2cf39eaeff004bd4981f5e3c0b8603aee8389beef449a15151002dce68e4abbf"
+    },
+    "cua_adapter/cua_driver.py": {
+      "sha256": "6d53201c9f8ab56ccd2a40502c1840dc87f4a2e0ed28f68b2a6bed9b554e4882",
+      "source_sha256": "93d7c4836d9eea4fa456ebfcadb3e38558a0a1a1ad91ce5a856e7679fb1ef2f7"
+    },
+    "cua_adapter/cua_evidence.py": {
+      "sha256": "63b3c61c74cb346fe3832c009606564bf4622abeae1543b7d2e48484ff84dfcf",
+      "source_sha256": "3f752059fdd72d5c50ccc521bdec227293cacf703f83e4c6fa400d84b5496abc"
+    },
+    "cua_adapter/cua_mcp.py": {
+      "sha256": "f81174247d4fdb917b41f01035fedde9d69856b4f97c9d8c1aca0ac457b65203",
+      "source_sha256": "f81174247d4fdb917b41f01035fedde9d69856b4f97c9d8c1aca0ac457b65203"
+    },
+    "cua_adapter/cua_native.py": {
+      "sha256": "ab26998bc7e7e9a1ae1db7ab52c552ed12b79319050825d55198ecbc153b53c0",
+      "source_sha256": "ab26998bc7e7e9a1ae1db7ab52c552ed12b79319050825d55198ecbc153b53c0"
+    },
+    "cua_adapter/cua_observation.py": {
+      "sha256": "af143f8327f84f633f029a1398b010cb1282b442b5f3e101776cbfea4f238472",
+      "source_sha256": "25e57e74ff2fbf094850cbc8773a56a650f05cef2a2ee7139221c9ee0187b269"
+    },
+    "cua_adapter/cua_repl.mjs": {
+      "sha256": "724201f37c99e45f6e98170ba02530bb3c8bb1f7677df3dcd84f7dda337d3ccd",
+      "source_sha256": "2b741784ffe7ec633906f6b46454273d87b578af46bb4a7d862f6829aeb2a947"
+    },
+    "cua_adapter/cua_service.py": {
+      "sha256": "40d1107e43bfd878b5eb285741efeef5f0aa6d22ffaf2a2ecc65f84920e42add",
+      "source_sha256": "5c53f38a72cd54ae0031a1e6eaad371b96e285008fa3a8b982e0a4a3d5829dc8"
+    },
+    "cua_adapter/cua_windows.py": {
+      "sha256": "8db903fd6aa0f295d0cba95814a14756e8bc352f06d6f600520350d28aa4b037",
+      "source_sha256": "66ea92a3f1b0d23060809d08fbf7f888e9af8df81f5992443d7d16abc483e520"
+    },
+    "cua_api.md": {
+      "sha256": "ba3daa37328fe331199e2b05673efb0a93a2ffb5da522e1c0f9fe3e209bac8a5",
+      "source_sha256": "21eeb34914dfd511ba93d6a43e0c80d1165b58bc7024c21d5492aff8eac0ea01"
+    },
+    "cua_images.py": {
+      "sha256": "b87f53ff2a16ed914cb3c27181fb4b90c5854e003495d2ebd37795e9f5cb7fd7",
+      "source_sha256": "b87f53ff2a16ed914cb3c27181fb4b90c5854e003495d2ebd37795e9f5cb7fd7"
+    }
+  },
+  "patches": [
+    {
+      "file": "0001-backend-injection-and-host-lifecycle.patch",
+      "sha256": "c3f83a679b53ed300260652bb221e4ee6a26929ec88eeb4e09be35630063fa73"
+    },
+    {
+      "file": "0002-scope-js-api.patch",
+      "sha256": "33749aa69ae1af3ee682498cd2838b9db775da6698d2f717dc8e21b26632ad35"
+    },
+    {
+      "file": "0003-package-imports.patch",
+      "sha256": "8380d0ba9e84acc5b4031e555c148c0f47ac065cdb81bffa466b7f02aad5ea9f"
+    },
+    {
+      "file": "0004-native-helper-command.patch",
+      "sha256": "79f8dc8c134ea4f09d863b203f80b40f350af61b15fc0e5753a507cb7aa7ef80"
+    },
+    {
+      "file": "0005-mapped-browser-hover.patch",
+      "sha256": "34cda4bc799a6d869420276b77174328fce8b39c220cdede04b5c9535fcc86a6"
+    },
+    {
+      "file": "0006-revalidate-keyboard-activation.patch",
+      "sha256": "5751abf4d23a92f42df26f09c8afb10636278097106adb56d6f3a7173c979f4a"
+    },
+    {
+      "file": "0007-managed-browser-actions.patch",
+      "sha256": "634e8c184e9e4ae84278d441dab19f0476142e20de7ab711c8c93164f4c08a0f"
+    },
+    {
+      "file": "0008-user-browser-read-text.patch",
+      "sha256": "6fc635a87c34099fd084564bda54dad7cf468ba96e61430e4ec516908bea26de"
+    },
+    {
+      "file": "0009-finder-inline-rename.patch",
+      "sha256": "2af085360409c3d9fd47ebd97c9cad766d977d69259c1fab3242bc33be81671c"
+    },
+    {
+      "file": "0010-attached-menu-input.patch",
+      "sha256": "cc8df9f15a8233483c57e7506e1c116d71fde01f39150d771695b36f93dfcb06"
+    },
+    {
+      "file": "0011-single-axpress-readback.patch",
+      "sha256": "754f19ff63ee2eb73e70f584673d4db0ab7af330326ae9623da22d585e14f0ee"
+    },
+    {
+      "file": "0012-user-browser-open-and-read.patch",
+      "sha256": "f6c0e1f865852c862d0e70fa7cf34862553272c993fb25a5fd44ec3cf004a3e3"
+    },
+    {
+      "file": "0013-expose-supported-browser-methods.patch",
+      "sha256": "afa59bef7de5f7f6abd85dadab6e69f925fc0ba8140a37a10c0a4898410e782a"
+    },
+    {
+      "file": "0014-managed-browser-observations-and-options.patch",
+      "sha256": "458a17e4e1a15d1a1446c766027495076fd36fc7b0a93ade6001f99302b61401"
+    },
+    {
+      "file": "0015-remove-unsupported-app-methods.patch",
+      "sha256": "6209a13b8139da0997854016cc8ce7d6de42bb78a92bac2c6e0aec5109ad4bee"
+    },
+    {
+      "file": "0016-repl-trailing-line-comment.patch",
+      "sha256": "5539286e605d0ec70f7c4e77f0c58e6ee0f3dc9f33c439a743530b5fd016e6a5"
+    },
+    {
+      "file": "0017-repl-worker-error-handling.patch",
+      "sha256": "a36d08e99a884ad2d82a59f2a21f011f6821f4d8b60163eada67139ebdcf3691"
+    }
+  ],
+  "source_branch": "dev/codex_v2.0",
+  "source_commit": "9ef2fa2604968f056326b2cbcc9ca8a3addc5c31",
+  "source_root": "src/mac_cua/data/guest"
+}

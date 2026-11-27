@@ -1,0 +1,111 @@
+--- a/cua_adapter/cua_observation.py
++++ b/cua_adapter/cua_observation.py
+@@ -494,6 +494,10 @@
+                      element_windows=targets, element_surfaces=surfaces,
+                      application_menu_indices=menu_indices,
+                      application_menu_paths=application_menu_paths, fresh=True)
++        if state.get('bundle_id') == 'com.apple.finder':
++            # Remember the editor the model saw, across a screenshot-only cell.
++            raw = state['attachment_ax'].get(current['window_id'], []) if current else []
++            state['finder_editor'] = self.windows.finder_editor(state, current, rows, raw)
+         if state.get('menu_context'):
+             rendered = self.render_menu_context(state, rows)
+         launch_window_timeout = state.pop('launch_window_timeout', None)
+--- a/cua_adapter/cua_windows.py
++++ b/cua_adapter/cua_windows.py
+@@ -613,6 +613,63 @@
+             return active_window
+         return active_window
+ 
++    @staticmethod
++    def finder_editor(state, root, rows, elements):
++        """Identify Finder's standalone filename AX field inside its untitled editing window."""
++        if root is None or root.get('layer') != 0:
++            return None
++        fields = [e for e in elements if e.get('depth') == 0 and e.get('role') == 'AXTextField'
++                  and e.get('enabled') is True and e.get('value') and e.get('label') == e['value']]
++        icons = [e for e in elements if e.get('role') == 'AXImage' and e.get('selected') is True]
++        if len(fields) != 1 or len(icons) != 1 or not icons[0].get('label'):
++            return None
++        field = fields[0]
++        surface_id = state.get('frontmost_window_id')
++        surfaces = [w for w in rows if w['window_id'] == surface_id and surface_id != root['window_id']
++                    and w.get('pid') == state['pid'] and w.get('title') == '' and w.get('layer') == 0
++                    and w.get('is_on_screen') is True and w.get('on_current_space') is True
++                    and w.get('current_space_id') == root.get('current_space_id')]
++
++        def contains(outer, inner):
++            a, b = rectangle(outer), rectangle(inner)
++            return (a and b and 0 < b[2] <= a[2] and 0 < b[3] <= a[3]
++                    and a[0] <= b[0] <= a[0] + a[2] - b[2] and a[1] <= b[1] <= a[1] + a[3] - b[3])
++
++        surface = surfaces[0] if len(surfaces) == 1 else {}
++        icon_box = rectangle(icons[0].get('frame'))
++        field_box = rectangle(field.get('frame'))
++        aligned = (icon_box and field_box and icon_box[2] > 0 and icon_box[3] > 0
++                   and field_box[0] <= icon_box[0] + icon_box[2] / 2 <= field_box[0] + field_box[2]
++                   and icon_box[1] <= field_box[1] <= icon_box[1] + 2 * icon_box[3])
++        if not (aligned and contains(root.get('bounds'), surface.get('bounds'))
++                and contains(surface.get('bounds'), field.get('frame'))):
++            surface_id = None
++        # An observed but unverified editor must refuse input, never activate the root.
++        return {'owner': (root['window_id'], root.get('current_space_id'), icons[0]['label'], icon_box),
++                'surface': surface_id, 'value': field['value']}
++
++    def verify_finder_editor(self, state, root, expected):
++        identity = {'pid': state['pid'], 'window_id': root['window_id']}
++        raw = data(self.call('get_window_state', {**identity, 'include_screenshot': False,
++                                                  'include_accessibility_tree': True}))
++        context = data(self.call('guest_get_window_context', {'pid': state['pid']}))
++        rows = self.verify_frame(state, root)
++        observed = self.finder_editor(state, root, rows, raw.get('elements', []))
++        main, focus = context.get('main_window', {}), context.get('focused_window', {})
++        focus_matches = (focus.get('window_id') in (root['window_id'], expected['surface'])
++                         if focus.get('status') == 'ok' else focus.get('ax_error') == -25212)
++        if not (expected['surface'] is not None and root.get('pid') == state['pid']
++                and root.get('is_on_screen') is True and root.get('on_current_space') is True
++                and root.get('current_space_id') is not None and root.get('title')
++                and state.get('driver_active_window_id') in (None, root['window_id'], expected['surface'])
++                and observed == expected and raw.get('pid') == state['pid']
++                and raw.get('window_id') == root['window_id'] and raw.get('window_bounds') == root['bounds']
++                and raw.get('truncated') is False and state.get('app_active') is True
++                and context.get('trusted') is True and main.get('window_id') == root['window_id']
++                and main.get('status') == 'ok' and main.get('minimized') is False
++                and focus_matches):
++            raise ValueError('WindowChanged: Finder rename editor disappeared or changed; no input sent. Observe again.')
++
+     def verify_frame(self, state, window):
+         try:
+             rows = self.interaction_windows(state)
+--- a/cua_adapter/cua_actions.py
++++ b/cua_adapter/cua_actions.py
+@@ -576,6 +576,29 @@
+         # All argument failures precede input delivery; indexed pixel fallback may take a screenshot.
+         self.driver.validate(name, {**identity, **params})
+         keyboard = plan.keyboard
++        rename_input = method == 'typeText' or (method == 'pressKey' and params.get('key') == 'return'
++                                                and not params.get('modifiers'))
++        if state.get('bundle_id') == 'com.apple.finder':
++            editor = state.get('finder_editor')
++            pending = state.get('pending_finder_editor')
++            if rename_input and (editor or pending):
++                # The last AX read must describe the same editing session after typing.
++                if pending and (not editor or pending != (editor['owner'], editor['surface'])):
++                    state.pop('pending_finder_editor', None)
++                    raise ValueError('WindowChanged: Finder rename editor changed; no input sent. Observe again.')
++                if not pending and editor['value'] != editor['owner'][2]:
++                    raise ValueError('TargetUnverified: Finder filename does not match the selected item; no input sent.')
++                self.invalidate()
++                self.windows.verify_finder_editor(state, active_window, editor)
++                result = self.call(name, {**identity, **params})
++                state['finder_editor'] = None
++                if method == 'typeText':
++                    state['pending_finder_editor'] = (editor['owner'], editor['surface'])
++                else:
++                    state.pop('pending_finder_editor', None)
++                return {'effect': self.result_data(result).get('effect')}
++            state.pop('finder_editor', None)
++            state.pop('pending_finder_editor', None)
+         if keyboard:
+             wid = active_window['window_id']
+             attached = (wid in state.get('attachments', {})

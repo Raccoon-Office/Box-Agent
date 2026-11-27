@@ -1,0 +1,40 @@
+diff --git a/cua_adapter/cua_repl.mjs b/cua_adapter/cua_repl.mjs
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -356,22 +356,26 @@
+     };
+     if (capability === 'cua') delete cua.getBrowser;
+     if (capability === 'browser') { delete cua.getApp; delete cua.listApps; }
+-    const output = new PassThrough();
+-    const r = repl.start({input: new PassThrough(), output, terminal: false, prompt: '', useGlobal: false});
+-    Object.assign(r.context, {cua, Uint8Array, nodeRepl: {write, emitImage}});
+-    // Console text never contaminates the internal RPC socket or the MCP stdout.
+-    r.context.console = {log: (...args) => write(args.map(x => typeof x === 'string' ? x : inspect(x)).join(' ')),
+-        error: (...args) => write(args.map(String).join(' '))};
+     const finish = (error, cell = scope.getStore()) => {
+-        if (!cell || active !== cell || cell.closed) return;
++        if (!cell || active !== cell || cell.closed) return false;
+         cell.closed = true;
+         const unawaited = [...pending.values()].some(p => p.cell === cell);
+         send({kind: 'done', cell: cell.id, error: error ? String(error.stack || error) :
+             unawaited ? 'CUA requests were not awaited; inspect state before continuing' : null});
+         active = null;
+-    };
+-    // Node REPL routes thrown errors through its domain instead of its eval callback.
+-    r._domain.on('error', error => finish(error));
++        return true;
++    };
++    const output = new PassThrough();
++    const r = repl.start({
++        input: new PassThrough(), output, terminal: false, prompt: '', useGlobal: false,
++        handleError: error => finish(error) ? 'ignore' : 'print',
++    });
++    Object.assign(r.context, {cua, Uint8Array, nodeRepl: {write, emitImage}});
++    // Console text never contaminates the internal RPC socket or the MCP stdout.
++    r.context.console = {log: (...args) => write(args.map(x => typeof x === 'string' ? x : inspect(x)).join(' ')),
++        error: (...args) => write(args.map(String).join(' '))};
++    // Older Node versions deliver REPL errors through a domain instead of handleError.
++    r._domain?.on('error', error => finish(error));
+     readline.createInterface({input: socket}).on('line', line => {
+         const message = JSON.parse(line);
+         if (message.kind === 'reply') {

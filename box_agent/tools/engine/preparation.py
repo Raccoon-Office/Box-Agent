@@ -64,7 +64,8 @@ def prepare_tools(
                 and (tool.name not in DISCOVERABLE_LOCAL_NAMES or tool.name in direct_local)
                 and tool.name not in _BROWSER_CONTEXT_TOOLS
             }
-        direct = tool_exposure._stable_direct
+        direct = {name: pair for name, pair in tool_exposure._stable_direct.items()
+                  if tool_exposure.is_model_tool_allowed(pair[0])}
         valid_refs = set(tool_exposure._search_refs)
         for text in tool_exposure._bootstrap_acked:
             try:
@@ -75,7 +76,8 @@ def prepare_tools(
         generations = dict(tool_exposure._direct_generations)
         for ref in valid_refs:
             tool, definition, generation = tool_exposure._stable_refs[ref]
-            if (tool.name in direct or not tool_exposure.is_current_target(tool.name, tool)
+            if (tool.name in direct or not tool_exposure.is_model_tool_allowed(tool)
+                    or not tool_exposure.is_current_target(tool.name, tool)
                     or definition.description != tool.description or not definition.matches_target(tool)
                     or (getattr(tool, "mcp_tool_id", None) is not None
                         and tool_exposure.validate_call(tool.name, generation, tool) is not None)):

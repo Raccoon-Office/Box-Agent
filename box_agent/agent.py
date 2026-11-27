@@ -508,12 +508,14 @@ class Agent:
         self.connector_discovery = connector_discovery if self.stable_prefix else None
         self._pending_skill_catalog: Message | None = None
         self._pending_tool_restore_notice = False
+        from .plugins.repl.policy import exclude_browser_backends
+
         self.llm = llm_client
         self.tools = {
             tool.name: tool
             for tool in tools
-            if not deferred_mcp_loading_enabled
-            or getattr(tool, "mcp_tool_id", None) is None
+            if (not deferred_mcp_loading_enabled or getattr(tool, "mcp_tool_id", None) is None)
+            and (enable_builtin_tools or exclude_browser_backends(tool))
         }
         self.max_steps = max_steps
         self.tool_limits = tool_limits or ToolLimitsConfig()
@@ -560,13 +562,15 @@ class Agent:
                 allowed_connector_ids_provider=allowed_connector_ids_provider,
                 connector_discovery=self.connector_discovery,
             )
+            self.mcp_tool_exposure.model_tool_filter = exclude_browser_backends
+            self.tools["tool_search"].model_tool_filter = exclude_browser_backends
             if self.stable_prefix:
                 from .tools.tool_call_tool import CallTool
                 self.tools["call_tool"] = CallTool()
                 self.mcp_tool_exposure.enable_stable_prefix(self.tools["tool_search"])
-                self.mcp_tool_exposure._live_candidates = lambda tools=self.tools: tools
             else:
                 self.mcp_tool_exposure.bind_search_tool(self.tools["tool_search"])
+            self.mcp_tool_exposure._live_candidates = lambda tools=self.tools: tools
         self.tool_result_storage = ToolResultStorage(
             state_path('sessions')
         )

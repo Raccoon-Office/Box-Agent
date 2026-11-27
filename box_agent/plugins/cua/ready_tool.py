@@ -1,14 +1,13 @@
 """CUA readiness seam registered alongside the existing MCP runtime owner."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import sys
+from pathlib import Path
 
-from box_agent.tools.base import Tool, ToolResult
-from box_agent.tools.runtime_components import runtime_component_required
 from .config import CuaConfig, CuaRuntimeConfig
-from .driver import DriverAdapter, installed_driver
+from .driver import DriverAdapter
 from .lifecycle import CuaRuntimeManager
 from .runtime.connection import DriverConnection, HOST_RUNTIME_ENV
 
@@ -18,37 +17,37 @@ class CuaService:
         self.settings = settings
         runtime = settings.runtime
         assert runtime is not None
-        driver = runtime.driver_path or installed_driver()
+        from .pinned_release import installed_pinned_driver
+        driver = runtime.driver_path or installed_pinned_driver()
         self.adapter = DriverAdapter(driver or "cua-driver", runtime.endpoint)
         self.config = runtime.model_copy(update={"driver_path": driver})
-        self.manager = CuaRuntimeManager(self.config, probe=self.adapter.ready, start=self.adapter.start)
+        self.manager = CuaRuntimeManager(self.config, probe=self._ready, start=self.adapter.start)
+
+    async def _ready(self, endpoint):
+        if await self.adapter.probe(endpoint):
+            from .driver import command
+            from .pinned_release import require_build
+            code, output = await command(self.adapter.driver, "call", "health_report",
+                                         '{"include":["binary_version"]}', "--socket", endpoint)
+            if code:
+                raise RuntimeError("Cannot verify host Driver identity; restart with the pinned release")
+            require_build(json.loads(output).get("build", {}), Path(self.adapter.driver))
+        return await self.adapter.ready(endpoint)
 
     @property
     def name(self):
         return self.settings.server_name
 
-    @property
-    def driver_server_config(self):
-        command = DriverConnection(self.config.driver_path or "cua-driver", self.adapter.endpoint,
-                                   self.config.mode == "external").command()
-        return {"command": command[0], "args": command[1:],
-                "disabled": not self.config.enabled}
-
-    @property
-    def server_config(self):
-        if self.settings.tool_interface == "driver":
-            return self.driver_server_config
-        command = ([sys.executable, "--cua-mcp"] if getattr(sys, "frozen", False)
-                   else [sys.executable, "-m", "box_agent.mcp_servers.cua_server"])
-        runtime = self.config.model_copy(update={
-            "driver_path": self.config.driver_path or "cua-driver",
-            "endpoint": self.adapter.endpoint,
-        })
-        return {"command": command[0], "args": command[1:],
-                "env": {HOST_RUNTIME_ENV: runtime.model_dump_json()},
-                "disabled": not self.config.enabled}
+    def driver_command(self) -> list[str]:
+        return DriverConnection(self.config.driver_path or "cua-driver", self.adapter.endpoint,
+                                self.config.mode == "external").command()
 
     async def prepare(self):
+        if self.config.enabled:
+            from .pinned_release import verify_source
+            if not self.config.driver_path:
+                raise RuntimeError("Matching CUA Driver is not installed; install the pinned REPL release")
+            await asyncio.to_thread(verify_source, Path(self.config.driver_path))
         result = await self.manager.ensure_ready()
         if result.state != "ready":
             raise RuntimeError(result.detail or f"CUA runtime is {result.state}")
@@ -59,50 +58,9 @@ class CuaService:
         self.adapter.cleanup()
 
 
-class EnsureCuaReadyTool(Tool):
-    name = "ensure_cua_ready"
-    description = "Prepare desktop computer-use, then connect its MCP tools. Call before desktop actions; use tool_search to discover the returned tools. Never downloads drivers or grants OS permissions."
-    parameters = {"type": "object", "properties": {}, "additionalProperties": False}
-
-    def __init__(self, service):
-        self.service = service
-
-    async def execute(self, **kwargs):
-        from box_agent.tools.mcp_loader import reconnect_mcp_server
-        from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
-        if kwargs:
-            return ToolResult(success=False, error="ensure_cua_ready accepts no arguments")
-        if not await get_mcp_tool_catalog().wait_until_ready(timeout=30):
-            return ToolResult(success=False, error="MCP discovery is still loading; retry after readiness")
-        result = await reconnect_mcp_server(self.service.name)
-        content = json.dumps(result)
-        if not result.get("success") and os.environ.get(HOST_RUNTIME_ENV, "").strip():
-            return runtime_component_required(
-                "computer-use", code="COMPUTER_USE_UNAVAILABLE",
-                message=result.get("error") or "Desktop control is not ready",
-                guidance=(
-                    "Ask the user to prepare Desktop control in the host's plugin settings: "
-                    "install its driver if missing, enable it, and complete the required OS permissions. "
-                    "The host must check readiness before retrying the original request. "
-                    "Do not install drivers, change settings, grant permissions, or start a daemon with other tools."
-                ),
-            )
-        if result.get("success"):
-            instructions = (
-                "CUA ready. Use get_app to bind the application and get_state to observe it. "
-                "Element IDs come from the latest app observation; observe again after each action.\n"
-                if self.service.settings.tool_interface == "app" else
-                "CUA ready. Read the computer-use skill before acting. Use tool_search to discover actions. "
-                "Copy only exact window_id, snapshot_id and element_token values from CUA structured results; "
-                "never guess or synthesize identifiers. Pass session only if the specific tool schema declares it.\n"
-            )
-            content = instructions + content
-        return ToolResult(success=result.get("success", False), content=content, error=result.get("error"))
-
-
 def create_cua_service(config):
     raw = config.plugins.get("cua")
-    host = os.environ.get("BOX_AGENT_CUA_RUNTIME_CONFIG", "").strip()
+    host = os.environ.get(HOST_RUNTIME_ENV, "").strip()
     if host:
         runtime = json.loads(host)
         user_runtime = (raw or {}).get("runtime") or {}

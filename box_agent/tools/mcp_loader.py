@@ -2787,11 +2787,15 @@ def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
 _cua_service = None  # Owned with the existing process-wide MCP registry; closed below.
 
 
+def get_cua_service():
+    """Borrow the process-owned Driver service without activating MCP tools."""
+    return _cua_service
+
+
 def register_cua_service(service):
     global _cua_service
     if _cua_service is not None and _cua_service is not service:
-        if (_cua_service.name == service.name and _cua_service.config == service.config
-                and _cua_service.settings.tool_interface == service.settings.tool_interface):
+        if _cua_service.name == service.name and _cua_service.config == service.config:
             service.adapter.cleanup()
             return _cua_service
         raise RuntimeError("CUA runtime is already registered")
@@ -2849,20 +2853,11 @@ def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer
             and not is_private_service_url(search.config["url"])
         ):
             servers.pop(HOSTED_WEB_SEARCH_SERVER_NAME)
+    # Desktop hosts may still publish the retired CUA server on every refresh.
+    # The App adapter opens its own Driver connection outside this registry.
+    servers.pop("computer-use", None)
     if _cua_service is not None:
-        name = _cua_service.name
-        config = _cua_service.server_config
-        existing = servers.get(name)
-        if existing and existing.config.get("disabled"):
-            return servers  # Explicit disable always wins, including host mode.
-        # The managed runtime owns this server name. Replace legacy direct-Driver
-        # registrations with the selected interface, using the host's resolved
-        # endpoint. Publishing a second server would expose two tool contracts.
-        servers[name] = ResolvedMcpServer(
-            name=name, config=config, owner="system", config_id=name,
-            connector_id=None, connector_name=None, source_path="<runtime:cua>",
-            fingerprint=json.dumps(config, sort_keys=True),
-        )
+        servers.pop(_cua_service.name, None)
     return servers
 
 
@@ -2988,10 +2983,6 @@ async def load_mcp_tools_async(
 
                 if _defer_user_mcp_startup(definition):
                     _record_status(server_name, "connecting", definition=definition)
-                    continue
-
-                if _cua_service is not None and server_name == _cua_service.name:
-                    _record_status(server_name, "connecting", error="Call ensure_cua_ready to prepare CUA", definition=definition)
                     continue
 
                 conn_type = _effective_connection_type(server_name, server_config)
@@ -3386,15 +3377,6 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
     if server_config.get("disabled"):
         _record_status(name, "disabled", definition=definition)
         return {"success": False, "error": "Server is disabled", "configPath": definition.source_path}
-
-    if _cua_service is not None and name == _cua_service.name:
-        try:
-            await _cua_service.prepare()
-        except (OSError, RuntimeError) as error:
-            if obsolete():
-                return superseded
-            _record_status(name, "failed", error=str(error), definition=definition)
-            return {"success": False, "error": str(error)}
 
     if obsolete():
         return superseded

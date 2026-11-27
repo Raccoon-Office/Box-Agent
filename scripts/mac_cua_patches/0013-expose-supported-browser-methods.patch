@@ -1,0 +1,44 @@
+diff --git a/cua_adapter/cua_repl.mjs b/cua_adapter/cua_repl.mjs
+--- a/cua_adapter/cua_repl.mjs
++++ b/cua_adapter/cua_repl.mjs
+@@ -257,7 +257,16 @@
+         async handleDialog({accept, promptText}) { await this.#action('handleDialog', {accept, promptText}); }
+         async close() { await call('browser.close', this.#handle); }
+     }
++    function exposeBrowserMethods(implementation, methods) {
++        if (methods === undefined) return implementation;
++        const prototype = Object.fromEntries(
++            methods.map(name => [name, implementation[name].bind(implementation)])
++        );
++        return Object.create(Object.freeze(prototype));
++    }
+     class Browser {
++        #tabMethods;
++        constructor(tabMethods) { this.#tabMethods = tabMethods; }
+         async openAndRead(url) {
+             const page = await call('browser.openAndRead', null, {url});
+             write(page);
+@@ -272,12 +281,12 @@
+         async getTab(targetId) {
+             const result = await call('browser.getTab', null, {targetId});
+             write(result.state);
+-            return new Tab(result.handle);
++            return exposeBrowserMethods(new Tab(result.handle), this.#tabMethods);
+         }
+         async newTab(url = 'about:blank') {
+             const result = await call('browser.newTab', null, {url});
+             write(result.state);
+-            return new Tab(result.handle);
++            return exposeBrowserMethods(new Tab(result.handle), this.#tabMethods);
+         }
+     }
+     const axElementId = (state, description) => {
+@@ -298,7 +307,7 @@
+             await writeDocumentation();
+             const result = await call('browser.getBrowser', null, {browser});
+             write(result.tabs);
+-            return new Browser();
++            return exposeBrowserMethods(new Browser(result.tabMethods), result.browserMethods);
+         },
+         async listApps(opts) {
+             opts = options(opts, ['emit']);

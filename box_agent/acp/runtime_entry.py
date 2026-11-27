@@ -11,7 +11,7 @@ import sys
 
 
 WEB_EXTRACT_MCP_ARG = "--web-extract-mcp"
-CUA_MCP_ARG = "--cua-mcp"
+CUA_NATIVE_ARG = "--cua-native"
 BOOTSTRAP_MCP_CONFIG_ARG = "--bootstrap-mcp-config"
 
 
@@ -53,6 +53,16 @@ def _preload_frozen_acp_schema() -> None:
 
 
 def main() -> None:
+    if sys.argv[1:2] == [CUA_NATIVE_ARG]:
+        import argparse
+        from box_agent._vendor.mac_cua.cua_adapter.cua_native import window_context
+
+        parser = argparse.ArgumentParser(description="Read-only native AX window context")
+        parser.add_argument("--pid", type=int, required=True)
+        args = parser.parse_args(sys.argv[2:])
+        print(json.dumps(window_context(args.pid)))
+        return
+
     if sys.argv[1:] == [BOOTSTRAP_MCP_CONFIG_ARG]:
         from box_agent.tools.mcp_bootstrap import (
             MANAGED_MCP_CONFIG_VERSION,
@@ -92,17 +102,8 @@ def main() -> None:
             sys.stdout = protocol_stdout
         return
 
-    if sys.argv[1:] == [CUA_MCP_ARG]:
-        # Native App adapter over the official cua-driver (macOS only).
-        from box_agent.mcp_servers.cua_server import main as run_cua_mcp
-
-        protocol_stdout = sys.stdout
-        sys.stdout = _McpStdoutProxy(protocol_stdout)
-        try:
-            run_cua_mcp()
-        finally:
-            sys.stdout = protocol_stdout
-        return
+    if sys.argv[1:]:
+        raise SystemExit(f"Unsupported ACP runtime argument: {sys.argv[1]}")
 
     # Ensure stdout is only used for ACP protocol — redirect any stray
     # stdlib print() calls to stderr before importing anything else.

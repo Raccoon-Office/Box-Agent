@@ -30,14 +30,6 @@ from box_agent.tools.runtime import SkillRuntimeContext
 
 _ALWAYS_BASE = {"create_scheduled_task", "mcp_config"}
 _SKILLS = {"get_skill", "list_skills"}
-_ENSURE_CUA_READY_SCHEMA = {
-    "aliases": [],
-    "schema": {
-        "name": "ensure_cua_ready",
-        "description": "Prepare desktop computer-use, then connect its MCP tools. Call before desktop actions; use tool_search to discover the returned tools. Never downloads drivers or grants OS permissions.",
-        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-    },
-}
 _LIST_SKILLS_SCHEMA = {
     "aliases": [],
     "schema": {
@@ -257,6 +249,9 @@ async def isolated_setup(tmp_path, monkeypatch):
     monkeypatch.delenv("BOX_AGENT_CUA_RUNTIME_CONFIG", raising=False)
     monkeypatch.setattr(cua_driver, "installed_driver", lambda: None)
     monkeypatch.setattr(mcp_loader, "_cua_service", None)
+    # The fixture loader does not own process-wide MCP startup state.
+    monkeypatch.setattr(mcp_loader, "_mcp_initial_connections_ready", None)
+    monkeypatch.setattr(mcp_loader, "_mcp_initial_connections", {})
     monkeypatch.setenv("BOX_AGENT_OBSIDIAN_CONFIG", str(profile / "obsidian.json"))
     monkeypatch.setattr(
         skill_loader_module, "SKILL_SETTINGS_PATH", profile / "skill-settings.json"
@@ -420,7 +415,6 @@ def _assert_schema_contract(tools, profile):
     # Preserve the old fixture and enumerate the Skill Engine's public additions.
     expected["list_skills"] = deepcopy(_LIST_SKILLS_SCHEMA)
     expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)
-    expected["ensure_cua_ready"] = deepcopy(_ENSURE_CUA_READY_SCHEMA)
     expected.update(deepcopy(_EMAIL_SCHEMAS))
     expected["read_video"] = deepcopy(_VIDEO_SCHEMA)
     expected.update(json.loads(
@@ -740,7 +734,7 @@ def _assert_schema_contract(tools, profile):
             {"flags": {"enable_skills": True}, "defer_skills": True},
             _SKILLS, id="deferred-empty-skills",
         ),
-        pytest.param({"flags": {"enable_mcp": True}}, {"fixture_lookup", "ensure_cua_ready"}, id="mcp"),
+        pytest.param({"flags": {"enable_mcp": True}}, {"fixture_lookup"}, id="mcp"),
         pytest.param({"flags": {"enable_sub_agent": True}}, set(), id="subagent-no-llm"),
         pytest.param(
             {"flags": {"enable_sub_agent": True}, "llm_mode": "text"},
@@ -753,14 +747,14 @@ def _assert_schema_contract(tools, profile):
         pytest.param({"image_endpoint": True}, {"generate_image"}, id="image-service"),
         pytest.param(
             {"defaults": True, "llm_mode": "text"},
-            _FILES | _BASH | _TODO | _PLAN | _SKILLS | {"sub_agent", "fixture_lookup", "ensure_cua_ready"},
+            _FILES | _BASH | _TODO | _PLAN | _SKILLS | {"sub_agent", "fixture_lookup"},
             id="config-defaults",
         ),
         pytest.param(
             {"defaults": True, "llm_mode": "vision", "memory": True,
              "sandbox": True, "image_endpoint": True, "process_owner_id": "fixture-session"},
             _FILES | _BASH | _TODO | _PLAN | _MEMORY | _SANDBOX | _SKILLS
-            | {"sub_agent", "fixture_lookup", "ensure_cua_ready", "inspect_images", "generate_image"},
+            | {"sub_agent", "fixture_lookup", "inspect_images", "generate_image"},
             id="all-capabilities-session-owned",
         ),
     ],

@@ -34,11 +34,15 @@ agent:
     keep_rounds: 3
     max_encoded_bytes: 10485760
 
-# ===== Computer Use (Optional) =====
-# With tools.enable_mcp enabled, CUA is registered by default. Install the
-# driver with `box-agent install-cua`; `ensure_cua_ready` starts it on demand.
-# No driver binary is bundled and no manual CUA mcp.json entry is needed.
+# ===== Browser and Computer Use (Optional) =====
+# Native macOS CUA uses only the JS REPL and a matching pinned Driver.
+# Browser and CUA expose only REPL actions on macOS with full access and trusted local JS.
+# Ordinary sessions can chat without GUI access. No CUA mcp.json entry is needed.
 # plugins:
+#   repl:
+#     trusted_local_code: true
+#     # Remove the obsolete enabled key. To keep local JS disabled, set trusted_local_code: false.
+#     node_path: /absolute/path/to/node # Optional; no automatic runtime download.
 #   cua:
 #     server_name: computer-use
 #     feed_screenshots: true
