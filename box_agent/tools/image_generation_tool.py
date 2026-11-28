@@ -35,7 +35,7 @@ from box_agent.llm.debug_logging import (
 from box_agent.llm.request_context import current_request_headers
 from box_agent.tools.billing import confirm_billing, confirmation
 from box_agent.tools.base import Tool, ToolResult
-from box_agent.tools.file_change_receipts import before_write, destination_lock, file_change_result
+from box_agent.tools.file_change_receipts import abefore_write, destination_lock, file_change_result
 from box_agent.tools.base import check_tool_cancellation
 from box_agent.tools.safety import validate_path_in_workspace
 from box_agent.tools.watermark import apply_text_watermark
@@ -744,7 +744,7 @@ class GenerateImageTool(Tool):
                     "size_bytes": len(image_bytes),
                     "sha256": hashlib.sha256(image_bytes).hexdigest(),
                 }, self.workspace_dir)
-                before = before_write(target)
+                before = await abefore_write(target)
                 target.write_bytes(image_bytes)
 
             rel_path = self._display_path(target)

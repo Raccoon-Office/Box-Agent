@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from ..events import ProgressEvent
 from ..model_history import is_model_history_placeholder
-from .file_change_receipts import FileChangeReceiptMixin, before_write, file_change_result
+from .file_change_receipts import (
+    FileChangeReceiptMixin,
+    abefore_write,
+    acapture_before_bytes,
+    file_change_result,
+)
 from .base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
 from .completion_checks import CompletionContext, CompletionIssue
 from .argument_limits import MAX_GENERATED_BODY_CHARS
@@ -1126,7 +1131,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
         state.size_bytes += len(data)
         return None
 
-    def _commit(self, state: _PendingTextWrite, *, temporary: bool = False) -> ToolResult:
+    async def _commit(self, state: _PendingTextWrite, *, temporary: bool = False) -> ToolResult:
         if error := self._permission_error(state.target):
             return self._active_result(state, error)
         try:
@@ -1154,7 +1159,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
                 reason="pptx_self_check_bypass",
             )
         digest = self._sha256_file(state.temporary)
-        before = before_write(state.target)
+        before = await abefore_write(state.target)
         backup_path = backup_file(state.target)
         created = False
         try:
@@ -1346,7 +1351,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
                     )
                 return append_result
             if final:
-                return self._commit(state, temporary=temporary)
+                return await self._commit(state, temporary=temporary)
             return ToolResult(
                 success=True,
                 content=(
@@ -1507,6 +1512,7 @@ class AppendTool(FileChangeReceiptMixin, Tool):
                 return ToolResult(success=True, content=f"Successfully appended to {file_path}")
 
             backup_file(file_path)
+            await acapture_before_bytes(file_path, original if existed else None)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             with file_path.open("a", encoding="utf-8") as f:
                 f.write(content)
@@ -1661,6 +1667,7 @@ class EditTool(FileChangeReceiptMixin, Tool):
 
             # Backup before editing
             backup_file(file_path)
+            await acapture_before_bytes(file_path, original)
 
             file_path.write_text(new_content, encoding="utf-8")
 

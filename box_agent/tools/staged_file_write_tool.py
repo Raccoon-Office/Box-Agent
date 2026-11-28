@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from .argument_limits import MAX_GENERATED_BODY_CHARS, RECOMMENDED_GENERATED_BODY_CHARS
 from .base import Tool, ToolInvocationContext, ToolResult
-from .file_change_receipts import before_write, destination_lock, file_change_result
+from .file_change_receipts import abefore_write, destination_lock, file_change_result
 from .file_tools import _resolve_from_active_root
 from .safety import backup_file, builtin_skill_write_error, validate_path_in_workspace
 
@@ -145,7 +145,7 @@ class StagedFileWriteTool(Tool):
             if action == "append_file":
                 return self._append_file(write_id, chunk_index, path)
             if action == "commit":
-                return self._commit(write_id, expected_chunks, expected_sha256)
+                return await self._commit(write_id, expected_chunks, expected_sha256)
             if action == "abort":
                 return self._abort(write_id)
             return ToolResult(success=False, error=f"Unknown staged file action: {action}")
@@ -351,7 +351,7 @@ class StagedFileWriteTool(Tool):
             },
         )
 
-    def _commit(
+    async def _commit(
         self,
         write_id: str | None,
         expected_chunks: int | None,
@@ -389,7 +389,7 @@ class StagedFileWriteTool(Tool):
         state.target.parent.mkdir(parents=True, exist_ok=True)
         if state.target.exists():
             backup_file(state.target)
-        before = before_write(state.target)
+        before = await abefore_write(state.target)
         os.replace(state.temporary, state.target)
         self._writes.pop(resolved_write_id, None)
         result = ToolResult(

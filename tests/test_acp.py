@@ -6317,6 +6317,7 @@ async def test_acp_general_mode_keeps_cwd_and_injects_directory_policy(tmp_path)
             "session_continuation_versions": [1],
             "history_revision_versions": [1],
             "managed_mcp_config_versions": [1],
+            "change_checkpoint_versions": [1],
         }
     }
 
@@ -8110,6 +8111,7 @@ async def test_acp_new_session_returns_only_metadata_and_first_prompt_loads_core
             "session_continuation_versions": [1],
             "history_revision_versions": [1],
             "managed_mcp_config_versions": [1],
+            "change_checkpoint_versions": [1],
         }
     }
     state = agent._sessions[session.sessionId]

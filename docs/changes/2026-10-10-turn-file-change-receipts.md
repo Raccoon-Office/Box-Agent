@@ -64,6 +64,50 @@ differences and a script's output text are candidates, not trusted ownership.
 This mechanism is cooperative attribution, not an OS sandbox against malicious
 processes or filesystem actors.
 
+## On-demand before-write checkpoints (`change_checkpoint_versions: [1]`)
+
+To eliminate pre-dispatch full workspace scanning and `before/` cloning on desktop
+hosts, `session/new`, `session/resume`, and `session/load` advertise
+`_meta.capabilities.change_checkpoint_versions: [1]`.
+
+When a capable host wants Box-Agent to capture pre-write snapshots on demand for a
+single turn, it passes an optional `_meta.change_checkpoint` object on
+`session/prompt`:
+
+```json
+{
+  "change_checkpoint": {
+    "version": 1,
+    "checkpoint_dir": "/abs/path/to/change-checkpoints/<operationId>",
+    "max_file_bytes": 52428800
+  }
+}
+```
+
+Validation and isolation rules:
+- `version` must be integer `1` (booleans rejected).
+- `checkpoint_dir` must be a non-empty string (preserving raw characters without
+  trimming), an absolute existing non-symlink directory, and strictly disjoint
+  from `workspace_dir` (neither equal to, inside, nor an ancestor of
+  `workspace_dir`). Invalid host-supplied payloads are ignored with a structured
+  warning containing only a non-sensitive reason code (`invalid_payload`,
+  `unsupported_version`, `empty_dir`, `relative_dir`, `symlink_dir`,
+  `missing_or_not_dir`, `overlaps_workspace`, `resolve_failed`).
+- `max_file_bytes` is optional and capped at `50 MiB` (`52428800`).
+- Paths inside `.box-agent` or `.box-agent-scratch` at any depth, or
+  `.box-agent-staging` at workspace root, are ignored; nested
+  `<dir>/.box-agent-staging/...` remains an ordinary workspace path.
+- Capture runs inside each writer's `destination_lock` via worker threads
+  (`asyncio.to_thread`) so disk I/O stays off the shared ACP event loop, with
+  `threading.Lock`-protected per-turn `recorded_paths`.
+- **First-write-wins & best-effort**: only the first write to a path in a turn
+  (deduplicated case-insensitively on Windows and case-insensitive macOS volumes)
+  captures `<checkpoint_dir>/before/<relativePath>` atomically via temp file +
+  hardlink/replace. Newly created files, oversized files, unreadable pre-existing
+  files, and capture I/O errors still record the path in `recorded_paths` so
+  subsequent edits in the same turn never backfill intermediate bytes into
+  `before/`, and capture failures never fail tool writes.
+
 ## Desktop dependency and rollback
 
 Raccoon-lab !890 consumes version 2 and binds it to the original operation. It

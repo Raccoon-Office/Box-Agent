@@ -4,7 +4,7 @@
 
 本文覆盖当前 Box-Agent 实际注册/调用的协议入口、回包、通知、元数据及内置工具结构化输出。使用 Git 中的固定 PR 提交内容，不含当前工作区未提交的切云实现。参数表以代码消费为准；SDK 接受但业务没有消费的字段另行标注。
 
-后续 PR #254 新增 `session/resume`，其能力声明、无回放恢复及 Lab 按需对账合同见[ACP SDK 对接文档](integration/acp-sdk-0.12.md)。下表仍保留上述 PR #250 固定版本，不把新入口追写为旧版本已有能力。
+后续 PR #254 新增 `session/resume`，其能力声明、无回放恢复及 Lab 按需对账合同见[ACP SDK 对接文档](integration/acp-sdk-0.12.md)。后续新增的写前按需快照能力 `capabilities.change_checkpoint_versions: [1]` 与 `session/prompt._meta.change_checkpoint` 契约见[文件变更回执与按需快照合同](changes/2026-10-10-turn-file-change-receipts.md)。下表仍保留上述 PR #250 固定版本，不把新入口追写为旧版本已有能力。
 
 配套材料：
 

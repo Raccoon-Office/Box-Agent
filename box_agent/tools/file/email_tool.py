@@ -8,7 +8,12 @@ from email.errors import MessageError
 from typing import Any
 
 from ..base import ToolInvocationContext, ToolResult, check_tool_cancellation
-from ..file_change_receipts import FileWriteInvocationContext, destination_lock, file_change_result
+from ..file_change_receipts import (
+    FileWriteInvocationContext,
+    acapture_before_bytes,
+    destination_lock,
+    file_change_result,
+)
 from ..safety import builtin_skill_write_error, validate_path_in_workspace
 from .email_parser import MAX_EMAIL_BYTES, EmailAttachment, ParsedEmail, parse_email
 from .read_tool import ReadTool, _blocked_device_error
@@ -187,6 +192,7 @@ class ExtractEmailAttachmentTool(_EmailFileTool):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with target.open("xb") as stream:
                     stream.write(item.data)
+                await acapture_before_bytes(target, None)
                 result = {"source_sha256": digest, "extracted_path": str(target),
                           "attachment": _attachment_metadata(attachment_index, item)}
                 return file_change_result(
