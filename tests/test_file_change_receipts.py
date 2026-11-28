@@ -605,3 +605,275 @@ async def test_delegated_writes_through_workspace_aliases_keep_their_scope(tmp_p
     tool = _WriteScopedTool(cls(workspace_dir=str(alias)), str(alias), ('allowed',))
     arguments = {'path': 'allowed/a.txt', **({'old_str': 'a', 'new_str': 'b'} if kind == 'edit' else {'content': 'b'})}
     assert changes(await tool.invoke(arguments))[0]['path'] == 'allowed/a.txt'
+
+
+def test_parse_change_checkpoint_target_validates_boundaries(tmp_path):
+    from box_agent.tools.file_change_receipts import (
+        MAX_CHECKPOINT_FILE_BYTES,
+        parse_change_checkpoint_target,
+    )
+
+    workspace = tmp_path / 'workspace'
+    checkpoint = tmp_path / 'checkpoint'
+    workspace.mkdir()
+    checkpoint.mkdir()
+
+    target = parse_change_checkpoint_target(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(checkpoint)}},
+        workspace,
+    )
+    assert target is not None
+    assert target.checkpoint_dir == checkpoint.resolve()
+    assert target.workspace_dir == workspace.resolve()
+    assert target.max_file_bytes == MAX_CHECKPOINT_FILE_BYTES
+
+    capped = parse_change_checkpoint_target(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(checkpoint), 'max_file_bytes': 128}},
+        workspace,
+    )
+    assert capped is not None and capped.max_file_bytes == 128
+
+    inside_ws = workspace / 'nested-cp'
+    inside_ws.mkdir()
+    symlink_cp = tmp_path / 'symlink-cp'
+    symlink_cp.symlink_to(checkpoint, target_is_directory=True)
+
+    for invalid_meta in [
+        None,
+        {},
+        {'change_checkpoint': {'version': 2, 'checkpoint_dir': str(checkpoint)}},
+        {'change_checkpoint': {'version': True, 'checkpoint_dir': str(checkpoint)}},
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': 'relative/path'}},
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(tmp_path / 'missing')}},
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(workspace)}},
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(inside_ws)}},
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(tmp_path)}},
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(symlink_cp)}},
+    ]:
+        assert parse_change_checkpoint_target(invalid_meta, workspace) is None
+
+
+@pytest.mark.asyncio
+async def test_on_demand_checkpoint_captures_first_write_wins_and_respects_limits(tmp_path):
+    from box_agent.tools.file_change_receipts import (
+        ChangeCheckpointTarget,
+        reset_change_checkpoint,
+        set_change_checkpoint,
+    )
+
+    workspace = tmp_path / 'workspace'
+    checkpoint = tmp_path / 'checkpoint'
+    workspace.mkdir()
+    checkpoint.mkdir()
+    (workspace / 'existing.txt').write_text('v0', encoding='utf-8')
+    (workspace / 'oversized.txt').write_bytes(b'x' * 200)
+
+    token = set_change_checkpoint(
+        ChangeCheckpointTarget(
+            checkpoint_dir=checkpoint.resolve(),
+            workspace_dir=workspace.resolve(),
+            max_file_bytes=64,
+        )
+    )
+    try:
+        writer = WriteTool(workspace_dir=str(workspace))
+        appender = AppendTool(workspace_dir=str(workspace))
+        editor = EditTool(workspace_dir=str(workspace))
+
+        # Multiple writes to an existing file keep the pre-turn v0 snapshot.
+        assert (await editor.invoke({'path': 'existing.txt', 'old_str': 'v0', 'new_str': 'v1'})).success
+        assert (await appender.invoke({'path': 'existing.txt', 'content': '-v2'})).success
+        assert (await writer.invoke({'path': 'existing.txt', 'content': 'v3'})).success
+        assert (checkpoint / 'before' / 'existing.txt').read_text(encoding='utf-8') == 'v0'
+
+        # Newly created file stays absent from before/ even after later edits in the same turn.
+        assert (await writer.invoke({'path': 'new.txt', 'content': 'first'})).success
+        assert (await appender.invoke({'path': 'new.txt', 'content': '-second'})).success
+        assert (await editor.invoke({'path': 'new.txt', 'old_str': 'first', 'new_str': 'third'})).success
+        assert not (checkpoint / 'before' / 'new.txt').exists()
+
+        # Oversized pre-existing file skips before/ without failing writes, and subsequent
+        # smaller rewrites do not backfill an intermediate before/ snapshot.
+        assert (await writer.invoke({'path': 'oversized.txt', 'content': 'small'})).success
+        assert (await editor.invoke({'path': 'oversized.txt', 'old_str': 'small', 'new_str': 'tiny'})).success
+        assert not (checkpoint / 'before' / 'oversized.txt').exists()
+
+        # Staged write and publish_artifact commit also capture before/.
+        (workspace / 'staged.txt').write_text('staged-v0', encoding='utf-8')
+        staged = StagedFileWriteTool(workspace_dir=str(workspace))
+        begin = await staged.invoke({'action': 'begin', 'path': 'staged.txt', 'expected_chunks': 1})
+        write_id = begin.raw_output['write_id']
+        assert (await staged.invoke({'action': 'append_text', 'write_id': write_id, 'chunk_index': 0, 'content': 'staged-v1'})).success
+        assert (await staged.invoke({'action': 'commit', 'write_id': write_id})).success
+        assert (checkpoint / 'before' / 'staged.txt').read_text(encoding='utf-8') == 'staged-v0'
+
+        (workspace / 'deliverable.txt').write_text('doc-v0', encoding='utf-8')
+        pub = PublishArtifactTool(workspace)
+        pub_begin = await pub.invoke({'action': 'begin', 'path': 'deliverable.txt'})
+        Path(pub_begin.raw_output['staging_path']).write_text('doc-v1', encoding='utf-8')
+        assert (await pub.invoke({'action': 'commit', 'write_id': pub_begin.raw_output['write_id']})).success
+        assert (checkpoint / 'before' / 'deliverable.txt').read_text(encoding='utf-8') == 'doc-v0'
+    finally:
+        reset_change_checkpoint(token)
+
+
+@pytest.mark.asyncio
+async def test_on_demand_checkpoint_capture_failure_never_blocks_writes_or_records_intermediate(
+    tmp_path, monkeypatch,
+):
+    from box_agent.tools import file_change_receipts as receipts
+
+    workspace = tmp_path / 'workspace'
+    checkpoint = tmp_path / 'checkpoint'
+    workspace.mkdir()
+    checkpoint.mkdir()
+    (workspace / 'doc.txt').write_text('v0', encoding='utf-8')
+
+    fail_first = {'fail': True}
+    real_prepare = receipts._prepare_before_destination
+
+    def flaky_prepare(cp, rel):
+        if fail_first['fail']:
+            fail_first['fail'] = False
+            raise OSError('simulated disk full')
+        return real_prepare(cp, rel)
+
+    monkeypatch.setattr(receipts, '_prepare_before_destination', flaky_prepare)
+    token = receipts.set_change_checkpoint(
+        receipts.ChangeCheckpointTarget(
+            checkpoint_dir=checkpoint.resolve(),
+            workspace_dir=workspace.resolve(),
+        )
+    )
+    try:
+        editor = EditTool(workspace_dir=str(workspace))
+        assert (await editor.invoke({'path': 'doc.txt', 'old_str': 'v0', 'new_str': 'v1'})).success
+        assert (await editor.invoke({'path': 'doc.txt', 'old_str': 'v1', 'new_str': 'v2'})).success
+        assert (workspace / 'doc.txt').read_text(encoding='utf-8') == 'v2'
+        # Second edit must not capture intermediate v1 as pre-turn state.
+        assert not (checkpoint / 'before' / 'doc.txt').exists()
+    finally:
+        receipts.reset_change_checkpoint(token)
+
+
+@pytest.mark.asyncio
+async def test_acp_advertises_change_checkpoint_capability_and_scopes_turn_capture(tmp_path):
+    from box_agent.tools.file_change_receipts import get_change_checkpoint
+
+    workspace = tmp_path / 'workspace'
+    checkpoint = tmp_path / 'checkpoint'
+    workspace.mkdir()
+    checkpoint.mkdir()
+    (workspace / 'note.txt').write_text('before-turn', encoding='utf-8')
+
+    class Connection:
+        def __init__(self):
+            self.updates = []
+
+        async def session_update(self, session_id, update, **meta):
+            self.updates.append(update)
+
+    class Model:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(type='finish', finish_reason='tool', tool_calls=[
+                    ToolCall(id='edit-1', type='function', function=FunctionCall(name='edit_file', arguments={
+                        'path': 'note.txt', 'old_str': 'before-turn', 'new_str': 'after-turn',
+                    })),
+                ])
+            else:
+                yield StreamEvent(type='text', delta='done')
+                yield StreamEvent(type='finish', finish_reason='stop')
+
+        async def generate(self, messages, tools=None, **kwargs):
+            return LLMResponse(content='done', finish_reason='stop')
+
+    config = Config(
+        llm=LLMConfig(api_key='test'),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = Connection()
+    adapter = BoxACPAgent(conn, config, Model(), [], 'system')
+    session = await adapter.new_session(**acp_params(SimpleNamespace(
+        cwd=str(workspace),
+        field_meta={'session_mode': 'code_agent', 'session_id': 'cp-session'},
+    )))
+    assert session.field_meta['capabilities']['change_checkpoint_versions'] == [1]
+
+    response = await adapter.prompt(**acp_params(SimpleNamespace(
+        sessionId=session.sessionId,
+        prompt=[{'text': 'edit note'}],
+        field_meta={
+            'change_checkpoint': {'version': 1, 'checkpoint_dir': str(checkpoint)},
+        },
+    )))
+    assert response.field_meta['ok'] is True
+    assert get_change_checkpoint() is None
+    assert (checkpoint / 'before' / 'note.txt').read_text(encoding='utf-8') == 'before-turn'
+    assert (workspace / 'note.txt').read_text(encoding='utf-8') == 'after-turn'
+
+
+@pytest.mark.asyncio
+async def test_failed_email_extract_on_existing_file_does_not_suppress_later_before_snapshot(tmp_path):
+    from email.message import EmailMessage
+    from box_agent.tools.file.email_tool import ExtractEmailAttachmentTool
+    from box_agent.tools.file_change_receipts import (
+        ChangeCheckpointTarget,
+        reset_change_checkpoint,
+        set_change_checkpoint,
+    )
+
+    workspace = tmp_path / 'workspace'
+    checkpoint = tmp_path / 'checkpoint'
+    workspace.mkdir()
+    checkpoint.mkdir()
+
+    msg = EmailMessage()
+    msg['Subject'] = 'Test'
+    msg['From'] = 'a@example.com'
+    msg['To'] = 'b@example.com'
+    msg.set_content('body')
+    msg.add_attachment(b'attachment-bytes', maintype='application', subtype='octet-stream', filename='report.bin')
+    (workspace / 'mail.eml').write_bytes(msg.as_bytes())
+    (workspace / 'existing.bin').write_bytes(b'original-existing')
+
+    token = set_change_checkpoint(
+        ChangeCheckpointTarget(
+            checkpoint_dir=checkpoint.resolve(),
+            workspace_dir=workspace.resolve(),
+        )
+    )
+    try:
+        extractor = ExtractEmailAttachmentTool(workspace_dir=str(workspace))
+        # Fails because existing.bin already exists; must not mark existing.bin as newly created.
+        failed = await extractor.invoke({
+            'path': 'mail.eml',
+            'attachment_index': 1,
+            'output_path': 'existing.bin',
+        })
+        assert not failed.success
+        assert (await WriteTool(workspace_dir=str(workspace)).invoke({
+            'path': 'existing.bin',
+            'content': 'overwritten',
+        })).success
+        assert (checkpoint / 'before' / 'existing.bin').read_bytes() == b'original-existing'
+
+        # Succeeds for a brand-new output; later edit in same turn must keep before/ absent.
+        created = await extractor.invoke({
+            'path': 'mail.eml',
+            'attachment_index': 1,
+            'output_path': 'fresh.bin',
+        })
+        assert created.success
+        assert (await WriteTool(workspace_dir=str(workspace)).invoke({
+            'path': 'fresh.bin',
+            'content': 'edited-fresh',
+        })).success
+        assert not (checkpoint / 'before' / 'fresh.bin').exists()
+    finally:
+        reset_change_checkpoint(token)

@@ -195,6 +195,9 @@ from box_agent.session_trace import (
     SessionTraceWriter, reset_session_trace_writer, scoped_session_trace,
     set_session_trace_writer,
 )
+from box_agent.tools.file_change_receipts import (
+    parse_change_checkpoint_target, reset_change_checkpoint, set_change_checkpoint,
+)
 from box_agent.session_log import (
     SessionLog, SessionLogCorrupted, SessionLogDurabilityError, SessionLogInUseError,
     SessionLogReplayError, SessionLogWorkspaceMismatch, TOOL_OUTCOME_UNKNOWN, run_session_io, run_session_write,
@@ -2623,6 +2626,7 @@ class BoxACPAgent:
                 "session_continuation_versions": [1],
                 "history_revision_versions": [1],
                 "managed_mcp_config_versions": [1],
+                "change_checkpoint_versions": [1],
             }
             response_meta["history_revision_id"] = session_log.current_revision() if session_log else "initial"
             if skillhub_search_enabled:
@@ -3029,6 +3033,7 @@ class BoxACPAgent:
         finished = asyncio.get_running_loop().create_future()
         state._prompt_finished = finished
         trace_token = None
+        checkpoint_token = None
         try:
             log_store = state.agent.session_log
             turn_id = _meta_string(meta, "turn_id", "turnId")
@@ -3057,6 +3062,9 @@ class BoxACPAgent:
             turn_id = turn_id or f"{session_id}-turn-{state.turn_counter + 1}"
             if state.trace_writer is not None:
                 trace_token = set_session_trace_writer(state.trace_writer, turn_id=turn_id)
+            checkpoint_target = parse_change_checkpoint_target(meta, state.agent.workspace_dir)
+            if checkpoint_target is not None:
+                checkpoint_token = set_change_checkpoint(checkpoint_target)
             config = state.config or self._config
             with private_payload_scope(config.agent.memory_backend_type == "desktop"):
                 return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)
@@ -3071,6 +3079,8 @@ class BoxACPAgent:
                 }) from exc
             raise
         finally:
+            if checkpoint_token is not None:
+                reset_change_checkpoint(checkpoint_token)
             if trace_token is not None:
                 reset_session_trace_writer(trace_token)
             state._prompt_in_progress = False

@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from ..events import ProgressEvent
 from ..model_history import is_model_history_placeholder
-from .file_change_receipts import FileChangeReceiptMixin, before_write, file_change_result
+from .file_change_receipts import (
+    FileChangeReceiptMixin,
+    before_write,
+    capture_before_bytes,
+    file_change_result,
+)
 from .base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
 from .completion_checks import CompletionContext, CompletionIssue
 from .argument_limits import MAX_GENERATED_BODY_CHARS
@@ -1507,6 +1512,7 @@ class AppendTool(FileChangeReceiptMixin, Tool):
                 return ToolResult(success=True, content=f"Successfully appended to {file_path}")
 
             backup_file(file_path)
+            capture_before_bytes(file_path, original if existed else None)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             with file_path.open("a", encoding="utf-8") as f:
                 f.write(content)
@@ -1661,6 +1667,7 @@ class EditTool(FileChangeReceiptMixin, Tool):
 
             # Backup before editing
             backup_file(file_path)
+            capture_before_bytes(file_path, original)
 
             file_path.write_text(new_content, encoding="utf-8")
 
