@@ -196,7 +196,7 @@ from box_agent.session_trace import (
     set_session_trace_writer,
 )
 from box_agent.tools.file_change_receipts import (
-    parse_change_checkpoint_target, reset_change_checkpoint, set_change_checkpoint,
+    parse_change_checkpoint_target_with_reason, reset_change_checkpoint, set_change_checkpoint,
 )
 from box_agent.session_log import (
     SessionLog, SessionLogCorrupted, SessionLogDurabilityError, SessionLogInUseError,
@@ -3062,9 +3062,17 @@ class BoxACPAgent:
             turn_id = turn_id or f"{session_id}-turn-{state.turn_counter + 1}"
             if state.trace_writer is not None:
                 trace_token = set_session_trace_writer(state.trace_writer, turn_id=turn_id)
-            checkpoint_target = parse_change_checkpoint_target(meta, state.agent.workspace_dir)
+            checkpoint_target, checkpoint_reject_reason = await asyncio.to_thread(
+                parse_change_checkpoint_target_with_reason, meta, state.agent.workspace_dir,
+            )
             if checkpoint_target is not None:
                 checkpoint_token = set_change_checkpoint(checkpoint_target)
+            elif checkpoint_reject_reason is not None:
+                log.warn(
+                    "session/prompt",
+                    session_id=session_id,
+                    message=f"Ignoring invalid change_checkpoint metadata ({checkpoint_reject_reason})",
+                )
             config = state.config or self._config
             with private_payload_scope(config.agent.memory_backend_type == "desktop"):
                 return await self._prompt_for_session(params, session_id, state, turn_id, context, prepared_input)

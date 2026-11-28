@@ -7,7 +7,9 @@ from contextvars import ContextVar, Token
 import hashlib
 import os
 import stat
+import sys
 import tempfile
+import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -18,12 +20,28 @@ from .base import ToolInvocationContext, ToolInvocationRejected, ToolResult, che
 from ..user_paths import state_path
 
 MAX_CHECKPOINT_FILE_BYTES = 50 * 1024 * 1024
-_CHECKPOINT_IGNORED_SEGMENTS = frozenset({'.box-agent', '.box-agent-scratch', '.box-agent-staging'})
+_CHECKPOINT_IGNORED_SEGMENTS = frozenset({'.box-agent', '.box-agent-scratch'})
+_CHECKPOINT_IGNORED_ROOT_SEGMENTS = frozenset({'.box-agent-staging'})
 
 
 @dataclass(frozen=True, slots=True)
 class FileWriteInvocationContext(ToolInvocationContext):
     validate_write_target: Callable[[Path], ToolResult | None] | None = None
+
+
+def _is_case_insensitive_dir(directory: Path) -> bool:
+    if os.path.normcase('A') == 'a':
+        return True
+    if sys.platform != 'darwin':
+        return False
+    name = directory.name
+    swapped = name.swapcase()
+    if swapped == name:
+        return True
+    try:
+        return os.path.samefile(directory, directory.with_name(swapped))
+    except OSError:
+        return False
 
 
 @dataclass
@@ -33,7 +51,9 @@ class ChangeCheckpointTarget:
     checkpoint_dir: Path
     workspace_dir: Path
     max_file_bytes: int = MAX_CHECKPOINT_FILE_BYTES
+    case_insensitive: bool = False
     recorded_paths: set[str] = field(default_factory=set)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 _ACTIVE_CHECKPOINT: ContextVar[ChangeCheckpointTarget | None] = ContextVar(
@@ -56,25 +76,34 @@ def get_change_checkpoint() -> ChangeCheckpointTarget | None:
     return _ACTIVE_CHECKPOINT.get()
 
 
-def parse_change_checkpoint_target(
+def parse_change_checkpoint_target_with_reason(
     meta: Any,
     workspace_dir: str | Path,
-) -> ChangeCheckpointTarget | None:
-    """Validate optional host-supplied change_checkpoint metadata for a single turn."""
-    if not isinstance(meta, dict):
-        return None
+) -> tuple[ChangeCheckpointTarget | None, str | None]:
+    """Validate optional host-supplied change_checkpoint metadata for a single turn.
+
+    Returns ``(target, reject_reason)``. ``reject_reason`` is ``None`` when
+    ``change_checkpoint`` is omitted or valid, and a non-sensitive reason code
+    when an explicitly supplied ``change_checkpoint`` payload is rejected.
+    """
+    if not isinstance(meta, dict) or 'change_checkpoint' not in meta or meta['change_checkpoint'] is None:
+        return None, None
     raw = meta.get('change_checkpoint')
     if not isinstance(raw, dict):
-        return None
+        return None, 'invalid_payload'
     if type(raw.get('version')) is not int or raw['version'] != 1:
-        return None
+        return None, 'unsupported_version'
     raw_dir = raw.get('checkpoint_dir')
     if not isinstance(raw_dir, str) or not raw_dir.strip():
-        return None
+        return None, 'empty_dir'
     try:
-        candidate = Path(raw_dir.strip())
-        if not candidate.is_absolute() or candidate.is_symlink() or not candidate.is_dir():
-            return None
+        candidate = Path(raw_dir)
+        if not candidate.is_absolute():
+            return None, 'relative_dir'
+        if candidate.is_symlink():
+            return None, 'symlink_dir'
+        if not candidate.is_dir():
+            return None, 'missing_or_not_dir'
         resolved_checkpoint = candidate.resolve()
         resolved_workspace = Path(workspace_dir).resolve()
         if (
@@ -82,20 +111,33 @@ def parse_change_checkpoint_target(
             or resolved_checkpoint.is_relative_to(resolved_workspace)
             or resolved_workspace.is_relative_to(resolved_checkpoint)
         ):
-            return None
+            return None, 'overlaps_workspace'
     except (OSError, RuntimeError, ValueError):
-        return None
+        return None, 'resolve_failed'
     raw_max = raw.get('max_file_bytes')
     max_file_bytes = (
         raw_max
         if type(raw_max) is int and 0 < raw_max <= MAX_CHECKPOINT_FILE_BYTES
         else MAX_CHECKPOINT_FILE_BYTES
     )
-    return ChangeCheckpointTarget(
-        checkpoint_dir=resolved_checkpoint,
-        workspace_dir=resolved_workspace,
-        max_file_bytes=max_file_bytes,
+    return (
+        ChangeCheckpointTarget(
+            checkpoint_dir=resolved_checkpoint,
+            workspace_dir=resolved_workspace,
+            max_file_bytes=max_file_bytes,
+            case_insensitive=_is_case_insensitive_dir(resolved_workspace),
+        ),
+        None,
     )
+
+
+def parse_change_checkpoint_target(
+    meta: Any,
+    workspace_dir: str | Path,
+) -> ChangeCheckpointTarget | None:
+    """Validate optional host-supplied change_checkpoint metadata for a single turn."""
+    target, _ = parse_change_checkpoint_target_with_reason(meta, workspace_dir)
+    return target
 
 
 def _checkpoint_relative_path(checkpoint: ChangeCheckpointTarget, target: Path) -> str | None:
@@ -105,9 +147,17 @@ def _checkpoint_relative_path(checkpoint: ChangeCheckpointTarget, target: Path) 
     except (OSError, RuntimeError, ValueError):
         return None
     parts = rel.parts
-    if not parts or any(part in ('', '.', '..') or part in _CHECKPOINT_IGNORED_SEGMENTS for part in parts):
+    if (
+        not parts
+        or parts[0] in _CHECKPOINT_IGNORED_ROOT_SEGMENTS
+        or any(part in ('', '.', '..') or part in _CHECKPOINT_IGNORED_SEGMENTS for part in parts)
+    ):
         return None
     return rel.as_posix()
+
+
+def _checkpoint_path_key(checkpoint: ChangeCheckpointTarget, relative: str) -> str:
+    return relative.casefold() if checkpoint.case_insensitive else os.path.normcase(relative)
 
 
 def _prepare_before_destination(checkpoint: ChangeCheckpointTarget, relative: str) -> Path | None:
@@ -143,20 +193,21 @@ def _commit_temp_before_file(temp_path: Path, dest: Path) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def capture_before_bytes(target: Path, original: bytes | None) -> None:
-    """Best-effort on-demand before-write snapshot from already-loaded bytes.
-
-    First write to a workspace path in a turn wins; later edits preserve the
-    pre-turn state (or absence if the file was created during this turn).
-    """
-    checkpoint = _ACTIVE_CHECKPOINT.get()
-    if checkpoint is None:
-        return
+def _capture_before_bytes_sync(
+    checkpoint: ChangeCheckpointTarget,
+    target: Path,
+    original: bytes | None,
+) -> None:
     relative = _checkpoint_relative_path(checkpoint, target)
-    if relative is None or relative in checkpoint.recorded_paths:
+    if relative is None:
         return
+    key = _checkpoint_path_key(checkpoint, relative)
+    with checkpoint.lock:
+        if key in checkpoint.recorded_paths:
+            return
     if original is None or len(original) > checkpoint.max_file_bytes:
-        checkpoint.recorded_paths.add(relative)
+        with checkpoint.lock:
+            checkpoint.recorded_paths.add(key)
         return
     temp_path: Path | None = None
     try:
@@ -173,26 +224,50 @@ def capture_before_bytes(target: Path, original: bytes | None) -> None:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
     finally:
-        checkpoint.recorded_paths.add(relative)
+        with checkpoint.lock:
+            checkpoint.recorded_paths.add(key)
+
+
+def capture_before_bytes(target: Path, original: bytes | None) -> None:
+    """Best-effort on-demand before-write snapshot from already-loaded bytes.
+
+    First write to a workspace path in a turn wins; later edits preserve the
+    pre-turn state (or absence if the file was created during this turn).
+    """
+    checkpoint = _ACTIVE_CHECKPOINT.get()
+    if checkpoint is None:
+        return
+    _capture_before_bytes_sync(checkpoint, target, original)
+
+
+async def acapture_before_bytes(target: Path, original: bytes | None) -> None:
+    """Async wrapper keeping checkpoint file I/O off the shared event loop."""
+    checkpoint = _ACTIVE_CHECKPOINT.get()
+    if checkpoint is None:
+        return
+    await asyncio.to_thread(_capture_before_bytes_sync, checkpoint, target, original)
 
 
 def _hash_and_capture_before(checkpoint: ChangeCheckpointTarget, target: Path) -> str | None:
     relative = _checkpoint_relative_path(checkpoint, target)
-    if relative is None or relative in checkpoint.recorded_paths:
+    if relative is None:
         return file_hash(target)
-    try:
-        fd = os.open(
-            target,
-            os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0),
-        )
-    except FileNotFoundError:
-        checkpoint.recorded_paths.add(relative)
-        return None
-    digest = hashlib.sha256()
+    key = _checkpoint_path_key(checkpoint, relative)
+    with checkpoint.lock:
+        if key in checkpoint.recorded_paths:
+            return file_hash(target)
     temp_path: Path | None = None
     temp_stream = None
     dest: Path | None = None
     try:
+        try:
+            fd = os.open(
+                target,
+                os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0),
+            )
+        except FileNotFoundError:
+            return None
+        digest = hashlib.sha256()
         with os.fdopen(fd, 'rb') as stream:
             st = os.fstat(stream.fileno())
             if not stat.S_ISREG(st.st_mode):
@@ -241,9 +316,10 @@ def _hash_and_capture_before(checkpoint: ChangeCheckpointTarget, target: Path) -
                     temp_path = None
             except OSError:
                 pass
-        checkpoint.recorded_paths.add(relative)
         return digest.hexdigest()
     finally:
+        with checkpoint.lock:
+            checkpoint.recorded_paths.add(key)
         if temp_stream is not None:
             try:
                 temp_stream.close()
@@ -271,15 +347,23 @@ def file_hash(target: Path) -> str | None:
 _UNKNOWN_BEFORE = object()
 
 
-def before_write(target: Path) -> str | None | object:
+def _before_write_sync(target: Path, checkpoint: ChangeCheckpointTarget | None) -> str | None | object:
     # Failure to read an old version must not remove existing write capability.
     try:
-        checkpoint = _ACTIVE_CHECKPOINT.get()
         if checkpoint is not None:
             return _hash_and_capture_before(checkpoint, target)
         return file_hash(target)
     except OSError:
         return _UNKNOWN_BEFORE
+
+
+def before_write(target: Path) -> str | None | object:
+    return _before_write_sync(target, _ACTIVE_CHECKPOINT.get())
+
+
+async def abefore_write(target: Path) -> str | None | object:
+    """Async version of before_write that keeps hashing and checkpoint I/O off the event loop."""
+    return await asyncio.to_thread(_before_write_sync, target, _ACTIVE_CHECKPOINT.get())
 
 
 def file_change_result(result: ToolResult, workspace_dir: str | Path, target: Path,
@@ -365,7 +449,7 @@ async def persist_file_change(workspace_dir: str, target: Path | None,
                     continue
                 if not resolved.is_relative_to(root):
                     raise ValueError('browser persistence target must stay inside the session workspace')
-                before = before_write(resolved)
+                before = await abefore_write(resolved)
                 check_tool_cancellation()
                 result = persist(resolved)
                 digest = result._written_file_sha256

@@ -10,7 +10,7 @@ from typing import Any
 from ..base import ToolInvocationContext, ToolResult, check_tool_cancellation
 from ..file_change_receipts import (
     FileWriteInvocationContext,
-    capture_before_bytes,
+    acapture_before_bytes,
     destination_lock,
     file_change_result,
 )
@@ -192,7 +192,7 @@ class ExtractEmailAttachmentTool(_EmailFileTool):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with target.open("xb") as stream:
                     stream.write(item.data)
-                capture_before_bytes(target, None)
+                await acapture_before_bytes(target, None)
                 result = {"source_sha256": digest, "extracted_path": str(target),
                           "attachment": _attachment_metadata(attachment_index, item)}
                 return file_change_result(

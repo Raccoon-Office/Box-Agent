@@ -19,7 +19,7 @@ from box_agent.artifact_metadata import read_metadata
 from box_agent.tools.base import Tool, ToolResult, ToolInvocationRejected, check_tool_cancellation
 from box_agent.tools.schema_validation import ToolArgumentIssue
 from box_agent.tools.file_change_receipts import (
-    FileWriteInvocationContext, before_write, destination_lock, file_change_result,
+    FileWriteInvocationContext, abefore_write, destination_lock, file_change_result,
 )
 from box_agent.tools.safety import builtin_skill_write_error
 
@@ -177,7 +177,7 @@ class PublishArtifactTool(Tool):
                             raise ValueError("Artifact destination changed during generation")
                         if error := self._write_error(target, context):
                             return error
-                        before = before_write(target)
+                        before = await abefore_write(target)
                         write_metadata(target, {"type": "artifact", "sha256": digest.hexdigest(),
                                                 "size_bytes": sealed.stat().st_size}, self.workspace_dir)
                         os.replace(sealed, target)

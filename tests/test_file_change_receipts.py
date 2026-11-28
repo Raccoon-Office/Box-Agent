@@ -877,3 +877,250 @@ async def test_failed_email_extract_on_existing_file_does_not_suppress_later_bef
         assert not (checkpoint / 'before' / 'fresh.bin').exists()
     finally:
         reset_change_checkpoint(token)
+
+
+def test_parse_change_checkpoint_target_reason_codes_and_trailing_space(tmp_path):
+    from box_agent.tools.file_change_receipts import parse_change_checkpoint_target_with_reason
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    trailing_cp = tmp_path / 'checkpoint '
+    trailing_cp.mkdir()
+
+    target, reason = parse_change_checkpoint_target_with_reason(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(trailing_cp)}},
+        workspace,
+    )
+    assert reason is None
+    assert target is not None
+    assert target.checkpoint_dir == trailing_cp.resolve()
+
+    inside_ws = workspace / 'nested-cp'
+    inside_ws.mkdir()
+    symlink_cp = tmp_path / 'symlink-cp'
+    symlink_cp.symlink_to(trailing_cp, target_is_directory=True)
+
+    assert parse_change_checkpoint_target_with_reason({}, workspace) == (None, None)
+    assert parse_change_checkpoint_target_with_reason({'change_checkpoint': 'bad'}, workspace) == (None, 'invalid_payload')
+    assert parse_change_checkpoint_target_with_reason(
+        {'change_checkpoint': {'version': 2, 'checkpoint_dir': str(trailing_cp)}}, workspace,
+    ) == (None, 'unsupported_version')
+    assert parse_change_checkpoint_target_with_reason(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': '   '}}, workspace,
+    ) == (None, 'empty_dir')
+    assert parse_change_checkpoint_target_with_reason(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': 'relative/cp'}}, workspace,
+    ) == (None, 'relative_dir')
+    assert parse_change_checkpoint_target_with_reason(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(symlink_cp)}}, workspace,
+    ) == (None, 'symlink_dir')
+    assert parse_change_checkpoint_target_with_reason(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(tmp_path / 'missing')}}, workspace,
+    ) == (None, 'missing_or_not_dir')
+    assert parse_change_checkpoint_target_with_reason(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(inside_ws)}}, workspace,
+    ) == (None, 'overlaps_workspace')
+    assert parse_change_checkpoint_target_with_reason(
+        {'change_checkpoint': {'version': 1, 'checkpoint_dir': str(tmp_path)}}, workspace,
+    ) == (None, 'overlaps_workspace')
+
+
+@pytest.mark.asyncio
+async def test_unreadable_first_write_records_path_and_blocks_intermediate_snapshot(tmp_path, monkeypatch):
+    from box_agent.tools import file_change_receipts as receipts
+
+    workspace = tmp_path / 'workspace'
+    checkpoint = tmp_path / 'checkpoint'
+    workspace.mkdir()
+    checkpoint.mkdir()
+    target = workspace / 'secret.txt'
+    target.write_text('v0', encoding='utf-8')
+
+    real_os_open = os.open
+    fail_once = {'active': True}
+
+    def flaky_os_open(path, *args, **kwargs):
+        if Path(path).resolve() == target.resolve() and fail_once['active']:
+            fail_once['active'] = False
+            raise PermissionError('simulated unreadable pre-existing file')
+        return real_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(receipts.os, 'open', flaky_os_open)
+    token = receipts.set_change_checkpoint(
+        receipts.ChangeCheckpointTarget(
+            checkpoint_dir=checkpoint.resolve(),
+            workspace_dir=workspace.resolve(),
+        )
+    )
+    try:
+        writer = WriteTool(workspace_dir=str(workspace))
+        # First write cannot read v0 (PermissionError), still succeeds atomically -> writes v1.
+        assert (await writer.invoke({'path': 'secret.txt', 'content': 'v1'})).success
+        # Second write in the same turn must NOT backfill intermediate v1 into before/.
+        assert (await writer.invoke({'path': 'secret.txt', 'content': 'v2'})).success
+        assert target.read_text(encoding='utf-8') == 'v2'
+        assert not (checkpoint / 'before' / 'secret.txt').exists()
+    finally:
+        receipts.reset_change_checkpoint(token)
+
+
+@pytest.mark.asyncio
+async def test_case_insensitive_checkpoint_dedup_prevents_intermediate_backfill(tmp_path):
+    from box_agent.tools.file_change_receipts import (
+        ChangeCheckpointTarget,
+        acapture_before_bytes,
+        reset_change_checkpoint,
+        set_change_checkpoint,
+    )
+
+    workspace = tmp_path / 'workspace'
+    checkpoint = tmp_path / 'checkpoint'
+    workspace.mkdir()
+    checkpoint.mkdir()
+
+    token = set_change_checkpoint(
+        ChangeCheckpointTarget(
+            checkpoint_dir=checkpoint.resolve(),
+            workspace_dir=workspace.resolve(),
+            case_insensitive=True,
+        )
+    )
+    try:
+        # First write creates report.txt (absent before turn).
+        await acapture_before_bytes(workspace / 'report.txt', None)
+        # Second write in same turn references Report.txt with different casing.
+        await acapture_before_bytes(workspace / 'Report.txt', b'intermediate-v1')
+        assert not (checkpoint / 'before' / 'report.txt').exists()
+        assert not (checkpoint / 'before' / 'Report.txt').exists()
+    finally:
+        reset_change_checkpoint(token)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_ignores_root_staging_only_and_runs_io_off_event_loop(tmp_path, monkeypatch):
+    import threading
+    from box_agent.tools import file_change_receipts as receipts
+
+    workspace = tmp_path / 'workspace'
+    checkpoint = tmp_path / 'checkpoint'
+    workspace.mkdir()
+    checkpoint.mkdir()
+
+    (workspace / '.box-agent-staging').mkdir()
+    (workspace / '.box-agent-staging' / 'tmp.txt').write_text('root-staging', encoding='utf-8')
+    (workspace / 'reports' / '.box-agent-staging').mkdir(parents=True)
+    (workspace / 'reports' / '.box-agent-staging' / 'keep.txt').write_text('nested-user', encoding='utf-8')
+    (workspace / 'doc.txt').write_text('v0', encoding='utf-8')
+
+    loop_thread_id = threading.get_ident()
+    observed_threads: list[int] = []
+    real_before_write_sync = receipts._before_write_sync
+    real_capture_sync = receipts._capture_before_bytes_sync
+
+    def spy_before_write_sync(path, checkpoint_arg):
+        observed_threads.append(threading.get_ident())
+        return real_before_write_sync(path, checkpoint_arg)
+
+    def spy_capture_sync(checkpoint_arg, path, original):
+        observed_threads.append(threading.get_ident())
+        return real_capture_sync(checkpoint_arg, path, original)
+
+    monkeypatch.setattr(receipts, '_before_write_sync', spy_before_write_sync)
+    monkeypatch.setattr(receipts, '_capture_before_bytes_sync', spy_capture_sync)
+
+    token = receipts.set_change_checkpoint(
+        receipts.ChangeCheckpointTarget(
+            checkpoint_dir=checkpoint.resolve(),
+            workspace_dir=workspace.resolve(),
+        )
+    )
+    try:
+        await receipts.abefore_write(workspace / 'doc.txt')
+        await receipts.acapture_before_bytes(workspace / '.box-agent-staging' / 'tmp.txt', b'root-staging')
+        await receipts.acapture_before_bytes(workspace / 'reports' / '.box-agent-staging' / 'keep.txt', b'nested-user')
+
+        assert len(observed_threads) == 3
+        assert all(tid != loop_thread_id for tid in observed_threads)
+        assert (checkpoint / 'before' / 'doc.txt').read_text(encoding='utf-8') == 'v0'
+        assert not (checkpoint / 'before' / '.box-agent-staging' / 'tmp.txt').exists()
+        assert (checkpoint / 'before' / 'reports' / '.box-agent-staging' / 'keep.txt').read_text(encoding='utf-8') == 'nested-user'
+    finally:
+        receipts.reset_change_checkpoint(token)
+
+
+@pytest.mark.asyncio
+async def test_acp_resume_and_load_advertise_change_checkpoint_and_warn_on_invalid_meta(tmp_path, monkeypatch):
+    from box_agent import acp as acp_module
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    nested_cp = workspace / 'nested-cp'
+    nested_cp.mkdir()
+
+    class Connection:
+        def __init__(self):
+            self.updates = []
+
+        async def session_update(self, session_id, update, **meta):
+            self.updates.append(update)
+
+    class Model:
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            yield StreamEvent(type='text', delta='ok')
+            yield StreamEvent(type='finish', finish_reason='stop')
+
+        async def generate(self, messages, tools=None, **kwargs):
+            return LLMResponse(content='ok', finish_reason='stop')
+
+    warnings: list[str] = []
+    real_warn = acp_module.log.warn
+
+    def spy_warn(event, **kwargs):
+        warnings.append(f'{event}:{kwargs.get("message", "")}')
+        return real_warn(event, **kwargs)
+
+    monkeypatch.setattr(acp_module.log, 'warn', spy_warn)
+
+    config = Config(
+        llm=LLMConfig(api_key='test'),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(workspace)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    adapter = BoxACPAgent(Connection(), config, Model(), [], 'system')
+    created = await adapter.new_session(**acp_params(SimpleNamespace(
+        cwd=str(workspace),
+        field_meta={'session_mode': 'code_agent', 'session_id': 'cap-session'},
+    )))
+    assert created.field_meta['capabilities']['change_checkpoint_versions'] == [1]
+
+    # Prompt with overlapping checkpoint_dir should warn with reason code and still succeed.
+    prompt_res = await adapter.prompt(**acp_params(SimpleNamespace(
+        sessionId=created.sessionId,
+        prompt=[{'text': 'hi'}],
+        field_meta={'change_checkpoint': {'version': 1, 'checkpoint_dir': str(nested_cp)}},
+    )))
+    assert prompt_res.field_meta['ok'] is True
+    assert any('overlaps_workspace' in w for w in warnings)
+
+    # Release writer lock before resuming/loading on fresh adapter instances.
+    adapter._sessions[created.sessionId].agent.session_log.close()
+
+    # Resume and load on a fresh adapter instance both advertise change_checkpoint_versions: [1].
+    adapter2 = BoxACPAgent(Connection(), config, Model(), [], 'system')
+    resumed = await adapter2.resume_session(**acp_params(SimpleNamespace(
+        sessionId=created.sessionId,
+        cwd=str(workspace),
+        field_meta={'session_mode': 'code_agent'},
+    )))
+    assert resumed.field_meta['capabilities']['change_checkpoint_versions'] == [1]
+    adapter2._sessions[created.sessionId].agent.session_log.close()
+
+    adapter3 = BoxACPAgent(Connection(), config, Model(), [], 'system')
+    loaded = await adapter3.load_session(**acp_params(SimpleNamespace(
+        sessionId=created.sessionId,
+        cwd=str(workspace),
+        field_meta={'session_mode': 'code_agent'},
+    )))
+    assert loaded.field_meta['capabilities']['change_checkpoint_versions'] == [1]
+    adapter3._sessions[created.sessionId].agent.session_log.close()
+
